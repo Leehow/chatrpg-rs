@@ -1,0 +1,18 @@
+{
+  "case_id": "roll_effect_damage_updates_ledger",
+  "description": "A successful attack followed by an effect roll should produce an effect packet/impact and update the mechanical ledger.",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "turns": [
+    {
+      "user_input": "我反击，用手枪朝那个 scav 开火，REF6+Handgun4，掷出6，合计16",
+      "required_events": ["phase:contest_resolved", "phase:pending_effect_roll_created"],
+      "forbidden_text": ["还不能判成必定命中", "请告诉我距离", "请告诉我掩体"]
+    },
+    {
+      "user_input": "3d6=11，SP 0",
+      "required_events": ["phase:pending_check_resolved", "phase:actor_hp_updated", "event:damage_packet"],
+      "forbidden_text": ["请选择改变局面", "上一枪", "目标当前 SP"]
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "name": "contest_attack_creates_profile",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "turns": [
+    {"user_input": "无人机开始朝我开火，场面进入战斗。", "required_events": ["phase:combat_frame_created", "phase:reaction_window_opened"]},
+    {"user_input": "反击，我开枪。", "required_events": ["phase:check_contract_created", "phase:pending_check_created"]},
+    {"user_input": "18", "required_events": ["phase:pending_check_resolved", "phase:contest_resolved", "phase:pending_damage_roll_created"], "required_event_contains": [{"event":"phase:contest_resolved", "contains":"contest"}], "forbidden_events": ["phase:gate_reprompt"]}
+  ],
+  "stream_format": "jsonl"
+}

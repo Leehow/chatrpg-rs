@@ -1,0 +1,24 @@
+{
+  "name": "combat_named_weapon_attack_routes_combat",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "turns": [
+    {
+      "user_input": "我用重型手枪朝那台失控的机械体开火攻击。",
+      "required_events": [
+        "phase:turn_orchestrator",
+        "phase:turn_route",
+        "phase:conflict_agent",
+        "phase:combat_frame_created",
+        "phase:check_contract_created"
+      ],
+      "forbidden_events": [
+        "phase:object_interaction_contract_created"
+      ],
+      "required_event_contains": [
+        {"event": "phase:turn_route", "contains": "start_frame_first"}
+      ]
+    }
+  ],
+  "stream_format": "jsonl"
+}

@@ -1,0 +1,22 @@
+{
+  "case_id": "unified_roll_effect_hp_persists",
+  "description": "A successful attack followed by a damage/effect roll produces a persisted HP impact.",
+  "steps": [
+    {"input": "无人机开始朝我开火，场面进入战斗。"},
+    {"input": "我拔枪还击。"},
+    {"input": "16"},
+    {"input": "/roll 3d6"}
+  ],
+  "expect_any": [
+    "attack_resolution_contract",
+    "pending_damage_roll_created",
+    "actor_hp_updated",
+    "damage_packet",
+    "effect_resolution_packet"
+  ],
+  "forbid_text": [
+    "上一枪后还剩多少血",
+    "这把枪伤害是多少",
+    "目标当前 SP 是多少"
+  ]
+}

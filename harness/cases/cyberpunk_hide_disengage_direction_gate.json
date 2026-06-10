@@ -1,0 +1,34 @@
+{
+  "name": "cyberpunk_hide_disengage_direction_gate",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "turns": [
+    {
+      "user_input": "无人机压低枪口，我拔枪还击。",
+      "required_events": [
+        "phase:combat_frame_created"
+      ]
+    },
+    {
+      "user_input": "我躲到集装箱后面，先不打了。",
+      "required_events": [
+        "phase:situation_intent_classified",
+        "phase:exit_contract_created",
+        "phase:conflict_direction_gate_opened",
+        "phase:done"
+      ],
+      "required_done_reason": "awaiting_situation_direction",
+      "require_no_llm_stream_start": true,
+      "required_event_contains": [
+        {
+          "event": "phase:conflict_agent",
+          "contains": "hide_to_disengage"
+        }
+      ]
+    }
+  ],
+  "forbidden_terms": [
+    "Athena"
+  ],
+  "stream_format": "jsonl"
+}

@@ -1,0 +1,22 @@
+{
+  "name": "cyberpunk_combat_start_cn_paraphrase",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "user_input": "无人机压低枪口，我拔枪还击。",
+  "required_events": [
+    "phase:conflict_agent",
+    "phase:situation_intent_classified",
+    "phase:combat_frame_created",
+    "event:combat_event"
+  ],
+  "required_event_contains": [
+    {
+      "event": "phase:conflict_agent",
+      "contains": "attack"
+    }
+  ],
+  "forbidden_terms": [
+    "Athena"
+  ],
+  "stream_format": "jsonl"
+}

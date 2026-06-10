@@ -1,0 +1,13 @@
+{
+  "name": "mechanics_search_skill_ability_parameter_binding",
+  "ruleset_id": "dnd5e",
+  "module_id": "dnd5e.generic",
+  "user_input": "我立刻施放一个防护反应法术来挡下这次攻击，看看需要什么触发、消耗和效果。",
+  "required_events": [
+    "phase:turn_orchestrator",
+    "phase:ability_kernel",
+    "phase:rule_binding_packet_created",
+    "phase:ability_definition_hydrated"
+  ],
+  "stream_format": "jsonl"
+}

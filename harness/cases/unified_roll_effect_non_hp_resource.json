@@ -1,0 +1,17 @@
+{
+  "case_id": "unified_roll_effect_non_hp_resource",
+  "description": "A sanity/chaos/harm-style effect records a ParameterImpact rather than assuming HP damage.",
+  "steps": [
+    {"input": "我看到不可名状的怪物，进行 SAN 检定。"},
+    {"input": "/roll 1d100"},
+    {"input": "SAN 损失 /roll 1d6"}
+  ],
+  "expect_any": [
+    "parameter_impact_applied",
+    "effect_resolution_packet"
+  ],
+  "forbid_text": [
+    "扣 HP",
+    "生命值减少"
+  ]
+}

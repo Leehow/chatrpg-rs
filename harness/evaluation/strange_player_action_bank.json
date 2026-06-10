@@ -1,0 +1,45 @@
+{
+  "version": "v1",
+  "actions": [
+    {
+      "category": "creative_environment",
+      "input": "我不攻击无人机，先打爆路灯制造黑暗，然后拖着警察撤到车后。",
+      "expects": "risk/cost adjudication; no flat refusal"
+    },
+    {
+      "category": "social_weird",
+      "input": "我对失控机械体喊话，试图让它相信我不是敌人。",
+      "expects": "possible communication/scan/provisional ruling, not automatic failure"
+    },
+    {
+      "category": "rules_probe",
+      "input": "我觉得这把手枪威力很大，想瞄准它的核心位置一枪打爆它。",
+      "expects": "GM verifies weapon/effect against rules/object facets and resolves automatically; does not accept player-implied extra damage as truth"
+    },
+    {
+      "category": "stale_gate_probe",
+      "input": "我继续压制它，不给它转向警察的机会。",
+      "expects": "continues combat; no direction menu"
+    },
+    {
+      "category": "exit_probe",
+      "input": "我冲进仓库，沿着电缆找控制源。",
+      "expects": "scene progress; not menu lock"
+    },
+    {
+      "category": "investigation_probe",
+      "input": "我不查明显线索，改去问旁边路人刚才听到了什么。",
+      "expects": "alternate clue path or cost; no dead end"
+    },
+    {
+      "category": "multilingual",
+      "input": "I keep it pinned with suppressive fire and move toward cover.",
+      "expects": "semantic combat action"
+    },
+    {
+      "category": "japanese",
+      "input": "遮蔽物に入りながら、機械を撃ち続ける。",
+      "expects": "semantic combat action"
+    }
+  ]
+}

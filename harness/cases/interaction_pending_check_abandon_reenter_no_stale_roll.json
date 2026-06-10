@@ -1,0 +1,24 @@
+{
+  "name": "interaction_pending_check_abandon_reenter_no_stale_roll",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "turns": [
+    {
+      "user_input": "我检查电缆，判断能不能安全切断它。",
+      "required_events": ["phase:pending_check_created"],
+      "required_done_reason": "awaiting_player_roll",
+      "require_no_llm_stream_start": true
+    },
+    {
+      "user_input": "算了，我不剪电缆了，改成撤退离开这片区域。",
+      "required_events": ["phase:gate_abandoned"],
+      "forbidden_events": ["phase:pending_check_resolved"]
+    },
+    {
+      "user_input": "/roll 1d10",
+      "forbidden_events": ["phase:pending_check_resolved"]
+    }
+  ],
+  "stream_format": "jsonl",
+  "forbidden_terms": ["Athena"]
+}

@@ -1,0 +1,163 @@
+{
+  "pack_id": "cpr_red.derived_formula_pack.llm_reextract.v1",
+  "ruleset_id": "cyberpunk_red",
+  "formulas": [
+    {
+      "field_id": "ranged_attack_roll",
+      "formula": "1d10 + REF + ranged_weapon_skill",
+      "depends_on": [
+        "REF",
+        "ranged_weapon_skill"
+      ],
+      "evaluator": "attack_vs_defense_or_dv",
+      "notes": "vs DV-by-range/weapon, or defender DEX+Evasion+1d10 if REF>=8"
+    },
+    {
+      "field_id": "melee_attack_roll",
+      "formula": "1d10 + DEX + melee_attack_skill",
+      "depends_on": [
+        "DEX",
+        "melee_attack_skill"
+      ],
+      "evaluator": "attack_vs_defense_or_dv",
+      "notes": "vs defender DEX+Evasion+1d10; ties to defender"
+    },
+    {
+      "field_id": "evasion_defense_roll",
+      "formula": "1d10 + DEX + Evasion",
+      "depends_on": [
+        "DEX",
+        "Evasion"
+      ],
+      "evaluator": "dice",
+      "notes": "defender active defense (dodge)"
+    },
+    {
+      "field_id": "initiative_value",
+      "formula": "1d10 + REF",
+      "depends_on": [
+        "REF"
+      ],
+      "evaluator": "dice",
+      "notes": "turn order"
+    },
+    {
+      "field_id": "generic_check_vs_dv",
+      "formula": "1d10 + STAT + Skill",
+      "depends_on": [
+        "STAT",
+        "Skill"
+      ],
+      "evaluator": "contest_profile_static_dv_or_source_bound_dv",
+      "notes": "STAT+Skill+1d10 defines/beats DV; tie->defender"
+    },
+    {
+      "field_id": "damage_after_armor",
+      "formula": "max(0, weapon_damage - SP)",
+      "depends_on": [
+        "weapon_damage",
+        "SP"
+      ],
+      "evaluator": "additional_damage",
+      "notes": "armor reduces damage"
+    },
+    {
+      "field_id": "aimed_headshot_damage",
+      "formula": "max(0, weapon_damage - SP) * 2",
+      "depends_on": [
+        "weapon_damage",
+        "SP"
+      ],
+      "evaluator": "additional_damage",
+      "notes": "aimed head shot doubles damage that gets through SP"
+    },
+    {
+      "field_id": "location_sp",
+      "formula": "max(armor_sp_sources_in_location)",
+      "depends_on": [
+        "armor_sp_sources_in_location"
+      ],
+      "evaluator": "character_derived_value",
+      "notes": "SP does not stack; highest only"
+    },
+    {
+      "field_id": "armor_ablation",
+      "formula": "max(0, SP - 1)",
+      "depends_on": [
+        "SP"
+      ],
+      "evaluator": "character_derived_value",
+      "notes": "ablate 1 per hit taken"
+    },
+    {
+      "field_id": "armor_recovery",
+      "formula": "min(SP_original, SP + days_of_rest)",
+      "depends_on": [
+        "SP",
+        "days_of_rest",
+        "SP_original"
+      ],
+      "evaluator": "character_derived_value",
+      "notes": "recover 1 SP/day rest"
+    },
+    {
+      "field_id": "grenade_damage",
+      "formula": "6d6 - SP",
+      "depends_on": [
+        "SP"
+      ],
+      "evaluator": "additional_damage",
+      "notes": "armor not ablated by grenade"
+    },
+    {
+      "field_id": "autofire_damage",
+      "formula": "2d6 * min(attack_net_hit, autofire_max)",
+      "depends_on": [
+        "attack_net_hit",
+        "autofire_max"
+      ],
+      "evaluator": "additional_damage",
+      "notes": "net=attack_total-DV; cap 3 SMG/4 AR; both 6 -> Crit Injury"
+    },
+    {
+      "field_id": "death_save_roll",
+      "formula": "1d10 + death_save_penalty",
+      "depends_on": [
+        "death_save_penalty"
+      ],
+      "evaluator": "dv",
+      "notes": "roll-UNDER BODY to live; nat 10 auto-fail; penalty +1 each save"
+    },
+    {
+      "field_id": "death_save_threshold",
+      "formula": "BODY",
+      "depends_on": [
+        "BODY"
+      ],
+      "evaluator": "character_derived_value",
+      "notes": "death save target = BODY"
+    },
+    {
+      "field_id": "heavy_armor_penalty",
+      "formula": "REF-2; DEX-2; MOVE-2",
+      "depends_on": [
+        "REF",
+        "DEX",
+        "MOVE"
+      ],
+      "evaluator": "character_derived_value",
+      "notes": "most punishing penalty, applied once"
+    }
+  ],
+  "precedence_rules": [
+    "SP highest-source-only (no stack)",
+    "tie -> defender wins",
+    "aimed headshot doubles post-SP damage"
+  ],
+  "source_refs": [
+    {
+      "locator": "r_talsorian_games_cyberpunk_red_core",
+      "section": "Resolving Combat / Armor / Death Saves"
+    }
+  ]
+}

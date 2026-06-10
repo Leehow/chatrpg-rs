@@ -1,0 +1,12 @@
+{
+  "name": "ability_rule_binding_packet_created",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "user_input": "我发动我的 Role Ability 来压住现场节奏。",
+  "required_events": [
+    "phase:ability_kernel",
+    "phase:rule_binding_packet_created",
+    "phase:ability_activation_contract_created"
+  ],
+  "stream_format": "jsonl"
+}

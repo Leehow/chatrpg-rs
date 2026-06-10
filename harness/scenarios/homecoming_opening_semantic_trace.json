@@ -1,0 +1,33 @@
+{
+  "scenario_id": "homecoming_opening_semantic_trace_v1_10_1",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "purpose": "Golden trace for the LLM-simulated Homecoming opening. This is not a replacement for the normal harness suite; it records expected route ownership and DB-level state for future simulation tooling.",
+  "turns": [
+    {
+      "input": "无人机在仓库门口扫射警察，我躲在车后，观察它背后的电缆，判断能不能安全切断，会不会触发防御协议。",
+      "expected_route": "standalone_check_or_agent",
+      "expected_phases": ["turn_orchestrator", "context_compiled", "agent_plan", "check_contract_created", "pending_check_created", "done"],
+      "forbidden_phases": ["object_interaction_contract_created", "llm_stream_start"],
+      "expected_done_reason": "awaiting_player_roll"
+    },
+    {
+      "input": "无人机开始朝我开火，场面进入战斗。",
+      "expected_route": "start_frame_first",
+      "expected_phases": ["combat_frame_created", "reaction_window_opened", "done"],
+      "expected_done_reason": "awaiting_required_reaction"
+    },
+    {
+      "input": "无人机锁定我并对我开火，我想先去剪线。",
+      "expected_route": "resolve_gate_first",
+      "expected_phases": ["reaction_window_opened", "gate_reprompt", "done"],
+      "expected_done_reason": "awaiting_required_reaction"
+    },
+    {
+      "input": "我决定停火并放下武器，喊它别再打了。",
+      "expected_route": "continue_frame_first",
+      "expected_phases": ["gate_superseded", "exit_contract_created"],
+      "forbidden_phases": ["gate_reprompt"]
+    }
+  ]
+}

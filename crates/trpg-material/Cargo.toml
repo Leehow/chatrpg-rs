@@ -1,0 +1,20 @@
+[package]
+name = "trpg-material"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+trpg-db = { path = "../trpg-db" }
+trpg-llm = { path = "../trpg-llm" }
+trpg-model = { path = "../trpg-model" }
+trpg-rule-agent = { path = "../trpg-rule-agent" }
+trpg-search = { path = "../trpg-search" }
+trpg-semantics = { path = "../trpg-semantics" }

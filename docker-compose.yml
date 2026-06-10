@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: chatrpg-postgres-v08
+    environment:
+      POSTGRES_USER: chatrpg
+      POSTGRES_PASSWORD: chatrpg
+      POSTGRES_DB: chatrpg
+    ports:
+      - "54323:5432"
+    volumes:
+      - chatrpg_pgdata_v08:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chatrpg -d chatrpg"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+volumes:
+  chatrpg_pgdata_v08:

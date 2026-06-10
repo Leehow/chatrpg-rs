@@ -1,0 +1,20 @@
+[package]
+name = "trpg-llm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+dotenvy.workspace = true
+async-stream.workspace = true
+async-trait.workspace = true
+futures-core.workspace = true
+futures-util.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+trpg-model = { path = "../trpg-model" }
+tokio.workspace = true

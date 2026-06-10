@@ -1,0 +1,6 @@
+/target
+.env
+*.log
+/data/rulebooks/*
+!/data/rulebooks/.gitkeep
+/data/search/

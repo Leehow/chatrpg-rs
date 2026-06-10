@@ -1,0 +1,19 @@
+[package]
+name = "trpg-ingest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+regex.workspace = true
+oxidize-pdf.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+trpg-model = { path = "../trpg-model" }
+uuid.workspace = true
+walkdir.workspace = true

@@ -1,0 +1,14 @@
+{
+  "case_id": "parameter_facet_executor_triangle_chaos",
+  "description": "Triangle-style Chaos effects should be represented as scene/anomaly parameter impacts with visibility controls.",
+  "env": {
+    "TRPG_PARAMETER_FACET_EXECUTOR_ENABLE_V113": "true"
+  },
+  "turns": [
+    {
+      "input": "我使用异常能力扭曲走廊，产生 2 点 Chaos。",
+      "expect_any": ["mechanics_search_planned", "effect_resolution_packet", "parameter_impact_applied"]
+    }
+  ],
+  "must_not_contain": ["numberless page", "未授权资料", "Agency property 的秘密内容"]
+}

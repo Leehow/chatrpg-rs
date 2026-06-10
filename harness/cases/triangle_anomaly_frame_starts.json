@@ -1,0 +1,18 @@
+{
+  "name": "triangle_anomaly_frame_starts",
+  "ruleset_id": "triangle_agency",
+  "module_id": "triangle_agency.the_vault",
+  "user_input": "异常实体开始扭曲现场，进入 Anomaly Encounter。",
+  "required_events": [
+    "phase:conflict_agent",
+    "phase:combat_frame_created",
+    "event:combat_event"
+  ],
+  "required_event_contains": [
+    {
+      "event": "phase:conflict_agent",
+      "contains": "anomaly_encounter"
+    }
+  ],
+  "stream_format": "jsonl"
+}

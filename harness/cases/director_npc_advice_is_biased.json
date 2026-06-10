@@ -1,0 +1,20 @@
+{
+  "name": "director_npc_advice_is_biased",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "user_input": "现场的警察和可能的雇主分别会怎么看这件事？",
+  "required_events": [
+    "phase:director",
+    "event:actionable_situation"
+  ],
+  "required_event_contains": [
+    {
+      "event": "event:actionable_situation",
+      "contains": "npc_advice"
+    },
+    {
+      "event": "event:actionable_situation",
+      "contains": "not_official_solution"
+    }
+  ]
+}

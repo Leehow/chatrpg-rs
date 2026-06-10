@@ -1,0 +1,29 @@
+{
+  "name": "director_stuck_player_guidance_ladder",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "user_input": "我不知道现在能做什么，帮我整理一下我们知道的东西。",
+  "required_events": [
+    "phase:director",
+    "phase:guidance_ladder",
+    "phase:clue_board_updated"
+  ],
+  "required_event_contains": [
+    {
+      "event": "phase:director",
+      "contains": "summarize_known_info"
+    },
+    {
+      "event": "phase:director",
+      "contains": "known_facts"
+    },
+    {
+      "event": "phase:director",
+      "contains": "open_leads"
+    }
+  ],
+  "forbidden_terms": [
+    "唯一正确",
+    "标准答案"
+  ]
+}

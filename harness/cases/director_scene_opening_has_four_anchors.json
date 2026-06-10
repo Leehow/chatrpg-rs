@@ -1,0 +1,32 @@
+{
+  "name": "director_scene_opening_has_four_anchors",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "user_input": "我先观察现场，不急着行动。",
+  "required_events": [
+    "phase:director",
+    "phase:actionable_situation_brief",
+    "event:actionable_situation"
+  ],
+  "required_event_contains": [
+    {
+      "event": "event:actionable_situation",
+      "contains": "visible_facts"
+    },
+    {
+      "event": "event:actionable_situation",
+      "contains": "pressure"
+    },
+    {
+      "event": "event:actionable_situation",
+      "contains": "affordances"
+    },
+    {
+      "event": "event:actionable_situation",
+      "contains": "risks"
+    }
+  ],
+  "forbidden_terms": [
+    "你应该"
+  ]
+}

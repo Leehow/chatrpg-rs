@@ -1,0 +1,58 @@
+{
+  "name": "debug_directive_and_auto_roll_resolution",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "allow_debug_directives": true,
+  "allow_manual_roll_input": false,
+  "forbidden_player_text": [
+    "请告诉我目标 SP",
+    "没有 locked-in check",
+    "上一枪后还剩多少血",
+    "debug",
+    "JSON",
+    "请你掷",
+    "请报告掷骰",
+    "请报告伤害"
+  ],
+  "evaluator_instructions": "Focus on whether debug setup is separated from player speech, whether the GM treats debug-created state as GM-only test context, and whether the system automatically plans, rolls, resolves, and persists mechanics after a fictional player action without asking for dice totals.",
+  "turns": [
+    {
+      "user_input": "[debug]add {\"id\":\"item.smartgun\",\"kind\":\"weapon\",\"damage\":\"4d6\",\"owner\":\"pc\",\"tags\":[\"test_only\"]}[/debug]\n我检查手里的智能枪，确认它已经上膛，然后瞄准最近的威胁。",
+      "notes": "Debug-created weapon should not leak as debug metadata; player action remains human-like and action-only.",
+      "forbid_player_text": [
+        "test_only",
+        "item.smartgun",
+        "debug",
+        "请你掷"
+      ]
+    },
+    {
+      "user_input": "我用这把枪朝最近的敌人扣下扳机，射完马上缩回掩体。",
+      "expect_phases": [
+        "turn_route"
+      ],
+      "require_db_deltas": {
+        "dice_rolls": 1,
+        "roll_plans": 1
+      },
+      "forbid_player_text": [
+        "这把枪伤害是多少",
+        "请你掷",
+        "请报告伤害"
+      ],
+      "notes": "The system should infer the attack, hydrate/use the debug-created weapon, roll automatically, and move to outcome or next player decision."
+    },
+    {
+      "user_input": "我看它有没有倒下，如果还在动，我换个角度继续压制它。",
+      "expect_phases": [
+        "turn_route"
+      ],
+      "forbid_player_text": [
+        "没有 locked-in check",
+        "请选择方向避免循环",
+        "请你掷"
+      ],
+      "notes": "Player never reports dice; the GM must rely on ledger state from the previous automatic resolution."
+    }
+  ]
+}

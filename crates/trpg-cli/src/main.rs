@@ -1,0 +1,2257 @@
+use anyhow::{anyhow, Context, Result};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use dialoguer::{Input, Password, Select};
+use futures_util::StreamExt;
+use serde::Deserialize;
+use serde_json::{json, Value};
+use std::collections::BTreeMap;
+use std::io::{self, IsTerminal, Read, Write};
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tracing::info;
+use trpg_agent::pending_check_prompt;
+use trpg_api::{serve, AppState};
+use trpg_combat::ConflictTurnResult;
+use trpg_db::Db;
+use trpg_llm::{LlmClient, LlmConfig, OpenAiCompatibleClient};
+use trpg_model::*;
+use trpg_parser::{ParserConfig, ProjectParseService};
+use trpg_rule_agent::RuleStewardAgent;
+use trpg_runtime::{roll_dice, validate_character_template_sheet, AutoRollExecution, RuntimeEngine};
+use trpg_search::{load_search_source_configs, SearchConfig, SearchService};
+
+mod agent_play;
+
+#[derive(Debug, Parser)]
+#[command(name = "trpg", version, about = "Rust TRPG rulebook/module parser and terminal runtime")]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Debug, Subcommand)]
+enum Commands {
+    Init,
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommand,
+    },
+    Migrate,
+    ParseAll {
+        #[arg(long, default_value_t = false)]
+        force: bool,
+        /// Opt into the old expensive full chunk extraction path. Default is GM onboarding + locators only.
+        #[arg(long, default_value_t = false)]
+        full_parse: bool,
+        /// PDF extraction backend. duotext (DEFAULT): two pdftotext views — reading-order prose
+        /// (indexed) + a -layout table sidecar (param grep); fast, pure-CPU, no ligature loss.
+        /// mineru: vision model — native 2-col order but ~500x slower and row-shifts dense tables.
+        /// oxidize/auto: rag_chunks collapses tables — avoid for table-heavy books. (pdftotext=duotext alias)
+        #[arg(long, value_parser = ["auto", "oxidize", "pdftotext", "duotext", "mineru"], default_value = "duotext")]
+        pdf_backend: String,
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+    Api {
+        #[arg(long, env = "TRPG_API_ADDR", default_value = "127.0.0.1:8787")]
+        addr: SocketAddr,
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+    Inspect {
+        #[command(subcommand)]
+        command: InspectCommand,
+    },
+    CreateCharacter(CreateCharacterArgs),
+    Play {
+        #[arg(long)]
+        ruleset: String,
+        #[arg(long)]
+        module: Option<String>,
+        #[arg(long, default_value_t = false)]
+        agent: bool,
+    },
+    /// Run exactly one GM turn without opening the interactive play shell.
+    /// Useful for pipes, regression tests, scripts, and LLM-driven debugging.
+    Turn(TurnArgs),
+    /// Unified Tantivy search. Short alias inspired by ripgrep.
+    Rg(SearchArgs),
+    /// Grep the duotext `.layout.md` table sidecars for exact aligned rows (e.g. weapon params).
+    /// DB-free: `trpg grep-table "Glock 17"` -> the full stat row. AND-of-tokens, table rows first.
+    GrepTable {
+        /// term(s) to match on a table row, e.g. "Glock 17" or "revolver 38"
+        query: String,
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+    /// Apply a character-growth change: set/add a track (class level, pool, rank) or a
+    /// base stat, then re-derive. Engine only moves the value (A0). e.g.
+    /// `trpg grow --session S --actor pc.current --bucket tracks --id fighter --op add --amount 1 --kind class_level`
+    Grow {
+        #[arg(long)] session: String,
+        #[arg(long, default_value = "pc.current")] actor: String,
+        #[arg(long, value_parser = ["tracks", "stats", "skills", "field"], default_value = "tracks")] bucket: String,
+        #[arg(long)] id: String,
+        #[arg(long, value_parser = ["set", "add"], default_value = "add")] op: String,
+        /// Amount to set/add. Negative allowed (e.g. spend a pool): `--amount -60`.
+        #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)] amount: f64,
+        /// A categorical/string value to SET (e.g. a race/ancestry/class choice). Use instead of --amount for non-numeric inputs.
+        #[arg(long)] value: Option<String>,
+        #[arg(long)] kind: Option<String>,
+        #[arg(long)] category: Option<String>,
+    },
+    Search {
+        #[command(subcommand)]
+        command: SearchCommand,
+    },
+    /// Rule Steward Agent: source-backed rule query, character onboarding, and playability audit.
+    Rules {
+        #[command(subcommand)]
+        command: RulesCommand,
+    },
+    Learn {
+        #[command(subcommand)]
+        command: LearnCommand,
+    },
+    Time {
+        #[command(subcommand)]
+        command: TimeCommand,
+    },
+    Roll {
+        expression: String,
+    },
+    /// Run the STAGED ruleset parse in-process and stream stage progress to the terminal.
+    ParseStaged {
+        #[arg(long)]
+        ruleset: String,
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        stage1_only: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+        #[arg(long, default_value_t = 9)]
+        budget: usize,
+    },
+}
+
+#[derive(Debug, Args)]
+struct CreateCharacterArgs {
+    /// Ruleset id. May also be supplied by --request-json.
+    #[arg(long)]
+    ruleset: Option<String>,
+    /// Module id. May also be supplied by --request-json.
+    #[arg(long)]
+    module: Option<String>,
+    /// User preferences / partial character choices. Skips interactive prompt.
+    #[arg(long)]
+    preferences: Option<String>,
+    /// Read user preferences from a file. Skips interactive prompt.
+    #[arg(long)]
+    preferences_file: Option<PathBuf>,
+    /// Read user preferences from stdin as plain text. Skips interactive prompt.
+    #[arg(long, default_value_t = false)]
+    stdin: bool,
+    /// Read a JSON request from this path, or '-' for stdin.
+    /// Shape: {"ruleset_id":"...","module_id":"...","user_preferences":"..."}
+    #[arg(long)]
+    request_json: Option<String>,
+    /// Output stream format for automation.
+    #[arg(long, value_enum, default_value = "text")]
+    stream_format: StreamFormat,
+    /// Do not write the streamed character draft into data/exports/characters.
+    #[arg(long, default_value_t = false)]
+    no_save: bool,
+    /// Auto-generate a COMPLETE starter character from the parsed onboarding
+    /// pack, persist it, and bind it into a session so `turn` plays AS it.
+    #[arg(long, default_value_t = false)]
+    auto: bool,
+    /// Session to bind the created character into. If omitted (with --auto) a
+    /// new session is started and its id is printed for use with `turn`.
+    #[arg(long)]
+    session_id: Option<String>,
+    /// Actor id to bind the created character as (default pc.current).
+    #[arg(long, default_value = "pc.current")]
+    actor_id: String,
+}
+
+#[derive(Debug, Args)]
+struct TurnArgs {
+    /// Ruleset id. May also be supplied by --request-json.
+    #[arg(long)]
+    ruleset: Option<String>,
+    /// Module id. May also be supplied by --request-json.
+    #[arg(long)]
+    module: Option<String>,
+    /// Existing session id. If omitted, a new session is created.
+    #[arg(long)]
+    session_id: Option<String>,
+    /// User input for this turn. Skips interactive prompt.
+    #[arg(long)]
+    input: Option<String>,
+    /// Read user input from file. Skips interactive prompt.
+    #[arg(long)]
+    input_file: Option<PathBuf>,
+    /// Read user input from stdin as plain text. Skips interactive prompt.
+    #[arg(long, default_value_t = false)]
+    stdin: bool,
+    /// Optional recent transcript text for BP3 dynamic context.
+    #[arg(long)]
+    recent_transcript: Option<String>,
+    /// Optional recent transcript file.
+    #[arg(long)]
+    recent_transcript_file: Option<PathBuf>,
+    /// Read a JSON request from this path, or '-' for stdin.
+    /// Shape: {"ruleset_id":"...","module_id":"...","session_id":"...","user_input":"...","recent_transcript":"..."}
+    #[arg(long)]
+    request_json: Option<String>,
+    /// Output stream format for automation.
+    #[arg(long, value_enum, default_value = "text")]
+    stream_format: StreamFormat,
+}
+
+
+
+#[derive(Debug, Subcommand)]
+enum TimeCommand {
+    Show {
+        #[arg(long)] session: String,
+    },
+    Advance {
+        #[arg(long)] session: String,
+        #[arg(long, default_value_t = 0)] seconds: i64,
+        #[arg(long, default_value_t = 0)] minutes: i64,
+        #[arg(long, default_value_t = 0)] hours: i64,
+        #[arg(long, default_value_t = 0)] days: i64,
+        #[arg(long = "rounds", default_value_t = 0)] combat_rounds: i64,
+        #[arg(long = "scene-beats", default_value_t = 0)] scene_beats: i64,
+        #[arg(long, default_value = "scene_beat")] scale: String,
+        #[arg(long, default_value = "manual CLI time advance")] reason: String,
+    },
+    Schedule {
+        #[arg(long)] session: String,
+        #[arg(long = "in-minutes", default_value_t = 0)] in_minutes: i64,
+        #[arg(long = "in-seconds", default_value_t = 0)] in_seconds: i64,
+        #[arg(long, default_value = "system_event")] kind: String,
+        #[arg(long, default_value = "{}")] payload_json: String,
+    },
+    Events {
+        #[arg(long)] session: String,
+        #[arg(long = "since-tick", default_value_t = 0)] since_tick: i64,
+        #[arg(long = "since-event-seq", default_value_t = 0)] since_event_seq: i64,
+        #[arg(long, default_value_t = 50)] limit: i64,
+    },
+}
+
+#[derive(Debug, Args, Clone)]
+struct SearchArgs {
+    /// Search query. If omitted, use '*' to inspect the currently indexed corpus.
+    #[arg(default_value = "*")]
+    query: String,
+    /// Restrict by high-level domain. Repeatable: --domain rules --domain modules.
+    #[arg(long = "domain", value_delimiter = ',')]
+    domains: Vec<String>,
+    /// Restrict by logical kind. Repeatable: --kind scene_node --kind procedure.
+    #[arg(long = "kind", value_delimiter = ',')]
+    kinds: Vec<String>,
+    /// Restrict by tag. Repeatable: --tag athena --tag combat.
+    #[arg(long = "tag", value_delimiter = ',')]
+    tags: Vec<String>,
+    /// Convenience scope filter.
+    #[arg(long)]
+    ruleset: Option<String>,
+    /// Convenience scope filter.
+    #[arg(long)]
+    module: Option<String>,
+    /// Convenience scope filter.
+    #[arg(long)]
+    session: Option<String>,
+    /// Convenience scope filter.
+    #[arg(long)]
+    scene: Option<String>,
+    /// Generic scope filter in key=value form. Not tied to any DB schema.
+    #[arg(long = "scope")]
+    scopes: Vec<String>,
+    /// Generic exact filter in key=value form. It matches scopes, facets, or string metadata.
+    #[arg(long = "filter")]
+    filters: Vec<String>,
+    #[arg(long, default_value_t = 10)]
+    limit: u32,
+    #[arg(long, default_value_t = false)]
+    explain: bool,
+    #[arg(long, default_value_t = false)]
+    jsonl: bool,
+    /// Reindex before searching.
+    #[arg(long, default_value_t = false)]
+    reindex: bool,
+    /// Use incremental reindex when --reindex is supplied.
+    #[arg(long, default_value_t = false)]
+    incremental_reindex: bool,
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Subcommand)]
+enum SearchCommand {
+    Query(SearchArgs),
+    Reindex {
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+        /// Only index sources with documents newer than the last per-source watermark.
+        #[arg(long, default_value_t = false)]
+        incremental: bool,
+    },
+    Sources,
+}
+
+
+#[derive(Debug, Subcommand)]
+enum RulesCommand {
+    /// Ask the Rule Steward Agent for a source-backed rule answer/context pack.
+    Query {
+        #[arg(long)]
+        ruleset: String,
+        #[arg(long)]
+        module: Option<String>,
+        /// Natural-language rule/materialization question.
+        query: String,
+        #[arg(long, value_enum, default_value = "general-rule-query")]
+        kind: RuleNeedKindArg,
+        #[arg(long = "missing-facet", value_delimiter = ',')]
+        missing_facets: Vec<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Show the parsed CharacterOnboardingPack for a ruleset.
+    CharacterPack {
+        #[arg(long)]
+        ruleset: String,
+    },
+    /// Verify that RuleKernel + character creation + first-session prep can start play.
+    Playability {
+        #[arg(long)]
+        ruleset: String,
+        #[arg(long)]
+        module: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// List RuleKernel patch proposals for BP1 maintenance.
+    Bp1Patches {
+        #[arg(long)]
+        ruleset: String,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: i64,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum RuleNeedKindArg {
+    CoreResolutionModel,
+    CheckProcedure,
+    AttackProcedure,
+    DamageProcedure,
+    DefenseOrArmorProcedure,
+    SaveOrResistanceProcedure,
+    AbilityOrSpellUse,
+    ObjectInteraction,
+    ResourceOrCondition,
+    CharacterSheetField,
+    CharacterCreation,
+    NpcOrMonsterStatBlock,
+    SceneOrModuleRule,
+    VisibilityOrSpoilerDecision,
+    LearningAudit,
+    Bp1KernelReview,
+    GeneralRuleQuery,
+}
+
+impl From<RuleNeedKindArg> for RuleNeedKind {
+    fn from(value: RuleNeedKindArg) -> Self {
+        match value {
+            RuleNeedKindArg::CoreResolutionModel => RuleNeedKind::CoreResolutionModel,
+            RuleNeedKindArg::CheckProcedure => RuleNeedKind::CheckProcedure,
+            RuleNeedKindArg::AttackProcedure => RuleNeedKind::AttackProcedure,
+            RuleNeedKindArg::DamageProcedure => RuleNeedKind::DamageProcedure,
+            RuleNeedKindArg::DefenseOrArmorProcedure => RuleNeedKind::DefenseOrArmorProcedure,
+            RuleNeedKindArg::SaveOrResistanceProcedure => RuleNeedKind::SaveOrResistanceProcedure,
+            RuleNeedKindArg::AbilityOrSpellUse => RuleNeedKind::AbilityOrSpellUse,
+            RuleNeedKindArg::ObjectInteraction => RuleNeedKind::ObjectInteraction,
+            RuleNeedKindArg::ResourceOrCondition => RuleNeedKind::ResourceOrCondition,
+            RuleNeedKindArg::CharacterSheetField => RuleNeedKind::CharacterSheetField,
+            RuleNeedKindArg::CharacterCreation => RuleNeedKind::CharacterCreation,
+            RuleNeedKindArg::NpcOrMonsterStatBlock => RuleNeedKind::NpcOrMonsterStatBlock,
+            RuleNeedKindArg::SceneOrModuleRule => RuleNeedKind::SceneOrModuleRule,
+            RuleNeedKindArg::VisibilityOrSpoilerDecision => RuleNeedKind::VisibilityOrSpoilerDecision,
+            RuleNeedKindArg::LearningAudit => RuleNeedKind::LearningAudit,
+            RuleNeedKindArg::Bp1KernelReview => RuleNeedKind::Bp1KernelReview,
+            RuleNeedKindArg::GeneralRuleQuery => RuleNeedKind::GeneralRuleQuery,
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+enum LearnCommand {
+    /// List review-gated learning candidates generated by learning_audit.
+    Candidates {
+        #[arg(long)]
+        ruleset: Option<String>,
+        #[arg(long, default_value = "pending_review")]
+        status: String,
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+    },
+    /// Approve a learning candidate into learned_packets.
+    Approve {
+        candidate_id: String,
+        #[arg(long, default_value = "used_once")]
+        stage: String,
+        #[arg(long)]
+        notes: Option<String>,
+    },
+}
+
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum StreamFormat {
+    /// Human-readable text stream. Metadata goes to stderr; deltas go to stdout.
+    Text,
+    /// Newline-delimited JSON events. Good for tests and LLM tooling.
+    Jsonl,
+    /// Server-Sent Events written to stdout, mirroring the Axum API event shape.
+    Sse,
+}
+
+#[derive(Debug, Subcommand)]
+enum AuthCommand {
+    Set,
+}
+
+#[derive(Debug, Subcommand)]
+enum InspectCommand {
+    Bundles,
+    CharacterTemplate { #[arg(long)] ruleset: String },
+    CharacterOnboarding { #[arg(long)] ruleset: String },
+    ProjectJson,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CharacterCreateJsonRequest {
+    #[serde(default, alias = "ruleset")]
+    ruleset_id: Option<String>,
+    #[serde(default, alias = "module")]
+    module_id: Option<String>,
+    #[serde(default, alias = "preferences")]
+    user_preferences: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct TurnJsonRequest {
+    #[serde(default, alias = "ruleset")]
+    ruleset_id: Option<String>,
+    #[serde(default, alias = "module")]
+    module_id: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default, alias = "input")]
+    user_input: String,
+    #[serde(default)]
+    recent_transcript: Option<String>,
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    dotenvy::dotenv().ok();
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()))
+        .init();
+
+    let cli = Cli::parse();
+    match cli.command {
+        Commands::Init => init_project().await,
+        Commands::Auth { command } => match command { AuthCommand::Set => auth_set().await },
+        Commands::Migrate => {
+            let db = connect_db().await?;
+            db.migrate().await?;
+            println!("migration complete");
+            Ok(())
+        }
+        Commands::ParseAll { force, full_parse, pdf_backend, data_dir } => {
+            let db = connect_db().await?;
+            db.migrate().await?;
+            let llm = make_llm()?;
+            std::env::set_var("TRPG_PDF_BACKEND", &pdf_backend);
+            let mut config = ParserConfig::new(data_dir.unwrap_or_else(default_data_dir), force);
+            if full_parse {
+                config.parse_full_chunks = true;
+                let rule_steward_first_pass = std::env::var("TRPG_RULE_STEWARD_FIRST_PASS")
+                    .ok()
+                    .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+                    .unwrap_or(true);
+                config.parse_config_hash = sha256_hex(format!("parser=v1.16.2;schema=v1;prompt=rule_steward_react_first_pass_v1;full_chunks=true;pdf_backend={};clean_mode={};oxidize_chunk_target_chars={};llm_clean={};semantic_units={};semantic_unit_max_chars={};llm_semantic_wash={};rule_steward_first_pass={}", config.pdf_backend.as_str(), config.oxidize_clean_mode.as_str(), config.oxidize_chunk_target_chars, config.llm_clean_extraction, config.semantic_unit_conditioning, config.semantic_unit_max_chars, config.llm_semantic_wash, rule_steward_first_pass));
+            }
+            let search_data_dir = config.data_dir.clone();
+            let pdf_backend_label = config.pdf_backend.as_str().to_string();
+            let service = ProjectParseService::new(db.clone(), llm, config);
+            let project = service.parse_all().await?;
+            let search = make_search(&db, search_data_dir)?;
+            let stats = search.reindex_all().await?;
+            println!("onboarded/indexed: {} ruleset bundle(s), {} module bundle(s)", project.rulesets.len(), project.modules.len());
+            println!("pdf backend: {}", pdf_backend_label);
+            let rule_steward_first_pass = std::env::var("TRPG_RULE_STEWARD_FIRST_PASS")
+                .ok()
+                .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+                .unwrap_or(true);
+            println!("rule steward first-pass skills: {}", if rule_steward_first_pass { "enabled" } else { "disabled" });
+            if full_parse { println!("full chunk extraction was enabled"); } else { println!("full chunk extraction skipped; cold data will be learned on demand"); }
+            println!("wrote data/parsed/project.bundle.json, context_blocks.jsonl, material_index.jsonl");
+            println!("tantivy search index updated: {} document(s) from {} source config(s)", stats.indexed_documents, stats.source_count);
+            if !stats.errors.is_empty() { eprintln!("search index warnings: {}", serde_json::to_string(&stats.errors)?); }
+            Ok(())
+        }
+        Commands::Api { addr, data_dir } => {
+            let db = connect_db().await?;
+            db.migrate().await?;
+            let llm = make_llm()?;
+            let parser_config = ParserConfig::new(data_dir.unwrap_or_else(default_data_dir), false);
+            let search = make_search(&db, parser_config.data_dir.clone())?;
+            let runtime = RuntimeEngine::new(db.clone()).with_search(search.clone());
+            let state = AppState { db, llm, runtime, search, parser_config };
+            serve(addr, state).await
+        }
+        Commands::Inspect { command } => inspect(command).await,
+        Commands::CreateCharacter(args) => create_character_cli(args).await,
+        Commands::Play { ruleset, module, agent } => {
+            if agent {
+                agent_play::play_cli_agent(&ruleset, module.as_deref()).await
+            } else {
+                play_cli(&ruleset, module.as_deref()).await
+            }
+        }
+        Commands::Turn(args) => turn_cli(args).await,
+        Commands::Rg(args) => search_query_cli(args).await,
+        Commands::GrepTable { query, limit, data_dir } => {
+            let dir = data_dir.unwrap_or_else(default_data_dir);
+            let hits = trpg_search::grep_layout_tables_in(&dir, &query, limit);
+            for h in &hits {
+                println!("{}", serde_json::json!({"source_id": h.source_id, "kind": h.source_kind, "page": h.page, "column_score": h.column_score, "context": h.context, "row": h.row}));
+            }
+            eprintln!("{} hit(s) for {:?}", hits.len(), query);
+            Ok(())
+        }
+        Commands::Grow { session, actor, bucket, id, op, amount, value, kind, category } => {
+            grow_cli(&session, &actor, &bucket, &id, &op, amount, value.as_deref(), kind.as_deref(), category.as_deref()).await
+        }
+        Commands::Search { command } => search_command_cli(command).await,
+        Commands::Rules { command } => rules_command_cli(command).await,
+        Commands::Learn { command } => learning_command_cli(command).await,
+        Commands::Time { command } => time_command_cli(command).await,
+        Commands::Roll { expression } => {
+            let roll = roll_dice(&expression)?;
+            println!("{} => {:?} {:+} = {}", roll.expression, roll.rolls, roll.modifier, roll.total);
+            Ok(())
+        }
+        Commands::ParseStaged { ruleset, data_dir, stage1_only, json, budget } => {
+            parse_staged_cli(ruleset, data_dir, stage1_only, json, budget).await
+        }
+    }
+}
+
+async fn init_project() -> Result<()> {
+    for dir in [
+        "data/rulebooks",
+        "data/modules",
+        "data/markdown/rulebooks",
+        "data/markdown/modules",
+        "data/parsed",
+        "data/exports/characters",
+        "data/exports/sessions",
+        "data/exports/traces",
+        "data/search/tantivy_v3",
+        "data/agent/advice",
+    ] {
+        tokio::fs::create_dir_all(dir).await?;
+    }
+    if !PathBuf::from(".env").exists() {
+        tokio::fs::write(".env", include_str!("../../../.env.example")).await?;
+        println!("created .env from .env.example");
+    }
+    println!("initialized data folders. Put rulebook PDFs in data/rulebooks and module PDFs in data/modules.");
+    println!("start PostgreSQL with: docker compose up -d postgres");
+    Ok(())
+}
+
+async fn auth_set() -> Result<()> {
+    let providers = vec!["openai", "openai_compatible"];
+    let provider_idx = Select::new().with_prompt("LLM provider").items(&providers).default(0).interact()?;
+    let provider = providers[provider_idx];
+    let default_base = if provider == "openai" { "https://api.openai.com/v1" } else { "http://localhost:8000/v1" };
+    let base_url: String = Input::new().with_prompt("Base URL").default(default_base.to_string()).interact_text()?;
+    let model: String = Input::new().with_prompt("Model").default("gpt-4.1".to_string()).interact_text()?;
+    let api_key = Password::new().with_prompt("API key").allow_empty_password(false).interact()?;
+    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://chatrpg:chatrpg@localhost:54323/chatrpg".to_string());
+    let data_dir = std::env::var("TRPG_DATA_DIR").unwrap_or_else(|_| "./data".to_string());
+    let env = format!(
+        "DATABASE_URL={database_url}\nTRPG_LLM_PROVIDER={provider}\nTRPG_LLM_BASE_URL={base_url}\nTRPG_LLM_API_KEY={api_key}\nTRPG_LLM_MODEL={model}\nTRPG_LLM_SEND_TEMPERATURE=false\nTRPG_DATA_DIR={data_dir}\nTRPG_API_ADDR=127.0.0.1:8787\nTRPG_MEMORY_RETRIEVAL_LIMIT=8\nTRPG_MEMORY_SNAPSHOT_EVERY_TURNS=8\nTRPG_SEARCH_INDEX_DIR=./data/search/tantivy_v3\nTRPG_SEARCH_WRITER_MEMORY_BYTES=96000000\nTRPG_RUNTIME_AUTO_SEARCH=true\nTRPG_RUNTIME_AUTO_SEARCH_LIMIT=5\nTRPG_RUNTIME_AUTO_SEARCH_MAX_SCENE_PINS=1\nTRPG_RUNTIME_AUTOPIN_SCENE_RULES=true\nTRPG_RUNTIME_AUTO_SEARCH_DOMAINS=learned,rules,modules,rulings,source,parsed\nTRPG_PDF_BACKEND=duotext\nTRPG_PDF_ALLOW_PDFTOTEXT_FALLBACK=true\nTRPG_OXIDIZE_CLEAN_MODE=heuristic\nTRPG_OXIDIZE_CHUNK_TARGET_CHARS=4000\nTRPG_OXIDIZE_WRITE_RAW_CHUNKS=true\nTRPG_INGEST_LLM_CLEAN=false\nTRPG_INGEST_LLM_CLEAN_MAX_CHUNKS=8\nTRPG_INGEST_SEMANTIC_UNITS=true\nTRPG_SEMANTIC_UNIT_MAX_CHARS=6000\nTRPG_INGEST_LLM_SEMANTIC_WASH=false\nTRPG_INGEST_LLM_SEMANTIC_WASH_MAX_UNITS=12\nTRPG_LEARNING_AUDIT=true\nTRPG_LEARNING_AUTO_PROMOTE=false\nTRPG_CONFLICT_AGENT_ENABLE_V10=true\nTRPG_SITUATION_ORCHESTRATOR_ENABLE_V11=true\nTRPG_SITUATION_STALEMATE_TURNS=3\nTRPG_ACTIONABLE_DIRECTOR_ENABLE_V12=true\nTRPG_ACTIONABLE_DIRECTOR_ENABLE_V13=true\nTRPG_ACTIONABLE_DIRECTOR_MAX_EXAMPLES=4\nTRPG_ACTIONABLE_DIRECTOR_MENU_COOLDOWN=2\nTRPG_NOVELTY_DIRECTOR_ENABLE_V13=true\nTRPG_NPC_MAX_REPEAT_TACTIC=1\nTRPG_OUTPUT_NO_REPEAT_VALIDATOR=true\nTRPG_DIRECTION_GATE_AUTO_DEFAULT_AFTER_REPROMPTS=2\nTRPG_WORLD_TIME_ENABLE_V14=true\nTRPG_WORLD_TIME_START_DISPLAY=Day 1, 00:00\nTRPG_WORLD_TIME_CALENDAR_ID=relative_default\nTRPG_WORLD_TIME_CONTEXT_EVENT_LIMIT=24\nTRPG_WORLD_TIME_AUTO_ADVANCE_PER_TURN_SECONDS=0\nTRPG_INTERACTION_KERNEL_ENABLE_V15=true\nTRPG_INTERACTION_RECONCILE_EVERY_TURN=true\nTRPG_INTERACTION_CASCADE_CLOSE_FRAME=true\nTRPG_INTERACTION_GENERATION_GUARD=true\nTRPG_RULESET_ADVICE_DIR=./data/ruleset_advice\nTRPG_COMBAT_AUTO_FRAME=true\nTRPG_COMBAT_COMPACTION=true\nTRPG_OBJECT_KERNEL_ENABLE_V16=true\nTRPG_OBJECT_INTERACTION_AUTOCONTRACT=true\nTRPG_OBJECT_CONTEXT_BP3=true\nTRPG_OBJECT_COMPACTION_ENABLE=true\nTRPG_OBJECT_DEFAULT_DISARM_TARGET=15\nTRPG_TURN_ORCHESTRATOR_ENABLE_V17=true\nTRPG_TURN_ORCHESTRATOR_GATE_RELEVANCE=true\nTRPG_TURN_ORCHESTRATOR_FRAME_FIRST=true\nTRPG_TURN_ORCHESTRATOR_OBJECT_AS_CHILD=true\nTRPG_TURN_ORCHESTRATOR_DISABLE_GENERIC_CHECK_FOR_FRAME_ACTION=true\nTRPG_RUNTIME_PARAM_HYDRATION_ENABLE_V18=true\nTRPG_OBJECT_BIND_NARRATION_TO_RULES_V18=true\nTRPG_OBJECT_SESSION_SCOPED_IDS=true\nTRPG_ORCHESTRATOR_OBJECT_SELF_SELECT=false\nTRPG_REQUIRED_REACTION_BLOCKS_OBJECT_INTENT=true\nTRPG_SEMANTIC_PRIMARY=true\nTRPG_SEMANTIC_CLASSIFIER_ENABLE_V19=true\nTRPG_SEMANTIC_EXTRACTOR_ENABLE_V19=true\nTRPG_LEXICAL_FALLBACK_ENABLE=false\nTRPG_LEXICAL_FALLBACK_AUDIT_ONLY=true\nTRPG_ABILITY_KERNEL_ENABLE_V19=true\nTRPG_RULE_BINDING_ENABLE_V19=true\nTRPG_RULE_BINDING_REQUIRE_RUNTIME_WRITEBACK=true\nTRPG_ABILITY_CONTEXT_BP3=true\nTRPG_SEMANTIC_ROUTE_REDUCER_STRICT=true\nTRPG_SEMANTIC_ROUTE_CACHE_ENABLE=true\nTRPG_SEMANTIC_RECORD_REPLAY_ENABLE=false\nTRPG_REAL_MATERIALIZATION_ENABLE_V110=true\nTRPG_REAL_MATERIALIZATION_EXTRACTOR_ENABLE_V110=true\nTRPG_MATERIALIZATION_REQUIRE_SOURCE_OR_PROVISIONAL_REASON=true\nTRPG_MATERIALIZATION_BLOCKING_FOR_MECHANICS=true\nTRPG_MATERIALIZATION_CONTEXT_BP3=true\nTRPG_MATERIALIZATION_PREFER_MODULE_CARDS=true\nTRPG_SIMULATION_GUIDED_HOTFIX_V1101=true\nTRPG_FORCE_TECH_ASSESSMENT_CHECK=true\nTRPG_REACTION_REPROMPT_EMITS_WINDOW=true\nTRPG_PLAYER_VALUE_REFEREE_ENABLE_V1102=true\nTRPG_PLAYER_VALUE_ALLOW_TABLE_OVERRIDE=true\nTRPG_PLAYER_VALUE_REQUIRE_RULE_OR_TABLE_CHECK=true\nTRPG_REFEREE_COMBAT_SLICE_ENABLE_V1102=true\nTRPG_MECHANICAL_LEDGER_CONTEXT_BP3=true\nTRPG_CONTEST_KERNEL_ENABLE_V111=true\n# TRPG_CONTEST_DEFAULT_PERCENTILE_SKILL=50  # optional table override only; default unset\nTRPG_CONTEST_CONTEXT_BP3=true\nTRPG_CONTEST_REQUIRE_MODEL_FOR_CHECK=true\nTRPG_MECHANICS_SEARCH_SKILLS_ENABLE_V112=true\nTRPG_MECHANICS_SEARCH_MULTI_STEP=true\nTRPG_MECHANICS_SEARCH_USE_RULESET_LOCATORS=true\nTRPG_MECHANICS_SEARCH_WRITE_FACETS=true\nTRPG_MECHANICS_SEARCH_CONTEXT_BP3=true\nTRPG_MECHANICS_SEARCH_GREP_CANDIDATES_ONLY=true\nTRPG_UNIFIED_ROLL_EFFECT_EXECUTOR_ENABLE_V1121=true\nTRPG_AGENT_TABLE_DICE_POLICY=system_rolls_visible\nTRPG_EFFECT_CONTEXT_BP3=true\nTRPG_EFFECT_ALLOW_PROVISIONAL_TARGET_PARAMETER=false\nTRPG_STRICT_SOURCE_BACKED_MATERIALIZATION=true\nTRPG_FAIL_ON_MISSING_SOURCE_BACKED_PARAMS=true\nTRPG_ALLOW_SYNTHETIC_ACTOR_SEEDS=false\nTRPG_RUNTIME_PARAM_ALLOW_SYNTHETIC_NPC_SEEDS=false\nTRPG_MATERIALIZATION_WRITE_PARTIAL=false\nTRPG_RULE_STEWARD_ENABLE_V116=true\nTRPG_RULE_STEWARD_AUTO_QUERY=true\nTRPG_CHARACTER_ONBOARDING_REQUIRED=true\nTRPG_PLAYABILITY_GATE_BLOCKING=false\nTRPG_RULE_KERNEL_PATCH_AUTO_APPLY=false\nTRPG_RULE_STEWARD_STRICT_SOURCE_BACKED=true\nTRPG_EFFECT_REQUIRE_PARAMETER_IMPACT=true\nTRPG_ROLL_BINDING_HOTFIX_ENABLE_V1122=true\nTRPG_ROLL_BINDING_USE_LATEST_UNRESOLVED_CHECK=true\nTRPG_DIRECTION_GATE_IS_ADVISORY=true\nTRPG_AUTO_RESOLVE_SYSTEM_EFFECT_ROLLS=true\nTRPG_PARAMETER_FACET_EXECUTOR_ENABLE_V113=true\nTRPG_PARAMETER_FACET_EXECUTOR_USE_BOUND_FACETS_FIRST=true\nTRPG_PARAMETER_FACET_EXECUTOR_USE_RULESET_STARTER_PROFILES=false\nTRPG_PARAMETER_FACET_EXECUTOR_WRITE_GENERIC_STATES=true\nTRPG_PARAMETER_FACET_EXECUTOR_CONTEXT_BP3=true\nTRPG_PARAMETER_FACET_EXECUTOR_AUDIT_PROVISIONAL=true\nTRPG_COMBAT_ROUTE_SOURCE_OBJECTS_AS_ATTACKS=true\nTRPG_COMBAT_COMMIT_FRAME_START_ACTION=true\nTRPG_ORCHESTRATOR_ATTACK_OVER_OBJECT_MATERIALIZATION=true
+TRPG_SEMANTIC_COMBAT_INTENT_ENABLE_V1133=true
+TRPG_SEMANTIC_COMBAT_LEXICAL_FALLBACK_AUDIT=true
+TRPG_SUSTAINED_COMBAT_LOOP_POLICY_V1133=true
+TRPG_DETERMINISTIC_ROLL_AUTHORITY_V1133=true
+TRPG_DIRECTION_GATE_ADVISORY_FOR_FRAME_ACTIONS=true
+TRPG_EXTERNAL_PLAYTEST_EVALUATOR_ENABLE_V114=true
+TRPG_PLAYTEST_EVALUATOR_BACKEND=claude-code
+TRPG_PLAYTEST_CLAUDE_BIN=claude
+TRPG_PLAYTEST_EXPORT_DB_DIFF=true
+TRPG_PLAYTEST_FORBID_RULE_TABLE_ASKS=true
+TRPG_RULE_STEWARD_ENABLE_V116=true
+TRPG_RULE_STEWARD_AUTO_QUERY=true
+TRPG_CHARACTER_ONBOARDING_REQUIRED=true
+TRPG_PLAYABILITY_GATE_BLOCKING=false
+TRPG_RULE_KERNEL_PATCH_AUTO_APPLY=false
+TRPG_RULE_STEWARD_STRICT_SOURCE_BACKED=true
+# NPC persona-judge synthesis (flagged provisional, drives resolution when no source). Set false for strict fail-closed.
+TRPG_NPC_PERSONA_SYNTHESIS=true
+\n"
+    );
+    tokio::fs::write(".env", env).await?;
+    println!("saved .env");
+    Ok(())
+}
+
+async fn inspect(command: InspectCommand) -> Result<()> {
+    let db = connect_db().await?;
+    match command {
+        InspectCommand::Bundles => {
+            let bundles = db.list_bundles().await?;
+            println!("{}", serde_json::to_string_pretty(&bundles)?);
+        }
+        InspectCommand::CharacterTemplate { ruleset } => {
+            let template = db.load_character_template(&ruleset).await?.ok_or_else(|| anyhow!("template not found for {ruleset}"))?;
+            println!("{}", serde_json::to_string_pretty(&template)?);
+        }
+        InspectCommand::CharacterOnboarding { ruleset } => {
+            let pack = db.load_character_onboarding_pack(&ruleset).await?.ok_or_else(|| anyhow!("character onboarding pack not found for {ruleset}"))?;
+            println!("{}", serde_json::to_string_pretty(&pack)?);
+        }
+        InspectCommand::ProjectJson => {
+            let project = db.load_latest_project_bundle().await?.ok_or_else(|| anyhow!("project bundle not found"))?;
+            println!("{}", serde_json::to_string_pretty(&project)?);
+        }
+    }
+    Ok(())
+}
+
+async fn create_character_cli(args: CreateCharacterArgs) -> Result<()> {
+    let mut req = if let Some(path) = args.request_json.as_deref() {
+        let text = read_path_or_stdin(path).await.context("failed to read --request-json")?;
+        serde_json::from_str::<CharacterCreateJsonRequest>(&text).context("invalid create-character JSON request")?
+    } else {
+        CharacterCreateJsonRequest::default()
+    };
+
+    if let Some(ruleset) = args.ruleset {
+        req.ruleset_id = Some(ruleset);
+    }
+    if let Some(module) = args.module {
+        req.module_id = Some(module);
+    }
+    if let Some(preferences) = resolve_text_input(
+        args.preferences,
+        args.preferences_file,
+        args.stdin,
+        args.request_json.is_none(),
+    ).await? {
+        req.user_preferences = preferences;
+    } else if args.request_json.is_none() && io::stdin().is_terminal() {
+        req.user_preferences = Input::new()
+            .with_prompt("角色概念 / 已确定选择（可以只写一部分，留空会让 AI 提案）")
+            .allow_empty(true)
+            .interact_text()?;
+    }
+
+    let ruleset_id = req.ruleset_id.ok_or_else(|| anyhow!("missing --ruleset or ruleset_id in --request-json"))?;
+
+    let db = connect_db().await?;
+    let llm = make_llm()?;
+    let runtime = RuntimeEngine::new(db.clone());
+
+    // F9 auto path: generate a complete starter character from the parsed
+    // onboarding pack, persist it, and bind it into a session so `turn` plays
+    // AS it (writes runtime_actor_parameters, not just a markdown draft).
+    if args.auto {
+        emit_phase(args.stream_format, "start", json!({"kind":"character_create_auto", "ruleset_id": ruleset_id, "module_id": req.module_id}))?;
+        let created = runtime
+            .create_and_bind_character(&*llm, &ruleset_id, args.session_id.as_deref(), &args.actor_id, &req.user_preferences)
+            .await?;
+        emit_phase(args.stream_format, "character_created", json!({
+            "character_id": created.character_id,
+            "name": created.name,
+            "status": created.status,
+            "session_id": created.session_id,
+            "actor_id": created.actor_id,
+            "validation": created.validation,
+            "sheet": created.sheet,
+        }))?;
+        emit_phase(args.stream_format, "bound", json!({
+            "session_id": created.session_id,
+            "actor_id": created.actor_id,
+            "play_hint": format!("trpg turn --ruleset {ruleset_id} --session-id {} --input \"...\"", created.session_id),
+        }))?;
+        emit_phase(args.stream_format, "done", json!({}))?;
+        return Ok(());
+    }
+
+    let messages = runtime.character_creation_messages(&ruleset_id, req.module_id.as_deref(), &req.user_preferences).await?;
+
+    emit_phase(args.stream_format, "start", json!({"kind":"character_create", "ruleset_id": ruleset_id, "module_id": req.module_id}))?;
+    emit_phase(args.stream_format, "llm_stream_start", json!({}))?;
+
+    let mut stream = match llm.stream_chat(messages, 0.7).await {
+        Ok(stream) => stream,
+        Err(err) => {
+            emit_error(args.stream_format, &err.to_string())?;
+            return Err(err);
+        }
+    };
+    let mut full = String::new();
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(delta) => {
+                emit_delta(args.stream_format, &delta)?;
+                full.push_str(&delta);
+            }
+            Err(err) => {
+                emit_error(args.stream_format, &err.to_string())?;
+                return Err(err);
+            }
+        }
+    }
+
+    if !args.no_save {
+        tokio::fs::create_dir_all("data/exports/characters").await.ok();
+        let path = format!("data/exports/characters/character_draft_{}.md", uuid::Uuid::new_v4().simple());
+        tokio::fs::write(&path, &full).await?;
+        emit_phase(args.stream_format, "draft_saved", json!({"path": path}))?;
+
+        let pack = db.load_character_onboarding_pack(&ruleset_id).await?;
+        let template = match pack.as_ref() {
+            Some(pack) => pack.sheet_template.clone(),
+            None => db.load_character_template(&ruleset_id).await?.ok_or_else(|| anyhow!("template not found for {ruleset_id}"))?,
+        };
+        let draft = extract_json_cli(&full).unwrap_or_else(|| json!({"raw_response": full.clone()}));
+        let name = draft.get("name")
+            .or_else(|| draft.get("character_name"))
+            .and_then(Value::as_str)
+            .unwrap_or("Unnamed Character")
+            .to_string();
+        let validation = validate_character_template_sheet(&template, &draft);
+        let pack_mechanically_ready = pack.as_ref().map(|p| {
+            p.validation_report.status == "ok"
+                && !p.derived_formula_pack.formulas.is_empty()
+                && !p.runtime_bindings.is_empty()
+                && !p.creation_flows.is_empty()
+        }).unwrap_or(false);
+        let status = if validation.status == "ok" && pack_mechanically_ready { "ready" } else { "draft_needs_rules_source" };
+        let character = CharacterSheet {
+            character_id: format!("character_{}", uuid::Uuid::new_v4().simple()),
+            ruleset_id: ruleset_id.clone(),
+            template_id: template.template_id.clone(),
+            name,
+            sheet: draft,
+            validation_report: validation.clone(),
+        };
+        db.save_character(&character, status).await?;
+        emit_phase(args.stream_format, "character_saved", json!({"character_id": character.character_id, "status": status, "validation": validation, "used_character_onboarding_pack": pack.is_some()}))?;
+    }
+    emit_phase(args.stream_format, "done", json!({}))?;
+    Ok(())
+}
+
+async fn play_cli(ruleset: &str, module: Option<&str>) -> Result<()> {
+    let db = connect_db().await?;
+    db.migrate().await?;
+    let llm = make_llm()?;
+    let search = make_search(&db, default_data_dir())?;
+    let runtime = RuntimeEngine::new(db.clone()).with_search(search);
+    let session_id = runtime.start_session(ruleset, module).await?;
+    println!("session: {session_id}");
+    println!("Type /quit to exit, /roll 2d6+3 to roll dice, /memory to inspect memory, /compact-memory to pin a summary.");
+    let mut recent = String::new();
+    loop {
+        print!("\n[chatrpg]> ");
+        io::stdout().flush().ok();
+        let mut input = String::new();
+        let read = io::stdin().read_line(&mut input)?;
+        if read == 0 {
+            break;
+        }
+        let input = input.trim().to_string();
+        if input.is_empty() { continue; }
+        if input == "/quit" { break; }
+        if let Some(expr) = input.strip_prefix("/roll ") {
+            match roll_dice(expr.trim()) {
+                Ok(r) => println!("{} => {:?} {:+} = {}", r.expression, r.rolls, r.modifier, r.total),
+                Err(e) => println!("roll error: {e}"),
+            }
+            continue;
+        }
+        if input == "/memory" {
+            let events = db.list_memory_events(&session_id, 10).await?;
+            let snapshots = db.list_memory_snapshots(&session_id, 3).await?;
+            println!("{} snapshot(s), {} recent event(s)", snapshots.len(), events.len());
+            for snapshot in snapshots {
+                println!("\n[SNAPSHOT] {} v{}\n{}", snapshot.title, snapshot.version, snapshot.summary_markdown);
+            }
+            for event in events {
+                println!("- {}", event.summary);
+            }
+            continue;
+        }
+        if input == "/compact-memory" {
+            compact_memory_cli(&db, &session_id, ruleset, module).await?;
+            continue;
+        }
+        let output = run_turn_once(
+            &db,
+            &runtime,
+            llm.clone(),
+            ruleset,
+            module,
+            &session_id,
+            &input,
+            Some(&recent),
+            StreamFormat::Text,
+        ).await?;
+        recent.push_str(&format!("\nPlayer: {input}\nGM: {output}\n"));
+        recent = take_tail_chars(&recent, 12_000);
+    }
+    Ok(())
+}
+
+async fn grow_cli(
+    session: &str, actor: &str, bucket: &str, id: &str, op: &str, amount: f64,
+    text: Option<&str>, kind: Option<&str>, category: Option<&str>,
+) -> anyhow::Result<()> {
+    let db = connect_db().await?;
+    db.migrate().await?;
+    let runtime = RuntimeEngine::new(db.clone());
+    let changed = runtime.apply_track_change(session, actor, bucket, id, op, amount, text, kind, category).await?;
+    println!("{}", serde_json::json!({
+        "ok": changed, "session": session, "actor": actor,
+        "bucket": bucket, "id": id, "op": op, "amount": amount, "value": text
+    }));
+    Ok(())
+}
+
+async fn turn_cli(args: TurnArgs) -> Result<()> {
+    let mut req = if let Some(path) = args.request_json.as_deref() {
+        let text = read_path_or_stdin(path).await.context("failed to read --request-json")?;
+        serde_json::from_str::<TurnJsonRequest>(&text).context("invalid turn JSON request")?
+    } else {
+        TurnJsonRequest::default()
+    };
+
+    if let Some(ruleset) = args.ruleset {
+        req.ruleset_id = Some(ruleset);
+    }
+    if let Some(module) = args.module {
+        req.module_id = Some(module);
+    }
+    if let Some(session_id) = args.session_id {
+        req.session_id = Some(session_id);
+    }
+    if let Some(input) = resolve_text_input(args.input, args.input_file, args.stdin, args.request_json.is_none()).await? {
+        req.user_input = input;
+    }
+    if let Some(recent) = resolve_text_input(args.recent_transcript, args.recent_transcript_file, false, false).await? {
+        req.recent_transcript = Some(recent);
+    }
+
+    let ruleset_id = req.ruleset_id.ok_or_else(|| anyhow!("missing --ruleset or ruleset_id in --request-json"))?;
+    if req.user_input.trim().is_empty() {
+        return Err(anyhow!("missing --input, --input-file, --stdin, or user_input in --request-json"));
+    }
+
+    let db = connect_db().await?;
+    db.migrate().await?;
+    let llm = make_llm()?;
+    let search = make_search(&db, default_data_dir())?;
+    let runtime = RuntimeEngine::new(db.clone()).with_search(search);
+    let session_id = match req.session_id {
+        Some(id) => id,
+        None => runtime.start_session(&ruleset_id, req.module_id.as_deref()).await?,
+    };
+
+    emit_phase(args.stream_format, "session", json!({"session_id": session_id.clone()}))?;
+    let _ = run_turn_once(
+        &db,
+        &runtime,
+        llm,
+        &ruleset_id,
+        req.module_id.as_deref(),
+        &session_id,
+        req.user_input.trim(),
+        req.recent_transcript.as_deref(),
+        args.stream_format,
+    ).await?;
+    Ok(())
+}
+
+async fn run_turn_once(
+    db: &Db,
+    runtime: &RuntimeEngine,
+    llm: Arc<dyn LlmClient>,
+    ruleset: &str,
+    module: Option<&str>,
+    session_id: &str,
+    user_input: &str,
+    recent_transcript: Option<&str>,
+    stream_format: StreamFormat,
+) -> Result<String> {
+    let turn_id = format!("turn_{}", uuid::Uuid::new_v4().simple());
+    emit_phase(stream_format, "start", json!({"kind":"play_turn", "turn_id": turn_id.clone()}))?;
+    let world_time = runtime.current_world_time(session_id).await?;
+    emit_phase(stream_format, "world_time", serde_json::to_value(&world_time)?)?;
+    let _player_event = runtime.record_world_event(
+        session_id,
+        Some(&turn_id),
+        None,
+        WorldEventKind::PlayerAction,
+        json!({"input": user_input, "ruleset_id": ruleset, "module_id": module}),
+        Visibility::GmOnly,
+    ).await.ok();
+
+    let request = ContextRequest {
+        ruleset_id: ruleset.to_string(),
+        module_id: module.map(str::to_string),
+        session_id: session_id.to_string(),
+        turn_id: turn_id.clone(),
+        viewer: VisibilityProfile::gm(),
+        token_budget: TokenBudget::default(),
+    };
+    let state = RuntimeState { world_time: Some(world_time), ruleset_id: ruleset.to_string(), module_id: module.map(str::to_string), ..Default::default() };
+
+    // §10.1 LIVE linkage: refresh the PC's recompute=live derived values from its
+    // CURRENT base stats at the very START of the turn (before any early-return),
+    // so a base stat changed last turn flows into dodge / HP-max / etc. now.
+    if let Ok(true) = runtime.refresh_actor_live_derived(session_id, "pc.current").await {
+        emit_phase(stream_format, "live_derived_refreshed", json!({"actor_id":"pc.current"}))?;
+    }
+
+    let turn_orchestration = runtime.orchestrate_turn(&request, &state, user_input).await?;
+    emit_phase(stream_format, "turn_orchestrator", serde_json::to_value(&turn_orchestration)?)?;
+    for phase in &turn_orchestration.phases {
+        emit_phase(stream_format, phase, serde_json::to_value(&turn_orchestration)?)?;
+    }
+    if let Some(gate_id) = &turn_orchestration.superseded_gate_id {
+        emit_phase(stream_format, "gate_superseded", json!({"gate_id": gate_id, "reason":"turn_orchestrator_superseded_gate"}))?;
+    }
+
+    let mut early_tool_context = String::new();
+    let gate_outcome = if turn_orchestration.route.should_resolve_gate_first {
+        runtime.handle_open_interaction_gate(session_id, &turn_id, user_input).await?
+    } else {
+        GateHandlingResult::None
+    };
+    let mut gate_notice_for_context = turn_orchestration.superseded_gate_id.as_ref().map(|gate_id| format!("\n\n[Turn Orchestrator Superseded Gate] gate_id={}\n", gate_id)).unwrap_or_default();
+    let resolved_pending = match &gate_outcome {
+        GateHandlingResult::PendingCheckResolved { result } => {
+            if result.outcome.get("contest_id").is_some() {
+                emit_phase(stream_format, "contest_resolved", json!({"check_id": &result.check_id, "contest_id": result.outcome.get("contest_id"), "success": result.outcome.get("success"), "target": result.outcome.get("target")}))?;
+            }
+            Some(result.clone())
+        },
+        GateHandlingResult::PendingFollowupCheckCreated { result, pending, prompt_public, reason } => {
+            emit_check_result_cli(stream_format, result)?;
+            if result.outcome.get("contest_id").is_some() {
+                emit_phase(stream_format, "contest_resolved", json!({"check_id": &result.check_id, "contest_id": result.outcome.get("contest_id"), "success": result.outcome.get("success"), "target": result.outcome.get("target")}))?;
+            }
+            if pending.contract.roll_visibility != RollVisibility::PlayerRollRequired || table_dice_policy_system_rolls_visible_cli() {
+                let execution = runtime.execute_system_roll_bundle(session_id, &turn_id, &pending.contract).await?;
+                emit_auto_roll_execution_cli(stream_format, &execution)?;
+                early_tool_context.push_str(&roll_execution_context_tag("pending_followup_effect", &execution)?);
+                Some(result.clone())
+            } else {
+                emit_phase(stream_format, "attack_resolution_contract", json!({"check_id": &result.check_id, "reason": reason, "followup_check_id": pending.check_id}))?;
+                emit_phase(stream_format, "pending_damage_roll_created", json!({"check_id": pending.check_id, "prompt": prompt_public, "reason": reason}))?;
+                emit_phase(stream_format, "pending_effect_roll_created", json!({"check_id": pending.check_id, "prompt": prompt_public, "reason": reason}))?;
+                emit_delta(stream_format, prompt_public)?;
+                emit_phase(stream_format, "done", json!({"reason": reason}))?;
+                return Ok(prompt_public.clone());
+            }
+        },
+        GateHandlingResult::GateReprompt { gate_id, check_id, reason, prompt_public } => {
+            emit_phase(stream_format, "gate_reprompt", json!({"gate_id": gate_id, "check_id": check_id, "reason": reason}))?;
+            emit_delta(stream_format, prompt_public)?;
+            emit_phase(stream_format, "done", json!({"reason":"awaiting_player_roll"}))?;
+            return Ok(prompt_public.clone());
+        }
+        GateHandlingResult::GateAbandoned { gate_id, check_id, reason, prompt_public } => {
+            emit_phase(stream_format, "gate_abandoned", json!({"gate_id": gate_id, "check_id": check_id, "reason": reason}))?;
+            emit_delta(stream_format, prompt_public)?;
+            gate_notice_for_context = format!("\n\n[Interaction Gate Abandoned]\n{}\n", prompt_public);
+            None
+        }
+        GateHandlingResult::GateChoiceResolved { gate_id, option_id, option_label, resolution_json } => {
+            emit_phase(stream_format, "reaction_window_resolved", json!({"gate_id": gate_id, "option_id": option_id, "option_label": option_label, "resolution": resolution_json}))?;
+            gate_notice_for_context = format!("\n\n[Interaction Gate Resolved] option={} label={}\n", option_id, option_label);
+            None
+        }
+        GateHandlingResult::GateChoiceReprompt { gate_id, reason, prompt_public } => {
+            let is_reaction_prompt = prompt_public.contains("反应") || prompt_public.contains("闪避") || prompt_public.contains("承受") || prompt_public.contains("reaction");
+            if is_reaction_prompt {
+                emit_phase(stream_format, "reaction_window_opened", json!({"gate_id": gate_id, "reason": reason, "source":"gate_reprompt", "prompt_public": prompt_public}))?;
+            }
+            emit_phase(stream_format, "gate_reprompt", json!({"gate_id": gate_id, "reason": reason}))?;
+            emit_delta(stream_format, prompt_public)?;
+            emit_phase(stream_format, "done", json!({"reason": if is_reaction_prompt { "awaiting_required_reaction" } else { "awaiting_required_choice" }}))?;
+            return Ok(prompt_public.clone());
+        }
+        GateHandlingResult::GateSuperseded { gate_id, reason, prompt_public } => {
+            emit_phase(stream_format, "gate_superseded", json!({"gate_id": gate_id, "reason": reason}))?;
+            emit_delta(stream_format, prompt_public)?;
+            gate_notice_for_context = format!("\n\n[Interaction Gate Superseded]\n{}\n", prompt_public);
+            None
+        }
+        GateHandlingResult::None => None,
+    };
+    if let Some(result) = &resolved_pending {
+        emit_phase(stream_format, "pending_check_resolved", serde_json::to_value(result)?)?;
+        if result.roll.visibility != RollVisibility::PrivateGmRoll {
+            emit_named_event(stream_format, "dice", json!({"visibility": result.roll.visibility, "roll": result.roll.clone(), "outcome": result.outcome.clone()}))?;
+        } else {
+            emit_named_event(stream_format, "tool", json!({"tool":"roll_dice", "visibility":"gm_only", "check_id": &result.check_id}))?;
+        }
+        for patch in &result.committed_patches {
+            match patch {
+                StatePatch::ActorHpDelta { actor_id, from, delta, to, reason } => {
+                    emit_phase(stream_format, "actor_hp_updated", json!({"actor_id": actor_id, "from": from, "delta": delta, "to": to, "reason": reason}))?;
+                    emit_named_event(stream_format, "damage_packet", json!({"actor_id": actor_id, "from": from, "delta": delta, "to": to, "reason": reason}))?;
+                }
+                StatePatch::ModifyTrack { target, amount, reason } => {
+                    emit_phase(stream_format, "parameter_impact_applied", json!({"target": target, "amount": amount, "reason": reason}))?;
+                    emit_named_event(stream_format, "effect_resolution_packet", json!({"target": target, "amount": amount, "reason": reason}))?;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let effective_user_input = if let Some(result) = &resolved_pending {
+        format!("{}\n\n[Resolved Pending Check]\n```json\n{}\n```", user_input, serde_json::to_string_pretty(result)?)
+    } else {
+        format!("{}{}", user_input, gate_notice_for_context)
+    };
+
+    let player_value_referee_result = runtime.verify_player_supplied_values(&request, user_input).await.ok().flatten();
+    if let Some(referee) = &player_value_referee_result {
+        emit_phase(stream_format, "player_value_referee", serde_json::to_value(referee)?)?;
+        for claim in &referee.claims {
+            emit_phase(stream_format, "player_value_claim_detected", serde_json::to_value(claim)?)?;
+        }
+        for verification in &referee.verifications {
+            emit_phase(stream_format, "player_value_verified", serde_json::to_value(verification)?)?;
+        }
+        for agreement in &referee.table_overrides {
+            emit_phase(stream_format, "table_override_proposed", serde_json::to_value(agreement)?)?;
+        }
+    }
+
+    let materialization_result = if resolved_pending.is_none() {
+        runtime.try_materialize_turn(&request, &state, user_input).await.ok()
+    } else { None };
+    if let Some(materialization) = &materialization_result {
+        if materialization.handled {
+            emit_phase(stream_format, "materialization_kernel", serde_json::to_value(materialization)?)?;
+            for phase in &materialization.phases {
+                emit_phase(stream_format, phase, serde_json::to_value(materialization)?)?;
+            }
+            for demand in &materialization.demands {
+                emit_phase(stream_format, "materialization_demand_created", serde_json::to_value(demand)?)?;
+            }
+            for binding in &materialization.rule_bindings {
+                emit_phase(stream_format, "rule_binding_packet_created", serde_json::to_value(binding)?)?;
+            }
+            for verification in &materialization.verifications {
+                emit_phase(stream_format, "binding_verification_created", serde_json::to_value(verification)?)?;
+            }
+        }
+    }
+
+    // §Task5 NPC card lazy-gen pre-resolution: trpg-contest is sync + has no LLM and
+    // returns Provisional-null with no source-backed DV, so the param must be on the
+    // NPC card BEFORE contest resolution. If this turn's check targets the current
+    // scene's NPC and needs a parameter, synthesize+write it now. Fully fail-soft:
+    // every step that can't resolve just skips; never blocks the turn.
+    // §Task8 B2: capture (bucket, param, persona) for stamp_opposed_check after plan build.
+    let mut opposed_npc: Option<(String, String, trpg_runtime::npc_synth::NpcPersona)> = None;
+    if resolved_pending.is_none() {
+        if let Some((bucket, param)) = runtime.check_param_need(ruleset, &turn_orchestration.intent.action_kind).await {
+            if let Some(persona) = runtime.current_check_npc_persona(&request, &state).await {
+                let check_context = turn_orchestration.intent.action_kind.as_str();
+                let _ = runtime
+                    .prepare_npc_for_check(session_id, ruleset, &persona, &bucket, &param, check_context)
+                    .await;
+                opposed_npc = Some((bucket, param, persona));
+            }
+        }
+    }
+
+    let compiled = runtime.prepare_turn_context(&request, &state, Some(&effective_user_input), recent_transcript).await?;
+    info!(prefix_hash=%compiled.prefix_hash, pinned_hash=%compiled.pinned_hash, dynamic_hash=%compiled.dynamic_hash, "compiled context");
+    emit_phase(stream_format, "context_compiled", json!({
+        "prefix_hash": compiled.prefix_hash.clone(),
+        "pinned_hash": compiled.pinned_hash.clone(),
+        "dynamic_hash": compiled.dynamic_hash.clone(),
+        "cache_key": compiled.cache_key.clone(),
+        "token_estimate": compiled.token_estimate
+    }))?;
+
+    let mut agent_tool_context = early_tool_context;
+    if let Some(referee) = &player_value_referee_result {
+        if let Some(ctx) = &referee.narration_context {
+            agent_tool_context.push_str("\n\n[Player-Supplied Value Referee Context]\n");
+            agent_tool_context.push_str(ctx);
+            agent_tool_context.push_str("\n```json\n");
+            agent_tool_context.push_str(&serde_json::to_string_pretty(referee)?);
+            agent_tool_context.push_str("\n```\n");
+        }
+    }
+    if resolved_pending.is_none() && matches!(turn_orchestration.intent.target_kind.as_str(), "assessment_check" | "named_check") && turn_orchestration.route.allow_agent_plan && agent_v09_enabled() {
+        // Named-check signal: prefer the orchestrator's classification, then fall
+        // back to the materialization pass (a separate, more reliable classify
+        // call) when the orchestrator's non-deterministic call did not name the
+        // tested parameter — so the route fires reliably without a 5th LLM call.
+        let materialized_named = materialization_result.as_ref().and_then(trpg_runtime::materialization_named_parameter);
+        let named_param = turn_orchestration.intent.named_parameter.as_deref().or(materialized_named.as_deref());
+        let source = if named_param.is_some() { "explicit_named_check" } else { "forced_technical_assessment" };
+        let mut plan = runtime.named_or_forced_assessment_plan(&request, user_input, named_param).await;
+        // §Task8 B2: stamp target_actor + opponent_tested_parameter onto the check contract.
+        if let (Some((bucket, param, persona)), Some(check)) = (opposed_npc.as_ref(), plan.check.as_mut()) {
+            trpg_runtime::stamp_opposed_check(check, persona, bucket, param);
+        }
+        runtime.persist_agent_plan(&plan).await?;
+        emit_phase(stream_format, "agent_plan", serde_json::to_value(&plan)?)?;
+        if let Some(check) = &plan.check {
+            emit_phase(stream_format, "check_contract_created", serde_json::to_value(check)?)?;
+            if check.roll_visibility == RollVisibility::PlayerRollRequired && !table_dice_policy_system_rolls_visible_cli() {
+                let pending = trpg_agent::make_pending_check(check);
+                db.insert_pending_check(&pending).await.ok();
+                db.insert_interaction_gate(&InteractionGate::from_pending_check(&pending)).await.ok();
+                let prompt = pending_check_prompt(check);
+                emit_phase(stream_format, "pending_check_created", json!({"check_id": &check.check_id, "label": &check.check_label, "roll_visibility": check.roll_visibility, "source": source}))?;
+                emit_delta(stream_format, &prompt)?;
+                let context_hashes = json!({"prefix_hash": compiled.prefix_hash, "pinned_hash": compiled.pinned_hash, "dynamic_hash": compiled.dynamic_hash, "cache_key": compiled.cache_key});
+                db.save_turn(session_id, &turn_id, user_input, &prompt, context_hashes, "awaiting_player_roll").await?;
+                emit_phase(stream_format, "done", json!({"reason":"awaiting_player_roll"}))?;
+                return Ok(prompt);
+            } else {
+                let execution = runtime.execute_system_roll_bundle(session_id, &turn_id, check).await?;
+                emit_auto_roll_execution_cli(stream_format, &execution)?;
+                agent_tool_context.push_str(&roll_execution_context_tag(source, &execution)?);
+            }
+        }
+    }
+    let mut ability_handled_for_turn = false;
+    if resolved_pending.is_none() && turn_orchestration.route.prefer_ability_first {
+        let ability_result = runtime.try_handle_ability_turn(&request, &state, user_input).await?;
+        if ability_result.handled {
+            ability_handled_for_turn = true;
+            emit_phase(stream_format, "ability_kernel", serde_json::to_value(&ability_result)?)?;
+            for phase in &ability_result.phases { emit_phase(stream_format, phase, serde_json::to_value(&ability_result)?)?; }
+            if let Some(binding) = &ability_result.rule_binding { emit_phase(stream_format, "rule_binding_packet_created", serde_json::to_value(binding)?)?; }
+            if let Some(def) = &ability_result.ability_definition { emit_phase(stream_format, "ability_definition_hydrated", serde_json::to_value(def)?)?; }
+            if let Some(inst) = &ability_result.ability_instance { emit_phase(stream_format, "ability_instance_hydrated", serde_json::to_value(inst)?)?; }
+            if let Some(act) = &ability_result.activation { emit_phase(stream_format, "ability_activation_contract_created", serde_json::to_value(act)?)?; }
+            if let Some(check) = &ability_result.check {
+                emit_phase(stream_format, "check_contract_created", serde_json::to_value(check)?)?;
+                let execution = runtime.execute_system_roll_bundle(session_id, &turn_id, check).await?;
+                emit_auto_roll_execution_cli(stream_format, &execution)?;
+                agent_tool_context.push_str(&roll_execution_context_tag("ability_kernel", &execution)?);
+            }
+            if let Some(ctx) = &ability_result.narration_context {
+                agent_tool_context.push_str("
+
+[Ability & Rule Binding Kernel Context]
+");
+                agent_tool_context.push_str(ctx);
+                agent_tool_context.push_str("
+```json
+");
+                agent_tool_context.push_str(&serde_json::to_string_pretty(&ability_result)?);
+                agent_tool_context.push_str("
+```
+");
+            }
+        }
+    }
+    let mut object_handled_for_turn = false;
+    if resolved_pending.is_none() && !ability_handled_for_turn && turn_orchestration.route.prefer_object_first && !turn_orchestration.route.prefer_conflict_first {
+        let object_result = runtime.try_handle_object_turn(&request, &state, user_input).await?;
+        if object_result.handled {
+            object_handled_for_turn = true;
+            emit_phase(stream_format, "object_kernel", serde_json::to_value(&object_result)?)?;
+            for phase in &object_result.phases {
+                emit_phase(stream_format, phase, serde_json::to_value(&object_result)?)?;
+            }
+            for event in &object_result.object_events {
+                emit_named_event(stream_format, "object_event", serde_json::to_value(event)?)?;
+            }
+            if let Some(interaction) = &object_result.interaction {
+                emit_phase(stream_format, "object_interaction_contract_created", serde_json::to_value(interaction)?)?;
+            }
+            if let Some(check) = &object_result.check {
+                emit_phase(stream_format, "check_contract_created", serde_json::to_value(check)?)?;
+                if check.roll_visibility == RollVisibility::PlayerRollRequired && !table_dice_policy_system_rolls_visible_cli() {
+                    let pending = trpg_agent::make_pending_check(check);
+                    db.insert_pending_check(&pending).await.ok();
+                    db.insert_interaction_gate(&InteractionGate::from_pending_check(&pending)).await.ok();
+                    let prompt = pending_check_prompt(check);
+                    emit_phase(stream_format, "pending_check_created", json!({"check_id": &check.check_id, "label": &check.check_label, "roll_visibility": check.roll_visibility, "source":"object_kernel"}))?;
+                    emit_delta(stream_format, &prompt)?;
+                    let context_hashes = json!({
+                        "prefix_hash": compiled.prefix_hash,
+                        "pinned_hash": compiled.pinned_hash,
+                        "dynamic_hash": compiled.dynamic_hash,
+                        "cache_key": compiled.cache_key
+                    });
+                    db.save_turn(session_id, &turn_id, user_input, &prompt, context_hashes, "awaiting_player_roll").await?;
+                    emit_phase(stream_format, "done", json!({"reason":"awaiting_player_roll"}))?;
+                    return Ok(prompt);
+                } else {
+                    let execution = runtime.execute_system_roll_bundle(session_id, &turn_id, check).await?;
+                    emit_auto_roll_execution_cli(stream_format, &execution)?;
+                    agent_tool_context.push_str(&roll_execution_context_tag("object_kernel", &execution)?);
+                }
+            }
+            if let Some(ctx) = &object_result.narration_context {
+                agent_tool_context.push_str("\n\n[Object & Possession Kernel Context]\n");
+                agent_tool_context.push_str(ctx);
+                agent_tool_context.push_str("\n```json\n");
+                agent_tool_context.push_str(&serde_json::to_string_pretty(&object_result)?);
+                agent_tool_context.push_str("\n```\n");
+            }
+        }
+    }
+    let mut conflict_handled_for_turn = false;
+    let mut conflict_result_for_director: Option<ConflictTurnResult> = None;
+    if resolved_pending.is_none() && !ability_handled_for_turn && !object_handled_for_turn && turn_orchestration.route.prefer_conflict_first {
+        let conflict = runtime.try_handle_conflict_turn(&request, &state, user_input, Some(&turn_orchestration)).await?;
+        if conflict.handled {
+            conflict_handled_for_turn = true;
+            conflict_result_for_director = Some(conflict.clone());
+            emit_phase(stream_format, "conflict_agent", serde_json::to_value(&conflict)?)?;
+            for phase in &conflict.phases {
+                emit_phase(stream_format, phase, serde_json::to_value(&conflict)?)?;
+            }
+            for event in &conflict.events {
+                emit_named_event(stream_format, "combat_event", serde_json::to_value(event)?)?;
+            }
+            if let Some(novelty) = &conflict.novelty {
+                emit_phase(stream_format, "novelty_director", serde_json::to_value(novelty)?)?;
+                emit_named_event(stream_format, "fresh_change", serde_json::to_value(novelty)?)?;
+            }
+            if let Some(check) = &conflict.check {
+                emit_phase(stream_format, "check_contract_created", serde_json::to_value(check)?)?;
+                if check.roll_visibility == RollVisibility::PlayerRollRequired && !table_dice_policy_system_rolls_visible_cli() {
+                    let pending = trpg_agent::make_pending_check(check);
+                    db.insert_pending_check(&pending).await.ok();
+                    db.insert_interaction_gate(&InteractionGate::from_pending_check(&pending)).await.ok();
+                    let prompt = pending_check_prompt(check);
+                    emit_phase(stream_format, "pending_check_created", json!({"check_id": &check.check_id, "label": &check.check_label, "roll_visibility": check.roll_visibility, "source":"combat_agent"}))?;
+                    emit_delta(stream_format, &prompt)?;
+                    let context_hashes = json!({
+                        "prefix_hash": compiled.prefix_hash,
+                        "pinned_hash": compiled.pinned_hash,
+                        "dynamic_hash": compiled.dynamic_hash,
+                        "cache_key": compiled.cache_key
+                    });
+                    db.save_turn(session_id, &turn_id, user_input, &prompt, context_hashes, "awaiting_player_roll").await?;
+                    emit_phase(stream_format, "done", json!({"reason":"awaiting_player_roll"}))?;
+                    return Ok(prompt);
+                } else {
+                    let execution = runtime.execute_system_roll_bundle(session_id, &turn_id, check).await?;
+                    emit_auto_roll_execution_cli(stream_format, &execution)?;
+                    agent_tool_context.push_str(&roll_execution_context_tag("combat_agent", &execution)?);
+                }
+            }
+            if let Some(effect) = &conflict.effect {
+                emit_phase(stream_format, "effect_contract_created", serde_json::to_value(effect)?)?;
+            }
+            if let Some(gate) = &conflict.gate {
+                emit_phase(stream_format, "reaction_window_opened", serde_json::to_value(gate)?)?;
+                emit_delta(stream_format, &gate.prompt_public)?;
+                if let Some(reason) = &conflict.done_reason {
+                    let context_hashes = json!({
+                        "prefix_hash": compiled.prefix_hash,
+                        "pinned_hash": compiled.pinned_hash,
+                        "dynamic_hash": compiled.dynamic_hash,
+                        "cache_key": compiled.cache_key
+                    });
+                    db.save_turn(session_id, &turn_id, user_input, &gate.prompt_public, context_hashes, reason).await?;
+                    emit_phase(stream_format, "done", json!({"reason": reason}))?;
+                    return Ok(gate.prompt_public.clone());
+                }
+            }
+            if let Some(compaction) = &conflict.compaction {
+                emit_phase(stream_format, "combat_frame_compacted", serde_json::to_value(compaction)?)?;
+            }
+            if let Some(ctx) = &conflict.narration_context {
+                agent_tool_context.push_str("\n\n[Conflict Frame / Combat Agent Context]\n");
+                agent_tool_context.push_str(ctx);
+                agent_tool_context.push_str("\n```json\n");
+                agent_tool_context.push_str(&serde_json::to_string_pretty(&conflict)?);
+                agent_tool_context.push_str("\n```\n");
+            }
+        }
+    }
+    if resolved_pending.is_none() && !ability_handled_for_turn && !object_handled_for_turn && !conflict_handled_for_turn && turn_orchestration.route.prefer_conflict_first && turn_orchestration.route.prefer_object_first {
+        let object_result = runtime.try_handle_object_turn(&request, &state, user_input).await?;
+        if object_result.handled {
+            object_handled_for_turn = true;
+            emit_phase(stream_format, "object_kernel", serde_json::to_value(&object_result)?)?;
+            for phase in &object_result.phases { emit_phase(stream_format, phase, serde_json::to_value(&object_result)?)?; }
+            for event in &object_result.object_events { emit_named_event(stream_format, "object_event", serde_json::to_value(event)?)?; }
+            if let Some(interaction) = &object_result.interaction { emit_phase(stream_format, "object_interaction_contract_created", serde_json::to_value(interaction)?)?; }
+            if let Some(check) = &object_result.check {
+                emit_phase(stream_format, "check_contract_created", serde_json::to_value(check)?)?;
+                if check.roll_visibility == RollVisibility::PlayerRollRequired && !table_dice_policy_system_rolls_visible_cli() {
+                    let pending = trpg_agent::make_pending_check(check);
+                    db.insert_pending_check(&pending).await.ok();
+                    db.insert_interaction_gate(&InteractionGate::from_pending_check(&pending)).await.ok();
+                    let prompt = pending_check_prompt(check);
+                    emit_phase(stream_format, "pending_check_created", json!({"check_id": &check.check_id, "label": &check.check_label, "roll_visibility": check.roll_visibility, "source":"object_kernel"}))?;
+                    emit_delta(stream_format, &prompt)?;
+                    let context_hashes = json!({"prefix_hash": compiled.prefix_hash, "pinned_hash": compiled.pinned_hash, "dynamic_hash": compiled.dynamic_hash, "cache_key": compiled.cache_key});
+                    db.save_turn(session_id, &turn_id, user_input, &prompt, context_hashes, "awaiting_player_roll").await?;
+                    emit_phase(stream_format, "done", json!({"reason":"awaiting_player_roll"}))?;
+                    return Ok(prompt);
+                } else {
+                    let execution = runtime.execute_system_roll_bundle(session_id, &turn_id, check).await?;
+                    emit_auto_roll_execution_cli(stream_format, &execution)?;
+                    agent_tool_context.push_str(&roll_execution_context_tag("object_kernel", &execution)?);
+                }
+            }
+            if let Some(ctx) = &object_result.narration_context {
+                agent_tool_context.push_str("
+
+[Object & Possession Kernel Context]
+");
+                agent_tool_context.push_str(ctx);
+                agent_tool_context.push_str("
+```json
+");
+                agent_tool_context.push_str(&serde_json::to_string_pretty(&object_result)?);
+                agent_tool_context.push_str("
+```
+");
+            }
+        }
+    }
+
+    if resolved_pending.is_none() {
+        let director = runtime.prepare_actionable_situation(&request, &state, &compiled, user_input, conflict_result_for_director.as_ref()).await?;
+        if director.handled {
+            emit_phase(stream_format, "director", serde_json::to_value(&director)?)?;
+            for phase in &director.phases {
+                emit_phase(stream_format, phase, serde_json::to_value(&director)?)?;
+            }
+            for tick in &director.clock_ticks {
+                emit_named_event(stream_format, "clock_tick", serde_json::to_value(tick)?)?;
+            }
+            if let Some(novelty) = &director.novelty {
+                emit_named_event(stream_format, "fresh_change", serde_json::to_value(novelty)?)?;
+            }
+            if let Some(brief) = &director.brief {
+                emit_named_event(stream_format, "actionable_situation", serde_json::to_value(brief)?)?;
+            }
+            if let Some(ctx) = &director.narration_context {
+                agent_tool_context.push_str("\n\n[Actionable Situation Director Context]\n");
+                agent_tool_context.push_str(ctx);
+                agent_tool_context.push_str("\n");
+            }
+        }
+    }
+
+    if resolved_pending.is_none() && !ability_handled_for_turn && !object_handled_for_turn && !conflict_handled_for_turn && turn_orchestration.route.allow_agent_plan && agent_v09_enabled() {
+        let plan = runtime.plan_agent_turn(&request, &state, user_input).await?;
+        runtime.persist_agent_plan(&plan).await?;
+        emit_phase(stream_format, "agent_plan", serde_json::to_value(&plan)?)?;
+        if let Some(check) = &plan.check {
+            emit_phase(stream_format, "check_contract_created", serde_json::to_value(check)?)?;
+        }
+        match plan.kind {
+            TurnPlanKind::AskPlayerRoll => {
+                let check = plan.check.as_ref().expect("AskPlayerRoll plan must contain check");
+                if table_dice_policy_system_rolls_visible_cli() {
+                    let execution = runtime.execute_system_roll_bundle(session_id, &turn_id, check).await?;
+                    emit_auto_roll_execution_cli(stream_format, &execution)?;
+                    agent_tool_context.push_str(&roll_execution_context_tag("generic_agent_plan", &execution)?);
+                } else {
+                    let prompt = pending_check_prompt(check);
+                    emit_phase(stream_format, "pending_check_created", json!({"check_id": &check.check_id, "label": &check.check_label, "roll_visibility": check.roll_visibility}))?;
+                    emit_delta(stream_format, &prompt)?;
+                    let context_hashes = json!({
+                        "prefix_hash": compiled.prefix_hash,
+                        "pinned_hash": compiled.pinned_hash,
+                        "dynamic_hash": compiled.dynamic_hash,
+                        "cache_key": compiled.cache_key
+                    });
+                    db.save_turn(session_id, &turn_id, user_input, &prompt, context_hashes.clone(), "awaiting_player_roll").await?;
+                    emit_phase(stream_format, "done", json!({"reason":"awaiting_player_roll"}))?;
+                    return Ok(prompt);
+                }
+            }
+            TurnPlanKind::GmRollThenNarrate | TurnPlanKind::SecretRollThenNarrate | TurnPlanKind::PassiveResolution => {
+                if let Some(check) = &plan.check {
+                    let execution = runtime.execute_system_roll_bundle(session_id, &turn_id, check).await?;
+                    emit_auto_roll_execution_cli(stream_format, &execution)?;
+                    agent_tool_context.push_str(&roll_execution_context_tag("generic_agent_plan", &execution)?);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Agentic GM retrieve phase (B): before narrating, let the GM fetch the
+    // SPECIFIC parsed rules it needs (function-calling), instead of inventing
+    // them. Appends source-backed rule snippets to the narrate context; the
+    // streamed narration below then resolves using real rules.
+    if gm_agentic_retrieve_enabled() {
+        let retrieved = gm_retrieve_phase(llm.as_ref(), runtime, ruleset, session_id, &effective_user_input).await;
+        if !retrieved.trim().is_empty() {
+            emit_phase(stream_format, "rules_retrieved", json!({"chars": retrieved.len()}))?;
+            agent_tool_context.push_str(&format!("\n[gm]Rules you retrieved this turn (source-backed — use them, do not invent mechanics):\n{retrieved}\n[/gm]\n"));
+        }
+    }
+    let messages = runtime.play_turn_messages(&compiled, &format!("{}{}", effective_user_input, agent_tool_context)).await?;
+    emit_phase(stream_format, "llm_stream_start", json!({}))?;
+    let mut stream = match llm.stream_chat(messages, 0.8).await {
+        Ok(stream) => stream,
+        Err(err) => {
+            emit_error(stream_format, &err.to_string())?;
+            return Err(err);
+        }
+    };
+    let mut full = String::new();
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(delta) => {
+                emit_delta(stream_format, &delta)?;
+                full.push_str(&delta);
+            }
+            Err(err) => {
+                emit_error(stream_format, &err.to_string())?;
+                return Err(err);
+            }
+        }
+    }
+
+    let context_hashes = json!({
+        "prefix_hash": compiled.prefix_hash,
+        "pinned_hash": compiled.pinned_hash,
+        "dynamic_hash": compiled.dynamic_hash,
+        "cache_key": compiled.cache_key
+    });
+    db.save_turn(session_id, &turn_id, user_input, &full, context_hashes.clone(), "ready").await?;
+    let _ = runtime.record_world_event(
+        session_id,
+        Some(&turn_id),
+        None,
+        WorldEventKind::SystemEvent,
+        json!({"kind":"assistant_turn_completed", "output_chars": full.len()}),
+        Visibility::SystemOnly,
+    ).await;
+    let memory_event = MemoryEvent {
+        event_id: format!("memory.event.{}", turn_id),
+        session_id: session_id.to_string(),
+        turn_id: Some(turn_id.clone()),
+        ruleset_id: ruleset.to_string(),
+        module_id: module.map(str::to_string),
+        scene_id: None,
+        location_id: None,
+        actor_ids: vec![],
+        visibility: Visibility::GmOnly,
+        event_kind: MemoryKind::Event,
+        summary: summarize_turn_for_memory(user_input, &full),
+        transcript_excerpt: Some(format!("Player: {}\nGM: {}", user_input, full.chars().take(2000).collect::<String>())),
+        source: json!({"source":"cli_turn", "context_hashes": context_hashes}),
+        tags: vec!["turn".to_string(), "session_memory".to_string()],
+        importance: 50,
+        occurred_at: chrono::Utc::now(),
+    };
+    db.save_memory_event(&memory_event).await?;
+    emit_phase(stream_format, "memory_event_saved", json!({"memory_event_id": memory_event.event_id}))?;
+    let audit = runtime.audit_learning_for_turn(session_id, ruleset, module, &turn_id, &effective_user_input, &full).await?;
+    emit_phase(stream_format, "learning_audit", serde_json::to_value(&audit)?)?;
+    // 模组场景导航（与 API turn_postprocess 共享）：本回合叙事后语义判定党是否走到另一场景，
+    // 更新 current_scene_id + 到场深抽。fail-closed：失败仅 warn，不影响回合返回。
+    if let Some(mid) = module {
+        if let Err(err) = trpg_api::scene_navigator(db, llm.as_ref(), session_id, mid, &default_data_dir(), &full).await {
+            emit_phase(stream_format, "scene_navigator_error", json!({"error": err.to_string()}))?;
+        }
+    }
+    emit_phase(stream_format, "done", json!({}))?;
+    Ok(full)
+}
+
+async fn compact_memory_cli(db: &Db, session_id: &str, ruleset: &str, module: Option<&str>) -> Result<()> {
+    let events = db.list_memory_events(session_id, 24).await?;
+    let facts = db.list_memory_facts(session_id, 40).await?;
+    let mut summary = String::from("# GM Memory Snapshot\n\n## Recent Events\n");
+    for event in events.iter().rev() {
+        summary.push_str(&format!("- {}\n", event.summary));
+    }
+    if !facts.is_empty() {
+        summary.push_str("\n## Active Facts\n");
+        for fact in &facts {
+            summary.push_str(&format!("- {}\n", fact.summary));
+        }
+    }
+    let snapshot = MemorySnapshot::new(
+        format!("memory.snapshot.{}.session", session_id),
+        session_id.to_string(),
+        ruleset.to_string(),
+        module.map(str::to_string),
+        Scope { scope_type: ScopeType::Session, scope_id: session_id.to_string() },
+        Visibility::GmOnly,
+        "GM Memory Snapshot",
+        summary,
+        events.iter().map(|e| e.event_id.clone()).collect(),
+        facts.iter().map(|f| f.fact_id.clone()).collect(),
+        1,
+    );
+    db.upsert_memory_snapshot(&snapshot).await?;
+    println!("memory snapshot saved: {} v{}", snapshot.snapshot_id, snapshot.version);
+    Ok(())
+}
+
+async fn resolve_text_input(
+    inline: Option<String>,
+    file: Option<PathBuf>,
+    read_stdin_flag: bool,
+    auto_stdin_when_piped: bool,
+) -> Result<Option<String>> {
+    if let Some(value) = inline {
+        return Ok(Some(value));
+    }
+    if let Some(path) = file {
+        return Ok(Some(tokio::fs::read_to_string(path).await?));
+    }
+    if read_stdin_flag || (auto_stdin_when_piped && !io::stdin().is_terminal()) {
+        let text = read_stdin_to_string()?;
+        return Ok(Some(text));
+    }
+    Ok(None)
+}
+
+async fn read_path_or_stdin(path_or_dash: &str) -> Result<String> {
+    if path_or_dash == "-" {
+        read_stdin_to_string()
+    } else {
+        Ok(tokio::fs::read_to_string(path_or_dash).await?)
+    }
+}
+
+fn read_stdin_to_string() -> Result<String> {
+    let mut buf = String::new();
+    io::stdin().read_to_string(&mut buf)?;
+    Ok(buf)
+}
+
+fn emit_phase(format: StreamFormat, phase: &str, data: Value) -> Result<()> {
+    match format {
+        StreamFormat::Text => {
+            eprintln!("[phase] {} {}", phase, serde_json::to_string(&data)?);
+        }
+        StreamFormat::Jsonl => {
+            println!("{}", json!({"event":"phase", "phase": phase, "data": data}));
+            io::stdout().flush().ok();
+        }
+        StreamFormat::Sse => {
+            emit_sse("phase", &json!({"phase": phase, "data": data}).to_string());
+        }
+    }
+    Ok(())
+}
+
+fn emit_delta(format: StreamFormat, delta: &str) -> Result<()> {
+    match format {
+        StreamFormat::Text => {
+            print!("{delta}");
+            io::stdout().flush().ok();
+        }
+        StreamFormat::Jsonl => {
+            println!("{}", json!({"event":"delta", "data": delta}));
+            io::stdout().flush().ok();
+        }
+        StreamFormat::Sse => {
+            emit_sse("delta", delta);
+        }
+    }
+    Ok(())
+}
+
+
+fn emit_named_event(format: StreamFormat, event: &str, data: Value) -> Result<()> {
+    match format {
+        StreamFormat::Text => eprintln!("[event] {} {}", event, serde_json::to_string(&data)?),
+        StreamFormat::Jsonl => println!("{}", json!({"event": event, "data": data})),
+        StreamFormat::Sse => emit_sse(event, &data.to_string()),
+    }
+    io::stdout().flush().ok();
+    Ok(())
+}
+
+fn agent_v09_enabled() -> bool {
+    std::env::var("TRPG_AGENT_ENABLE_V09").map(|v| v != "0" && v.to_lowercase() != "false").unwrap_or(true)
+}
+
+fn emit_error(format: StreamFormat, message: &str) -> Result<()> {
+    match format {
+        StreamFormat::Text => eprintln!("[error] {message}"),
+        StreamFormat::Jsonl => println!("{}", json!({"event":"error", "message": message})),
+        StreamFormat::Sse => emit_sse("error", &json!({"message": message}).to_string()),
+    }
+    io::stdout().flush().ok();
+    Ok(())
+}
+
+fn emit_sse(event: &str, data: &str) {
+    println!("event: {event}");
+    for line in data.lines() {
+        println!("data: {line}");
+    }
+    if data.is_empty() {
+        println!("data:");
+    }
+    println!();
+    io::stdout().flush().ok();
+}
+
+fn summarize_turn_for_memory(user_input: &str, assistant_output: &str) -> String {
+    let mut summary = String::new();
+    summary.push_str("Player: ");
+    summary.push_str(&user_input.chars().take(240).collect::<String>());
+    summary.push_str(" | GM: ");
+    summary.push_str(&assistant_output.chars().take(360).collect::<String>());
+    summary
+}
+
+fn take_tail_chars(input: &str, max_chars: usize) -> String {
+    let mut chars: Vec<char> = input.chars().rev().take(max_chars).collect();
+    chars.reverse();
+    chars.into_iter().collect()
+}
+
+
+
+
+async fn time_command_cli(command: TimeCommand) -> Result<()> {
+    let db = connect_db().await?;
+    db.migrate().await?;
+    let runtime = RuntimeEngine::new(db.clone());
+    match command {
+        TimeCommand::Show { session } => {
+            let state = runtime.current_world_time(&session).await?;
+            println!("{}", serde_json::to_string_pretty(&state)?);
+        }
+        TimeCommand::Advance { session, seconds, minutes, hours, days, combat_rounds, scene_beats, scale, reason } => {
+            let amount = TimeAmount { seconds, minutes, hours, days, combat_rounds, scene_beats, label: String::new() };
+            let result = runtime.advance_world_time(TimeAdvanceRequest {
+                session_id: session,
+                campaign_id: None,
+                reason,
+                amount,
+                scale: parse_time_scale(&scale),
+                mutation_kind: TimeMutationKind::Advance,
+                visibility: Visibility::PlayerVisible,
+                caused_by_turn_id: None,
+                caused_by_event_id: None,
+                scene_epoch: None,
+            }).await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        TimeCommand::Schedule { session, in_minutes, in_seconds, kind, payload_json } => {
+            let service = trpg_time::WorldTimeService::new(db.clone());
+            let payload: Value = serde_json::from_str(&payload_json).unwrap_or_else(|_| json!({"raw": payload_json}));
+            let scheduled = service.schedule_in(&session, TimeAmount { seconds: in_seconds, minutes: in_minutes, ..Default::default() }, parse_world_event_kind(&kind), payload, Visibility::GmOnly, None).await?;
+            println!("{}", serde_json::to_string_pretty(&scheduled)?);
+        }
+        TimeCommand::Events { session, since_tick, since_event_seq, limit } => {
+            let events = db.list_world_events_since(&session, since_tick, since_event_seq, limit).await?;
+            println!("{}", serde_json::to_string_pretty(&events)?);
+        }
+    }
+    Ok(())
+}
+
+fn parse_time_scale(scale: &str) -> TimeScale {
+    match scale.to_ascii_lowercase().as_str() {
+        "instant" => TimeScale::Instant,
+        "combat_round" | "combat" | "round" => TimeScale::CombatRound,
+        "exploration" => TimeScale::Exploration,
+        "travel" => TimeScale::Travel,
+        "downtime" => TimeScale::Downtime,
+        "flashback" => TimeScale::Flashback,
+        _ => TimeScale::SceneBeat,
+    }
+}
+
+fn parse_world_event_kind(kind: &str) -> WorldEventKind {
+    match kind.to_ascii_lowercase().as_str() {
+        "player_action" => WorldEventKind::PlayerAction,
+        "npc_action" => WorldEventKind::NpcAction,
+        "clock_tick" => WorldEventKind::ClockTick,
+        "scene_changed" => WorldEventKind::SceneChanged,
+        "scheduled_event_due" => WorldEventKind::ScheduledEventDue,
+        "frame_closed" => WorldEventKind::FrameClosed,
+        "frame_opened" => WorldEventKind::FrameOpened,
+        _ => WorldEventKind::SystemEvent,
+    }
+}
+
+async fn rules_command_cli(command: RulesCommand) -> Result<()> {
+    let db = connect_db().await?;
+    db.migrate().await?;
+    let search = make_search(&db, default_data_dir())?;
+    let steward = RuleStewardAgent::new(db.clone(), search, default_data_dir());
+    match command {
+        RulesCommand::Query { ruleset, module, query, kind, missing_facets, json: as_json } => {
+            let need = RuleNeed {
+                need_id: format!("cli_need_{}", uuid::Uuid::new_v4().simple()),
+                ruleset_id: ruleset,
+                module_id: module,
+                need_kind: kind.into(),
+                query: query.clone(),
+                player_action_summary: query,
+                missing_facets,
+                visibility: Visibility::GmOnly,
+                urgency: RuleUrgency::ImmediateTurn,
+                allowed_outputs: vec![RuleAssistOutputKind::ContextBlock, RuleAssistOutputKind::MaterializationPatch, RuleAssistOutputKind::Bp1PatchProposal],
+                ..Default::default()
+            };
+            let assist = steward.assist(need).await?;
+            if as_json {
+                println!("{}", serde_json::to_string_pretty(&assist)?);
+            } else {
+                println!("status: {} confidence: {:.2}", assist.status.as_str(), assist.confidence);
+                println!("scope: {:?}", assist.answer_scope);
+                println!("{}", assist.gm_brief);
+                if let Some(summary) = &assist.player_safe_summary { println!("player-safe: {}", summary); }
+                if assist.source_refs.is_empty() {
+                    println!("source refs: none");
+                } else {
+                    println!("source refs: {}", assist.source_refs.len());
+                    for src in assist.source_refs.iter().take(8) {
+                        println!("- {} page={:?} anchor={:?}", src.source_id, src.page, src.anchor_id);
+                    }
+                }
+                if !assist.unresolved_questions.is_empty() {
+                    println!("unresolved:");
+                    for gap in &assist.unresolved_questions {
+                        println!("- {}{}", gap.description, if gap.blocking { " [blocking]" } else { "" });
+                    }
+                }
+                println!("context blocks: {}", assist.context_blocks.len());
+            }
+            Ok(())
+        }
+        RulesCommand::CharacterPack { ruleset } => {
+            let pack = steward.character_onboarding_pack(&ruleset).await?
+                .ok_or_else(|| anyhow!("character onboarding pack not found for {ruleset}; run parse-all first"))?;
+            println!("{}", serde_json::to_string_pretty(&pack)?);
+            Ok(())
+        }
+        RulesCommand::Playability { ruleset, module, json: as_json } => {
+            let report = steward.playability_gate(&ruleset, module.as_deref()).await?;
+            if as_json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("ready: {}", report.ready);
+                println!("rule_kernel: {}", report.has_rule_kernel);
+                println!("character_template: {}", report.has_character_sheet_template);
+                println!("character_creation_flow: {}", report.has_character_creation_flow);
+                println!("derived_formula_pack: {}", report.has_derived_formula_pack);
+                println!("starter_character_path: {}", report.has_starter_character_path);
+                println!("first_session_packet: {}", report.has_first_session_packet);
+                if !report.blocking_gaps.is_empty() {
+                    println!("blocking gaps:");
+                    for gap in &report.blocking_gaps {
+                        println!("- {} ({})", gap.message, gap.repair_skill.as_deref().unwrap_or("no repair skill"));
+                    }
+                }
+                if !report.warnings.is_empty() {
+                    println!("warnings:");
+                    for warning in &report.warnings { println!("- {}: {}", warning.code, warning.message); }
+                }
+            }
+            Ok(())
+        }
+        RulesCommand::Bp1Patches { ruleset, status, limit } => {
+            let patches = db.list_rule_kernel_patches(&ruleset, status.as_deref(), limit).await?;
+            println!("{}", serde_json::to_string_pretty(&json!({"patches": patches}))?);
+            Ok(())
+        }
+    }
+}
+
+async fn learning_command_cli(command: LearnCommand) -> Result<()> {
+    match command {
+        LearnCommand::Candidates { ruleset, status, limit } => {
+            let db = connect_db().await?;
+            db.migrate().await?;
+            let candidates = db.list_learning_candidates(ruleset.as_deref(), Some(&status), limit).await?;
+            println!("{}", serde_json::to_string_pretty(&json!({"candidates": candidates}))?);
+            Ok(())
+        }
+        LearnCommand::Approve { candidate_id, stage, notes } => {
+            let db = connect_db().await?;
+            db.migrate().await?;
+            let candidate = db.get_learning_candidate(&candidate_id).await?.ok_or_else(|| anyhow!("unknown candidate_id: {candidate_id}"))?;
+            let packet = candidate.to_learned_packet(parse_learning_stage(&stage)?);
+            db.upsert_learned_packet(&packet).await?;
+            db.update_learning_candidate_status(&candidate_id, LearningCandidateStatus::Approved, notes.as_deref()).await?;
+            println!("{}", serde_json::to_string_pretty(&json!({"candidate_id": candidate_id, "learned_packet": packet}))?);
+            Ok(())
+        }
+    }
+}
+
+fn parse_learning_stage(input: &str) -> Result<LearningStage> {
+    match input {
+        "unseen" => Ok(LearningStage::Unseen),
+        "located" => Ok(LearningStage::Located),
+        "looked_up" => Ok(LearningStage::LookedUp),
+        "used_once" => Ok(LearningStage::UsedOnce),
+        "stable" => Ok(LearningStage::Stable),
+        "memorized" => Ok(LearningStage::Memorized),
+        other => Err(anyhow!("unknown learning stage: {other}")),
+    }
+}
+
+async fn search_command_cli(command: SearchCommand) -> Result<()> {
+    match command {
+        SearchCommand::Query(args) => search_query_cli(args).await,
+        SearchCommand::Reindex { data_dir, incremental } => {
+            let db = connect_db().await?;
+            db.migrate().await?;
+            let search = make_search(&db, data_dir.unwrap_or_else(default_data_dir))?;
+            let stats = if incremental { search.reindex_incremental().await? } else { search.reindex_all().await? };
+            println!("{}", serde_json::to_string_pretty(&stats)?);
+            Ok(())
+        }
+        SearchCommand::Sources => {
+            let db = connect_db().await?;
+            db.migrate().await?;
+            let sources = load_search_source_configs(&db.pool).await?;
+            println!("{}", serde_json::to_string_pretty(&sources)?);
+            Ok(())
+        }
+    }
+}
+
+async fn search_query_cli(args: SearchArgs) -> Result<()> {
+    let jsonl_output = args.jsonl;
+    let db = connect_db().await?;
+    db.migrate().await?;
+    let search = make_search(&db, args.data_dir.clone().unwrap_or_else(default_data_dir))?;
+    if args.reindex {
+        let stats = if args.incremental_reindex { search.reindex_incremental().await? } else { search.reindex_all().await? };
+        if jsonl_output {
+            println!("{}", json!({"event":"reindex", "stats": stats}));
+        } else {
+            eprintln!("search index updated: {} document(s) from {} source config(s)", stats.indexed_documents, stats.source_count);
+        }
+    }
+    let request = build_search_request(args)?;
+    let response = search.search_async(&request).await?;
+    if let Some(session_id) = request.scopes.get("session_id") {
+        let event = LookupEvent {
+            event_id: format!("lookup.cli.{}", uuid::Uuid::new_v4().simple()),
+            session_id: Some(session_id.clone()),
+            ruleset_id: request.scopes.get("ruleset_id").cloned(),
+            module_id: request.scopes.get("module_id").cloned(),
+            demand_id: None,
+            query_text: request.query.clone(),
+            search_terms: vec![request.query.clone()],
+            source_hits: serde_json::to_value(&response.hits)?,
+            result_status: if response.hits.is_empty() { "no_hits".into() } else { "hit".into() },
+            created_at: chrono::Utc::now(),
+        };
+        db.insert_lookup_event(&event).await.ok();
+    }
+    if request.explain || response.hits.is_empty() || !request.query.is_empty() {
+        // no-op: keep variables consumed clearly for future extension
+    }
+    if response.hits.is_empty() {
+        if jsonl_output {
+            println!("{}", json!({"event":"done", "hits": 0, "query_id": response.query_id}));
+        } else {
+            println!("no hits");
+        }
+        return Ok(());
+    }
+    if jsonl_output {
+        for hit in response.hits {
+            println!("{}", json!({"event":"hit", "hit": hit}));
+        }
+        println!("{}", json!({"event":"done", "query_id": response.query_id, "considered": response.total_considered}));
+    } else {
+        for (idx, hit) in response.hits.iter().enumerate() {
+            println!("{}. [{:.3}] {} / {} / {}", idx + 1, hit.score, hit.domain, hit.logical_kind, hit.title);
+            if !hit.scopes.is_empty() { println!("   scopes: {}", serde_json::to_string(&hit.scopes)?); }
+            if !hit.source_refs.is_empty() { println!("   sources: {}", serde_json::to_string(&hit.source_refs)?); }
+            println!("   {}", hit.snippet.replace('\n', "\n   "));
+            if request.explain { println!("   explain: {}", serde_json::to_string(&hit.explain)?); }
+        }
+    }
+    Ok(())
+}
+
+fn build_search_request(args: SearchArgs) -> Result<SearchRequest> {
+    let mut scopes = BTreeMap::new();
+    if let Some(v) = args.ruleset { scopes.insert("ruleset_id".to_string(), v); }
+    if let Some(v) = args.module { scopes.insert("module_id".to_string(), v); }
+    if let Some(v) = args.session { scopes.insert("session_id".to_string(), v); }
+    if let Some(v) = args.scene { scopes.insert("scene_id".to_string(), v); }
+    for raw in args.scopes {
+        let (key, value) = split_key_value(&raw)?;
+        scopes.insert(key, value);
+    }
+    let mut filters: BTreeMap<String, Vec<String>> = Default::default();
+    for raw in args.filters {
+        let (key, value) = split_key_value(&raw)?;
+        filters.entry(key).or_default().push(value);
+    }
+    Ok(SearchRequest {
+        query: args.query,
+        mode: SearchMode::Auto,
+        domains: args.domains,
+        kinds: args.kinds,
+        tags: args.tags,
+        scopes,
+        filters,
+        rewrite_query: true,
+        intent: Some("cli_search".into()),
+        limit: args.limit.min(100),
+        explain: args.explain,
+        viewer: VisibilityProfile::gm(),
+    })
+}
+
+fn split_key_value(input: &str) -> Result<(String, String)> {
+    let Some((key, value)) = input.split_once('=') else {
+        return Err(anyhow!("expected key=value, got `{input}`"));
+    };
+    Ok((key.trim().to_string(), value.trim().to_string()))
+}
+
+fn search_config_for_data_dir(data_dir: PathBuf) -> SearchConfig {
+    SearchConfig::from_env_or_defaults(data_dir)
+}
+
+fn make_search(db: &Db, data_dir: PathBuf) -> Result<SearchService> {
+    let config = search_config_for_data_dir(data_dir);
+    SearchService::open(db.pool.clone(), config)
+}
+
+
+async fn connect_db() -> Result<Db> {
+    let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://chatrpg:chatrpg@localhost:54323/chatrpg".to_string());
+    Db::connect(&url).await
+}
+
+fn make_llm() -> Result<Arc<dyn LlmClient>> {
+    let config = LlmConfig::from_env()?;
+    Ok(Arc::new(OpenAiCompatibleClient::new(config)?))
+}
+
+fn gm_agentic_retrieve_enabled() -> bool {
+    std::env::var("TRPG_GM_AGENTIC_RETRIEVE")
+        .map(|v| !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"))
+        .unwrap_or(true)
+}
+
+/// Agentic GM rule retrieval (B): before narrating, the GM may call `retrieve`
+/// (OpenAI function-calling) to fetch SPECIFIC parsed rules for the action,
+/// rather than inventing them. Returns the concatenated source-backed snippets
+/// it pulled (empty if it decided the core mechanic suffices).
+async fn gm_retrieve_phase(llm: &dyn LlmClient, runtime: &RuntimeEngine, ruleset_id: &str, session_id: &str, user_input: &str) -> String {
+    let tool = json!({"type":"function","function":{
+        "name":"retrieve",
+        "description":"Search the parsed rulebook for a SPECIFIC rule needed to resolve the player's action (e.g. surprise, stealth, grappling, a named maneuver, a status effect). Returns rule snippets with pages. Use only when the action needs a rule beyond the core mechanic already in context.",
+        "parameters":{"type":"object","properties":{"query":{"type":"string","description":"keywords, e.g. 'surprise ambush', 'sleight of hand pickpocket'"}},"required":["query"]}}});
+    let grow_tool = json!({"type":"function","function":{
+        "name":"apply_track_change",
+        "description":"Apply a character-growth change when the fiction calls for it (level up, raise a skill, spend points, raise a stat). Sets or adds a value to a track (class level, pool, rank) or a base stat, then the engine re-derives. You decide the rule-appropriate amount; the engine only moves the value.",
+        "parameters":{"type":"object","properties":{
+            "bucket":{"type":"string","enum":["tracks","stats","skills","field"]},
+            "id":{"type":"string","description":"track id (e.g. 'fighter') or stat id (e.g. 'dexterity')"},
+            "op":{"type":"string","enum":["set","add"]},
+            "amount":{"type":"number"},
+            "value":{"type":"string","description":"a categorical value to SET (e.g. a race/ancestry/class choice like 'red' or 'wizard'); use instead of amount for non-numeric inputs"},
+            "kind":{"type":"string","description":"semantic tag for a new track, e.g. class_level / magical_class_level / pool / rank"},
+            "category":{"type":"string"}
+        },"required":["bucket","id","op"]}}});
+    let sys = "You are the GM about to resolve a player's action. The core rules (resolution mechanic, state tracks, character) are ALREADY in your context. If correctly resolving THIS action needs a SPECIFIC rule you don't already have, call retrieve(query) to fetch it from the rulebook — NEVER invent rules. Call retrieve up to 3 times. \
+When the fiction grants concrete character growth (a level up, raising a skill, spending earned points, raising a stat), call apply_track_change to move the value; the engine re-derives. Decide the rule-appropriate amount yourself. Do NOT call it for transient effects, damage, or resource spends handled by the dice/effect tools. \
+ITEM POLICY — when the player INTRODUCES or CREATES an item not already established, NEVER fabricate its mechanical parameters: \
+(1) If its identity is AMBIGUOUS or you cannot match it to a real rules/genre item (any object flagged clarification_needed in your context is this case), ASK the player what it is before assigning any mechanics. \
+(2) If they give a reasonable real-world / genre-appropriate analog (e.g. 'a pistol like a Desert Eagle'), treat it as the matching rules item and retrieve THAT item's stats from the source. \
+(3) If it is clearly over-power or genre-inappropriate for THIS module (e.g. a Warhammer 40k Astartes in a mundane setting), push back and advise the player to reconsider; they MAY insist, in which case allow it but warn clearly that it will severely hurt the game experience — never silently assign 'balanced' stats. \
+NPC POLICY — when an NPC the player INTRODUCES or you must voice has no established stat block or persona, NEVER fabricate 'balanced' mechanics: \
+(1) If who the NPC is is AMBIGUOUS or no persona is established, ASK the player to establish who they are (or what they want from this NPC) before assigning any stats or motives — do not invent an identity. \
+(2) If a fitting NPC fits the module/genre, use the module NPC card if one exists, otherwise a fitting genre archetype, and retrieve its stats from the source. \
+(3) If the NPC is clearly over-powered or genre-mismatched for THIS module, push back and warn the player; you MAY proceed but FLAG it as provisional / off-power — never silently fabricate 'balanced' stats. \
+When you have what you need (or the action only needs the core mechanic), reply with the single word READY and no tool call.";
+    let mut msgs = vec![
+        json!({"role":"system","content": sys}),
+        json!({"role":"user","content": format!("Ruleset: {ruleset_id}\nPlayer action: {user_input}\nRetrieve any specific rule you need, then reply READY.")}),
+    ];
+    let mut fetched = String::new();
+    for _ in 0..4 {
+        let resp = match llm.complete_with_tools(msgs.clone(), vec![tool.clone(), grow_tool.clone()]).await {
+            Ok(r) => r,
+            Err(_) => break,
+        };
+        let msg = resp.pointer("/choices/0/message").cloned().unwrap_or_else(|| json!({}));
+        let tcs = msg.get("tool_calls").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        if tcs.is_empty() {
+            break;
+        }
+        msgs.push(msg);
+        for tc in &tcs {
+            let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            let name = tc.pointer("/function/name").and_then(|v| v.as_str()).unwrap_or("");
+            let args: serde_json::Value = tc
+                .pointer("/function/arguments")
+                .and_then(|v| v.as_str())
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_else(|| json!({}));
+            if name == "apply_track_change" {
+                let b = args.get("bucket").and_then(Value::as_str).unwrap_or("tracks");
+                let tid = args.get("id").and_then(Value::as_str).unwrap_or("");
+                let op = args.get("op").and_then(Value::as_str).unwrap_or("add");
+                let amt = args.get("amount").and_then(Value::as_f64).unwrap_or(0.0);
+                let val = args.get("value").and_then(Value::as_str);
+                let kind = args.get("kind").and_then(Value::as_str);
+                let cat = args.get("category").and_then(Value::as_str);
+                let ok = runtime
+                    .apply_track_change(session_id, "pc.current", b, tid, op, amt, val, kind, cat)
+                    .await
+                    .unwrap_or(false);
+                let res = json!({"applied": ok, "bucket": b, "id": tid, "op": op, "amount": amt, "value": val}).to_string();
+                fetched.push_str(&format!("\n## apply_track_change({b}/{tid} {op} {amt}) -> applied={ok}\n"));
+                msgs.push(json!({"role":"tool","tool_call_id": id, "content": res}));
+                continue;
+            }
+            let q = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+            let res = runtime.retrieve_rules(ruleset_id, q, 4).await;
+            fetched.push_str(&format!("\n## retrieve(\"{q}\")\n{res}\n"));
+            msgs.push(json!({"role":"tool","tool_call_id": id, "content": res}));
+        }
+    }
+    fetched
+}
+
+fn default_data_dir() -> PathBuf {
+    std::env::var("TRPG_DATA_DIR").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("./data"))
+}
+
+/// In-process driver for the STAGED ruleset parse — the quick test harness (no
+/// server, no browser). Loads the rulebook units + duotext sidecar for one
+/// ruleset, inserts a `background_jobs` row, runs `StagedParse::run`, and streams
+/// each stage transition (with elapsed time) to stderr. With `--json` it dumps
+/// the raw `JobStatus` snapshot; otherwise it prints the resolved
+/// `character_sheet_schema` from the partial kernel for eyeballing the fast path.
+async fn parse_staged_cli(ruleset: String, data_dir: Option<PathBuf>, stage1_only: bool, json: bool, budget: usize) -> Result<()> {
+    let db = connect_db().await?;
+    db.migrate().await?;
+    let llm = make_llm()?;
+    let dir = data_dir.unwrap_or_else(default_data_dir);
+    // Locate the rulebook source by picking the largest semantic_units.jsonl.
+    let (units_path, source_id) = largest_units_file(&dir.join("parsed/source_units"))?;
+    let units = trpg_rule_agent::reader::load_units(&units_path)?;
+    let sidecar = std::fs::read_to_string(dir.join(format!("markdown/rulebooks/{source_id}.md"))).ok();
+    let job_id = format!("staged_{}", uuid::Uuid::new_v4().simple());
+    db.insert_background_job(&job_id, "ruleset_parse_staged", json!({"ruleset": ruleset})).await?;
+    let sp = trpg_parser::staged::StagedParse {
+        db: db.clone(),
+        llm,
+        ruleset_id: ruleset.clone(),
+        units,
+        sidecar_text: sidecar,
+        title: ruleset.clone(),
+        job_id,
+        data_dir: dir,
+        stage1_only,
+    };
+    let t0 = std::time::Instant::now();
+    let st = sp.run(budget).await;
+    for s in &st.stages {
+        let dur = s.duration_secs().map(|d| format!("{d:>6.1}s")).unwrap_or_else(|| "    -- ".into());
+        eprintln!("[{dur}] {:<10} {:<7} {}", s.name, s.status, s.detail);
+    }
+    eprintln!("[{:>6.1}s] TOTAL", t0.elapsed().as_secs_f32());
+    if json {
+        println!("{}", serde_json::to_string_pretty(&st.to_value())?);
+    } else if let Some(k) = db.load_rule_kernel(&ruleset).await? {
+        println!("{}", serde_json::to_string_pretty(&k.character_sheet_schema)?);
+    }
+    Ok(())
+}
+
+/// Pick the largest `*.semantic_units.jsonl` under `dir` and derive its
+/// `source_id` from the filename (strip the `.semantic_units.jsonl` suffix).
+fn largest_units_file(dir: &std::path::Path) -> Result<(PathBuf, String)> {
+    let mut best: Option<(PathBuf, String, u64)> = None;
+    let entries = std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))?;
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        let source_id = match name.strip_suffix(".semantic_units.jsonl") {
+            Some(id) => id.to_string(),
+            None => continue,
+        };
+        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        if best.as_ref().map(|(_, _, s)| size > *s).unwrap_or(true) {
+            best = Some((path, source_id, size));
+        }
+    }
+    best.map(|(p, id, _)| (p, id))
+        .ok_or_else(|| anyhow!("no *.semantic_units.jsonl under {}", dir.display()))
+}
+
+
+
+fn extract_json_cli(text: &str) -> Option<Value> {
+    if let Some(v) = extract_fenced_cli(text, "json").and_then(|s| serde_json::from_str::<Value>(&s).ok()) { return Some(v); }
+    if let Some(v) = extract_fenced_cli(text, "character_draft").and_then(|s| serde_json::from_str::<Value>(&s).ok()) { return Some(v); }
+    serde_json::from_str::<Value>(text).ok()
+}
+
+fn extract_fenced_cli(text: &str, lang: &str) -> Option<String> {
+    let fence = format!("```{lang}");
+    let start = text.find(&fence)? + fence.len();
+    let rest = &text[start..];
+    let end = rest.find("```")?;
+    Some(rest[..end].trim().to_string())
+}
+
+fn emit_check_result_cli(stream_format: StreamFormat, result: &CheckResultRecord) -> Result<()> {
+    emit_phase(stream_format, "pending_check_resolved", serde_json::to_value(result)?)?;
+    if result.roll.visibility == RollVisibility::PrivateGmRoll {
+        emit_named_event(stream_format, "tool", json!({"tool":"roll_dice", "visibility":"gm_only", "check_id": &result.check_id}))?;
+    } else {
+        emit_named_event(stream_format, "dice", json!({"visibility": result.roll.visibility, "roll": result.roll.clone(), "outcome": result.outcome.clone()}))?;
+    }
+    for patch in &result.committed_patches {
+        match patch {
+            StatePatch::ActorHpDelta { actor_id, from, delta, to, reason } => {
+                emit_phase(stream_format, "actor_hp_updated", json!({"actor_id": actor_id, "from": from, "delta": delta, "to": to, "reason": reason}))?;
+                emit_named_event(stream_format, "damage_packet", json!({"actor_id": actor_id, "from": from, "delta": delta, "to": to, "reason": reason}))?;
+            }
+            StatePatch::ModifyTrack { target, amount, reason } => {
+                emit_phase(stream_format, "parameter_impact_applied", json!({"target": target, "amount": amount, "reason": reason}))?;
+                emit_named_event(stream_format, "effect_resolution_packet", json!({"target": target, "amount": amount, "reason": reason}))?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn emit_auto_roll_execution_cli(stream_format: StreamFormat, execution: &AutoRollExecution) -> Result<()> {
+    emit_check_result_cli(stream_format, &execution.primary)?;
+    for followup in &execution.followups {
+        emit_check_result_cli(stream_format, followup)?;
+    }
+    Ok(())
+}
+
+/// An outcome that ROLLED but bound NO verdict (no target / pass-fail): the
+/// contest resolver returned a no-verdict model (provisional / ruleset_procedure_lookup)
+/// or left success+degree null. Distinct from `blocked` (refused to roll).
+/// Used to tell the narrator NOT to invent a success/failure.
+fn outcome_is_provisional(outcome: &serde_json::Value) -> bool {
+    // Already resolved: success or degree field is non-null (opposed rolls produce
+    // success=false/true + degree even when target is null).
+    let has_verdict = outcome.get("success").map(|v| !v.is_null()).unwrap_or(false)
+        || outcome.get("degree").map(|v| !v.is_null()).unwrap_or(false);
+    if has_verdict { return false; }
+    // No verdict yet: only provisional/ruleset_procedure_lookup models are genuinely
+    // unresolved. OpposedRoll is serialized as "opposed_roll" (snake_case) and will
+    // always carry success+degree when resolved, so it never reaches here.
+    let model = outcome.get("resolution_model").map(|m| m.to_string()).unwrap_or_default();
+    model.contains("provisional") || model.contains("ruleset_procedure_lookup")
+}
+
+fn roll_execution_context_tag(source: &str, execution: &AutoRollExecution) -> Result<String> {
+    let blocked = execution.roll_policy == "blocked_missing_source" || execution.primary.outcome.get("blocked").and_then(|v| v.as_bool()).unwrap_or(false);
+    let provisional = !blocked && outcome_is_provisional(&execution.primary.outcome);
+    let instruction = if blocked {
+        "Rust mechanics refused to roll because source-backed actor/target/weapon/defense/damage facets are missing. Do not invent DV, HP, SP, damage, or skill totals. Narrate the visible uncertainty/action beat and surface that the rules steward must hydrate the missing facets before mechanical resolution."
+    } else if provisional {
+        "Rust rolled the dice but could NOT bind a target number / pass-fail verdict for this step (provisional, needs source binding). Narrate ONLY the kinetic action and visible tension of the roll; do NOT state or imply success or failure, and do NOT invent a target number, DV, HP/SP, or verdict. Surface that the outcome is pending until the rules steward binds the missing skill/DV."
+    } else {
+        "Rust dice/effect tools have already resolved and written this mechanical step. Narrate the visible fictional outcome; do not ask for dice, damage, target numbers, HP/SP, or resource totals."
+    };
+    let payload = json!({
+        "source": source,
+        "roll_policy": &execution.roll_policy,
+        "primary": &execution.primary,
+        "followups": &execution.followups,
+        "narration_instruction": instruction
+    });
+    let system_instruction = if blocked {
+        "[system]本次机械结算因缺少 source-backed 参数被暂停。请不要编造骰子、伤害、DV、HP、SP 或技能值；只叙述玩家可见的行动推进，并说明需要规则管家先水合缺失参数。[/system]"
+    } else if provisional {
+        "[system]骰子已掷出，但本次结算尚未绑定目标值/成败判定（provisional，待规则绑定）。请只叙述掷骰的动作与张力，不要陈述或暗示成功/失败，也不要编造目标值、DV、HP、SP 或判定结果；说明结果待规则管家绑定后再确定。[/system]"
+    } else {
+        "[system]骰子与效果工具已经完成本次机械结算。请只叙述玩家可见后果，并在下一个有意义的玩家决策点停下；不要要求玩家提供骰子结果、伤害、DV、HP、SP 或其他规则数值。[/system]"
+    };
+    Ok(format!("
+
+[roll]
+{}
+[/roll]
+{}
+", serde_json::to_string_pretty(&payload)?, system_instruction))
+}
+
+
+
+fn table_dice_policy_system_rolls_visible_cli() -> bool {
+    std::env::var("TRPG_AGENT_TABLE_DICE_POLICY")
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "system_rolls_visible" | "system" | "gm_rolls_visible" | "auto" | "auto_visible"))
+        .unwrap_or(true)
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn resolved_opposed_outcome_is_not_provisional() {
+        // 对抗已出胜负:success 非空(target 可为 null)。守卫不得判 provisional。
+        let resolved = json!({"success": false, "degree": "defender_wins", "target": null,
+            "resolution_model": {"kind":"opposed_roll"}});
+        assert!(!outcome_is_provisional(&resolved));
+        // 真未判定:success/degree 都 null。
+        let unresolved = json!({"success": null, "degree": null, "target": null,
+            "resolution_model": {"kind":"provisional","reason":"x"}});
+        assert!(outcome_is_provisional(&unresolved));
+    }
+}

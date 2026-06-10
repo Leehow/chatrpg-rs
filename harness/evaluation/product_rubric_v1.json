@@ -1,0 +1,127 @@
+{
+  "version": "v1",
+  "total_points": 100,
+  "pass_thresholds": {
+    "prototype_playable": 70,
+    "good_table_experience": 85,
+    "release_candidate": 92
+  },
+  "dimensions": [
+    {
+      "id": "product_journey",
+      "label": "End-to-end product journey",
+      "points": 12,
+      "checks": [
+        "rulebook/module ingestion starts from user files",
+        "onboarding bundle or equivalent is created",
+        "character creation works with partial preferences",
+        "session can start without manual DB edits",
+        "chapter/scene can progress to a meaningful transition"
+      ]
+    },
+    {
+      "id": "referee_integrity",
+      "label": "GM as referee",
+      "points": 16,
+      "checks": [
+        "knows when fictional uncertainty requires mechanics",
+        "uses rules/parameters rather than asking the player for rule-table values",
+        "under default product policy, rolls automatically with the system dice tool",
+        "does not wait for player dice/result input unless an explicit manual-roll compatibility mode is being tested",
+        "applies effects to correct tracked parameters",
+        "records provisional rulings and audit needs",
+        "does not falsely claim writeback"
+      ]
+    },
+    {
+      "id": "rules_compliance",
+      "label": "Rules compliance and source grounding",
+      "points": 12,
+      "checks": [
+        "uses source-backed procedures when available",
+        "distinguishes learned packet vs provisional ruling",
+        "handles non-HP resources like SAN/Harm/Chaos",
+        "materializes NPC/object/ability parameters on demand",
+        "avoids ruleset-specific hardcoding as the only path"
+      ]
+    },
+    {
+      "id": "module_progression",
+      "label": "Module/scenario progression",
+      "points": 12,
+      "checks": [
+        "presents actionable situation anchors",
+        "supports multiple player approaches",
+        "does not railroad a fixed plot",
+        "provides redundant clues or alternate paths for key conclusions",
+        "moves clocks/factions/NPCs when the player delays"
+      ]
+    },
+    {
+      "id": "npc_world_simulation",
+      "label": "NPC and world simulation",
+      "points": 10,
+      "checks": [
+        "NPCs have goals and constraints",
+        "NPCs change tactics under repetition",
+        "morale/self-preservation/deescalation are represented",
+        "world state changes persist",
+        "NPCs do not steal PC agency"
+      ]
+    },
+    {
+      "id": "ux_fun",
+      "label": "Player UX and fun",
+      "points": 14,
+      "checks": [
+        "player-visible output is clear and timely",
+        "choices are understandable without feeling like a railroad",
+        "failure is interesting and not a dead stop",
+        "pacing creates tension and progress",
+        "novice players are supported",
+        "creative players are rewarded with adjudication",
+        "LLM/subagent player inputs are human-like and not QA/code/JSON prose",
+        "LLM/subagent player inputs remain fictional action descriptions, not dice/result reports or QA/code/JSON prose",
+        "the GM continues through automatic mechanical resolution until the next meaningful player decision"
+      ]
+    },
+    {
+      "id": "robustness",
+      "label": "Robustness to weird inputs",
+      "points": 10,
+      "checks": [
+        "multilingual/paraphrase actions route semantically",
+        "ambiguous actions trigger clarification or goal-question, not failure",
+        "stale gates do not hijack later turns",
+        "weird but plausible actions receive risk/cost adjudication",
+        "debug setup can inject rare actors/items/clues/resources without polluting player-facing text",
+        "clear fictional actions trigger automatic roll/effect planning without manual dice prompts",
+        "manual-roll compatibility, if tested, is isolated from default product-play scenarios"
+      ]
+    },
+    {
+      "id": "safety_visibility",
+      "label": "Safety and visibility control",
+      "points": 8,
+      "checks": [
+        "GM-only module facts remain hidden",
+        "safety/session-zero style boundaries are acknowledged when relevant",
+        "horror/dark content is framed without surprise escalation",
+        "player-facing text does not expose debug/source metadata"
+      ]
+    },
+    {
+      "id": "observability",
+      "label": "Observability and reproducibility",
+      "points": 6,
+      "checks": [
+        "events are machine-readable",
+        "DB diffs are captured when possible",
+        "playtest artifacts are complete",
+        "failures include reproduction steps and evidence",
+        "test-only debug directives are recorded separately from player speech",
+        "debug-created state is visible in artifacts and final report"
+      ]
+    }
+  ]
+}

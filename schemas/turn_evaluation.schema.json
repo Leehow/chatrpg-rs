@@ -1,0 +1,22 @@
+{
+  "type": "object",
+  "properties": {
+    "verdict": {"type": "string", "enum": ["pass", "soft_fail", "hard_fail"]},
+    "score": {"type": "number"},
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "kind": {"type": "string"},
+          "severity": {"type": "string", "enum": ["low", "medium", "high"]},
+          "evidence": {"type": "string"},
+          "expected_behavior": {"type": "string"}
+        },
+        "required": ["kind", "severity", "evidence", "expected_behavior"]
+      }
+    },
+    "next_probe_action": {"type": "string"}
+  },
+  "required": ["verdict", "issues"]
+}

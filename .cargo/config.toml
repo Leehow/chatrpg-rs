@@ -1,0 +1,8 @@
+[build]
+target-dir = "/Users/haoli/.cache/cargo-target/chatrpg-rs-v1.20-formula"
+
+[profile.dev]
+incremental = false
+
+[profile.test]
+incremental = false

@@ -1,0 +1,22 @@
+{
+  "case_id": "parameter_facet_triangle_chaos_track",
+  "description": "A Triangle-style anomaly effect writes to a scene/anomaly Chaos track, not HP.",
+  "steps": [
+    {"input": "我使用异常能力扭曲走廊，让追兵绕回原点。"},
+    {"input": "/roll 1d6"},
+    {"input": "这个效果产生 Chaos 2 点。"}
+  ],
+  "expect_any": [
+    "parameter_impact_applied",
+    "effect_resolution_packet"
+  ],
+  "expect_db_hint": [
+    "generic_parameter_states.parameter_path contains tracks.chaos.current",
+    "parameter_facet_execution_runs.target_kind = scene or anomaly"
+  ],
+  "forbid_text": [
+    "扣 HP",
+    "生命值减少",
+    "请告诉我 Chaos 现在是多少"
+  ]
+}

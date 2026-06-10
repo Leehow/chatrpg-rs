@@ -1,0 +1,10 @@
+{
+  "case_id": "sustained_combat_advisory_gate_does_not_block",
+  "description": "A direction/stalemate gate must be superseded by a clear in-frame sustained attack instead of reprompting.",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "turns": [
+    {"input": "无人机开始朝我开火，场面进入战斗。", "expect_events": ["phase:combat_frame_created"]},
+    {"input": "我继续压制它，不让它靠近。", "expect_events": ["phase:turn_route", "phase:conflict_agent"], "forbid_events": ["phase:gate_reprompt"]}
+  ]
+}

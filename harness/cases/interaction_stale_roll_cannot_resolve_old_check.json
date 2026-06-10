@@ -1,0 +1,11 @@
+{
+  "name": "interaction_stale_roll_cannot_resolve_old_check",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "turns": [
+    {"user_input": "我想技术分析那根电缆，看看怎么切断。", "required_events": ["phase:pending_check_created"]},
+    {"user_input": "算了，战斗结束后我不切线了，先撤离现场。", "required_events": ["phase:gate_superseded"]},
+    {"user_input": "/roll 1d10+10", "forbidden_events": ["phase:pending_check_resolved"]}
+  ],
+  "stream_format": "jsonl"
+}

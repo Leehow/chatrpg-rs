@@ -1,0 +1,22 @@
+{
+  "name": "homecoming_first_turn_no_spoiler",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "user_input": "我只看一眼现场：无人机、警察和仓库门口现在分别是什么状况？",
+  "forbidden_terms": [
+    "Athena"
+  ],
+  "required_events": [
+    "phase:start",
+    "phase:context_compiled",
+    "phase:agent_plan",
+    "phase:llm_stream_start",
+    "phase:memory_event_saved",
+    "phase:learning_audit",
+    "phase:done"
+  ],
+  "forbidden_events": [
+    "phase:pending_check_created"
+  ],
+  "stream_format": "jsonl"
+}

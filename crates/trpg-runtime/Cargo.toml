@@ -1,0 +1,40 @@
+[package]
+name = "trpg-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+rand.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+trpg-agent = { path = "../trpg-agent" }
+trpg-combat = { path = "../trpg-combat" }
+trpg-contest = { path = "../trpg-contest" }
+trpg-director = { path = "../trpg-director" }
+trpg-db = { path = "../trpg-db" }
+trpg-llm = { path = "../trpg-llm" }
+trpg-model = { path = "../trpg-model" }
+trpg-formula = { path = "../trpg-formula" }
+uuid.workspace = true
+trpg-search = { path = "../trpg-search" }
+trpg-time = { path = "../trpg-time" }
+trpg-interaction = { path = "../trpg-interaction" }
+
+trpg-object = { path = "../trpg-object" }
+trpg-orchestrator = { path = "../trpg-orchestrator" }
+trpg-params = { path = "../trpg-params" }
+trpg-semantics = { path = "../trpg-semantics" }
+trpg-ability = { path = "../trpg-ability" }
+trpg-material = { path = "../trpg-material" }
+
+trpg-referee = { path = "../trpg-referee" }
+
+trpg-mechanics = { path = "../trpg-mechanics" }
+
+[dev-dependencies]
+tokio.workspace = true

@@ -1,0 +1,18 @@
+{
+  "case_id": "parameter_facet_dnd_spell_effect",
+  "description": "A D&D spell-like effect uses ability/effect facets and can target HP or a condition without a dedicated D&D engine.",
+  "steps": [
+    {"input": "我施放一个造成伤害的法术攻击那只哥布林。"},
+    {"input": "/roll"}
+  ],
+  "expect_any": [
+    "mechanics_query_plan",
+    "rule_binding_packet_created",
+    "effect_resolution_packet",
+    "parameter_impact_applied"
+  ],
+  "expect_db_hint": [
+    "parameter_facet_execution_runs exists",
+    "effect_resolution_packets exists"
+  ]
+}

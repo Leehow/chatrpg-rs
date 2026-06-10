@@ -1,0 +1,15 @@
+{
+  "name": "orchestrator_frame_worthy_before_generic_check",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "user_input": "另一台无人机堵住我，我又开枪打它。",
+  "required_events": [
+    "phase:turn_orchestrator",
+    "phase:conflict_agent",
+    "phase:combat_frame_created"
+  ],
+  "required_event_contains": [
+    {"event":"phase:turn_orchestrator", "contains":"frame-worthy action routed before generic check"}
+  ],
+  "stream_format": "jsonl"
+}

@@ -1,0 +1,32 @@
+# crates/trpg-gm/Cargo.toml
+[package]
+name = "trpg-gm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+futures-core.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+trpg-agent = { path = "../trpg-agent" }
+trpg-db = { path = "../trpg-db" }
+trpg-interaction = { path = "../trpg-interaction" }
+trpg-llm = { path = "../trpg-llm" }
+trpg-mechanics = { path = "../trpg-mechanics" }
+trpg-model = { path = "../trpg-model" }
+trpg-runtime = { path = "../trpg-runtime" }
+trpg-params = { path = "../trpg-params" }
+
+[dev-dependencies]
+async-stream.workspace = true
+sqlx.workspace = true

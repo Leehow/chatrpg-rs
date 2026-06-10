@@ -1,0 +1,22 @@
+[package]
+name = "trpg-object"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+trpg-model = { path = "../trpg-model" }
+trpg-db = { path = "../trpg-db" }
+trpg-time = { path = "../trpg-time" }
+trpg-interaction = { path = "../trpg-interaction" }
+trpg-semantics = { path = "../trpg-semantics" }
+
+[dev-dependencies]
+tokio.workspace = true

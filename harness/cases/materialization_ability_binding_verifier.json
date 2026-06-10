@@ -1,0 +1,12 @@
+{
+  "name": "materialization_ability_binding_verifier",
+  "ruleset_id": "dnd5e",
+  "module_id": null,
+  "user_input": "我立刻撑起一道防护法术挡下这一击。",
+  "required_events": [
+    "phase:materialization_kernel",
+    "phase:rule_binding_packet_created",
+    "phase:binding_verification_created"
+  ],
+  "stream_format": "jsonl"
+}

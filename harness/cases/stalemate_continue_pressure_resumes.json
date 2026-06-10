@@ -1,0 +1,42 @@
+{
+  "name": "stalemate_continue_pressure_resumes",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "turns": [
+    {
+      "user_input": "无人机朝我开火，我拔枪还击。",
+      "required_events": [
+        "phase:combat_frame_created"
+      ]
+    },
+    {
+      "user_input": "我躲在掩体后观察。",
+      "required_events": [
+        "phase:situation_intent_classified"
+      ]
+    },
+    {
+      "user_input": "我继续等着看它怎么动。",
+      "required_events": [
+        "phase:situation_intent_classified"
+      ]
+    },
+    {
+      "user_input": "我还是不动，继续僵持。",
+      "required_events": [
+        "phase:conflict_direction_gate_opened"
+      ],
+      "required_done_reason": "awaiting_situation_direction"
+    },
+    {
+      "user_input": "我继续朝它开火。",
+      "required_events": [
+        "phase:reaction_window_resolved"
+      ],
+      "forbidden_events": [
+        "phase:gate_reprompt"
+      ]
+    }
+  ],
+  "stream_format": "jsonl"
+}

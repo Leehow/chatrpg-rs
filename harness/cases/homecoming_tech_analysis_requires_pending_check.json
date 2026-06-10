@@ -1,0 +1,33 @@
+{
+  "name": "homecoming_tech_analysis_requires_pending_check",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "user_input": "我观察无人机后面的线缆，判断能不能安全切断，会不会触发防御协议。",
+  "forbidden_terms": [
+    "Athena"
+  ],
+  "required_events": [
+    "phase:start",
+    "phase:context_compiled",
+    "phase:agent_plan",
+    "phase:check_contract_created",
+    "phase:pending_check_created",
+    "phase:done"
+  ],
+  "forbidden_events": [
+    "phase:llm_stream_start"
+  ],
+  "require_no_llm_stream_start": true,
+  "required_done_reason": "awaiting_player_roll",
+  "required_event_contains": [
+    {
+      "event": "phase:agent_plan",
+      "contains": "ask_player_roll"
+    },
+    {
+      "event": "phase:check_contract_created",
+      "contains": "player_roll_required"
+    }
+  ],
+  "stream_format": "jsonl"
+}

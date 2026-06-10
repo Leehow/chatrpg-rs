@@ -1,0 +1,27 @@
+{
+  "case_id": "parameter_facet_executor_hp_impact",
+  "description": "A successful attack/effect roll should create a facet execution and HP impact through the parameter facet executor.",
+  "env": {
+    "TRPG_AGENT_TABLE_DICE_POLICY": "players_report",
+    "TRPG_PARAMETER_FACET_EXECUTOR_ENABLE_V113": "true"
+  },
+  "turns": [
+    {
+      "input": "无人机开始朝我开火，场面进入战斗。",
+      "expect": ["combat_frame_created"]
+    },
+    {
+      "input": "我开枪反击。",
+      "expect_any": ["pending_check_created", "contest_resolved", "pending_effect_roll_created"]
+    },
+    {
+      "input": "我掷出 16。",
+      "expect_any": ["contest_resolved", "attack_resolution_recorded", "pending_effect_roll_created"]
+    },
+    {
+      "input": "伤害 3d6=11，SP 0。",
+      "expect_any": ["parameter_impact_applied", "actor_hp_updated", "damage_packet"]
+    }
+  ],
+  "must_not_contain": ["上一枪后还剩多少血", "请告诉我目标当前 SP", "请选择方向避免循环"]
+}

@@ -1,0 +1,22 @@
+{
+  "case_id": "parameter_facet_coc_sanity_track",
+  "description": "A CoC/BRP-style sanity effect writes a non-HP actor resource impact through the parameter facet executor.",
+  "steps": [
+    {"input": "我看到不可名状的怪物，进行 SAN 检定。"},
+    {"input": "/roll 1d100"},
+    {"input": "SAN 损失 /roll 1d6"}
+  ],
+  "expect_any": [
+    "parameter_impact_applied",
+    "effect_resolution_packet"
+  ],
+  "expect_db_hint": [
+    "parameter_impacts.parameter_path contains resources.sanity.current or sanity.current",
+    "parameter_facet_execution_runs.status in applied/applied_provisional"
+  ],
+  "forbid_text": [
+    "扣 HP",
+    "生命值减少",
+    "请告诉我你的 SAN 剩多少"
+  ]
+}

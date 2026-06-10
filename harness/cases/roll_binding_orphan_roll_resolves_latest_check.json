@@ -1,0 +1,18 @@
+{
+  "case_id": "roll_binding_orphan_roll_resolves_latest_check",
+  "description": "A naked /roll should bind to the latest unresolved attack/effect check instead of becoming an orphan RNG row.",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "turns": [
+    {
+      "user_input": "我再朝它开一枪",
+      "required_events": ["phase:turn_orchestrator", "phase:conflict_agent", "phase:check_contract_created"],
+      "forbidden_events": ["phase:gate_reprompt"]
+    },
+    {
+      "user_input": "/roll",
+      "required_events": ["phase:pending_check_resolved", "event:dice"],
+      "forbidden_text": ["no locked-in check", "没有 locked-in check", "不能处理 naked /roll", "请选择改变局面"]
+    }
+  ]
+}

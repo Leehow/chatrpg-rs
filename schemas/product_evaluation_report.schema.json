@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "chatrpg product evaluation report",
+  "type": "object",
+  "required": ["version", "overall_score", "verdict", "scorecard", "findings"],
+  "properties": {
+    "version": {"type": "string"},
+    "overall_score": {"type": "integer", "minimum": 0, "maximum": 100},
+    "verdict": {"type": "string", "enum": ["blocked", "prototype_playable", "good_table_experience", "release_candidate"]},
+    "scorecard": {"type": "object", "additionalProperties": {"type": "integer"}},
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "severity", "title", "evidence", "expected", "repro"],
+        "properties": {
+          "id": {"type": "string"},
+          "severity": {"type": "string", "enum": ["P0", "P1", "P2", "P3"]},
+          "title": {"type": "string"},
+          "evidence": {"type": "string"},
+          "expected": {"type": "string"},
+          "repro": {"type": "string"}
+        }
+      }
+    },
+    "recommended_next_plan": {"type": "array", "items": {"type": "string"}},
+    "unknowns": {"type": "array", "items": {"type": "string"}}
+  }
+}

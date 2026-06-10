@@ -1,0 +1,18 @@
+{
+  "case_id": "parameter_facet_executor_non_hp_resource",
+  "description": "A non-HP effect such as SAN/Chaos/Harm should produce a parameter impact, not an HP-only damage packet.",
+  "env": {
+    "TRPG_PARAMETER_FACET_EXECUTOR_ENABLE_V113": "true"
+  },
+  "turns": [
+    {
+      "input": "我看见不可名状的怪物，进行理智检定，失败后损失 SAN 1d6。",
+      "expect_any": ["mechanics_search_planned", "rule_binding_packet_created", "pending_check_created", "effect_resolution_packet", "parameter_impact_applied"]
+    },
+    {
+      "input": "/roll 1d6",
+      "expect_any": ["parameter_impact_applied", "effect_resolution_packet"]
+    }
+  ],
+  "must_not_contain": ["HP 受到伤害", "还剩多少血"]
+}

@@ -1,0 +1,34 @@
+{
+  "name": "combat_repeated_player_attack_npc_changes_tactic",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "turns": [
+    {
+      "user_input": "我朝无人机开火。",
+      "required_events": [
+        "phase:combat_frame_created"
+      ]
+    },
+    {
+      "user_input": "我继续朝它开火。",
+      "required_events": [
+        "phase:novelty_director",
+        "event:fresh_change"
+      ],
+      "required_event_contains": [
+        {
+          "event": "phase:novelty_director",
+          "contains": "selected_tactic_id"
+        }
+      ]
+    },
+    {
+      "user_input": "我还是继续朝它猛打。",
+      "required_events": [
+        "phase:novelty_director",
+        "event:fresh_change"
+      ]
+    }
+  ],
+  "stream_format": "jsonl"
+}

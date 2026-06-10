@@ -1,0 +1,122 @@
+{
+  "name": "homecoming_external_playtest_8turn",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "forbidden_player_text": [
+    "上一枪后还剩多少血",
+    "这把枪伤害是多少",
+    "请告诉我目标 SP",
+    "请告诉我命中 DV",
+    "请你掷",
+    "请你自己掷",
+    "请报告掷骰",
+    "请报告伤害",
+    "没有 locked-in check",
+    "请选择方向避免循环"
+  ],
+  "evaluator_instructions": "Judge this as a black-box solo TRPG product. A pass requires the GM/system to act as referee: decide when mechanics are needed, auto-roll under system_rolls_visible, resolve hit/damage/effects, persist resources to DB, avoid asking players for roll results or rule-table values, avoid GM-only leaks, and continue until the next meaningful player decision.",
+  "turns": [
+    {
+      "user_input": "我躲在警车后，观察那台拖着电缆的无人机和电缆走向，判断能不能安全切断，会不会触发防御协议。",
+      "expect_phases": [
+        "agent_plan",
+        "check_contract_created"
+      ],
+      "forbid_phases": [
+        "object_interaction_contract_created"
+      ],
+      "forbid_player_text": [
+        "Athena",
+        "请你掷"
+      ]
+    },
+    {
+      "user_input": "无人机锁定我并朝我开火，我想先去剪线。",
+      "expect_phases": [
+        "reaction_window_opened"
+      ],
+      "forbid_phases": [
+        "object_interaction_contract_created"
+      ],
+      "forbid_player_text": [
+        "剪断成功",
+        "请你掷"
+      ]
+    },
+    {
+      "user_input": "我选择找掩体并反击。",
+      "expect_phases": [
+        "combat_frame_created"
+      ],
+      "forbid_player_text": [
+        "请你掷"
+      ]
+    },
+    {
+      "user_input": "我用重型手枪近距离朝那台失控机械体本体开火攻击。",
+      "expect_phases": [
+        "combat_frame_created",
+        "check_contract_created"
+      ],
+      "forbid_phases": [
+        "object_interaction_contract_created"
+      ],
+      "forbid_player_text": [
+        "请你掷",
+        "请报告",
+        "这把枪伤害是多少"
+      ],
+      "notes": "Player gives only a fictional attack. The system should auto-plan, auto-roll, resolve, and continue to the next player decision."
+    },
+    {
+      "user_input": "我继续保持掩体后射击，压低枪口追着它的机身打，尽量不让它重新瞄准警察。",
+      "expect_phases": [
+        "turn_route"
+      ],
+      "require_db_deltas": {
+        "dice_rolls": 1,
+        "roll_plans": 1
+      },
+      "forbid_player_text": [
+        "请你自己掷",
+        "请报告伤害",
+        "请告诉我目标 SP",
+        "没有 locked-in check"
+      ],
+      "notes": "Auto-roll regression probe: no human roll/result input is allowed."
+    },
+    {
+      "user_input": "[debug]add {\"id\":\"npc.scav_boss\",\"kind\":\"npc\",\"hp\":35,\"armor_sp\":0,\"weapon\":\"shotgun\",\"goal\":\"capture the drone core\"}[/debug]\n我注意到另一个拿霰弹枪的头目冲向无人机核心，立刻转火压制他。",
+      "notes": "Debug directive creates a rare NPC to test target switching and state hydration without waiting for the module to surface one. Player speech stays fictional and action-only.",
+      "expect_phases": [
+        "turn_route"
+      ],
+      "forbid_player_text": [
+        "debug",
+        "JSON",
+        "npc.scav_boss",
+        "请你掷"
+      ],
+      "require_db_deltas": {}
+    },
+    {
+      "user_input": "我继续压低枪口持续压制它，不给它靠近警察的机会。",
+      "expect_phases": [
+        "turn_route"
+      ],
+      "forbid_player_text": [
+        "请选择方向避免循环",
+        "请你掷"
+      ]
+    },
+    {
+      "user_input": "我趁它被压制，冲进仓库脱离街口火线。",
+      "forbid_player_text": [
+        "请选择方向避免循环",
+        "请你掷"
+      ]
+    }
+  ],
+  "allow_debug_directives": true,
+  "allow_manual_roll_input": false
+}

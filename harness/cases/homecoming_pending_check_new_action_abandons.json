@@ -1,0 +1,37 @@
+{
+  "name": "homecoming_pending_check_new_action_abandons",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "stream_format": "jsonl",
+  "turns": [
+    {
+      "user_input": "我判断能不能安全切断无人机后面的线缆。",
+      "required_events": [
+        "phase:pending_check_created",
+        "phase:done"
+      ],
+      "required_done_reason": "awaiting_player_roll",
+      "require_no_llm_stream_start": true
+    },
+    {
+      "user_input": "算了，我改去绕仓库后门。",
+      "required_events": [
+        "phase:gate_abandoned",
+        "phase:llm_stream_start",
+        "phase:done"
+      ],
+      "forbidden_events": [
+        "phase:pending_check_resolved"
+      ],
+      "required_event_contains": [
+        {
+          "event": "phase:gate_abandoned",
+          "contains": "player_started_new_action"
+        }
+      ],
+      "forbidden_terms": [
+        "Athena"
+      ]
+    }
+  ]
+}

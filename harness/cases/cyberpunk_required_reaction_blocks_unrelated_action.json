@@ -1,0 +1,26 @@
+{
+  "name": "cyberpunk_required_reaction_blocks_unrelated_action",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "turns": [
+    {
+      "user_input": "无人机开始朝我开火，场面进入战斗。",
+      "required_events": [
+        "phase:combat_frame_created"
+      ]
+    },
+    {
+      "user_input": "无人机锁定我并对我开火，我想先去剪线。",
+      "required_events": [
+        "phase:reaction_window_opened",
+        "phase:done"
+      ],
+      "required_done_reason": "awaiting_required_reaction",
+      "require_no_llm_stream_start": true,
+      "forbidden_terms": [
+        "Athena"
+      ]
+    }
+  ],
+  "stream_format": "jsonl"
+}

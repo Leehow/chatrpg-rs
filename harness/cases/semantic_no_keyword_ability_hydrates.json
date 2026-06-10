@@ -1,0 +1,10 @@
+{
+  "name": "semantic_no_keyword_ability_hydrates",
+  "ruleset_id": "sword_world_2_5",
+  "module_id": "sword_world_2_5.test",
+  "user_input": "我用训练过的那招，把魔力压进剑锋里让下一击变得不同。",
+  "required_events": [
+    "phase:semantic_classification"
+  ],
+  "stream_format": "jsonl"
+}

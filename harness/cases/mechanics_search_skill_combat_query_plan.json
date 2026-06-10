@@ -1,0 +1,11 @@
+{
+  "name": "mechanics_search_skill_combat_query_plan",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "turns": [
+    {"user_input": "无人机开始朝我开火，场面进入战斗。", "required_events": ["phase:combat_frame_created", "phase:reaction_window_opened"]},
+    {"user_input": "我反击，继续开枪压制它。", "required_events": ["phase:check_contract_created", "phase:pending_check_created"]},
+    {"user_input": "18", "required_events": ["phase:contest_resolved", "phase:pending_damage_roll_created"], "required_event_contains": [{"event":"phase:contest_resolved", "contains":"contest"}]}
+  ],
+  "stream_format": "jsonl"
+}

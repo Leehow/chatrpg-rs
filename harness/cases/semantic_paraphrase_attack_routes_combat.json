@@ -1,0 +1,13 @@
+{
+  "case_id": "semantic_paraphrase_attack_routes_combat",
+  "description": "Paraphrased combat intent without a narrow keyword should route through combat when semantic cues indicate combat_action.",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "turns": [
+    {
+      "input": "我压低枪口让那台失控机械体别再靠近，并保持火力压制。",
+      "expect_events": ["phase:turn_orchestrator", "phase:turn_route", "phase:conflict_agent", "phase:combat_frame_created"],
+      "forbid_events": ["phase:object_interaction_contract_created"]
+    }
+  ]
+}

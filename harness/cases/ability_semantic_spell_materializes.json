@@ -1,0 +1,13 @@
+{
+  "name": "ability_semantic_spell_materializes",
+  "ruleset_id": "dnd5e",
+  "module_id": "dnd5e.test",
+  "user_input": "我立刻撑起一道防护力场挡这一下。",
+  "required_events": [
+    "phase:ability_kernel",
+    "phase:semantic_classification",
+    "phase:ability_definition_hydrated",
+    "phase:ability_activation_contract_created"
+  ],
+  "stream_format": "jsonl"
+}

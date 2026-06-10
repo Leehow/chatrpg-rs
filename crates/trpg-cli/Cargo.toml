@@ -1,0 +1,38 @@
+[package]
+name = "trpg-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "trpg"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+chrono.workspace = true
+dialoguer.workspace = true
+dotenvy.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+trpg-agent = { path = "../trpg-agent" }
+trpg-combat = { path = "../trpg-combat" }
+trpg-api = { path = "../trpg-api" }
+trpg-db = { path = "../trpg-db" }
+trpg-gm = { path = "../trpg-gm" }
+trpg-llm = { path = "../trpg-llm" }
+trpg-model = { path = "../trpg-model" }
+trpg-parser = { path = "../trpg-parser" }
+trpg-rule-agent = { path = "../trpg-rule-agent" }
+trpg-runtime = { path = "../trpg-runtime" }
+trpg-search = { path = "../trpg-search" }
+uuid.workspace = true
+trpg-time = { path = "../trpg-time" }
+trpg-interaction = { path = "../trpg-interaction" }
+
+trpg-object = { path = "../trpg-object" }

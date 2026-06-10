@@ -1,0 +1,15 @@
+{
+  "name": "world_time_survives_combat_turn",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "user_input": "无人机开始朝我开火，场面进入战斗。",
+  "required_events": [
+    "phase:world_time",
+    "phase:conflict_agent",
+    "phase:combat_frame_created"
+  ],
+  "required_event_contains": [
+    {"event": "phase:world_time", "contains": "scene_beat"}
+  ],
+  "stream_format": "jsonl"
+}
