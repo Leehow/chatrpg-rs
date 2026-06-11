@@ -130,28 +130,33 @@ pub async fn compile_mechanics_catalog(
 
     // Deterministic guardrail write-back (mechanics_finalize): validation
     // messages land in kernel.validation_report.warnings AND are echoed as
-    // gap notes for the caller's tracing. No submit -> kernel untouched.
-    if merged.is_empty() && ups.is_empty() {
-        gaps.push("mechanics compiler produced nothing; kernel left untouched".into());
-        return gaps;
-    }
+    // gap notes for the caller's tracing. No submit -> catalog untouched.
     // Pre-pass snapshot: the round-trip guard below vetoes ALL of this pass's
     // write-backs at once (never half-written).
     let backup = kernel.clone();
-    let raw: Vec<Value> = merged.into_values().collect();
-    let (entries, mut messages) =
-        super::mechanics_finalize::finalize_catalog(raw, kernel, &ctx.skill_names);
-    if entries.is_empty() {
-        gaps.push("mechanics compiler produced nothing usable; kernel catalog left untouched".into());
+    // The on_outcome `=field` reference guard runs UNCONDITIONALLY: it audits
+    // the READER pass's resource_tracks (already on the kernel), not this
+    // pass's submissions — a dead =ref must surface even when no mechanic lands.
+    let mut messages = super::mechanics_finalize::apply_on_outcome_ref_guard(kernel);
+    if merged.is_empty() && ups.is_empty() {
+        gaps.push("mechanics compiler produced nothing; kernel catalog left untouched".into());
     } else {
-        kernel.mechanics_catalog = entries;
+        let raw: Vec<Value> = merged.into_values().collect();
+        let (entries, more) =
+            super::mechanics_finalize::finalize_catalog(raw, kernel, &ctx.skill_names);
+        messages.extend(more);
+        if entries.is_empty() {
+            gaps.push("mechanics compiler produced nothing usable; kernel catalog left untouched".into());
+        } else {
+            kernel.mechanics_catalog = entries;
+        }
+        // A4 companion upgrades — applied AFTER the catalog is final (threshold
+        // followup refs validate against it); all merges additive, never overwrite.
+        let catalog = kernel.mechanics_catalog.clone();
+        messages.extend(super::mechanics_finalize::apply_thresholds_upgrades(kernel, &ups.thresholds, &catalog));
+        messages.extend(super::mechanics_finalize::apply_success_bands_upgrades(kernel, &ups.bands));
+        messages.extend(super::mechanics_finalize::apply_field_notes(kernel, &ups.field_notes));
     }
-    // A4 companion upgrades — applied AFTER the catalog is final (threshold
-    // followup refs validate against it); all merges additive, never overwrite.
-    let catalog = kernel.mechanics_catalog.clone();
-    messages.extend(super::mechanics_finalize::apply_thresholds_upgrades(kernel, &ups.thresholds, &catalog));
-    messages.extend(super::mechanics_finalize::apply_success_bands_upgrades(kernel, &ups.bands));
-    messages.extend(super::mechanics_finalize::apply_field_notes(kernel, &ups.field_notes));
     for m in &messages {
         gaps.push(format!("{} [{}]: {}", m.code, m.target.as_deref().unwrap_or("-"), m.message));
     }

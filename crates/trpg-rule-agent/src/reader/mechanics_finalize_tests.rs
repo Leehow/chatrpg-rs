@@ -185,3 +185,182 @@ fn sheet_parameter_keys_union_and_lowercase() {
     bare.character_sheet_schema = json!({"title":"fallback"});
     assert!(sheet_parameter_keys(&bare, &[]).is_empty(), "fallback schema -> empty set");
 }
+
+// ---- on_outcome `=field` 引用守卫（mechanics_outcome_refs）----
+
+fn kernel_with_rules(track_id: &str, rules: Value) -> RuleKernel {
+    let mut k = RuleKernel::default();
+    k.ruleset_id = "testgame".into();
+    k.resource_tracks = vec![json!({"id": track_id, "owner_kind": "actor", "on_outcome": rules})];
+    k
+}
+
+fn track_rules(k: &RuleKernel) -> Vec<Value> {
+    k.resource_tracks[0]["on_outcome"].as_array().cloned().unwrap_or_default()
+}
+
+/// 回归（triangle `=chaos_generated` 类）：发明出来的 outcome 字段引用、又无
+/// default_amount 救援 → 该条规则永不可能触发，丢弃 + 上报；同轨其余规则不受牵连。
+#[test]
+fn invented_outcome_field_rule_dropped_and_reported() {
+    let mut k = kernel_with_rules("chaos", json!([
+        {"trigger":"always","op":"add","amount":"=chaos_generated"},
+        {"trigger":"always","op":"add","amount":"=pool_miss_count"},
+    ]));
+    let msgs = apply_on_outcome_ref_guard(&mut k);
+    let rules = track_rules(&k);
+    assert_eq!(rules.len(), 1, "invented-field rule dropped, sibling kept: {rules:?}");
+    assert_eq!(rules[0]["amount"], json!("=pool_miss_count"));
+    assert!(
+        msgs.iter().any(|m| m.code == "on_outcome_dropped_unknown_outcome_field"
+            && m.target.as_deref() == Some("chaos")
+            && m.message.contains("chaos_generated")),
+        "msgs: {msgs:?}"
+    );
+}
+
+/// 回归（live cyberpunk_red 第二实例）：`=damage_after_armor` 只是 derived_formulas
+/// 的 field_id，从不出现在 outcome JSON → 丢弃 + 上报（运行时本就静默 no-op）。
+#[test]
+fn cyberpunk_damage_after_armor_shape_dropped() {
+    let mut k = kernel_with_rules("hit_points", json!([
+        {"op":"subtract","amount":"=damage_after_armor","trigger":"always",
+         "mitigation":"armor.sp","check_match":"damage|attack"},
+    ]));
+    let msgs = apply_on_outcome_ref_guard(&mut k);
+    assert!(track_rules(&k).is_empty(), "dead rule dropped: {:?}", track_rules(&k));
+    assert!(
+        msgs.iter().any(|m| m.code == "on_outcome_dropped_unknown_outcome_field"
+            && m.target.as_deref() == Some("hit_points")),
+        "msgs: {msgs:?}"
+    );
+}
+
+/// 合法引用与非引用表达式一字不动、零 message：=field/=value+when/骰子/整数/
+/// max_of:、纯 when 规则、无 on_outcome 的轨、非对象规则都安然通过。
+#[test]
+fn valid_refs_and_plain_amounts_untouched() {
+    let rules = json!([
+        {"trigger":"always","op":"add","amount":"=pool_miss_count"},
+        {"trigger":"on_failure","op":"subtract","amount":"1d6"},
+        {"trigger":"always","when":"success","op":"add","amount":"=value"},
+        {"op":"subtract","amount":"3"},
+        {"op":"subtract","amount":"max_of:1d10"},
+        {"trigger":"always","op":"add","when":"pool_miss_count"},
+        "not-an-object",
+    ]);
+    let mut k = kernel_with_rules("hp", rules.clone());
+    k.resource_tracks.push(json!({"id":"bare_track"}));
+    let before = k.resource_tracks.clone();
+    let msgs = apply_on_outcome_ref_guard(&mut k);
+    assert!(msgs.is_empty(), "zero messages, got: {msgs:?}");
+    assert_eq!(k.resource_tracks, before, "tracks byte-identical");
+}
+
+/// 现役 CoC sanity 形状：坏引用 `=<sanity_loss>` 但带 default_amount → 规则保留
+/// （tested 路径靠默认骰仍在工作，丢弃反而破坏现役行为），降档上报、绝不静默。
+#[test]
+fn broken_amount_with_default_kept_and_downgraded() {
+    let mut k = kernel_with_rules("sanity", json!([
+        {"trigger":"on_failure","op":"subtract","amount":"=<sanity_loss>",
+         "default_amount":"1d6","check_match":"Sanity|sanity roll"},
+    ]));
+    let msgs = apply_on_outcome_ref_guard(&mut k);
+    let rules = track_rules(&k);
+    assert_eq!(rules.len(), 1, "rule kept: {msgs:?}");
+    assert_eq!(rules[0]["amount"], json!("=<sanity_loss>"), "amount untouched");
+    assert!(
+        msgs.iter().any(|m| m.code == "on_outcome_downgraded_unknown_outcome_field"
+            && m.target.as_deref() == Some("sanity")
+            && m.message.contains("default_amount")),
+        "msgs: {msgs:?}"
+    );
+}
+
+/// 工具说明书占位符被原样照抄（`=<total>`）或大小写变体（`=Success_Count`）、
+/// 内里字段确实合法 → 确定性修复为规范写法，保留 + repair 上报。
+#[test]
+fn placeholder_and_case_variants_repaired() {
+    let mut k = kernel_with_rules("hp", json!([
+        {"trigger":"always","op":"subtract","amount":"=<total>"},
+        {"trigger":"always","op":"add","amount":"=Success_Count"},
+    ]));
+    let msgs = apply_on_outcome_ref_guard(&mut k);
+    let rules = track_rules(&k);
+    assert_eq!(rules.len(), 2, "both kept: {msgs:?}");
+    assert_eq!(rules[0]["amount"], json!("=total"));
+    assert_eq!(rules[1]["amount"], json!("=success_count"));
+    assert_eq!(
+        msgs.iter().filter(|m| m.code == "on_outcome_repaired_outcome_field").count(),
+        2,
+        "msgs: {msgs:?}"
+    );
+}
+
+/// `=value` 读的是 `when` 指的 outcome 字段：when 不合法或干脆缺失、又无
+/// default_amount → 死规则，丢弃；when 经修复后合法 → 保留。
+#[test]
+fn eq_value_requires_known_when_field() {
+    let mut k = kernel_with_rules("hp", json!([
+        {"trigger":"always","op":"add","amount":"=value","when":"damage_dealt"},
+        {"trigger":"always","op":"add","amount":"=value"},
+        {"trigger":"always","op":"add","amount":"=value","when":"Pool_Miss_Count"},
+    ]));
+    let msgs = apply_on_outcome_ref_guard(&mut k);
+    let rules = track_rules(&k);
+    assert_eq!(rules.len(), 1, "only the repairable-when rule survives: {rules:?}");
+    assert_eq!(rules[0]["when"], json!("pool_miss_count"), "when repaired");
+    assert_eq!(
+        msgs.iter().filter(|m| m.code == "on_outcome_dropped_unknown_outcome_field").count(),
+        2,
+        "msgs: {msgs:?}"
+    );
+}
+
+/// 纯 when 规则（无 amount/delta）引用未知字段 → 运行时 None→skip 且无默认救援，
+/// 丢弃 + 上报。
+#[test]
+fn when_only_rule_unknown_field_dropped() {
+    let mut k = kernel_with_rules("chaos", json!([
+        {"trigger":"always","op":"add","when":"chaos_generated"},
+    ]));
+    let msgs = apply_on_outcome_ref_guard(&mut k);
+    assert!(track_rules(&k).is_empty(), "dead when-only rule dropped");
+    assert!(
+        msgs.iter().any(|m| m.code == "on_outcome_dropped_unknown_outcome_field"),
+        "msgs: {msgs:?}"
+    );
+}
+
+/// 回归（live CoC hp / sword_world 形状）：`=<damage>` 占位符内字段也不合法且
+/// 无默认 → 修复失败仍 drop；when 合法救不了死掉的 amount 分支（运行时 amount
+/// 优先，永不回落到 when）→ 同样 drop。
+#[test]
+fn live_coc_hp_and_sword_world_shapes_dropped() {
+    let mut k = kernel_with_rules("hp", json!([
+        {"op":"subtract","amount":"=<damage>","trigger":"always"},
+        {"when":"success","amount":"=damage","trigger":"always"},
+    ]));
+    let msgs = apply_on_outcome_ref_guard(&mut k);
+    assert!(track_rules(&k).is_empty(), "both dead rules dropped: {:?}", track_rules(&k));
+    assert_eq!(
+        msgs.iter().filter(|m| m.code == "on_outcome_dropped_unknown_outcome_field").count(),
+        2,
+        "msgs: {msgs:?}"
+    );
+}
+
+/// 词汇表整体回归：引擎导出的 AMOUNT_RESOLVABLE 里每个字段都被守卫接受
+/// （验证器与发射端共享同一 const，杜绝两份手维护清单漂移）。
+#[test]
+fn engine_vocabulary_accepted_wholesale() {
+    for f in trpg_model::outcome_fields::AMOUNT_RESOLVABLE {
+        let mut k = kernel_with_rules("t", json!([
+            {"trigger":"always","op":"add","amount": format!("={f}")},
+            {"trigger":"always","op":"add","amount":"=value","when": f},
+        ]));
+        let msgs = apply_on_outcome_ref_guard(&mut k);
+        assert!(msgs.is_empty(), "field `{f}` must be accepted: {msgs:?}");
+        assert_eq!(track_rules(&k).len(), 2, "field `{f}` rules kept");
+    }
+}

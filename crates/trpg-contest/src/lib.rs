@@ -33,9 +33,6 @@ impl ContestService {
         let mut outcome = json!({
             "check_id": contract.check_id,
             "check_label": contract.check_label,
-            "total": total,
-            "target": target,
-            "success": success,
             "degree": degree,
             "contest_id": profile.contest_id,
             "resolution_model": &profile.resolution_model,
@@ -44,6 +41,12 @@ impl ContestService {
             "roll_visibility": contract.roll_visibility,
             "disclosure": &contract.disclosure,
         });
+        // Amount-resolvable fields are keyed by the shared outcome_fields
+        // consts — the same consts the kernel finalize guard validates
+        // `=field` references against, so emitter and validator cannot drift.
+        outcome[outcome_fields::TOTAL] = json!(total);
+        outcome[outcome_fields::TARGET] = json!(target);
+        outcome[outcome_fields::SUCCESS] = json!(success);
         // Dice-pool enrichment — GENERIC names (no game-specific vocabulary in
         // the resolver): success_count = dice showing the target face;
         // pool_miss_count = the rest (a kernel resource_track, e.g. Triangle's
@@ -51,8 +54,8 @@ impl ContestService {
         if let CheckResolutionModel::DicePoolCount { target_face, .. } = &profile.resolution_model {
             let hits = rolls.iter().filter(|&&d| d == *target_face as i64).count();
             let misses = rolls.iter().filter(|&&d| d != *target_face as i64).count();
-            outcome["success_count"] = json!(hits);
-            outcome["pool_miss_count"] = json!(misses);
+            outcome[outcome_fields::SUCCESS_COUNT] = json!(hits);
+            outcome[outcome_fields::POOL_MISS_COUNT] = json!(misses);
             outcome["dice"] = json!(rolls);
         }
         // 对抗结算富化：把双方总点 + 双方技能值 + 胜者写入 outcome["opposed"]。
@@ -79,7 +82,7 @@ impl ContestService {
                 if let Some(bands) = kernel.dice_core.get("success_bands").and_then(|v| v.as_array()) {
                     if let Some((tier, rank)) = success_tier_for(bands, total, t) {
                         outcome["success_tier"] = json!(tier);
-                        outcome["success_tier_rank"] = json!(rank);
+                        outcome[outcome_fields::SUCCESS_TIER_RANK] = json!(rank);
                     }
                 }
             }

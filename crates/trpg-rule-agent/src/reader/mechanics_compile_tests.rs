@@ -178,6 +178,33 @@ async fn validation_messages_written_to_kernel_report() {
     );
 }
 
+/// on_outcome `=field` 守卫接线：resource_tracks 来自 reader 主 pass，即使本
+/// pass 零提交也要被审计 —— 死引用规则被丢、写 validation_report、回声进 gaps。
+#[tokio::test]
+async fn on_outcome_guard_runs_even_without_submissions() {
+    let client = ScriptClient::new(vec![]); // 从不 submit
+    let mut kernel = kernel_fixture();
+    kernel.resource_tracks = vec![json!({
+        "id":"chaos","owner_kind":"scene",
+        "on_outcome":[{"trigger":"always","op":"add","amount":"=chaos_generated"}]
+    })];
+    let gaps = compile_mechanics_catalog(&client, &mut kernel, mech_ctx(&[]), 0).await;
+    assert!(
+        kernel.resource_tracks[0]["on_outcome"].as_array().unwrap().is_empty(),
+        "dead rule dropped: {:?}",
+        kernel.resource_tracks
+    );
+    assert!(
+        kernel.validation_report.warnings.iter().any(|w| w.code == "on_outcome_dropped_unknown_outcome_field"),
+        "warnings: {:?}",
+        kernel.validation_report.warnings
+    );
+    assert!(
+        gaps.iter().any(|g| g.contains("on_outcome_dropped_unknown_outcome_field")),
+        "echoed as gap note: {gaps:?}"
+    );
+}
+
 #[test]
 fn seed_contains_sheet_keys_and_track_ids() {
     let kernel = kernel_fixture();

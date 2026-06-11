@@ -218,6 +218,12 @@ pub use upgrades::{
     kernel_round_trip_guard,
 };
 
+/// On-outcome `=field` reference guard — same physical-split pattern as the
+/// A4 upgrades; the public path stays `mechanics_finalize::apply_*`.
+#[path = "mechanics_outcome_refs.rs"]
+mod outcome_refs;
+pub use outcome_refs::apply_on_outcome_ref_guard;
+
 /// Normalized dedup key: trim + ascii-lowercase; empty -> None.
 fn norm_id(r: &Value) -> Option<String> {
     r.get("id")
