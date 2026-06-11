@@ -144,9 +144,9 @@ pub fn core_schema() -> Value {
                 "trigger":{"type":"string","enum":["on_success","on_failure","always"],"description":"when this rule fires (default always)"},
                 "check_match":{"type":"string","description":"OPTIONAL scope: only fire on checks whose intent/label/tested-parameter contains one of these pipe-separated alternatives. Include the term in the RULEBOOK'S OWN LANGUAGE plus the common English term and any in-text synonyms players use, so the same check matches across languages — e.g. a Sanity track: sanity|san|理智|恐惧|horror. Derive these from how the rulebook actually names the check; do NOT invent. Omit entirely for rules that apply to every roll (e.g. Triangle Chaos)."},
                 "op":{"type":"string","enum":["add","subtract","set"]},
-                "amount":{"type":"string","description":"a dice expr like 1d6 (rolled), =value (uses the `when` outcome field), =<field> (reads that named outcome field, e.g. =sanity_loss), or a fixed int. e.g. CoC Sanity loss on a failed roll = 1d6"},
-                "default_amount":{"type":"string","description":"OPTIONAL fallback dice/int used when amount's =<field> is absent on the outcome AND this track is the check's tested parameter, e.g. CoC default Sanity loss 1d6. Lets a bare 'make a Sanity roll' still cost SAN."},
-                "when":{"type":"string","description":"for amount==value: which outcome field — pool_miss_count|success_count|total|success"},
+                "amount":{"type":"string","description":"a dice expr like 1d6 (rolled), =value (uses the `when` outcome field), =field (reads a check-outcome field directly — ONLY total|target|success|success_count|pool_miss_count|success_tier_rank exist; write it bare, e.g. =pool_miss_count, never with <> brackets), or a fixed int. NEVER reference a derived_formulas field_id or an invented name (=damage, =damage_after_armor, =sanity_loss read NOTHING — the rule is dead and gets dropped); an amount from a separate roll (weapon damage) is NOT expressible here — omit the rule, the combat/effect path applies it. e.g. CoC Sanity loss on a failed roll = 1d6"},
+                "default_amount":{"type":"string","description":"OPTIONAL fallback dice/int used when amount's =field is absent on the outcome AND this track is the check's tested parameter, e.g. CoC default Sanity loss 1d6. Lets a bare 'make a Sanity roll' still cost SAN."},
+                "when":{"type":"string","description":"for amount==value: which outcome field — total|target|success|success_count|pool_miss_count|success_tier_rank"},
                 "mitigation":{"type":"string","description":"optional, e.g. armor.sp — subtract target armor before applying (HP damage)"}}}},
             "thresholds":{"type":"array","description":"consequences when the track crosses a value, or when one roll changes it a lot","items":{"type":"object","properties":{
                 "at":{"type":"integer","description":"cumulative threshold value"},"direction":{"type":"string","enum":["at_or_above","at_or_below"]},
@@ -258,5 +258,21 @@ mod tests {
         assert_eq!(s.len(), 4);
         assert_eq!(s[0]["function"]["name"], "get_toc");
         assert_eq!(s[3]["function"]["name"], "submit_run_kit");
+    }
+
+    #[test]
+    fn on_outcome_amount_docs_carry_the_engine_outcome_vocabulary() {
+        // The amount AND when descriptions must teach exactly the legal
+        // `=field` vocabulary (trpg-model AMOUNT_RESOLVABLE) — drift here
+        // re-teaches the extractor to invent dead fields like
+        // "=damage_after_armor" (silent no-op rules, dropped by the
+        // finalize guard).
+        let vocab = trpg_model::outcome_fields::AMOUNT_RESOLVABLE.join("|");
+        let docs = serde_json::to_string(&tool_schemas()).unwrap();
+        assert_eq!(
+            docs.matches(vocab.as_str()).count(),
+            2,
+            "amount + when descriptions must both list the vocabulary: {vocab}"
+        );
     }
 }
