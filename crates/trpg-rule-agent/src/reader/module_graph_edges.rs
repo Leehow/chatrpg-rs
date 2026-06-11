@@ -171,6 +171,31 @@ pub fn dedup_entities_by_key(entities: &mut Vec<serde_json::Value>, scenes: &mut
     merged
 }
 
+/// 兜底入口选择（确定性）：首个 node_type=="scene"/"story" 的场景；无则首个。空 → None。
+/// 仅在 reader 没给出语义入口时使用，保留 reader 提交的顺序。
+/// （从 module_reader.rs 外移守 ≤400 行；经其 `pub(super) use` 再导出，调用点/测试不变。）
+pub(super) fn entry_scene_index(scenes: &[ScenarioNode]) -> Option<usize> {
+    if scenes.is_empty() {
+        return None;
+    }
+    scenes
+        .iter()
+        .position(|n| matches!(n.node_type.as_str(), "scene" | "story"))
+        .or(Some(0))
+}
+
+/// 选取 Pass B 的入口场景索引。**语义优先**：先用 reader 自己判定的 entry_node_id
+/// （它读懂了这本模组、会跳过前言/安全提示/目录等非可玩前置）；reader 未给或 id 失效
+/// → 退到确定性 `entry_scene_index`。主路径不靠 node_type 字面关键词匹配，符合语义优先理念。
+pub(super) fn resolve_entry_index(scenes: &[ScenarioNode], entry_node_id: Option<&str>) -> Option<usize> {
+    if let Some(id) = entry_node_id.map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(i) = scenes.iter().position(|n| n.node_id == id) {
+            return Some(i);
+        }
+    }
+    entry_scene_index(scenes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

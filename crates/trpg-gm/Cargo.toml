@@ -24,8 +24,10 @@ trpg-interaction = { path = "../trpg-interaction" }
 trpg-llm = { path = "../trpg-llm" }
 trpg-mechanics = { path = "../trpg-mechanics" }
 trpg-model = { path = "../trpg-model" }
+trpg-object = { path = "../trpg-object" }
 trpg-runtime = { path = "../trpg-runtime" }
 trpg-params = { path = "../trpg-params" }
+trpg-time = { path = "../trpg-time" }
 
 [dev-dependencies]
 async-stream.workspace = true

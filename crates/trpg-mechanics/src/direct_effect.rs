@@ -112,6 +112,26 @@ impl crate::RefereeCombatService {
         };
         let applied = self.apply_effect_roll_with_decision(&contract, &result, Some(decision)).await?;
         result.committed_patches.extend(applied.patches.clone());
+        // B4 watcher：直接效果落账后阈值检测（与 apply_outcome_resource_tracks
+        // 同一纯函数单点）。fail-closed：kernel 缺失/impact before-after 取整不成/
+        // parameter_path 解析不到 kernel 轨 → 跳过；watcher 故障绝不中断主链。
+        if let Ok(Some(kernel)) = self.db.load_rule_kernel(ruleset_id).await {
+            let mut crossings: Vec<crate::watcher::ThresholdCrossing> = Vec::new();
+            for impact in &applied.effect.impacts {
+                let (Some(b), Some(a)) = (
+                    impact.before.as_ref().and_then(|v| v.as_i64()).and_then(|n| i32::try_from(n).ok()),
+                    impact.after.as_ref().and_then(|v| v.as_i64()).and_then(|n| i32::try_from(n).ok()),
+                ) else { continue };
+                let Some(track_id) = trpg_model::resolve_resource_track_id(&impact.parameter_path, &kernel) else { continue };
+                let Some(track) = kernel.resource_tracks.iter()
+                    .find(|t| t.get("id").and_then(|v| v.as_str()).map(str::trim) == Some(track_id.as_str())) else { continue };
+                let owner_kind = track.get("owner_kind").and_then(|v| v.as_str()).unwrap_or("actor");
+                crossings.extend(crate::watcher::detect_crossings(track, owner_kind, target_actor_id, b, a, impact.operation));
+            }
+            if !crossings.is_empty() {
+                let _ = self.detect_threshold_dues(&contract, &result, &kernel, &crossings).await;
+            }
+        }
         let effect = EffectContract { effect_id: applied.effect.effect_resolution_id.clone(), source_event_id: None, effect_kind: effect_kind_for_operation(operation), target_actor_ids: vec![target_actor_id.to_string()], source_refs: applied.effect.source_refs.clone(), learned_packet_ids: vec![], deterministic_parts: vec![], pending_rolls: vec![], proposed_patches: applied.patches.clone(), visibility, confidence: RulingConfidence::Medium, metadata: json!({"reason": reason, "source": "direct_effect", "source_actor_id": source_actor_id, "parameter_path": parameter_path, "operation": operation.as_str()}) };
         Ok(DirectEffectOutcome { effect, impacts: applied.effect.impacts, patches: applied.patches })
     }

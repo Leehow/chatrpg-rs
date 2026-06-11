@@ -1,16 +1,18 @@
 pub mod check;
 pub mod effect;
+pub mod mechanic;
 pub mod npc;
 pub mod world;
 
 use crate::ledger::TurnLedger;
+use crate::obligations::ObligationLedger;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use trpg_llm::AggregatedToolCall;
 use trpg_model::{ContextRequest, RuntimeState};
 use trpg_runtime::RuntimeEngine;
@@ -35,6 +37,10 @@ pub struct ToolCtx<'a> {
     pub state: &'a RuntimeState,
     /// None = 无模组或装配方未提供（navigate_scene 仅校验+切换，跳过深抽）。
     pub scene_extractor: Option<&'a SceneDeepExtractFn>,
+    /// B6 机械债务清单（waive_obligation 内存侧豁免；dispatch 链上 ToolCtx 是
+    /// 共享引用，&mut 借用打架 → 互斥锁内点改，guard 绝不跨 await）。
+    /// None = 单测/装配方未挂清单（waive 折 obligation_not_found）。
+    pub obligations: Option<&'a Mutex<ObligationLedger>>,
 }
 
 /// 工具单次执行的产物。
@@ -79,6 +85,9 @@ pub trait GmTool: Send + Sync {
 ///   scene_not_found          target_node_id 不在 ModuleGraph.scenes
 ///   scene_same_as_current    target == 当前场景
 ///   npc_synthesis_unavailable 合成门关 / 无 LLM / 无 NPC 卡
+///   mechanic_not_found       mechanic_id 不在 kernel.mechanics_catalog（或 kernel 无目录）
+///   scene_mechanic_not_found scene_mechanic_id 不在当前场景 scene_mechanics（scene_policy 解析）
+///   obligation_not_found     waive_obligation 的 target_id 不在未清债务清单
 ///   internal_error           db/IO 等内部错误（recoverable=false）
 #[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
 #[error("{code}: {message}")]
@@ -121,15 +130,17 @@ pub struct ToolDispatchOutcome {
     pub awaiting_player_roll: Option<AwaitingPlayerRoll>,
 }
 
-/// 第一期 10 工具注册表。
+/// GM 工具注册表（一期 10 个 + 二期尾部追加）。
 pub struct ToolRegistry {
     tools: Vec<Box<dyn GmTool>>,
 }
 
 impl ToolRegistry {
-    /// 注册全部 10 个第一期工具，注册顺序固定（= schemas() 顺序，缓存稳定）：
-    /// roll_check, request_player_roll, apply_effect, change_track, retrieve_rules,
-    /// get_actor, ensure_npc_param, navigate_scene, advance_time, remember。
+    /// 注册全部工具，注册顺序固定（= schemas() 顺序，缓存稳定）。一期 10 个
+    /// （roll_check, request_player_roll, apply_effect, change_track, retrieve_rules,
+    /// get_actor, ensure_npc_param, navigate_scene, advance_time, remember）的
+    /// schema 字节与顺序绝不动；二期工具只在尾部追加：lookup_mechanic,
+    /// waive_obligation（11→12）。
     pub fn standard() -> Self {
         Self { tools: vec![
             Box::new(check::RollCheckTool),
@@ -142,6 +153,8 @@ impl ToolRegistry {
             Box::new(world::NavigateSceneTool),
             Box::new(world::AdvanceTimeTool),
             Box::new(world::RememberTool),
+            Box::new(mechanic::LookupMechanicTool),
+            Box::new(mechanic::WaiveObligationTool),
         ] }
     }
 
@@ -216,7 +229,7 @@ mod tests {
     async fn dispatch_unknown_tool_returns_structured_error() {
         let registry = ToolRegistry::standard();
         let (engine, request, state) = dummy_ctx();
-        let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None };
+        let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: None };
         let mut ledger = TurnLedger::new();
         let outcome = registry.dispatch(&ctx, &mut ledger, &trpg_llm::AggregatedToolCall { id: "c1".to_string(), name: "missing".to_string(), arguments: "{}".to_string() }).await;
         let v: Value = serde_json::from_str(&outcome.content).unwrap();
@@ -228,7 +241,7 @@ mod tests {
     async fn dispatch_invalid_arguments_returns_structured_error() {
         let registry = ToolRegistry { tools: vec![Box::new(EchoTool)] };
         let (engine, request, state) = dummy_ctx();
-        let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None };
+        let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: None };
         let mut ledger = TurnLedger::new();
         let outcome = registry.dispatch(&ctx, &mut ledger, &trpg_llm::AggregatedToolCall { id: "c2".to_string(), name: "echo".to_string(), arguments: "not-json".to_string() }).await;
         let v: Value = serde_json::from_str(&outcome.content).unwrap();

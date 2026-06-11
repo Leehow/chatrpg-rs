@@ -53,7 +53,8 @@ pub fn effect_parameter_path(args: &ApplyEffectArgs) -> String {
     }
 }
 
-fn op_from_str(s: &str) -> Result<ParameterOperation> {
+/// op 字符串 → ParameterOperation（scene_policy 复用同一词表，不复制粘贴）。
+pub(crate) fn op_from_str(s: &str) -> Result<ParameterOperation> {
     match s.trim().to_ascii_lowercase().as_str() {
         "add" => Ok(ParameterOperation::Add),
         "subtract" => Ok(ParameterOperation::Subtract),

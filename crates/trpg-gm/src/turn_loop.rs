@@ -1,6 +1,7 @@
 use crate::errata::ErrataMemory;
 use crate::gate::GateResolverFn;
 use crate::ledger::TurnLedger;
+use crate::obligations::{carryover_memory_event, ObligationLedger, RetroactiveEffectDebt};
 use crate::prompts::{load_gm_skill, DynamicTailInput, TurnMessages};
 use crate::stream::RedactingBuffer;
 use crate::tools::{AwaitingPlayerRoll, SceneDeepExtractFn, ToolCtx, ToolRegistry};
@@ -24,10 +25,10 @@ pub struct LoopConfig { pub max_tool_rounds: u8, pub repeat_finding_threshold: u
 impl Default for LoopConfig { fn default() -> Self { Self { max_tool_rounds: 8, repeat_finding_threshold: 3 } } }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TurnOutcome { Narration(String), AwaitingPlayerRoll { check_id: String, prompt_public: String } }
-pub struct GmLoop { pub engine: RuntimeEngine, pub llm: Arc<dyn LlmClient>, pub tools: ToolRegistry, pub cfg: LoopConfig, pub data_dir: PathBuf, pub scene_extractor: Option<SceneDeepExtractFn>, pub ctx_provider: Option<CtxProviderFn>, pub gate_resolver: Option<GateResolverFn>, pub errata: ErrataMemory }
+pub struct GmLoop { pub engine: RuntimeEngine, pub llm: Arc<dyn LlmClient>, pub tools: ToolRegistry, pub cfg: LoopConfig, pub data_dir: PathBuf, pub scene_extractor: Option<SceneDeepExtractFn>, pub ctx_provider: Option<CtxProviderFn>, pub gate_resolver: Option<GateResolverFn>, pub errata: ErrataMemory, pub obligations: ObligationLedger }
 pub struct GmTurnInput<'a> { pub request: &'a ContextRequest, pub state: &'a RuntimeState, pub user_input: &'a str, pub history: &'a [ChatMessage], pub recent_transcript: Option<&'a str> }
 impl GmLoop {
-    pub fn new(engine: RuntimeEngine, llm: Arc<dyn LlmClient>, tools: ToolRegistry, cfg: LoopConfig, data_dir: PathBuf) -> Self { let errata = ErrataMemory::new(cfg.repeat_finding_threshold); Self { engine, llm, tools, cfg, data_dir, scene_extractor: None, ctx_provider: None, gate_resolver: None, errata } }
+    pub fn new(engine: RuntimeEngine, llm: Arc<dyn LlmClient>, tools: ToolRegistry, cfg: LoopConfig, data_dir: PathBuf) -> Self { let errata = ErrataMemory::new(cfg.repeat_finding_threshold); Self { engine, llm, tools, cfg, data_dir, scene_extractor: None, ctx_provider: None, gate_resolver: None, errata, obligations: ObligationLedger::default() } }
     pub async fn run_gm_turn(&mut self, input: GmTurnInput<'_>, on_delta: &mut (dyn FnMut(&str) + Send)) -> Result<TurnOutcome> {
         // —— 1. 确定性头部（spec §4 四项顺序：record → refresh → reconcile → gate 结算）——
         let _ = self.engine.record_world_event(&input.request.session_id, Some(&input.request.turn_id), None, WorldEventKind::PlayerAction, json!({"input": input.user_input}), Visibility::GmOnly).await;
@@ -39,6 +40,23 @@ impl GmLoop {
         let mut resolved_gate_facts = Vec::new();
         // gate 结算（含裸 "roll" 兜底与 Err 折叠两个 e2e must-fix）收口在 gate.rs 单点。
         crate::gate::resolve_pending_gate(&self.engine, self.gate_resolver.as_ref(), &input.request.session_id, &input.request.turn_id, input.user_input, &mut ledger, &mut resolved_gate_facts).await;
+        // B5 第三触发通路：TurnStart hook dues 在 prepare_turn_context 之前落库
+        // （B3 BP3 投影 / B6 债务装载同回合可见）。失败 unwrap_or_default()
+        // ——头部任何 watcher 故障不得阻断回合（与既有 `let _ =` 风格一致）。
+        let hook_dues = trpg_mechanics::RefereeCombatService::new(self.engine.db.clone())
+            .dues_for_hook(&input.request.session_id, &input.request.turn_id, &input.request.ruleset_id, &trpg_mechanics::watcher::HookEvent::TurnStart)
+            .await
+            .unwrap_or_default();
+        // —— B6 债务装载（spec §5.3）：turn-scope 豁免过期 → 跨回合遗留（持久
+        //    字段 + db open dues）与 TurnStart hook dues 统一进 ObligationLedger
+        //    （按 due_id 去重——watcher 产出即落库，两路可能是同一条）。db 失败
+        //    unwrap_or_default：债务装载绝不阻断回合，in-memory 清单仍兜底。
+        self.obligations.begin_turn(&input.request.turn_id);
+        let leftover_dues = self.engine.db.list_open_mechanic_dues(&input.request.session_id).await.unwrap_or_default();
+        self.obligations.absorb_dues(leftover_dues);
+        self.obligations.absorb_dues(hook_dues);
+        // 上回合遗留债务 → 本回合 BP3 尾段（errata 之后、Player Input 之前）。
+        let obligations_block = self.obligations.carryover_block();
         // —— 2. 上下文（agent_loop_protocol 强制置位 → BP1 出 agent-loop 版 engine protocol）——
         let mut state_agent = input.state.clone();
         state_agent.agent_loop_protocol = true;
@@ -54,7 +72,7 @@ impl GmLoop {
         let mut errata_blocks = Vec::new();
         if let Some(block) = self.errata.errata_block() { errata_blocks.push(block); }
         if let Some(block) = self.errata.standing_reminder_block() { errata_blocks.push(block); }
-        let tail = DynamicTailInput { user_input: input.user_input, resolved_gate_facts: &resolved_gate_facts, errata_blocks: &errata_blocks };
+        let tail = DynamicTailInput { user_input: input.user_input, resolved_gate_facts: &resolved_gate_facts, errata_blocks: &errata_blocks, obligations_block: obligations_block.as_deref() };
         let mut messages = TurnMessages::assemble(&compiled, &gm_skill, input.history, &tail);
         let schemas = self.tools.schemas();
         let mut visible_text = String::new();
@@ -62,8 +80,11 @@ impl GmLoop {
         let mut narrated = false;
         // —— 3. 工具轮（循环内恒 ToolChoice::Auto；ctx 限定块级作用域，块结束
         //     即释放对 self 的借用，收尾 &self 方法才可调用）——
+        // B6：obligations 暂入互斥单元——dispatch 链上 ToolCtx 是共享引用，
+        // waive_obligation 需要点改清单；块结束取回持久字段。
+        let obligations_cell = std::sync::Mutex::new(std::mem::take(&mut self.obligations));
         {
-            let ctx = ToolCtx { engine: &self.engine, request: input.request, state: &state_agent, scene_extractor: self.scene_extractor.as_ref() };
+            let ctx = ToolCtx { engine: &self.engine, request: input.request, state: &state_agent, scene_extractor: self.scene_extractor.as_ref(), obligations: Some(&obligations_cell) };
             'rounds: for round in 0..self.cfg.max_tool_rounds {
                 // §6.1 第 5 条可观测链前半：每轮请求前记缓存锚点（后半 cached_tokens
                 // 由下方 Usage 分支在同一 gm_cache target 下记录，relay 不透传则缺省）。
@@ -77,14 +98,42 @@ impl GmLoop {
                     tool_round = round,
                     "gm agent prompt cache anchors"
                 );
+                // —— B6 债务门控前置（spec §5.3；D2 真流式终审修复）：债务状态只能
+                //    被工具调用改变、纯叙事轮内不可能新增债务 ⇒ 轮前判定一次即够。
+                //    blocking 为空 ⇒ 本轮纯叙事终态必然合法 ⇒ ContentDelta 经
+                //    RedactingBuffer 后立即 on_delta 直通（恢复一期逐 token 流式）；
+                //    blocking 非空 ⇒ 本轮绝不能成为交付的叙事终态 ⇒ content 实时
+                //    丢弃（不缓冲不流出不进消息历史），回填债务观察让 agent 用工具
+                //    处理或 waive 后才放行。round 0 不回填：同一清单刚由
+                //    obligations_block 进了本回合 dynamic tail，相邻重复无信息增量。
+                let blocked = {
+                    let mut obligations = obligations_cell.lock().unwrap_or_else(|p| p.into_inner());
+                    // 账本同步：有结果的契约 settle，未结算的升格 open-check 债务
+                    // （request_player_roll gate 开着走 awaiting 终态不经此处，不算债）。
+                    let settled: std::collections::BTreeSet<&str> = ledger.snapshot().check_results.iter().map(|r| r.check_id.as_str()).collect();
+                    for contract in &ledger.snapshot().check_contracts {
+                        if settled.contains(contract.check_id.as_str()) { obligations.mark_check_settled(&contract.check_id); } else { obligations.record_open_check(&contract.check_id); }
+                    }
+                    // 追溯债务清偿（spec §5.3"补 apply_effect 落账"半边）：前轮新落账
+                    // effect 按 FIFO 结清追溯债务（effect_id 只消费一次，逐轮重扫安全）。
+                    let effect_ids: Vec<String> = ledger.snapshot().effect_contracts.iter().map(|e| e.effect_id.clone()).collect();
+                    obligations.settle_retro_debts_with_effects(&effect_ids);
+                    match obligations.block_text() {
+                        Some(block) => { if round > 0 { messages.push_system_observation(&block); } true }
+                        None => false,
+                    }
+                };
                 let mut stream = self.llm.stream_chat_with_tools(messages.to_request_messages(), schemas.clone(), ToolChoice::Auto).await?;
                 let mut saw_tool = false;
                 let mut redactor = RedactingBuffer::new(ledger.private_roll_tokens());
                 while let Some(event) = stream.next().await {
                     match event? {
                         StreamEvent::ContentDelta(delta) => {
-                            let safe = redactor.push(&delta);
-                            if !safe.is_empty() { on_delta(&safe); visible_text.push_str(&safe); }
+                            // 被门轮 content 实时丢弃（绝不缓冲、绝不流出）。
+                            if !blocked {
+                                let safe = redactor.push(&delta);
+                                if !safe.is_empty() { on_delta(&safe); visible_text.push_str(&safe); }
+                            }
                         }
                         StreamEvent::Usage(usage) => {
                             // §6.1 第 5 条可观测：relay 透传则记，缺省无此事件。
@@ -97,25 +146,28 @@ impl GmLoop {
                                 let outcome = self.tools.dispatch(&ctx, &mut ledger, &call).await;
                                 messages.push_tool_result(&outcome.tool_call_id, &outcome.name, &outcome.content);
                                 if let Some(gate) = outcome.awaiting_player_roll {
-                                    let rest = redactor.finish();
-                                    if !rest.is_empty() { on_delta(&rest); visible_text.push_str(&rest); }
+                                    drain_redactor(&mut redactor, blocked, on_delta, &mut visible_text);
                                     awaiting = Some(gate);
                                     break 'rounds;
                                 }
                             }
                             // 工具产物可能新增私骰 token：排空旧缓冲后按最新账本重建（混合轮防漏）。
-                            let rest = redactor.finish();
-                            if !rest.is_empty() { on_delta(&rest); visible_text.push_str(&rest); }
+                            // 混合轮 content 已实时直通（不是叙事终态，不受债务门控）。
+                            drain_redactor(&mut redactor, blocked, on_delta, &mut visible_text);
                             redactor = RedactingBuffer::new(ledger.private_roll_tokens());
                         }
                         StreamEvent::Done { .. } => {}
                     }
                 }
-                let rest = redactor.finish();
-                if !rest.is_empty() { on_delta(&rest); visible_text.push_str(&rest); }
-                if !saw_tool { narrated = true; break 'rounds; }
+                drain_redactor(&mut redactor, blocked, on_delta, &mut visible_text);
+                // 被门轮（blocked）无论纯叙事还是混合轮都不得成为终态：继续工具轮，
+                // 下一轮轮前重新判定（工具可能已清债）。
+                if saw_tool || blocked { continue 'rounds; }
+                narrated = true;
+                break 'rounds;
             }
         }
+        self.obligations = obligations_cell.into_inner().unwrap_or_else(|p| p.into_inner());
         // —— 终态 A：request_player_roll gate ——
         if let Some(gate) = awaiting {
             // 流后校验是 loop 之后的无条件阶段（spec §4）：awaiting 终态前可能已
@@ -139,6 +191,12 @@ impl GmLoop {
             }
             let rest = redactor.finish();
             if !rest.is_empty() { on_delta(&rest); visible_text.push_str(&rest); }
+            // B6：轮耗尽带债强制叙事 → 债务落勘误记忆（绝不静默丢失；BP3 注入
+            // 由下回合 carryover_block 完成）。落库失败 `let _ =` 吞错。
+            if let Some(block) = self.obligations.carryover_block() {
+                let event = carryover_memory_event(input.request, &block);
+                let _ = self.engine.db.save_memory_event(&event).await;
+            }
         }
         // —— 5. 流后校验（不阻塞交付：叙事已全部流出）——
         self.verify_after_stream(input.request, &ledger, &visible_text).await;
@@ -152,13 +210,25 @@ impl GmLoop {
     /// "gm_errata"；落库失败 `let _ =` 吞错——叙事已交付，校验绝不反向中断回合）。
     async fn verify_after_stream(&mut self, request: &ContextRequest, ledger: &TurnLedger, visible_text: &str) {
         let verifier = trpg_agent::NarrationVerifier;
-        let submission = trpg_agent::FinalNarrationSubmission { player_visible_text: visible_text.to_string(), mechanical_claims: vec![], referenced_ledger_ids: vec![] };
+        // B7 语义决策：agent 不显式声明引用，引擎代填"已落账事实全集"
+        // （ledger_id_set 物化，排序保证确定性）——结构化核对退化为"声称的
+        // id 必在账本"恒真 + 子串回退被关闭；`fallback:substring_scan: `
+        // 标注路径只在账本为空（id 全集为空 → refs 为空）时出现。
+        let referenced_ledger_ids = { let mut ids: Vec<String> = trpg_agent::ledger_id_set(ledger.snapshot()).into_iter().collect(); ids.sort(); ids };
+        let submission = trpg_agent::FinalNarrationSubmission { player_visible_text: visible_text.to_string(), mechanical_claims: vec![], referenced_ledger_ids };
         let result = verifier.verify(ledger.snapshot(), &submission);
         let entries = self.errata.record(&request.turn_id, &result.findings);
         if !entries.is_empty() {
             let event = self.errata.to_memory_event(request, &entries);
             let _ = self.engine.db.save_memory_event(&event).await;
         }
+        // B6：InventedEffect → 追溯债务（叙事已流出不可回收）进下回合清单——
+        // 补 apply_effect 落账或 waive_obligation 带理由，债务必清。
+        let debts = result.findings.iter()
+            .filter(|f| matches!(f.kind, trpg_agent::VerifierFindingKind::InventedEffect))
+            .map(|f| RetroactiveEffectDebt { debt_id: format!("debt_{}", Uuid::new_v4().simple()), turn_id: request.turn_id.clone(), finding_detail: f.detail.clone(), created_at: Utc::now() })
+            .collect::<Vec<_>>();
+        self.obligations.absorb_retro_debts(debts);
     }
 
     /// 确定性收尾（spec §4：save_turn / memory event / learning audit）：持久化
@@ -186,6 +256,14 @@ impl GmLoop {
     }
 }
 
+/// 排空 RedactingBuffer 尾窗并直通 on_delta（混合轮重建 / 轮收尾 / awaiting
+/// 终态共用）；被门轮（blocked）丢弃——B6 门控下该轮任何 content 不得流出。
+fn drain_redactor(redactor: &mut RedactingBuffer, blocked: bool, on_delta: &mut (dyn FnMut(&str) + Send), visible_text: &mut String) {
+    let rest = redactor.finish();
+    if blocked || rest.is_empty() { return; }
+    on_delta(&rest);
+    visible_text.push_str(&rest);
+}
 
 #[cfg(test)]
 #[path = "turn_loop_tests.rs"]

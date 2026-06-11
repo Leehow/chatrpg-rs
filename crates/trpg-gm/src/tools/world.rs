@@ -5,7 +5,9 @@ use async_trait::async_trait;
 use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use trpg_model::{MemoryEvent, MemoryKind, TimeAdvanceRequest, TimeAmount, TimeScale, Visibility};
+use trpg_mechanics::watcher::HookEvent;
+use trpg_mechanics::RefereeCombatService;
+use trpg_model::{MechanicDue, MemoryEvent, MemoryKind, TimeAdvanceRequest, TimeAmount, TimeScale, Visibility};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -28,6 +30,16 @@ pub fn parse_time_scale(s: &str) -> Result<TimeScale> {
         "flashback" => Ok(TimeScale::Flashback),
         other => Err(ToolError::recoverable("invalid_arguments", format!("invalid time scale: {other}"), Some("Use instant, combat_round, scene_beat, exploration, travel, downtime, or flashback.".to_string()))),
     }
+}
+
+/// PURE：hook dues → 工具结果 JSON 数组（due_id/threshold_desc/mechanic_id）。
+pub fn hook_dues_json(dues: &[MechanicDue]) -> Value {
+    Value::Array(dues.iter().map(|d| json!({"due_id": d.due_id, "threshold_desc": d.threshold_desc, "mechanic_id": d.mechanic_id})).collect())
+}
+
+/// PURE：advance_time 结果 JSON（B5 增 "hook_dues" 键，空数组缺省）。
+pub fn advance_time_result_json(from_tick: i64, to_tick: i64, triggered_events: usize, hook_dues: &[MechanicDue]) -> Value {
+    json!({"from_tick": from_tick, "to_tick": to_tick, "triggered_events": triggered_events, "hook_dues": hook_dues_json(hook_dues)})
 }
 
 pub fn parse_navigate_args(value: Value) -> Result<NavigateArgs> {
@@ -62,7 +74,18 @@ impl GmTool for AdvanceTimeTool {
             _ => TimeAmount::minutes(args.amount),
         };
         let result = ctx.engine.advance_world_time(TimeAdvanceRequest { session_id: ctx.request.session_id.clone(), campaign_id: None, reason: args.reason, amount, scale, mutation_kind: Default::default(), visibility: Visibility::GmOnly, caused_by_turn_id: Some(ctx.request.turn_id.clone()), caused_by_event_id: None, scene_epoch: None }).await?;
-        Ok(ToolOutput::ok(json!({"from_tick": result.from.world_tick, "to_tick": result.to.world_tick, "triggered_events": result.triggered_events.len()})))
+        // B5 第三触发通路：advance 后发 TimeAdvance（目录 TimeAdvance 钩子直发、
+        // Calendar 钩子在同一事件内走 calendar_crossed 闸）；downtime 再发 Rest
+        // （数据映射，非新工具）。失败 unwrap_or_default——工具主链不因 watcher 中断。
+        let svc = RefereeCombatService::new(ctx.engine.db.clone());
+        let mut hook_dues = svc
+            .dues_for_hook(&ctx.request.session_id, &ctx.request.turn_id, &ctx.request.ruleset_id, &HookEvent::TimeAdvance { from_tick: result.from.world_tick, to_tick: result.to.world_tick })
+            .await
+            .unwrap_or_default();
+        if scale == TimeScale::Downtime {
+            hook_dues.extend(svc.dues_for_hook(&ctx.request.session_id, &ctx.request.turn_id, &ctx.request.ruleset_id, &HookEvent::Rest).await.unwrap_or_default());
+        }
+        Ok(ToolOutput::ok(advance_time_result_json(result.from.world_tick, result.to.world_tick, result.triggered_events.len(), &hook_dues)))
     }
 }
 
@@ -92,8 +115,23 @@ impl GmTool for NavigateSceneTool {
         if !graph.scenes.iter().any(|s| s.node_id == args.target_node_id) { return Err(ToolError::recoverable("scene_not_found", format!("scene not found: {}", args.target_node_id), None)); }
         if ctx.state.scene_id.as_deref() == Some(args.target_node_id.as_str()) { return Err(ToolError::recoverable("scene_same_as_current", "target scene is already current", None)); }
         ctx.engine.db.set_session_scene(&ctx.request.session_id, &args.target_node_id).await?;
+        // B6 场景切换重开（spec §5.3：scene 豁免"场景切换时清除豁免"）：db 侧
+        // waive_scope='scene' 的 waived 行回到 open（watcher 抑制规则①接管），
+        // 内存侧 Scene waivers 清除（本回合 blocking 视图立刻恢复提醒）。
+        // db 写失败 `?` 上抛——豁免重开是"债务必清"的正确性写入，吞错会把
+        // scene 豁免重新变成会话级永久豁免（恰是本修复要堵的洞）。
+        ctx.engine.db.reopen_scene_waived_dues(&ctx.request.session_id).await?;
+        if let Some(cell) = ctx.obligations {
+            cell.lock().unwrap_or_else(|p| p.into_inner()).clear_scene_waivers();
+        }
+        // B5 第三触发通路：set_session_scene 成功后发 SceneEnter（检测单点在
+        // dues_for_hook，此处只构造事件）。失败 unwrap_or_default 不阻断导航。
+        let hook_dues = RefereeCombatService::new(ctx.engine.db.clone())
+            .dues_for_hook(&ctx.request.session_id, &ctx.request.turn_id, &ctx.request.ruleset_id, &HookEvent::SceneEnter { scene_id: args.target_node_id.clone() })
+            .await
+            .unwrap_or_default();
         let extracted = if let Some(extractor) = ctx.scene_extractor { Some(extractor(args.target_node_id.clone()).await?) } else { None };
-        Ok(ToolOutput::ok(json!({"scene_id": args.target_node_id, "reason": args.reason, "deep_extracted": extracted})))
+        Ok(ToolOutput::ok(json!({"scene_id": args.target_node_id, "reason": args.reason, "deep_extracted": extracted, "hook_dues": hook_dues_json(&hook_dues)})))
     }
 }
 
@@ -109,16 +147,27 @@ mod tests {
     }
 
     #[test]
-    fn registry_has_ten_tools_in_stable_order() {
+    fn registry_has_twelve_tools_in_stable_order() {
         let names = crate::tools::ToolRegistry::standard().schemas().into_iter()
             .map(|v| v.pointer("/function/name").and_then(|x| x.as_str()).unwrap_or("").to_string())
             .collect::<Vec<_>>();
-        assert_eq!(names, vec!["roll_check", "request_player_roll", "apply_effect", "change_track", "retrieve_rules", "get_actor", "ensure_npc_param", "navigate_scene", "advance_time", "remember"]);
+        assert_eq!(names, vec!["roll_check", "request_player_roll", "apply_effect", "change_track", "retrieve_rules", "get_actor", "ensure_npc_param", "navigate_scene", "advance_time", "remember", "lookup_mechanic", "waive_obligation"]);
     }
 
     #[test]
     fn navigate_args_require_target() {
         let err = parse_navigate_args(json!({"reason":"move"})).unwrap_err();
         assert!(err.to_string().contains("invalid_arguments"));
+    }
+
+    #[test]
+    fn advance_time_result_carries_hook_dues_key_shape() {
+        // 纯断言结果 JSON 形状：lazy pool 下 dues 为空数组缺省键即可
+        // （真触发归 C5/C6 e2e）。
+        let v = advance_time_result_json(0, 60, 0, &[]);
+        assert_eq!(v.get("from_tick").and_then(|x| x.as_i64()), Some(0));
+        assert_eq!(v.get("to_tick").and_then(|x| x.as_i64()), Some(60));
+        assert_eq!(v.get("triggered_events").and_then(|x| x.as_i64()), Some(0));
+        assert_eq!(v.get("hook_dues"), Some(&json!([])), "hook_dues key must default to an empty array");
     }
 }

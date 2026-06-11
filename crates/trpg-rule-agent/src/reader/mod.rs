@@ -4,6 +4,8 @@
 
 pub mod agent;
 pub mod chargen_compile;
+pub mod mechanics_compile;
+pub mod mechanics_finalize;
 pub mod module_graph_build;
 pub mod module_graph_edges;
 pub mod module_graph_validator;
@@ -14,11 +16,14 @@ mod object_regrab;
 pub mod onboarding_compile;
 pub mod parallel;
 pub mod run_kit;
+pub(crate) mod scene_mechanics;
 pub mod tools;
 pub mod units;
 
 pub use agent::{run_reader, ReaderResult};
 pub use chargen_compile::{compile_chargen_formulas, CompileCtx};
+pub use mechanics_compile::{compile_mechanics_catalog, MechCompileCtx};
+pub use mechanics_finalize::finalize_catalog;
 pub use module_graph_edges::apply_bridge_edges;
 pub use module_reader::{run_module_reader, ModuleReaderCtx, ModuleReadout};
 pub use module_reader_loop::{complete_skeleton_stubs, deep_extract_scene_in_place};

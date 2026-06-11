@@ -13,7 +13,7 @@
     use std::sync::{Arc, Mutex};
     use trpg_db::Db;
     use trpg_llm::{AggregatedToolCall, LlmClient, StreamEvent, ToolChoice};
-    use trpg_model::{ActorKind, ActorRef, ChatMessage, CheckContract, CheckResultRecord, CheckStakes, CheckTargetModel, CompiledContext, ContextRequest, DiceRollRecord, OppositionModel, RollAuthority, RollDisclosurePolicy, RollVisibility, RulingConfidence, RulingStatus, RuntimeState, TokenBudget, VisibilityProfile};
+    use trpg_model::{ActorKind, ActorRef, ChatMessage, CheckContract, CheckResultRecord, CheckStakes, CheckTargetModel, CompiledContext, ContextRequest, DiceRollRecord, DueSource, DueStatus, MechanicDue, OppositionModel, RollAuthority, RollDisclosurePolicy, RollVisibility, RulingConfidence, RulingStatus, RuntimeState, TokenBudget, VisibilityProfile};
     use trpg_runtime::AutoRollExecution;
 
     struct MockLlm { scripts: Mutex<Vec<Vec<StreamEvent>>>, choices: Mutex<Vec<ToolChoice>>, requests: Mutex<Vec<Vec<Value>>> }
@@ -151,6 +151,20 @@
     }
 
     #[tokio::test]
+    async fn debt_free_round_streams_deltas_incrementally() {
+        // D2 真流式回归（B6 门控前移终审修复）：无债回合的 ContentDelta 必须
+        // 逐块到达 on_delta（恢复一期行为）——缓冲到流结束一次性 flush 会把
+        // 两块合并成单次回调，此断言即红。
+        let scripts = vec![vec![StreamEvent::ContentDelta("第一块。".to_string()), StreamEvent::ContentDelta("第二块。".to_string()), StreamEvent::Done { finish_reason: Some("stop".to_string()) }]];
+        let (mut gm, _llm, request, state) = loop_fixture(scripts, ToolRegistry::from_tools(vec![]), 1);
+        let chunks = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = chunks.clone();
+        let result = gm.run_gm_turn(GmTurnInput { request: &request, state: &state, user_input: "go", history: &[], recent_transcript: None }, &mut move |d| sink.lock().unwrap().push(d.to_string())).await.unwrap();
+        assert_eq!(*chunks.lock().unwrap(), vec!["第一块。".to_string(), "第二块。".to_string()], "deltas must reach on_delta chunk-by-chunk, not as one flush");
+        assert_eq!(result, TurnOutcome::Narration("第一块。第二块。".to_string()));
+    }
+
+    #[tokio::test]
     async fn max_rounds_forces_tool_choice_none() {
         // max_tool_rounds=1：第 1 轮 Auto 仍要工具 → 循环耗尽 → 追加唯一一轮 None。
         // tool_choice 序列必须是 [Auto, None]（循环内绝不提前 None、绝无双重 None）。
@@ -222,6 +236,112 @@
         let tail_content = turn2_request.last().and_then(|m| m.get("content")).and_then(Value::as_str).unwrap_or("");
         assert!(tail_content.contains("[gm_errata]"), "dynamic tail missing errata block: {tail_content}");
         assert!(tail_content.contains("omitted_visible_result"));
+    }
+
+    /// B6 测试用最小 open due（零 per-ruleset 内容：track/desc 是测试夹具语义）。
+    fn seeded_due(id: &str, desc: &str) -> MechanicDue {
+        MechanicDue { due_id: id.to_string(), session_id: "s".to_string(), turn_id: "t".to_string(), source: DueSource::Threshold, source_track: Some("sanity".to_string()), hook_event: None, mechanic_id: None, threshold_desc: desc.to_string(), followup_procedure_id: None, owner_kind: "actor".to_string(), owner_id: "pc.current".to_string(), evidence: json!({"before": 38, "after": 32, "delta": -6}), status: DueStatus::Open, created_at: Utc::now() }
+    }
+
+    fn waive_call(target_id: &str) -> AggregatedToolCall {
+        AggregatedToolCall { id: "call_waive".to_string(), name: "waive_obligation".to_string(), arguments: format!("{{\"target_id\":\"{target_id}\",\"reason\":\"handled in fiction\"}}") }
+    }
+
+    #[tokio::test]
+    async fn open_due_blocks_narration_round() {
+        // spec 验收 5（D2 真流式修复后语义）：ObligationLedger 有未处理 due →
+        // 轮前门控判定该轮被门（blocked），该轮 content 实时丢弃、绝不流给
+        // on_delta（不再缓冲后 flush）；下一轮轮前回填 block_text() 的 system
+        // 观察继续循环（round 0 由 dynamic tail 的 obligations_block 告知，
+        // 不重复回填）；waive 后 content 恢复直通流出。
+        let tools = ToolRegistry::from_tools(vec![Box::new(crate::tools::mechanic::WaiveObligationTool)]);
+        let scripts = vec![
+            vec![StreamEvent::ContentDelta("premature ending".to_string()), StreamEvent::Done { finish_reason: Some("stop".to_string()) }],
+            vec![StreamEvent::ToolCalls(vec![waive_call("due_block")]), StreamEvent::Done { finish_reason: Some("tool_calls".to_string()) }],
+            vec![StreamEvent::ContentDelta("clean ending".to_string()), StreamEvent::Done { finish_reason: Some("stop".to_string()) }],
+        ];
+        let (mut gm, llm, request, state) = loop_fixture(scripts, tools, 4);
+        gm.obligations.absorb_dues(vec![seeded_due("due_block", "sanity threshold crossed")]);
+        let mut out = String::new();
+        let result = gm.run_gm_turn(GmTurnInput { request: &request, state: &state, user_input: "go", history: &[], recent_transcript: None }, &mut |d| out.push_str(d)).await.unwrap();
+        assert!(!out.contains("premature ending"), "blocked round content leaked: {out}");
+        assert_eq!(out, "clean ending");
+        assert_eq!(result, TurnOutcome::Narration("clean ending".to_string()));
+        // 第二轮请求里必须带 block_text() 的 system 观察回填。
+        let second_request = llm.requests.lock().unwrap()[1].clone();
+        let observation = second_request.iter().rev().find(|m| m.get("role").and_then(Value::as_str) == Some("system")).and_then(|m| m.get("content")).and_then(Value::as_str).unwrap_or("").to_string();
+        assert!(observation.contains("[obligations]"), "missing obligations observation: {observation}");
+        assert!(observation.contains("sanity threshold crossed"));
+        assert!(observation.contains("due_block"));
+    }
+
+    #[tokio::test]
+    async fn waive_emits_audit_and_unblocks() {
+        // waive 带理由 → 审计 MemoryEvent tags 含 "gm_waive"（MockLlm 路径断言
+        // 载荷，不连 DB）+ blocking() 清空放行。
+        let tools = ToolRegistry::from_tools(vec![Box::new(crate::tools::mechanic::WaiveObligationTool)]);
+        let scripts = vec![
+            vec![StreamEvent::ToolCalls(vec![waive_call("due_audit")]), StreamEvent::Done { finish_reason: Some("tool_calls".to_string()) }],
+            vec![StreamEvent::ContentDelta("onward".to_string()), StreamEvent::Done { finish_reason: Some("stop".to_string()) }],
+        ];
+        let (mut gm, llm, request, state) = loop_fixture(scripts, tools, 4);
+        gm.obligations.absorb_dues(vec![seeded_due("due_audit", "chaos pool overflow")]);
+        let mut out = String::new();
+        let _ = gm.run_gm_turn(GmTurnInput { request: &request, state: &state, user_input: "go", history: &[], recent_transcript: None }, &mut |d| out.push_str(d)).await.unwrap();
+        assert_eq!(out, "onward");
+        assert!(gm.obligations.blocking().is_empty(), "waive must unblock the ledger");
+        // 审计载荷（纯构造，不打 DB）：tags 必含 "gm_waive"。
+        let record = crate::obligations::WaiverRecord { target_id: "due_audit".to_string(), reason: "handled in fiction".to_string(), scope: crate::obligations::WaiveScope::Turn, turn_id: "t".to_string() };
+        let event = crate::obligations::waiver_to_memory_event(&request, &record);
+        assert!(event.tags.iter().any(|t| t == "gm_waive"), "audit tags missing gm_waive: {:?}", event.tags);
+        // 工具结果回填同样携带审计 tags（agent 可见可审计）。
+        let second_request = llm.requests.lock().unwrap()[1].clone();
+        let tool_content = second_request.iter().find(|m| m.get("role").and_then(Value::as_str) == Some("tool")).and_then(|m| m.get("content")).and_then(Value::as_str).unwrap_or("");
+        assert!(tool_content.contains("gm_waive"), "audit tags missing from tool result: {tool_content}");
+    }
+
+    #[tokio::test]
+    async fn round_exhaustion_carries_debt_to_next_turn() {
+        // 轮耗尽仍有债务 → ToolChoice::None 强制叙事语义不变（一期断言照绿）+
+        // 债务跨回合存活 + 下回合 assemble 的 dynamic tail 含 obligations_block。
+        let scripts = vec![
+            vec![StreamEvent::ContentDelta("blocked draft".to_string()), StreamEvent::Done { finish_reason: Some("stop".to_string()) }],
+            vec![StreamEvent::ContentDelta("forced ending".to_string()), StreamEvent::Done { finish_reason: Some("stop".to_string()) }],
+            vec![StreamEvent::ContentDelta("blocked again".to_string()), StreamEvent::Done { finish_reason: Some("stop".to_string()) }],
+            vec![StreamEvent::ContentDelta("forced again".to_string()), StreamEvent::Done { finish_reason: Some("stop".to_string()) }],
+        ];
+        let (mut gm, llm, request, state) = loop_fixture(scripts, ToolRegistry::from_tools(vec![]), 1);
+        gm.obligations.absorb_dues(vec![seeded_due("due_carry", "sanity threshold crossed")]);
+        let mut out = String::new();
+        let result = gm.run_gm_turn(GmTurnInput { request: &request, state: &state, user_input: "go", history: &[], recent_transcript: None }, &mut |d| out.push_str(d)).await.unwrap();
+        assert_eq!(llm.choices.lock().unwrap()[..2], vec![ToolChoice::Auto, ToolChoice::None]);
+        assert_eq!(out, "forced ending");
+        assert!(matches!(result, TurnOutcome::Narration(_)));
+        // GmLoop.obligations 持久字段含 carryover。
+        assert!(!gm.obligations.blocking().is_empty(), "debt must survive the turn");
+        assert!(gm.obligations.carryover_block().is_some());
+        // 下回合 assemble 的 dynamic tail 含 obligations_block。
+        let request2 = ContextRequest { turn_id: "t2".to_string(), ..request.clone() };
+        let _ = gm.run_gm_turn(GmTurnInput { request: &request2, state: &state, user_input: "继续", history: &[], recent_transcript: None }, &mut |d| out.push_str(d)).await.unwrap();
+        let turn2_request = llm.requests.lock().unwrap()[2].clone();
+        let tail = turn2_request.last().and_then(|m| m.get("content")).and_then(Value::as_str).unwrap_or("");
+        assert!(tail.contains("[obligations_carryover]"), "tail missing obligations_block: {tail}");
+        assert!(tail.contains("sanity threshold crossed"));
+    }
+
+    #[tokio::test]
+    async fn invented_effect_becomes_retro_debt() {
+        // spec 验收 11 单测侧：verify_after_stream 抓到 InventedEffect →
+        // absorb_retro_debts → 下回合 blocking() 含该 debt_id。
+        let scripts = vec![vec![StreamEvent::ContentDelta("你失去了 3 点理智。".to_string()), StreamEvent::Done { finish_reason: Some("stop".to_string()) }]];
+        let (mut gm, _llm, request, state) = loop_fixture(scripts, ToolRegistry::from_tools(vec![]), 2);
+        let mut out = String::new();
+        let _ = gm.run_gm_turn(GmTurnInput { request: &request, state: &state, user_input: "go", history: &[], recent_transcript: None }, &mut |d| out.push_str(d)).await.unwrap();
+        assert_eq!(gm.errata.kind_counts().get("invented_effect"), Some(&1));
+        let blocking = gm.obligations.blocking();
+        assert_eq!(blocking.len(), 1, "exactly one retro debt expected: {blocking:?}");
+        assert_eq!(blocking[0].kind, "debt");
+        assert!(blocking[0].target_id.starts_with("debt_"), "debt_id shape: {}", blocking[0].target_id);
     }
 
     #[tokio::test]

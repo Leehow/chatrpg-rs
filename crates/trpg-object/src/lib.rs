@@ -602,6 +602,47 @@ impl ObjectService {
         Ok(out)
     }
 
+    /// effect_policy SetObjectState 的执行原语（C4 scene_policy 的对象态落库单点）：
+    /// object_instances 无该 object_id 行 → 先建最小实例（模组声明即存在：
+    /// display_name=object_id、object_kind 默认、scope={Session, session_id}、
+    /// mechanical_state={}、active=true，经既有 upsert_instance），再走既有
+    /// SetMechanicalState merge SQL（apply_patch 分支）。返回 created
+    /// （是否新建了实例——可观测）。
+    pub async fn apply_external_mechanical_patch(
+        &self,
+        session_id: &str,
+        object_id: &str,
+        patch_json: serde_json::Value,
+        reason: &str,
+        world_tick: i64,
+    ) -> Result<bool> {
+        let created = if self.find_object(session_id, object_id).await?.is_none() {
+            let obj = ObjectInstance {
+                object_id: object_id.to_string(),
+                session_id: session_id.to_string(),
+                scope: Scope { scope_type: ScopeType::Session, scope_id: session_id.to_string() },
+                display_name: object_id.to_string(),
+                visibility_state: visible_state(object_id, true),
+                mechanical_state: json!({}),
+                created_at_tick: world_tick,
+                updated_at_tick: world_tick,
+                active: true,
+                ..Default::default()
+            };
+            self.upsert_instance(&obj).await?;
+            true
+        } else {
+            false
+        };
+        let patch = ObjectPatch::SetMechanicalState {
+            object_id: object_id.to_string(),
+            patch_json,
+            reason: reason.to_string(),
+        };
+        self.apply_patch(session_id, "scene.policy", &patch, world_tick).await?;
+        Ok(created)
+    }
+
     /// True when `object_id` is provably owned by `owner_actor_id` (scope_id or
     /// held_by:/carried_by: tags). Gates the loot patch-validation allowance.
     async fn object_owned_by(&self, session_id: &str, object_id: &str, owner_actor_id: &str) -> Result<bool> {

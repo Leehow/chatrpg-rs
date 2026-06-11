@@ -3508,8 +3508,10 @@ dependencies = [
  "trpg-llm",
  "trpg-mechanics",
  "trpg-model",
+ "trpg-object",
  "trpg-params",
  "trpg-runtime",
+ "trpg-time",
  "uuid",
 ]
 

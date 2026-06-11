@@ -22,12 +22,14 @@ fn default_skills_bucket() -> String { "skills".to_string() }
 #[derive(Debug, Clone, Deserialize)]
 pub struct RollCheckArgs {
     pub check_label: String,
-    pub tested_parameter: String,
+    #[serde(default)] pub tested_parameter: String,        // 一期 required → 二期：无 mechanic_id 时仍必填（运行时校验）
     pub actor_id: Option<String>,
     pub opposed: Option<OpposedArgs>,
     #[serde(default = "default_public")]
     pub visibility: String,
     pub intent_kind: Option<String>,
+    #[serde(default)] pub mechanic_id: Option<String>,
+    #[serde(default)] pub scene_mechanic_id: Option<String>, // 字段+schema 本任务落；消费逻辑归 C4
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -47,10 +49,28 @@ fn default_public() -> String { "public".to_string() }
 pub fn parse_roll_check_args(value: Value) -> Result<RollCheckArgs> {
     let args: RollCheckArgs = serde_json::from_value(value)
         .map_err(|e| ToolError::recoverable("invalid_arguments", format!("roll_check arguments invalid: {e}"), Some("Provide check_label and tested_parameter.".to_string())))?;
-    if args.tested_parameter.trim().is_empty() {
+    // 无 mechanic_id 时 tested_parameter 仍必填（一期语义保持）；
+    // 有 mechanic_id 时延后到 call 内目录继承之后再校验。
+    if args.mechanic_id.is_none() && args.tested_parameter.trim().is_empty() {
         return Err(ToolError::recoverable("invalid_arguments", "tested_parameter is required", Some("Bind the check to the real actor parameter being tested.".to_string())));
     }
     Ok(args)
+}
+
+/// 纯函数：目录继承。显式 args 优先（目录是知识不是枷锁）：
+/// - args.tested_parameter 为空且 entry.tested_parameter 为 Some → 写入 args；
+/// - 返回 entry.procedure 首个 ProcedureStep::Roll 的 dice（Some 时调用方用它替代
+///   kernel_dice_expr 缺省；显式骰式本工具本无入参，不存在覆盖冲突）。
+pub fn apply_mechanic_inheritance(args: &mut RollCheckArgs, entry: &MechanicEntry) -> Option<String> {
+    if args.tested_parameter.trim().is_empty() {
+        if let Some(param) = entry.tested_parameter.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            args.tested_parameter = param.to_string();
+        }
+    }
+    entry.procedure.iter().find_map(|step| match step {
+        ProcedureStep::Roll { dice, .. } => Some(dice.clone()),
+        _ => None,
+    })
 }
 
 fn parse_player_args(value: Value) -> Result<RequestPlayerRollArgs> {
@@ -114,7 +134,7 @@ pub fn build_check_contract_for_args(session_id: &str, turn_id: &str, ruleset_id
 }
 
 pub fn build_player_contract_for_args(session_id: &str, turn_id: &str, ruleset_id: &str, module_id: Option<&str>, args: &RequestPlayerRollArgs, dice: &str) -> Result<CheckContract> {
-    let mut sys_args = RollCheckArgs { check_label: args.check_label.clone(), tested_parameter: args.tested_parameter.clone(), actor_id: Some("pc.current".to_string()), opposed: None, visibility: args.visibility.clone(), intent_kind: Some("player_roll_requested".to_string()) };
+    let mut sys_args = RollCheckArgs { check_label: args.check_label.clone(), tested_parameter: args.tested_parameter.clone(), actor_id: Some("pc.current".to_string()), opposed: None, visibility: args.visibility.clone(), intent_kind: Some("player_roll_requested".to_string()), mechanic_id: None, scene_mechanic_id: None };
     sys_args.visibility = "public".to_string();
     let mut c = build_check_contract_for_args(session_id, turn_id, ruleset_id, module_id, &sys_args, dice)?;
     c.roll_visibility = RollVisibility::PlayerRollRequired;
@@ -126,14 +146,14 @@ pub fn build_player_contract_for_args(session_id: &str, turn_id: &str, ruleset_i
     Ok(c)
 }
 
-async fn kernel_dice(ctx: &ToolCtx<'_>) -> Result<String> {
-    let kernel = ctx.engine.db.load_rule_kernel(&ctx.request.ruleset_id).await?;
-    let dice = kernel
+/// 纯辅助：kernel 缺省骰式。B3 小重构——call 顶部 load_rule_kernel 一次后复用
+/// （band_semantics 也要同一 kernel），不再每处各查一遍 db。
+fn kernel_dice_expr(kernel: Option<&RuleKernel>) -> Result<String> {
+    kernel
         .and_then(|k| k.dice_core.get("dice").and_then(Value::as_str).map(str::to_string))
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| ToolError::recoverable("missing_kernel_dice", "rule kernel has no dice_core.dice", Some("Call retrieve_rules for a source-backed procedure, ask for a player roll, or narrate without a mechanical roll.".to_string())))?;
-    Ok(dice)
+        .ok_or_else(|| ToolError::recoverable("missing_kernel_dice", "rule kernel has no dice_core.dice", Some("Call retrieve_rules for a source-backed procedure, ask for a player roll, or narrate without a mechanical roll.".to_string())).into())
 }
 
 pub struct RollCheckTool;
@@ -141,13 +161,54 @@ pub struct RollCheckTool;
 #[async_trait]
 impl GmTool for RollCheckTool {
     fn spec(&self) -> ToolSpec {
-        ToolSpec { name: "roll_check", schema: json!({"type":"function","function":{"name":"roll_check","description":"Execute a source-backed system roll. tested_parameter is mandatory.","parameters":{"type":"object","properties":{"check_label":{"type":"string"},"tested_parameter":{"type":"string"},"actor_id":{"type":"string"},"opposed":{"type":"object","properties":{"npc_id":{"type":"string"},"opponent_parameter":{"type":"string"},"bucket":{"type":"string","default":"skills"}},"required":["npc_id","opponent_parameter"]},"visibility":{"type":"string","enum":["public","secret"]},"intent_kind":{"type":"string"}},"required":["check_label","tested_parameter"]}}}) }
+        ToolSpec { name: "roll_check", schema: json!({"type":"function","function":{"name":"roll_check","description":"Execute a source-backed system roll. tested_parameter is mandatory unless inherited via mechanic_id.","parameters":{"type":"object","properties":{"check_label":{"type":"string"},"tested_parameter":{"type":"string"},"actor_id":{"type":"string"},"opposed":{"type":"object","properties":{"npc_id":{"type":"string"},"opponent_parameter":{"type":"string"},"bucket":{"type":"string","default":"skills"}},"required":["npc_id","opponent_parameter"]},"visibility":{"type":"string","enum":["public","secret"]},"intent_kind":{"type":"string"},"mechanic_id":{"type":"string"},"scene_mechanic_id":{"type":"string","description":"intent_id from the current scene's mechanic-intents block; inherits the module-stated tested_parameter/difficulty and the engine enforces the stated consequences after settlement"}},"required":["check_label"]}}}) }
     }
 
     async fn call(&self, ctx: &ToolCtx<'_>, ledger: &mut TurnLedger, args: Value) -> Result<ToolOutput> {
-        let args = parse_roll_check_args(args)?;
-        let dice = kernel_dice(ctx).await?;
+        let mut args = parse_roll_check_args(args)?;
+        // kernel 单次加载（B3）：目录继承、缺省骰式、band 语义共用同一份。
+        let kernel = ctx.engine.db.load_rule_kernel(&ctx.request.ruleset_id).await?;
+        // ① mechanic_id 给定 → 查目录继承（目录是知识不是枷锁：显式 args 优先）。
+        let mut inherited_dice: Option<String> = None;
+        if let Some(mechanic_id) = args.mechanic_id.clone() {
+            let entry = kernel
+                .as_ref()
+                .and_then(|k| crate::tools::mechanic::find_mechanic(&k.mechanics_catalog, &mechanic_id));
+            let Some(entry) = entry else {
+                return Err(ToolError::recoverable(
+                    "mechanic_not_found",
+                    format!("mechanic not found in catalog: {mechanic_id}"),
+                    Some("Check the BP1 mechanics index for valid ids, or use retrieve_rules.".to_string()),
+                ));
+            };
+            inherited_dice = apply_mechanic_inheritance(&mut args, entry);
+        }
+        // ② 继承后 tested_parameter 仍空 → invalid_arguments（一期语义保持）。
+        if args.tested_parameter.trim().is_empty() {
+            return Err(ToolError::recoverable("invalid_arguments", "tested_parameter is required", Some("Bind the check to the real actor parameter being tested.".to_string())));
+        }
+        // C4：scene_mechanic_id → 当前场景 intent（解析/错误码细节在 scene_policy）。
+        let scene_intent = crate::scene_policy::resolve_scene_intent(ctx.engine, ctx.request, ctx.state.scene_id.as_deref(), args.scene_mechanic_id.as_deref()).await?;
+        // 显式 args 优先（意图是知识不是枷锁）：与 intent.tested_parameter 不一致用 args 值并标记（可观测）。
+        let parameter_overridden = scene_intent.as_ref().is_some_and(|i| !args.tested_parameter.trim().is_empty() && args.tested_parameter.trim() != i.tested_parameter.trim());
+        // 继承骰式为 Some 用之；None 仍走 kernel 缺省（missing_kernel_dice 语义不变）。
+        let dice = match inherited_dice {
+            Some(d) => d,
+            None => kernel_dice_expr(kernel.as_ref())?,
+        };
         let mut contract = build_check_contract_for_args(&ctx.request.session_id, &ctx.request.turn_id, &ctx.request.ruleset_id, ctx.request.module_id.as_deref(), &args, &dice)?;
+        // ③ 结构化引用走 advice_refs，不动 CheckContract 5 处签名（契约 §6 注记）。
+        if let Some(mechanic_id) = &args.mechanic_id {
+            contract.advice_refs.push(format!("mechanic:{mechanic_id}"));
+        }
+        // C4：场景意图继承——difficulty 认得的形态 → StaticNumber target（认不出保持
+        // UnknownUntilLookup，交给 kernel defaults，fail-closed）；结构化引用进账（护栏 §3.5.1）。
+        if let Some(intent) = &scene_intent {
+            if let Some(t) = crate::scene_policy::difficulty_to_target(intent.difficulty.as_ref()) {
+                contract.target = t;
+            }
+            contract.advice_refs.push(format!("scene_mechanic:{}", intent.intent_id));
+        }
         if let Some(opposed) = &args.opposed {
             let persona = trpg_runtime::npc_synth::NpcPersona { actor_id: opposed.npc_id.clone(), name: opposed.npc_id.clone(), prose: "opposition selected by GM agent".to_string() };
             // fail-closed 不静默：防御参数合成失败 ⇒ 结构化错误让 agent 改道
@@ -181,7 +242,10 @@ impl GmTool for RollCheckTool {
         ledger.record_contract(&contract);
         let exec = ctx.engine.execute_system_roll_bundle(&ctx.request.session_id, &ctx.request.turn_id, &contract).await?;
         ledger.record_execution(&exec);
-        Ok(ToolOutput::ok(json!({
+        // B3：成功度的剧情/机制语义随结果带回（success_bands[*].semantics 渲染）。
+        // None → 整键缺省（fail-closed：裸 band 仍在 outcome 里，绝不编造语义）。
+        let band_line = kernel.as_ref().and_then(|k| band_semantics_line(&k.dice_core, &exec.primary.outcome));
+        let mut out = json!({
             "check_id": contract.check_id,
             "check_label": contract.check_label,
             "roll_policy": exec.roll_policy,
@@ -189,7 +253,37 @@ impl GmTool for RollCheckTool {
             "primary_roll": exec.primary.roll.result,
             "committed_patch_count": exec.primary.committed_patches.len(),
             "followup_count": exec.followups.len()
-        })))
+        });
+        if let Some(line) = band_line {
+            if let Some(obj) = out.as_object_mut() {
+                obj.insert("band_semantics".into(), json!(line));
+            }
+        }
+        // C4：结算后 effect_policy Rust 强制执行（spec §6"效果不留给叙事"——结算完成后
+        // 由 Rust 立即执行、不经叙事；outcome 无 success 布尔则 fail-closed 跳过并标记）。
+        if let Some(intent) = &scene_intent {
+            if parameter_overridden {
+                if let Some(obj) = out.as_object_mut() {
+                    obj.insert("parameter_overridden_from_intent".into(), json!(true));
+                }
+            }
+            crate::scene_policy::run_policy_after_settlement(ctx.engine, ctx.request, intent, &exec.primary.outcome, &mut out, ledger).await?;
+        }
+        // B4：本回合结算新产的机械债务当场带回（spec §5.2 agent 当场看见）。
+        // 轻查询：复用 list_open（回合内行数极小），按 turn_id 过滤本回合新产；
+        // 查询失败按空处理（fail-closed，不阻断结果）；空数组时整键缺省。
+        let dues: Vec<Value> = ctx.engine.db.list_open_mechanic_dues(&ctx.request.session_id).await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|d| d.turn_id == ctx.request.turn_id)
+            .map(|d| json!({"due_id": d.due_id, "threshold_desc": d.threshold_desc, "followup_procedure_id": d.followup_procedure_id, "evidence": d.evidence}))
+            .collect();
+        if !dues.is_empty() {
+            if let Some(obj) = out.as_object_mut() {
+                obj.insert("dues".into(), json!(dues));
+            }
+        }
+        Ok(ToolOutput::ok(out))
     }
 }
 
@@ -203,7 +297,8 @@ impl GmTool for RequestPlayerRollTool {
 
     async fn call(&self, ctx: &ToolCtx<'_>, ledger: &mut TurnLedger, args: Value) -> Result<ToolOutput> {
         let args = parse_player_args(args)?;
-        let dice = kernel_dice(ctx).await?;
+        let kernel = ctx.engine.db.load_rule_kernel(&ctx.request.ruleset_id).await?;
+        let dice = kernel_dice_expr(kernel.as_ref())?;
         let contract = build_player_contract_for_args(&ctx.request.session_id, &ctx.request.turn_id, &ctx.request.ruleset_id, ctx.request.module_id.as_deref(), &args, &dice)?;
         // 对齐 persist_agent_plan 既有行为：插新 pending 前先作废旧 open gate，
         // 防同会话累积多个 open pending check。
@@ -226,20 +321,74 @@ mod tests {
     use trpg_model::{CheckTargetModel, RollAuthority, RollVisibility};
 
     #[test]
-    fn roll_args_require_tested_parameter() {
+    fn roll_check_without_mechanic_still_requires_tested_parameter() {
         let err = parse_roll_check_args(json!({"check_label":"Scan","visibility":"public"})).unwrap_err();
         assert!(err.to_string().contains("invalid_arguments"));
     }
 
     #[test]
+    fn mechanic_inheritance_fills_tested_parameter_and_dice() {
+        let entry = MechanicEntry {
+            id: "coc.skill.jump".to_string(),
+            name: "Jump".to_string(),
+            tested_parameter: Some("jump".to_string()),
+            procedure: vec![ProcedureStep::Roll { dice: "1d100".to_string(), vs: None, note: None }],
+            ..Default::default()
+        };
+        let mut args = RollCheckArgs { check_label: "Jump the chasm".to_string(), tested_parameter: String::new(), actor_id: None, opposed: None, visibility: "public".to_string(), intent_kind: None, mechanic_id: Some("coc.skill.jump".to_string()), scene_mechanic_id: None };
+        let dice = apply_mechanic_inheritance(&mut args, &entry);
+        assert_eq!(args.tested_parameter, "jump");
+        assert_eq!(dice, Some("1d100".to_string()));
+    }
+
+    #[test]
+    fn explicit_args_beat_catalog() {
+        let entry = MechanicEntry {
+            id: "coc.skill.jump".to_string(),
+            name: "Jump".to_string(),
+            tested_parameter: Some("jump".to_string()),
+            ..Default::default()
+        };
+        let mut args = RollCheckArgs { check_label: "Climb the wall".to_string(), tested_parameter: "climb".to_string(), actor_id: None, opposed: None, visibility: "public".to_string(), intent_kind: None, mechanic_id: Some("coc.skill.jump".to_string()), scene_mechanic_id: None };
+        apply_mechanic_inheritance(&mut args, &entry);
+        assert_eq!(args.tested_parameter, "climb");
+    }
+
+    #[test]
     fn build_contract_binds_tested_parameter_and_visibility() {
-        let args = RollCheckArgs { check_label: "Stealth".to_string(), tested_parameter: "Stealth".to_string(), actor_id: Some("pc.current".to_string()), opposed: None, visibility: "secret".to_string(), intent_kind: Some("stealth_or_dangerous_movement".to_string()) };
+        let args = RollCheckArgs { check_label: "Stealth".to_string(), tested_parameter: "Stealth".to_string(), actor_id: Some("pc.current".to_string()), opposed: None, visibility: "secret".to_string(), intent_kind: Some("stealth_or_dangerous_movement".to_string()), mechanic_id: None, scene_mechanic_id: None };
         let contract = build_check_contract_for_args("s", "t", "cyberpunk_red", Some("homecoming"), &args, "1d10").unwrap();
         assert_eq!(contract.tested_parameter.as_ref().unwrap().key, "Stealth");
         assert_eq!(contract.roll_visibility, RollVisibility::PrivateGmRoll);
         assert_eq!(contract.roll_authority, RollAuthority::System);
         // CheckTargetModel 是带数据枚举，没有 as_str()，必须用 matches! 断言。
         assert!(matches!(contract.target, CheckTargetModel::UnknownUntilLookup));
+    }
+
+    // B3: roll_check 结果 JSON 的 band_semantics 渲染（纯函数级——构造
+    // outcome+dice_core 调 band_semantics_line；工具级走真 db 的留 C5 e2e）。
+    #[test]
+    fn roll_check_result_carries_band_semantics_when_kernel_has_it() {
+        let dice_core = json!({"success_bands":[{"id":"hard","label":"困难成功","semantics":"超出常人的表现"}]});
+        let outcome = json!({"success": true, "success_tier": "hard"});
+        let line = band_semantics_line(&dice_core, &outcome).expect("kernel band semantics must render");
+        for seg in ["hard", "困难成功", "超出常人的表现"] {
+            assert!(line.contains(seg), "line must contain `{seg}`: {line}");
+        }
+        // 无 semantics 的 kernel -> None（call 端整键缺省，裸 band 仍在 outcome 里）
+        let bare = json!({"success_bands":[{"id":"hard","label":"困难成功"}]});
+        assert_eq!(band_semantics_line(&bare, &outcome), None);
+    }
+
+    // C4：scene_mechanic_id 字段就位 + 向后兼容（不给 → None）。C7：player 路径同入口。
+    #[test]
+    fn roll_args_accept_scene_mechanic_id() {
+        let args = parse_roll_check_args(json!({"check_label":"Cut the cable","tested_parameter":"brawling","scene_mechanic_id":"x"})).unwrap();
+        assert_eq!(args.scene_mechanic_id.as_deref(), Some("x"));
+        let args = parse_roll_check_args(json!({"check_label":"Cut the cable","tested_parameter":"brawling"})).unwrap();
+        assert!(args.scene_mechanic_id.is_none());
+        let p = parse_player_args(json!({"check_label":"c","tested_parameter":"brawling","stakes":{"before":"b","success":"s","failure":"f"},"scene_mechanic_id":"x"})).unwrap();
+        assert_eq!(p.scene_mechanic_id.as_deref(), Some("x"));
     }
 
     #[test]

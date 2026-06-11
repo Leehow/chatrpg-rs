@@ -83,6 +83,10 @@ pub(crate) mod fixtures {
         let roll = DiceRollRecord { roll_id: format!("roll_{check_id}"), session_id: "s".to_string(), turn_id: "t".to_string(), check_id: Some(check_id.to_string()), roller_kind: ActorKind::PlayerCharacter, roller_id: Some("pc.current".to_string()), visibility: RollVisibility::PublicGmRoll, expression: "1d100".to_string(), result: json!({"total": 27}), seed_commitment: "seed".to_string(), revealed_at: None, created_at: Utc::now() };
         CheckResultRecord { check_id: check_id.to_string(), roll, outcome: json!({"success": true}), committed_patches: vec![], created_at: Utc::now() }
     }
+
+    pub(crate) fn gate_request(module_id: Option<&str>) -> trpg_model::ContextRequest {
+        trpg_model::ContextRequest { ruleset_id: "rs".to_string(), module_id: module_id.map(str::to_string), session_id: "s".to_string(), turn_id: "t".to_string(), viewer: trpg_model::VisibilityProfile::gm(), token_budget: trpg_model::TokenBudget::default() }
+    }
 }
 
 #[cfg(test)]

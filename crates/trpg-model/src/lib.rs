@@ -7,6 +7,8 @@ use uuid::Uuid;
 
 pub mod mechanics;
 pub use mechanics::*;
+pub mod mechanics_render;
+pub use mechanics_render::*;
 
 pub const PROJECT_SCHEMA_VERSION: &str = "chatrpg.project_bundle.v1";
 pub const RULE_SCHEMA_VERSION: &str = "chatrpg.rule_bundle.v1";
@@ -237,6 +239,7 @@ pub enum BlockKind {
     RulesetCharacterKernel,
     RulesetOnboarding,
     RuleStewardKernel,
+    MechanicsCatalogIndex,
     RuleAgentRun,
     RuleKernelPatch,
     RuleEntityLocator,
@@ -383,6 +386,7 @@ impl BlockKind {
             BlockKind::RulesetCharacterKernel => "ruleset_character_kernel",
             BlockKind::RulesetOnboarding => "ruleset_onboarding",
             BlockKind::RuleStewardKernel => "rule_steward_kernel",
+            BlockKind::MechanicsCatalogIndex => "mechanics_catalog_index",
             BlockKind::RuleAgentRun => "rule_agent_run",
             BlockKind::RuleKernelPatch => "rule_kernel_patch",
             BlockKind::RuleEntityLocator => "rule_entity_locator",

@@ -229,17 +229,30 @@ impl NarrationVerifier {
             }
         }
 
-        if submission.mechanical_claims.is_empty() {
+        if !submission.referenced_ledger_ids.is_empty() {
+            // B7 结构化核对优先（护栏 §3.5.5）：每个引用 id 必须 ∈ 账本 id 全集
+            // （check_id ∪ roll_id ∪ effect_id ∪ impact_id）；不存在 → InventedEffect。
+            let known = ledger_id_set(ledger);
+            for id in &submission.referenced_ledger_ids {
+                if !known.contains(id) {
+                    findings.push(VerifierFinding::blocker(
+                        VerifierFindingKind::InventedEffect,
+                        format!("referenced ledger id not found in turn ledger: {id}"),
+                    ));
+                }
+            }
+        } else if submission.mechanical_claims.is_empty() {
+            // 引用为空 → 回退子串扫描（可观测技术债：detail 带标注前缀，不静默）。
             if text_says_check_or_roll(&text) && !ledger.has_check_fact() {
                 findings.push(VerifierFinding::blocker(
                     VerifierFindingKind::MissingCheck,
-                    "final narration mentions a check/roll, but no ledger check fact exists",
+                    "fallback:substring_scan: final narration mentions a check/roll, but no ledger check fact exists",
                 ));
             }
             if text_says_effect(&text) && !ledger.has_effect_evidence() {
                 findings.push(VerifierFinding::blocker(
                     VerifierFindingKind::InventedEffect,
-                    "final narration mentions a mechanical effect, but no ledger effect evidence exists",
+                    "fallback:substring_scan: final narration mentions a mechanical effect, but no ledger effect evidence exists",
                 ));
             }
         }
@@ -356,6 +369,26 @@ fn next_action_for(findings: &[VerifierFinding]) -> Option<VerifierNextAction> {
     } else {
         Some(VerifierNextAction::ReviseText)
     }
+}
+
+/// 账本 id 全集（B7 结构化核对）：check_contracts 的 check_id ∪ dice_rolls 的
+/// roll_id ∪ effect_contracts 的 effect_id ∪ parameter_impacts 的 impact_id。
+/// pub 仅为 trpg-gm verify_after_stream 以"已落账事实全集"代填 referenced_ledger_ids。
+pub fn ledger_id_set(ledger: &TurnLedgerSnapshot) -> std::collections::HashSet<String> {
+    let mut ids = std::collections::HashSet::new();
+    for check in &ledger.check_contracts {
+        ids.insert(check.check_id.clone());
+    }
+    for roll in &ledger.dice_rolls {
+        ids.insert(roll.roll_id.clone());
+    }
+    for effect in &ledger.effect_contracts {
+        ids.insert(effect.effect_id.clone());
+    }
+    for impact in &ledger.parameter_impacts {
+        ids.insert(impact.impact_id.clone());
+    }
+    ids
 }
 
 fn roll_is_player_visible(visibility: RollVisibility) -> bool {
@@ -632,6 +665,91 @@ mod tests {
         let result = NarrationVerifier::default().verify(&ledger, &submission);
 
         assert!(result.accepted, "{:?}", result.findings);
+    }
+
+    #[test]
+    fn verifier_structured_refs_accept_known_ids() {
+        // B7 测试 1：引用账本真实 id 全集 → accepted。OmittedVisibleResult 语义
+        // 保留（可见结果 token 检查独立运行），故构造 token 在文本中存在的用例。
+        let result_record = sample_result(
+            "check_attack",
+            RollVisibility::PublicGmRoll,
+            "1d10+12",
+            json!({"total": 18, "band": "success"}),
+        );
+        let ledger = TurnLedgerSnapshot {
+            check_contracts: vec![sample_check("check_attack", "手枪攻击")],
+            dice_rolls: vec![result_record.roll.clone()],
+            check_results: vec![result_record],
+            effect_contracts: vec![sample_effect("effect_damage", "npc.scav")],
+            parameter_impacts: vec![sample_impact("impact_hp", "npc.scav", "hp.current", -8)],
+            ..Default::default()
+        };
+        let submission = FinalNarrationSubmission {
+            player_visible_text: "手枪攻击 1d10+12 掷出 18，命中。effect_damage 生效，npc.scav 的 hp.current 受到 -8 影响。".into(),
+            mechanical_claims: vec![
+                MechanicalClaim::new(MechanicalClaimKind::Roll, "手枪攻击 18"),
+                MechanicalClaim::new(MechanicalClaimKind::Damage, "hp.current -8"),
+            ],
+            referenced_ledger_ids: vec![
+                "check_attack".into(),
+                "roll_check_attack".into(),
+                "effect_damage".into(),
+                "impact_hp".into(),
+            ],
+        };
+
+        let result = NarrationVerifier::default().verify(&ledger, &submission);
+
+        assert!(result.accepted, "{:?}", result.findings);
+        assert!(result.findings.is_empty());
+        assert_eq!(result.next_required_action, None);
+    }
+
+    #[test]
+    fn verifier_structured_refs_reject_unknown_id() {
+        // B7 测试 2：引用不存在的账本 id → InventedEffect finding 含该 id。
+        let ledger = TurnLedgerSnapshot {
+            check_contracts: vec![sample_check("check_attack", "手枪攻击")],
+            ..Default::default()
+        };
+        let submission = FinalNarrationSubmission {
+            player_visible_text: "手枪攻击蓄势待发。".into(),
+            mechanical_claims: vec![],
+            referenced_ledger_ids: vec!["check_不存在".into()],
+        };
+
+        let result = NarrationVerifier::default().verify(&ledger, &submission);
+
+        assert!(!result.accepted);
+        assert!(
+            result.findings.iter().any(|f| f.kind == VerifierFindingKind::InventedEffect
+                && f.detail.contains("check_不存在")),
+            "{:?}",
+            result.findings
+        );
+    }
+
+    #[test]
+    fn verifier_empty_refs_falls_back_with_marker() {
+        // B7 测试 3：引用为空 + 文本声称伤害无账本证据 → 回退子串扫描，
+        // finding detail 以 `fallback:substring_scan: ` 开头（可观测技术债）。
+        let ledger = TurnLedgerSnapshot::default();
+        let submission = FinalNarrationSubmission {
+            player_visible_text: "清道夫受到 8 点伤害，踉跄后退。".into(),
+            mechanical_claims: vec![],
+            referenced_ledger_ids: vec![],
+        };
+
+        let result = NarrationVerifier::default().verify(&ledger, &submission);
+
+        assert!(!result.accepted);
+        assert!(
+            result.findings.iter().any(|f| f.kind == VerifierFindingKind::InventedEffect
+                && f.detail.starts_with("fallback:substring_scan: ")),
+            "{:?}",
+            result.findings
+        );
     }
 
     fn sample_check(check_id: &str, label: &str) -> CheckContract {

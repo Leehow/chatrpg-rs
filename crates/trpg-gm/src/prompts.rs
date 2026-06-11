@@ -13,6 +13,9 @@ pub struct DynamicTailInput<'a> {
     pub resolved_gate_facts: &'a [String],
     /// ErrataMemory 的勘误块 + 持续提醒块；无则空（块整体缺省，不写空块）。
     pub errata_blocks: &'a [String],
+    /// 上回合遗留机械债务（ObligationLedger::carryover_block）；排在
+    /// errata_blocks 之后、Player Input 之前。None ⇒ 不写块。
+    pub obligations_block: Option<&'a str>,
 }
 
 /// 回合消息容器：assemble 渲染一次、整回合复用；工具轮只在尾部 push，
@@ -42,6 +45,10 @@ impl TurnMessages {
             dynamic.push_str("\n\n");
             dynamic.push_str(&tail.errata_blocks.join("\n\n"));
         }
+        if let Some(block) = tail.obligations_block {
+            dynamic.push_str("\n\n");
+            dynamic.push_str(block);
+        }
         dynamic.push_str("\n\n[Player Input]\n");
         dynamic.push_str(tail.user_input);
         messages.push(json!({"role":"user","content": dynamic}));
@@ -58,6 +65,12 @@ impl TurnMessages {
     /// 工具轮：追加一条 tool role 结果消息（content = dispatch 产物）。
     pub fn push_tool_result(&mut self, tool_call_id: &str, name: &str, content: &str) {
         self.messages.push(json!({"role":"tool","tool_call_id": tool_call_id,"name": name,"content": content}));
+    }
+
+    /// 债务门控（B6）：被拦下的叙事终态轮回填 block_text() 为 system 观察，
+    /// 该轮 content 整体丢弃后循环继续（尾部追加，前缀字节不动）。
+    pub fn push_system_observation(&mut self, text: &str) {
+        self.messages.push(json!({"role":"system","content": text}));
     }
 
     /// 每轮请求体快照（Vec<Value> clone）。
@@ -121,7 +134,7 @@ mod tests {
     #[test]
     fn assemble_order_is_stable() {
         let history = vec![ChatMessage { role: "assistant".to_string(), content: "old".to_string() }];
-        let tail = DynamicTailInput { user_input: "go", resolved_gate_facts: &["[roll]done[/roll]".to_string()], errata_blocks: &["[gm_errata]fix[/gm_errata]".to_string()] };
+        let tail = DynamicTailInput { user_input: "go", resolved_gate_facts: &["[roll]done[/roll]".to_string()], errata_blocks: &["[gm_errata]fix[/gm_errata]".to_string()], obligations_block: Some("[obligations_carryover]debt[/obligations_carryover]") };
         let messages = TurnMessages::assemble(&compiled(), "SKILL", &history, &tail);
         let raw = messages.to_request_messages();
         assert_eq!(raw[0].get("role").and_then(Value::as_str), Some("system"));
@@ -130,13 +143,17 @@ mod tests {
         assert!(raw[2].get("content").and_then(Value::as_str).unwrap().contains("old"));
         assert!(raw[3].get("content").and_then(Value::as_str).unwrap().contains("BP3"));
         assert!(raw[3].get("content").and_then(Value::as_str).unwrap().contains("[Player Input]"));
+        // B6 契约：obligations_block 排在 errata_blocks 之后、Player Input 之前。
+        let dynamic = raw[3].get("content").and_then(Value::as_str).unwrap();
+        assert!(dynamic.find("[gm_errata]").unwrap() < dynamic.find("[obligations_carryover]").unwrap());
+        assert!(dynamic.find("[obligations_carryover]").unwrap() < dynamic.find("[Player Input]").unwrap());
     }
 
     #[test]
     fn empty_pinned_context_injects_get_actor_hint() {
         // BP2 空投影兜底（e2e must-fix 便宜修法）：pinned 为空串 ⇒ dynamic tail
         // 注入 [system] get_actor 提示；非空 ⇒ 绝不注入（不污染正常回合）。
-        let tail = DynamicTailInput { user_input: "go", resolved_gate_facts: &[], errata_blocks: &[] };
+        let tail = DynamicTailInput { user_input: "go", resolved_gate_facts: &[], errata_blocks: &[], obligations_block: None };
         let mut empty_pinned = compiled();
         empty_pinned.pinned_text = "  ".to_string();
         let messages = TurnMessages::assemble(&empty_pinned, "SKILL", &[], &tail);
@@ -150,11 +167,25 @@ mod tests {
 
     #[test]
     fn push_does_not_change_prefix_hash() {
-        let tail = DynamicTailInput { user_input: "go", resolved_gate_facts: &[], errata_blocks: &[] };
+        let tail = DynamicTailInput { user_input: "go", resolved_gate_facts: &[], errata_blocks: &[], obligations_block: None };
         let mut messages = TurnMessages::assemble(&compiled(), "SKILL", &[], &tail);
         let before = messages.prefix_byte_hash(4);
         messages.push_tool_result("call_1", "retrieve_rules", "{\"ok\":true}");
         assert_eq!(before, messages.prefix_byte_hash(4));
+    }
+
+    #[test]
+    fn gm_skill_merge_order_includes_new_entries() {
+        // B8：global gm_skill 新增 40_mechanics_catalog / 50_obligation_policy 两条准则，
+        // load_gm_skill 按文件名字典序合并 ⇒ 40_ 内容出现在 30_ 之后、50_ 在 40_ 之后。
+        // 直接装载仓库真实 data/ 目录（ruleset 子目录不存在 ⇒ 仅 global 六份）。
+        let data_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data");
+        let text = load_gm_skill(&data_dir, "__no_such_ruleset__").unwrap();
+        let p30 = text.find("Player-visible Output Contract").expect("30_output_contract content missing");
+        let p40 = text.find("目录优先于自由发挥").expect("40_mechanics_catalog content missing");
+        let p50 = text.find("due 必须回应").expect("50_obligation_policy content missing");
+        assert!(p30 < p40, "40_ content must appear after 30_ ({p30} vs {p40})");
+        assert!(p40 < p50, "50_ content must appear after 40_ ({p40} vs {p50})");
     }
 
     #[test]
@@ -184,7 +215,7 @@ mod cache_stability_tests {
 
     #[test]
     fn same_inputs_assemble_same_bytes() {
-        let tail = DynamicTailInput { user_input: "x", resolved_gate_facts: &[], errata_blocks: &[] };
+        let tail = DynamicTailInput { user_input: "x", resolved_gate_facts: &[], errata_blocks: &[], obligations_block: None };
         let a = TurnMessages::assemble(&compiled(), "skill", &[], &tail);
         let b = TurnMessages::assemble(&compiled(), "skill", &[], &tail);
         assert_eq!(serde_json::to_vec(&a.to_request_messages()).unwrap(), serde_json::to_vec(&b.to_request_messages()).unwrap());
@@ -192,7 +223,7 @@ mod cache_stability_tests {
 
     #[test]
     fn tool_append_changes_only_tail() {
-        let tail = DynamicTailInput { user_input: "x", resolved_gate_facts: &[], errata_blocks: &[] };
+        let tail = DynamicTailInput { user_input: "x", resolved_gate_facts: &[], errata_blocks: &[], obligations_block: None };
         let mut m = TurnMessages::assemble(&compiled(), "skill", &[ChatMessage { role: "assistant".to_string(), content: "old".to_string() }], &tail);
         let before = m.to_request_messages();
         m.push_assistant_tool_calls(&[AggregatedToolCall { id: "c".to_string(), name: "remember".to_string(), arguments: "{}".to_string() }]);
@@ -202,7 +233,7 @@ mod cache_stability_tests {
 
     #[test]
     fn prefix_hash_is_byte_level_hash() {
-        let tail = DynamicTailInput { user_input: "x", resolved_gate_facts: &[], errata_blocks: &[] };
+        let tail = DynamicTailInput { user_input: "x", resolved_gate_facts: &[], errata_blocks: &[], obligations_block: None };
         let m = TurnMessages::assemble(&compiled(), "skill", &[], &tail);
         assert_eq!(m.prefix_byte_hash(2), m.prefix_byte_hash(2));
         assert_ne!(m.prefix_byte_hash(1), m.prefix_byte_hash(2));
@@ -213,12 +244,12 @@ mod cache_stability_tests {
         // §6.1 第 3 条 / spec §9 单测 9 的回归本体：场景不变、gm_skill 不变，
         // 跨回合 history 仅追加 ⇒ system+BP2 两条消息字节不变，旧 history 段不改写。
         let turn1_history = vec![ChatMessage { role: "user".to_string(), content: "hi".to_string() }, ChatMessage { role: "assistant".to_string(), content: "scene".to_string() }];
-        let tail1 = DynamicTailInput { user_input: "look", resolved_gate_facts: &[], errata_blocks: &[] };
+        let tail1 = DynamicTailInput { user_input: "look", resolved_gate_facts: &[], errata_blocks: &[], obligations_block: None };
         let turn1 = TurnMessages::assemble(&compiled(), "skill", &turn1_history, &tail1);
         let mut turn2_history = turn1_history.clone();
         turn2_history.push(ChatMessage { role: "user".to_string(), content: "look".to_string() });
         turn2_history.push(ChatMessage { role: "assistant".to_string(), content: "you see".to_string() });
-        let tail2 = DynamicTailInput { user_input: "move", resolved_gate_facts: &[], errata_blocks: &[] };
+        let tail2 = DynamicTailInput { user_input: "move", resolved_gate_facts: &[], errata_blocks: &[], obligations_block: None };
         let turn2 = TurnMessages::assemble(&compiled(), "skill", &turn2_history, &tail2);
         let raw1 = turn1.to_request_messages();
         let raw2 = turn2.to_request_messages();

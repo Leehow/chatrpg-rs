@@ -1,4 +1,9 @@
 pub mod direct_effect;
+pub mod watcher;
+#[cfg(test)]
+mod watcher_tests;
+pub mod ledger_semantics;
+pub use ledger_semantics::*;
 
 use anyhow::Result;
 use chrono::Utc;
@@ -92,27 +97,13 @@ impl RefereeCombatService {
             let path = if is_actor { format!("resources.{}.current", id) } else { format!("tracks.{}.current", id) };
             let max = track.get("max").and_then(|v| v.as_i64()).map(|n| n as i32);
             let initial = track.get("initial").and_then(|v| v.as_i64()).map(|n| n as i32);
-            let success = result.outcome.get("success").and_then(|v| v.as_bool());
             for rule in rules {
-                // Trigger gate: a rule fires on success, on failure, or always.
-                match rule.get("trigger").and_then(|v| v.as_str()).unwrap_or("always") {
-                    "on_success" if success != Some(true) => continue,
-                    "on_failure" if success != Some(false) => continue,
-                    // Gate on a graded success tier (e.g. CoC "extra effect on
-                    // extreme"): `tier:"<id>"` and/or `min_rank:<n>` vs the
-                    // success_tier the contest resolver emitted. Data-driven.
-                    "on_tier" => {
-                        let want_tier = rule.get("tier").and_then(|v| v.as_str());
-                        let got_tier = result.outcome.get("success_tier").and_then(|v| v.as_str());
-                        let tier_ok = want_tier.map(|w| Some(w) == got_tier).unwrap_or(true);
-                        let rank_ok = match rule.get("min_rank").and_then(|v| v.as_i64()) {
-                            Some(min) => result.outcome.get("success_tier_rank").and_then(|v| v.as_i64()).map(|r| r >= min).unwrap_or(false),
-                            None => true,
-                        };
-                        if !(tier_ok && rank_ok) { continue; }
-                    }
-                    _ => {}
-                }
+                // Trigger gate (A5, three layers — see trigger_fires): a rule
+                // fires on success/failure/always/on_tier (legacy strings,
+                // unchanged), or on a structured outcome band
+                // {kind:"band", band_id:"fumble"}; unrecognized triggers skip
+                // the rule (fail-closed), a missing key stays "always".
+                if !trigger_fires(rule, &result.outcome) { continue; }
                 // Scope gate (config-driven, not hardcoded): if the rule declares
                 // `check_match`, it only fires when the check's intent/label contains
                 // it. This scopes e.g. "Sanity loss" to sanity checks, while an
@@ -165,29 +156,25 @@ impl RefereeCombatService {
                     fact: json!({"resource_track": id, "parameter_path": path, "before": before, "after": after, "delta_applied": after - before, "amount_rolled": amount}),
                     reason: "resource_delta_applied".into(),
                 });
-                if let Some(ths) = track.get("thresholds").and_then(|v| v.as_array()) {
-                    for th in ths {
-                        let cons = th.get("consequence").and_then(|v| v.as_str()).unwrap_or("threshold reached");
-                        // (a) cumulative crossing: value reaches `at` (edge-triggered).
-                        if let Some(at) = th.get("at").and_then(|v| v.as_i64()).map(|a| a as i32) {
-                            let below = th.get("direction").and_then(|v| v.as_str()) == Some("at_or_below");
-                            let crossed = if below { after <= at && before > at } else { after >= at && before < at };
-                            if crossed {
-                                result.committed_patches.push(StatePatch::CreateFact { target: target_id.clone(),
-                                    fact: json!({"resource_track": id, "kind": "cumulative", "threshold_at": at, "value": after, "consequence": cons}),
-                                    reason: "resource_threshold_consequence".into() });
-                            }
-                        }
-                        // (b) single-application magnitude (e.g. CoC: lose >=5 in one roll -> temporary insanity).
-                        if let Some(n) = th.get("loss_in_one_go").and_then(|v| v.as_i64()).map(|x| x as i32) {
-                            let lost = before - after;
-                            if matches!(op, ParameterOperation::Subtract) && lost >= n {
-                                result.committed_patches.push(StatePatch::CreateFact { target: target_id.clone(),
-                                    fact: json!({"resource_track": id, "kind": "loss_in_one_go", "lost": lost, "value": after, "consequence": cons}),
-                                    reason: "resource_threshold_consequence".into() });
-                            }
-                        }
-                    }
+                // 护栏 §3.5.1：规则经 check_match regex（字符串路径）命中、且契约
+                // 未带 "mechanic:" 结构化引用 → 账本打可观测回退标注，绝不静默。
+                if let Some(p) = check_match_fallback_fact(rule, &contract.advice_refs, &target_id, &id, &contract.check_label) {
+                    result.committed_patches.push(p);
+                }
+                // B4 watcher：阈值判定抽成纯函数单点（行为零变化，金样测试钉死）；
+                // CreateFact 从 crossing 重建 + 新增 MechanicDue 落库（债务必清通路）。
+                // owner_kind 取 track 字段原值（开放枚举，party/world 不丢），无则按
+                // is_actor 二分回填。
+                let owner_kind = track.get("owner_kind").and_then(|v| v.as_str())
+                    .unwrap_or(if is_actor { "actor" } else { "scene" });
+                let crossings = watcher::detect_crossings(track, owner_kind, &target_id, before, after, op);
+                for c in &crossings {
+                    result.committed_patches.push(StatePatch::CreateFact { target: target_id.clone(),
+                        fact: watcher::crossing_fact(c),
+                        reason: "resource_threshold_consequence".into() });
+                }
+                if !crossings.is_empty() {
+                    let _ = self.detect_threshold_dues(contract, result, &kernel, &crossings).await;
                 }
             }
         }
@@ -268,7 +255,13 @@ impl RefereeCombatService {
         Ok(None)
     }
 
-    pub async fn mechanical_ledger_context_block(&self, session_id: &str, world_tick: i64) -> Result<ContextBlock> {
+    /// B3 signature: `ruleset_id` is the session's ruleset — scene/party/world
+    /// rows have no actor to resolve a ruleset from, and the semantic lines
+    /// need a kernel. Loaded once and reused; the per-actor kernel cache below
+    /// stays (multi-ruleset actor sessions remain correct), the new parameter
+    /// only serves non-actor rows and actors missing a ruleset mapping.
+    pub async fn mechanical_ledger_context_block(&self, session_id: &str, ruleset_id: &str, world_tick: i64) -> Result<ContextBlock> {
+        let session_kernel = self.db.load_rule_kernel(ruleset_id).await.ok().flatten();
         let rows = sqlx::query("select actor_id, actor_kind, hp_current, hp_max, armor_current, wound_state, morale, resources_json, conditions_json, provisional_reason, world_tick from actor_mechanical_states where session_id = $1 order by updated_at desc limit 16")
             .bind(session_id).fetch_all(&self.db.pool).await?;
         let mut actors: Vec<Value> = rows.into_iter().map(|r| json!({
@@ -289,9 +282,11 @@ impl RefereeCombatService {
         // with the live SSOT value via the actor's kernel HP track, so the GM sees
         // current HP. Kernels cached by ruleset to avoid reloading per actor.
         let mut kernel_cache: std::collections::HashMap<String, Option<RuleKernel>> = std::collections::HashMap::new();
+        kernel_cache.insert(ruleset_id.to_string(), session_kernel.clone());
         for a in actors.iter_mut() {
             let Some(actor_id) = a.get("actor_id").and_then(|v| v.as_str()).map(str::to_string) else { continue };
-            let Some(rs) = self.actor_ruleset_id(session_id, &actor_id).await else { continue };
+            // Actors without a ruleset mapping fall back to the session ruleset (B3).
+            let rs = self.actor_ruleset_id(session_id, &actor_id).await.unwrap_or_else(|| ruleset_id.to_string());
             let kernel = match kernel_cache.get(&rs) {
                 Some(k) => k.clone(),
                 None => { let k = self.db.load_rule_kernel(&rs).await.ok().flatten(); kernel_cache.insert(rs.clone(), k.clone()); k }
@@ -302,6 +297,11 @@ impl RefereeCombatService {
                 if let Some(obj) = a.as_object_mut() {
                     obj.insert("hp_current".into(), serde_json::json!(live));
                     obj.insert("hp_source".into(), serde_json::json!("generic_parameter_states_live"));
+                    // B3: the live HP number also gets its kernel-track semantic
+                    // line (threshold zone / zero_means) — fail-closed absent.
+                    if let Some(line) = semantic_for_parameter_path("hp", live, &k) {
+                        obj.insert("semantic".into(), serde_json::json!(line));
+                    }
                 }
             }
         }
@@ -316,7 +316,7 @@ impl RefereeCombatService {
         })).collect();
         let generic_rows = sqlx::query("select target_kind, target_id, parameter_path, value_json, visibility, provisional_reason, world_tick from generic_parameter_states where session_id = $1 order by updated_at desc limit 20")
             .bind(session_id).fetch_all(&self.db.pool).await.unwrap_or_default();
-        let generic_states: Vec<Value> = generic_rows.into_iter().map(|r| json!({
+        let mut generic_states: Vec<Value> = generic_rows.into_iter().map(|r| json!({
             "target_kind": r.get::<String,_>("target_kind"),
             "target_id": r.get::<String,_>("target_id"),
             "parameter_path": r.get::<String,_>("parameter_path"),
@@ -325,6 +325,11 @@ impl RefereeCombatService {
             "provisional_reason": r.get::<Option<String>,_>("provisional_reason"),
             "world_tick": r.get::<Option<i64>,_>("world_tick"),
         })).collect();
+        // B3: every generic row (actor AND scene/party/world — same read path)
+        // gets a "semantic" line from the kernel track it resolves to.
+        if let Some(k) = session_kernel.as_ref() {
+            attach_generic_state_semantics(&mut generic_states, k);
+        }
         let facet_rows = sqlx::query("select execution_kind, target_kind, target_id, parameter_path, operation, status, output_json, provisional_reason, world_tick from parameter_facet_execution_runs where session_id = $1 order by created_at desc limit 16")
             .bind(session_id).fetch_all(&self.db.pool).await.unwrap_or_default();
         let facet_executions: Vec<Value> = facet_rows.into_iter().map(|r| json!({
@@ -1063,6 +1068,99 @@ fn is_plain_dice(s: &str) -> bool {
     dice_ok && only_dice_chars
 }
 
+/// Deterministic maximum of a plain dice amount expression (no randomness):
+/// "1d10"→10, "2d6"→12, "2d6+3"→15, "2d6-1"→11, "d8"→8; a bare integer ("7")
+/// is a legal degenerate form (→7). Anything that is not a plain NdM±K dice
+/// expression (named tokens, formula strings) → None. Shares the NdM±K parsing
+/// rules of `roll_amount_dice` (incl. the 1..=100 / 1..=1000 clamps) but stays
+/// an independent small function — ten copied lines over a forced DRY knot.
+fn dice_max(expr: &str) -> Option<i32> {
+    let s = expr.trim().to_ascii_lowercase().replace(' ', "");
+    if s.is_empty() { return None; }
+    let dpos = match s.find('d') { Some(p) => p, None => return s.parse().ok() };
+    let (dice_part, modifier) = match s[dpos + 1..].find(|c| c == '+' || c == '-') {
+        Some(rel) => { let split = dpos + 1 + rel; (&s[..split], s[split..].parse::<i32>().ok()?) }
+        None => (&s[..], 0),
+    };
+    let mut it = dice_part.splitn(2, 'd');
+    let a = it.next().unwrap_or("1");
+    let n = if a.is_empty() { 1 } else { a.parse::<i32>().ok()? }.clamp(1, 100);
+    let m = it.next()?.parse::<i32>().ok()?.clamp(1, 1000);
+    Some(n * m + modifier)
+}
+
+/// Structured trigger form (pure): `{kind:"band", band_id:"fumble"}` →
+/// Some("fumble"). Exact shape only — `kind` MUST be "band", extra keys are
+/// tolerated, a missing `band_id` → None. Strings and any other shape → None
+/// (string triggers never reach this function — the call site takes the
+/// legacy `as_str()` word-table branch first, byte-for-byte unchanged).
+fn band_trigger_id(trigger: &Value) -> Option<String> {
+    let obj = trigger.as_object()?;
+    if obj.get("kind").and_then(|v| v.as_str()) != Some("band") { return None; }
+    obj.get("band_id").and_then(|v| v.as_str()).map(|s| s.to_string())
+}
+
+/// on_outcome trigger gate, three layers (A5):
+///   1. missing `trigger` key → fire (legacy "always" default — absence is NOT
+///      "unrecognized"; old kernels carry many bare rules that rely on this);
+///   2. string trigger → the legacy word table, behavior unchanged
+///      (always/on_success/on_failure/on_tier incl. tier/min_rank reconcile);
+///   3. non-string trigger → `band_trigger_id`: a band form is reconciled
+///      case-insensitively against `outcome.success_tier` — the SAME key the
+///      contest resolver writes and the on_tier branch already reads (verified
+///      2026-06-10 against live check_results.outcome_json rows: band ids
+///      "regular"/"hard"/"extreme" live under `success_tier`; failed checks may
+///      omit the key → no match → skip). Anything unrecognized (other objects,
+///      arrays, numbers) SKIPS the rule — never falls back to "always":
+///      firing on an unparsed trigger would amplify the error (fail-closed).
+fn trigger_fires(rule: &Value, outcome: &Value) -> bool {
+    let Some(trigger) = rule.get("trigger") else { return true };
+    if let Some(s) = trigger.as_str() {
+        let success = outcome.get("success").and_then(|v| v.as_bool());
+        return match s {
+            "on_success" => success == Some(true),
+            "on_failure" => success == Some(false),
+            // Gate on a graded success tier (e.g. CoC "extra effect on
+            // extreme"): `tier:"<id>"` and/or `min_rank:<n>` vs the
+            // success_tier the contest resolver emitted. Data-driven.
+            "on_tier" => {
+                let want_tier = rule.get("tier").and_then(|v| v.as_str());
+                let got_tier = outcome.get("success_tier").and_then(|v| v.as_str());
+                let tier_ok = want_tier.map(|w| Some(w) == got_tier).unwrap_or(true);
+                let rank_ok = match rule.get("min_rank").and_then(|v| v.as_i64()) {
+                    Some(min) => outcome.get("success_tier_rank").and_then(|v| v.as_i64()).map(|r| r >= min).unwrap_or(false),
+                    None => true,
+                };
+                tier_ok && rank_ok
+            }
+            _ => true,
+        };
+    }
+    match band_trigger_id(trigger) {
+        Some(band_id) => outcome.get("success_tier").and_then(|v| v.as_str())
+            .map(|t| t.eq_ignore_ascii_case(&band_id)).unwrap_or(false),
+        None => false,
+    }
+}
+
+/// 护栏 §3.5.1（C7 债项落地，spec 终审 important #2）：on_outcome 规则经
+/// `check_match` regex（字符串路径）命中触发、且契约 advice_refs 无 "mechanic:"
+/// 前缀的结构化引用（即未走结构化绑定）时，产出账本可观测回退标注
+/// （CreateFact，与 resource_delta_applied 同通道）——字符串回退绝不静默。
+/// 结构化路径不标注：① 规则 trigger 是 A5 结构化 band 形态（band_trigger_id）；
+/// ② 契约带 "mechanic:" 引用；③ 规则没有 check_match（未走字符串扫描）。
+/// 调用点位于 check_match 门之后 ⇒ 走到这里即 regex 已命中。
+fn check_match_fallback_fact(rule: &Value, advice_refs: &[String], target_id: &str, track_id: &str, check_label: &str) -> Option<StatePatch> {
+    rule.get("check_match").and_then(|v| v.as_str())?;
+    if rule.get("trigger").is_some_and(|t| band_trigger_id(t).is_some()) { return None; }
+    if advice_refs.iter().any(|r| r.starts_with("mechanic:")) { return None; }
+    Some(StatePatch::CreateFact {
+        target: target_id.to_string(),
+        fact: json!(format!("fallback:check_match regex matched track '{track_id}' for check '{check_label}'")),
+        reason: "check_match_fallback_observed".into(),
+    })
+}
+
 /// The text a resource-track `check_match` is scanned against. Includes the
 /// check's DELIBERATE engine-set binding (`tested_parameter`) alongside its
 /// intent/label and the player prose, so a check that was explicitly bound to a
@@ -1102,8 +1200,9 @@ fn track_matches_tested_parameter(tested: Option<&TestedParameter>, track: &Valu
 
 /// Resolve a resource-track on_outcome amount, fully data-driven:
 ///   - `amount` may be a dice expr (`1d6`), `=value` (the `when` outcome field),
-///     `=<field>` (read `outcome.<field>` directly, e.g. `=sanity_loss`), or a
-///     fixed int;
+///     `=<field>` (read `outcome.<field>` directly, e.g. `=sanity_loss`),
+///     `max_of:<dice>` (deterministic dice maximum, e.g. `max_of:1d10`→10), or
+///     a fixed int;
 ///   - legacy `delta` is honored unchanged;
 ///   - when `amount`'s referenced outcome field is ABSENT, fall back to the
 ///     rule's configurable `default_amount` die — but ONLY when this track is the
@@ -1132,6 +1231,11 @@ fn resolve_track_amount(
             when.and_then(&field_amount)
         } else if let Some(field) = e.strip_prefix('=') {
             field_amount(field)
+        } else if let Some(rest) = e.strip_prefix("max_of:") {
+            // Deterministic dice maximum (e.g. fumble loses the MAX of the
+            // die). Unparseable argument → None: same fallback semantics as a
+            // missing outcome field (default_amount when tested, else skip).
+            dice_max(rest.trim())
         } else if is_plain_dice(e) {
             Some(roll_amount_dice(e))
         } else {
@@ -1240,9 +1344,9 @@ fn row_to_actor_state(r: sqlx::postgres::PgRow) -> ActorMechanicalState {
 
 #[cfg(test)]
 mod on_outcome_match_amount_tests {
-    use super::{check_match_hay, resolve_track_amount, track_matches_tested_parameter};
+    use super::{check_match_fallback_fact, check_match_hay, dice_max, resolve_track_amount, track_matches_tested_parameter, trigger_fires};
     use serde_json::json;
-    use trpg_model::TestedParameter;
+    use trpg_model::{StatePatch, TestedParameter};
 
     fn tp(key: &str) -> TestedParameter { TestedParameter { domain: None, key: key.into(), label: key.into() } }
 
@@ -1283,6 +1387,31 @@ mod on_outcome_match_amount_tests {
     fn no_tested_parameter_means_not_tested() {
         let track = json!({"id":"sanity","name":"Sanity"});
         assert!(!track_matches_tested_parameter(None, &track));
+    }
+
+    // 护栏 §3.5.1：check_match regex 命中且契约无 "mechanic:" 结构化引用 →
+    // 结算产物出可观测回退标注 fact（reason=check_match_fallback_observed）。
+    #[test]
+    fn check_match_regex_hit_emits_fallback_fact() {
+        let rule = json!({"check_match": "sanity|理智", "trigger": "on_failure", "amount": "1d6"});
+        let patch = check_match_fallback_fact(&rule, &[], "pc.current", "sanity", "Sanity check").expect("regex 命中应产出回退标注");
+        let StatePatch::CreateFact { target, fact, reason } = patch else { panic!("应为 CreateFact") };
+        assert_eq!(target, "pc.current");
+        assert_eq!(reason, "check_match_fallback_observed");
+        let s = fact.as_str().unwrap_or_default();
+        assert!(s.starts_with("fallback:check_match"), "fact 前缀应为 fallback:check_match: {s}");
+        assert!(s.contains("'sanity'") && s.contains("'Sanity check'"), "fact 应含 track id 与 check label: {s}");
+    }
+
+    // 结构化路径三分支均不标注：A5 band 触发 / mechanic: 引用 / 无 check_match。
+    #[test]
+    fn structured_paths_emit_no_fallback_fact() {
+        let band_rule = json!({"check_match": "sanity", "trigger": {"kind": "band", "band_id": "fumble"}});
+        assert!(check_match_fallback_fact(&band_rule, &[], "pc.current", "sanity", "SAN").is_none(), "A5 结构化 band 触发不打标注");
+        let rule = json!({"check_match": "sanity", "trigger": "on_failure"});
+        assert!(check_match_fallback_fact(&rule, &["mechanic:sanity_loss".to_string()], "pc.current", "sanity", "SAN").is_none(), "mechanic: 结构化引用不打标注");
+        let no_cm = json!({"trigger": "on_failure"});
+        assert!(check_match_fallback_fact(&no_cm, &[], "pc.current", "sanity", "SAN").is_none(), "无 check_match 未走字符串扫描不打标注");
     }
 
     // D3: =<field> 读 outcome.<field>。
@@ -1330,5 +1459,86 @@ mod on_outcome_match_amount_tests {
         let outcome = json!({"success_count": 2});
         assert_eq!(resolve_track_amount(None, Some("=value"), Some("success_count"), None, false, &outcome), Some(2));
         assert_eq!(resolve_track_amount(None, Some("3"), None, None, false, &outcome), Some(3));
+    }
+
+    // ===== A5: on_outcome 结构化 band 触发 + amount max_of =====
+
+    // 回归锚：既有字符串词表（always/on_success/on_failure/on_tier）行为零变化。
+    #[test]
+    fn string_triggers_behave_unchanged() {
+        let ok = json!({"success": true, "success_tier": "hard", "success_tier_rank": 2});
+        let fail = json!({"success": false});
+        // on_success 正反两断言：success=true 触发 / false 不触发。
+        assert!(trigger_fires(&json!({"trigger": "on_success"}), &ok));
+        assert!(!trigger_fires(&json!({"trigger": "on_success"}), &fail));
+        assert!(trigger_fires(&json!({"trigger": "on_failure"}), &fail));
+        assert!(!trigger_fires(&json!({"trigger": "on_failure"}), &ok));
+        assert!(trigger_fires(&json!({"trigger": "always"}), &fail));
+        // on_tier 的 tier/min_rank 对账原样。
+        assert!(trigger_fires(&json!({"trigger": "on_tier", "tier": "hard"}), &ok));
+        assert!(!trigger_fires(&json!({"trigger": "on_tier", "tier": "extreme"}), &ok));
+        assert!(trigger_fires(&json!({"trigger": "on_tier", "min_rank": 2}), &ok));
+        assert!(!trigger_fires(&json!({"trigger": "on_tier", "min_rank": 3}), &ok));
+    }
+
+    // 老 kernel 裸 rule 行为锁死：无 trigger 键 → 照常触发（缺失 ≠ 认不出）。
+    #[test]
+    fn missing_trigger_defaults_to_always() {
+        assert!(trigger_fires(&json!({"op": "subtract"}), &json!({"success": false})));
+    }
+
+    // 结构化 band 触发：与结算器写的 outcome.success_tier 同词汇表对账。
+    #[test]
+    fn band_trigger_matches_outcome_band() {
+        let rule = json!({"trigger": {"kind": "band", "band_id": "fumble"}});
+        assert!(trigger_fires(&rule, &json!({"success_tier": "fumble"})), "band 命中应触发(资源被改)");
+        assert!(!trigger_fires(&rule, &json!({"success_tier": "regular"})), "band 不匹配不触发");
+    }
+
+    #[test]
+    fn band_trigger_case_insensitive() {
+        let rule = json!({"trigger": {"kind": "band", "band_id": "Fumble"}});
+        assert!(trigger_fires(&rule, &json!({"success_tier": "fumble"})));
+    }
+
+    // 验收 12② 后半：认不出的 trigger → 该 rule 跳过（绝不回落 always），
+    // 同 track 其余 rule 照常、不 panic。
+    #[test]
+    fn unrecognized_trigger_object_skips_rule() {
+        let outcome = json!({"success": true, "success_tier": "regular"});
+        assert!(!trigger_fires(&json!({"trigger": {"kind": "phase_of_moon"}}), &outcome));
+        assert!(!trigger_fires(&json!({"trigger": 42}), &outcome));
+        // 同 track 其余（合法 trigger 的）rule 照常触发。
+        assert!(trigger_fires(&json!({"trigger": "always"}), &outcome));
+    }
+
+    // 骰式最大值：确定性、与 roll_amount_dice 同一 NdM±K 解析规则。
+    #[test]
+    fn dice_max_forms() {
+        assert_eq!(dice_max("1d10"), Some(10));
+        assert_eq!(dice_max("2d6"), Some(12));
+        assert_eq!(dice_max("2d6+3"), Some(15));
+        assert_eq!(dice_max("2d6-1"), Some(11));
+        assert_eq!(dice_max("d8"), Some(8));
+        assert_eq!(dice_max("7"), Some(7));
+        assert_eq!(dice_max("max(0,x)"), None);
+        assert_eq!(dice_max(""), None);
+    }
+
+    // fumble 掉最大值由 prose 变机械事实的最小证据：确定性断言，无随机容差。
+    #[test]
+    fn amount_max_of_resolves_max() {
+        let outcome = json!({"success": false});
+        assert_eq!(resolve_track_amount(Some("max_of:1d10"), None, None, None, false, &outcome), Some(10));
+    }
+
+    // 认不出的 max_of 实参沿既有 None 语义：被测参数走 default_amount 兜底，否则跳过。
+    #[test]
+    fn amount_max_of_garbage_falls_back() {
+        let outcome = json!({"success": false});
+        let v = resolve_track_amount(Some("max_of:garbage"), None, None, Some("1d6"), true, &outcome);
+        let v = v.expect("track_is_tested=true 应走 default_amount 兜底");
+        assert!((1..=6).contains(&v), "1d6 应在 1..=6: {v}");
+        assert_eq!(resolve_track_amount(Some("max_of:garbage"), None, None, Some("1d6"), false, &outcome), None);
     }
 }

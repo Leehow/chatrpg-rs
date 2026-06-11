@@ -48,6 +48,7 @@ impl Db {
             include_str!("../../../migrations/0024_parameter_facet_executor_v113.sql"),
             include_str!("../../../migrations/0025_rule_steward_character_onboarding_v116.sql"),
             include_str!("../../../migrations/0026_session_current_scene_v120.sql"),
+            include_str!("../../../migrations/0027_mechanic_dues_v120.sql"),
         ];
         for sql in migrations {
             for statement in split_sql_statements(sql) {
@@ -1829,9 +1830,97 @@ impl Db {
 
 
     // ------------------------------------------------------------------
-    // v1.5 Interaction Lifecycle Kernel persistence helpers
+    // v1.20 mechanic_dues persistence (B4 watcher; 对标 insert_check_contract)
     // ------------------------------------------------------------------
 
+    pub async fn insert_mechanic_due(&self, due: &MechanicDue) -> Result<()> {
+        sqlx::query(
+            r#"
+            insert into mechanic_dues
+              (due_id, session_id, turn_id, source, source_track, hook_event, mechanic_id,
+               threshold_desc, followup_procedure_id, owner_kind, owner_id, evidence, status, created_at)
+            values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+            on conflict (due_id) do nothing
+            "#,
+        )
+        .bind(&due.due_id)
+        .bind(&due.session_id)
+        .bind(&due.turn_id)
+        .bind(due_source_str(&due.source))
+        .bind(&due.source_track)
+        .bind(&due.hook_event)
+        .bind(&due.mechanic_id)
+        .bind(&due.threshold_desc)
+        .bind(&due.followup_procedure_id)
+        .bind(&due.owner_kind)
+        .bind(&due.owner_id)
+        .bind(&due.evidence)
+        .bind(due_status_str(&due.status))
+        .bind(due.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_open_mechanic_dues(&self, session_id: &str) -> Result<Vec<MechanicDue>> {
+        self.list_mechanic_dues_with_status(session_id, "open").await
+    }
+
+    pub async fn list_mechanic_dues_with_status(&self, session_id: &str, status: &str) -> Result<Vec<MechanicDue>> {
+        let rows = sqlx::query(
+            r#"
+            select due_id, session_id, turn_id, source, source_track, hook_event, mechanic_id,
+                   threshold_desc, followup_procedure_id, owner_kind, owner_id, evidence, status, created_at
+            from mechanic_dues
+            where session_id = $1 and status = $2
+            order by created_at asc
+            "#,
+        )
+        .bind(session_id)
+        .bind(status)
+        .fetch_all(&self.pool)
+        .await?;
+        // fail-closed：source/status 列认不出的行跳过（不猜不编造）。
+        Ok(rows.iter().filter_map(row_to_mechanic_due).collect())
+    }
+
+    pub async fn update_mechanic_due_status(&self, due_id: &str, status: &str,
+        waive_reason: Option<&str>, waive_scope: Option<&str>) -> Result<()> {
+        sqlx::query(
+            r#"
+            update mechanic_dues
+            set status = $2, waive_reason = $3, waive_scope = $4, updated_at = now()
+            where due_id = $1
+            "#,
+        )
+        .bind(due_id)
+        .bind(status)
+        .bind(waive_reason)
+        .bind(waive_scope)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// B6 场景切换重开（spec §5.3：scene 豁免"场景切换时清除豁免"）：该 session
+    /// 内 waive_scope='scene' 且 status='waived' 的行重开为 open，waive 记账列
+    /// 清空（审计留在 gm_waive 勘误记忆，不靠行残留）。返回重开行数。
+    /// scope='turn' 的行不动（turn 豁免由内存侧 begin_turn 过期，db 行保持审计原样）。
+    pub async fn reopen_scene_waived_dues(&self, session_id: &str) -> Result<u64> {
+        let result = sqlx::query(
+            r#"
+            update mechanic_dues
+            set status = 'open', waive_reason = null, waive_scope = null, updated_at = now()
+            where session_id = $1 and status = 'waived' and waive_scope = 'scene'
+            "#,
+        )
+        .bind(session_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    // ------------------------------------------------------------------
     // v1.5 Interaction Lifecycle Kernel persistence helpers
     // ------------------------------------------------------------------
 
@@ -3406,6 +3495,45 @@ fn split_sql_statements(sql: &str) -> Vec<&str> {
     sql.split(";\n").collect()
 }
 
+fn due_source_str(s: &DueSource) -> &'static str {
+    match s { DueSource::Threshold => "threshold", DueSource::Hook => "hook" }
+}
+
+fn due_status_str(s: &DueStatus) -> &'static str {
+    match s { DueStatus::Open => "open", DueStatus::Resolved => "resolved", DueStatus::Waived => "waived" }
+}
+
+/// 行→MechanicDue；source/status 列值认不出 → None（fail-closed 跳过该行）。
+fn row_to_mechanic_due(row: &sqlx::postgres::PgRow) -> Option<MechanicDue> {
+    let source = match row.get::<String, _>("source").as_str() {
+        "threshold" => DueSource::Threshold,
+        "hook" => DueSource::Hook,
+        _ => return None,
+    };
+    let status = match row.get::<String, _>("status").as_str() {
+        "open" => DueStatus::Open,
+        "resolved" => DueStatus::Resolved,
+        "waived" => DueStatus::Waived,
+        _ => return None,
+    };
+    Some(MechanicDue {
+        due_id: row.get("due_id"),
+        session_id: row.get("session_id"),
+        turn_id: row.get("turn_id"),
+        source,
+        source_track: row.get("source_track"),
+        hook_event: row.get("hook_event"),
+        mechanic_id: row.get("mechanic_id"),
+        threshold_desc: row.get("threshold_desc"),
+        followup_procedure_id: row.get("followup_procedure_id"),
+        owner_kind: row.get("owner_kind"),
+        owner_id: row.get("owner_id"),
+        evidence: row.get("evidence"),
+        status,
+        created_at: row.get("created_at"),
+    })
+}
+
 fn row_to_context_block(row: sqlx::postgres::PgRow) -> Result<ContextBlock> {
     let kind = block_kind_from_str(&row.get::<String, _>("block_kind"));
     let visibility = visibility_from_str(&row.get::<String, _>("visibility"));
@@ -3973,5 +4101,49 @@ mod dice_core_override_tests {
     fn non_object_base_is_replaced_by_override() {
         let merged = merge_dice_core(json!(null), json!({"compare":"meet_or_beat"}).as_object().unwrap());
         assert_eq!(merged.get("compare").and_then(|v| v.as_str()), Some("meet_or_beat"));
+    }
+
+    /// （A4 回归）override merge 与编译遍升级出的新字段兼容：
+    /// ① base success_bands 带 semantics、override 只设 "dice" 键 → semantics
+    ///   保留（shallow key 语义天然兼容）；
+    /// ② override 设 success_bands 键 → 整值替换（文档化既有语义：override
+    ///   文件必须带它想保留的全部字段）；
+    /// ③ resource_tracks override：未被覆盖 track 的 followup_procedure_id
+    ///   保留、被覆盖 track 整体替换（merge_resource_tracks 语义不变）。
+    #[test]
+    fn override_merge_keeps_upgraded_fields() {
+        use super::merge_resource_tracks;
+        // ① untouched key keeps the upgraded semantics
+        let base = json!({"dice":"1d100","success_bands":[{"id":"regular","semantics":"plain success"}]});
+        let merged = merge_dice_core(base, json!({"dice":"1d20"}).as_object().unwrap());
+        assert_eq!(merged.get("dice").and_then(|v| v.as_str()), Some("1d20"));
+        assert_eq!(
+            merged.pointer("/success_bands/0/semantics").and_then(|v| v.as_str()),
+            Some("plain success"),
+            "shallow merge: an untouched key keeps its upgraded fields"
+        );
+        // ② an override that sets success_bands replaces the WHOLE value
+        let base = json!({"success_bands":[{"id":"regular","semantics":"plain success"}]});
+        let merged = merge_dice_core(base, json!({"success_bands":[{"id":"critical"}]}).as_object().unwrap());
+        let bands = merged.get("success_bands").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(bands.len(), 1);
+        assert_eq!(bands[0].get("id").and_then(|v| v.as_str()), Some("critical"));
+        assert!(
+            bands[0].get("semantics").is_none(),
+            "wholesale replacement: an override file must carry the FULL fields it wants to keep"
+        );
+        // ③ resource_tracks: untouched track keeps its upgraded threshold key;
+        //    an overridden track is replaced wholesale
+        let base = vec![
+            json!({"id":"sanity","thresholds":[{"loss_in_one_go":5,"followup_procedure_id":"x.temp"}]}),
+            json!({"id":"luck","max":99}),
+        ];
+        let merged = merge_resource_tracks(base, vec![json!({"id":"luck","max":50})]);
+        assert_eq!(
+            merged[0].pointer("/thresholds/0/followup_procedure_id").and_then(|v| v.as_str()),
+            Some("x.temp"),
+            "untouched track keeps the upgraded followup_procedure_id"
+        );
+        assert_eq!(merged[1].get("max").and_then(|v| v.as_i64()), Some(50), "overridden track replaced wholesale");
     }
 }

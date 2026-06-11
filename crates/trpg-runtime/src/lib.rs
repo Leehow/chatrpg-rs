@@ -604,7 +604,7 @@ impl RuntimeEngine {
 
     pub async fn referee_combat_blocks_for_turn(&self, request: &ContextRequest) -> Result<Vec<ContextBlock>> {
         let world_tick = self.current_world_time(&request.session_id).await.map(|t| t.world_tick).unwrap_or_default();
-        let block = RefereeCombatService::new(self.db.clone()).mechanical_ledger_context_block(&request.session_id, world_tick).await?;
+        let block = RefereeCombatService::new(self.db.clone()).mechanical_ledger_context_block(&request.session_id, &request.ruleset_id, world_tick).await?;
         Ok(vec![block])
     }
 
@@ -1438,11 +1438,14 @@ fn fail_on_missing_source_backed_parameters() -> bool {
         }
         let mut blocks = Vec::new();
         if let Some(kernel) = self.db.load_rule_kernel(&request.ruleset_id).await? {
+            // B1: the kernel rides BP1 stripped of mechanics_catalog (a CoC-sized
+            // catalog inline would blow validate_compiled_budget); the catalog is
+            // re-projected below as a compact index block instead.
             let mut block = ContextBlock::new(
                 format!("rule_steward.active_kernel.{}", request.ruleset_id),
                 BlockKind::RuleStewardKernel,
                 "Active Rule Steward BP1 Kernel",
-                BlockContent::Json(serde_json::to_value(&kernel)?),
+                BlockContent::Json(serde_json::to_value(&kernel_bp1_view(&kernel))?),
                 Visibility::GmOnly,
                 Stability::RarelyChanged,
                 CacheZone::Prefix,
@@ -1453,6 +1456,34 @@ fn fail_on_missing_source_backed_parameters() -> bool {
             block.source_refs = kernel.source_refs.clone();
             block.load_reason = Some("active_rule_kernel".into());
             blocks.push(block);
+            // B1: compact mechanics-catalog index (one line `id | name | when_to_use`
+            // per entry, data-driven tiering past the limit) + passive-modifier lines
+            // for the viewer, all in ONE prefix block right under the kernel block.
+            // Empty catalog -> no block (older kernels change nothing, fail-closed).
+            if !kernel.mechanics_catalog.is_empty() {
+                let limit = std::env::var("TRPG_MECHANICS_INDEX_BP1_LIMIT").ok().and_then(|v| v.parse().ok()).unwrap_or(96);
+                let mut text = catalog_index_text(&kernel.mechanics_catalog, limit);
+                let viewer_actor_id = request.viewer.actor_id.as_deref().unwrap_or("pc.current");
+                let pm_lines = self.passive_lines_for_viewer(&request.session_id, viewer_actor_id, &kernel.mechanics_catalog).await;
+                if !pm_lines.is_empty() {
+                    text.push('\n');
+                    text.push_str(&pm_lines.join("\n"));
+                }
+                let mut index_block = ContextBlock::new(
+                    format!("rule_steward.mechanics_index.{}", request.ruleset_id),
+                    BlockKind::MechanicsCatalogIndex,
+                    "Mechanics Catalog Index",
+                    BlockContent::Text(text),
+                    Visibility::GmOnly,
+                    Stability::RarelyChanged,
+                    CacheZone::Prefix,
+                    Scope::ruleset(&request.ruleset_id),
+                    116,
+                );
+                index_block.tags = vec!["rule_steward".into(), "bp1".into(), "mechanics_catalog_index".into(), "source_backed".into()];
+                index_block.load_reason = Some("mechanics_catalog_index".into());
+                blocks.push(index_block);
+            }
         }
         if let Some(pack) = self.db.load_character_onboarding_pack(&request.ruleset_id).await? {
             let mut block = ContextBlock::new(
@@ -1472,6 +1503,18 @@ fn fail_on_missing_source_backed_parameters() -> bool {
             blocks.push(block);
         }
         Ok(blocks)
+    }
+
+    /// B1 PM-line assembly: load the viewer's card (same RuntimeParameterService
+    /// usage as `refresh_actor_live_derived`) and render one passive-projection
+    /// line per catalog entry that has one. Actor missing / db failure / no PM
+    /// entries -> empty Vec — BP1 assembly must never fail on PM projection.
+    async fn passive_lines_for_viewer(&self, session_id: &str, viewer_actor_id: &str, entries: &[MechanicEntry]) -> Vec<String> {
+        let service = RuntimeParameterService::new(self.db.clone());
+        let Ok(Some(params)) = service.load_actor_parameters(session_id, viewer_actor_id).await else {
+            return Vec::new();
+        };
+        entries.iter().filter_map(|e| passive_projection_line(e, &params.sheet_json)).collect()
     }
 
     async fn state_frame_blocks_for_turn(&self, request: &ContextRequest) -> Result<Vec<ContextBlock>> {
@@ -2305,7 +2348,28 @@ fn scene_node_to_blocks(
     block.expires_at_scene = Some(n.node_id.clone());
     block.load_reason = Some("current_scene_deep_projection".into());
     block.tags = vec!["module_scene".into(), "scene_static".into(), "deep_extracted".into()];
-    vec![block]
+    let mut blocks = vec![block];
+    // C3：当前场景机制意图索引（BP2）。渲染纯函数在 trpg-model（scene_intents_text，
+    // 每条一行 id|description|tested_parameter|difficulty 摘要，不含 effect_policy 全文
+    // ——结算才用，C4 按 intent_id 从图谱取）。空 intents → None → 不出块（旧模组零变化）。
+    if let Some(text) = trpg_model::scene_intents_text(&n.scene_mechanics) {
+        let mut b = ContextBlock::new(
+            format!("module.{module_id}.scene.{}.mechanics", n.node_id),
+            BlockKind::SceneStatic, // 复用既有 kind：不动 trpg-db 的 block_kind 词表
+            format!("{} —— 场景机制意图", n.title),
+            BlockContent::Text(text),
+            Visibility::GmOnly,
+            Stability::SceneStable,
+            CacheZone::PinnedMiddle, // 骨架契约：pinned_hash 场景内稳定，场景切换换块
+            Scope { scope_type: ScopeType::Scene, scope_id: n.node_id.clone() },
+            58, // 略低于正文块（60）
+        );
+        b.expires_at_scene = Some(n.node_id.clone());
+        b.load_reason = Some("current_scene_mechanic_intents".into());
+        b.tags = vec!["module_scene".into(), "scene_mechanics".into()];
+        blocks.push(b);
+    }
+    blocks
 }
 
 fn make_ruling_summary(user_input: &str, assistant_output: &str, signal: &MechanicalSignal, hit_titles: &[String]) -> String {
@@ -3104,6 +3168,72 @@ mod module_scene_proj_tests {
             _ => String::new(),
         };
         assert!(body.contains("镇中心"), "出口应含目标场景标题");
+    }
+
+    // ===== C3: 当前场景 intents 投影（BP2）=====
+
+    fn mech_intent(id: &str) -> trpg_model::SceneMechanicIntent {
+        trpg_model::SceneMechanicIntent {
+            intent_id: id.into(),
+            description: "玩家试图强行剪断缆线".into(),
+            tested_parameter: "brawling".into(),
+            difficulty: Some(serde_json::json!({"kind":"dv","value":13})),
+            // 非空 effect_policy：若实现误把全文投影，下方 on_success 断言会抓住。
+            effect_policy: trpg_model::EffectPolicy {
+                on_success: vec![trpg_model::EffectPatchIntent::CreateFact {
+                    target: "scene.lawmen".into(),
+                    fact: serde_json::json!({"cable":"cut"}),
+                }],
+                on_failure: vec![],
+            },
+            source_anchor: "p.12 原文锚点".into(),
+        }
+    }
+
+    fn deep_scene_with_intents(node_id: &str) -> ScenarioNode {
+        let mut n = ScenarioNode::default();
+        n.node_id = node_id.into();
+        n.title = "执法者驾到".into();
+        n.read_aloud = Some("警笛由远而近。".into());
+        n.extraction_status = SceneExtractionStatus::DeepExtracted;
+        n.scene_mechanics = vec![mech_intent("homecoming.lawmen.cut_cable_force")];
+        n
+    }
+
+    #[test]
+    fn scene_with_mechanics_projects_intents_block() {
+        let n = deep_scene_with_intents("loc1");
+        let blocks = scene_node_to_blocks("mod1", &n, &[], &[]);
+        assert_eq!(blocks.len(), 2, "正文块 + intents 块");
+        let b = &blocks[1];
+        assert!(b.block_id.ends_with(".mechanics"), "block_id 应以 .mechanics 结尾: {}", b.block_id);
+        assert_eq!(b.cache_zone, CacheZone::PinnedMiddle);
+        assert_eq!(b.stability, trpg_model::Stability::SceneStable);
+        assert_eq!(b.expires_at_scene.as_deref(), Some("loc1"));
+        let text = b.content.render_text();
+        assert!(text.contains("homecoming.lawmen.cut_cable_force"), "内容应含 intent_id: {text}");
+        assert!(!text.contains("effect_policy"), "effect_policy 全文不投影: {text}");
+        assert!(!text.contains("on_success"), "on_success 全文不投影: {text}");
+    }
+
+    #[test]
+    fn scene_without_mechanics_projects_single_block_unchanged() {
+        let mut n = deep_scene_with_intents("loc1");
+        n.scene_mechanics = Vec::new(); // 旧模组：无 intents
+        let blocks = scene_node_to_blocks("mod1", &n, &[], &[]);
+        assert_eq!(blocks.len(), 1, "空 intents → 仍单块（旧模组零变化=fail-closed）");
+        let text = blocks[0].content.render_text();
+        assert!(!text.contains("机制意图"), "首块内容不得混入机制意图: {text}");
+    }
+
+    #[test]
+    fn intents_block_bytes_stable_across_calls() {
+        let n = deep_scene_with_intents("loc1");
+        let first = scene_node_to_blocks("mod1", &n, &[], &[]);
+        let second = scene_node_to_blocks("mod1", &n, &[], &[]);
+        let a = serde_json::to_vec(&first[1]).expect("intents 块可序列化");
+        let b = serde_json::to_vec(&second[1]).expect("intents 块可序列化");
+        assert_eq!(a, b, "同节点两次投影的 intents 块字节必须一致（pinned_hash 场景内稳定的函数级前提）");
     }
 
     #[test]

@@ -126,6 +126,63 @@ async fn deep_extract_preserves_preexisting_anchorless_links() {
 }
 
 #[tokio::test]
+async fn oneshot_deep_carries_scene_mechanics_fail_closed() {
+    // 深抽提交带 2 条 intents（1 条无 anchor）→ 只有带锚那条落进节点（fail-closed 不编造）。
+    let mut out = ModuleReadout::default();
+    out.scenes = vec![paged_scene("s0", "加油站", 16)];
+    let ctx = ModuleReaderCtx {
+        units: &[],
+        sidecar_text: Some(sidecar(16, "强行剪断缆绳需要进行斗殴检定。")),
+        ruleset_id: None,
+    };
+    let deep = json!({"scene":{
+        "read_aloud":"你们看到缆绳横在路中。",
+        "scene_mechanics":[
+            {"intent_id":"m1","description":"强行剪断缆绳","tested_parameter":"brawling",
+             "source_anchor":"强行剪断缆绳需要进行斗殴检定"},
+            {"intent_id":"m2","description":"无锚编造","tested_parameter":"stealth",
+             "source_anchor":""}
+        ]
+    }});
+    let client = ReplayClient { deep_args: deep, seen_user: std::sync::Mutex::new(String::new()) };
+    deep_extract_scene_in_place(&client, &ctx, &mut out, 0, 6).await;
+    assert_eq!(out.scenes[0].scene_mechanics.len(), 1, "无 anchor 的 intent 被 fail-closed 丢弃");
+    assert_eq!(out.scenes[0].scene_mechanics[0].intent_id, "m1");
+}
+
+#[tokio::test]
+async fn legacy_deep_payload_keeps_existing_mechanics() {
+    // 节点预置 1 条 scene_mechanics，深抽提交不含该键 → 仍是原 1 条（空/缺不覆盖既有）。
+    use trpg_model::SceneMechanicIntent;
+    let mut out = ModuleReadout::default();
+    out.scenes = vec![paged_scene("s0", "加油站", 16)];
+    out.scenes[0].scene_mechanics = vec![SceneMechanicIntent {
+        intent_id: "m0".into(),
+        description: "既有意图".into(),
+        tested_parameter: "spot_hidden".into(),
+        difficulty: None,
+        effect_policy: Default::default(),
+        source_anchor: "原文片段".into(),
+    }];
+    let ctx = ModuleReaderCtx {
+        units: &[],
+        sidecar_text: Some(sidecar(16, "你们看到一座破败的加油站。")),
+        ruleset_id: None,
+    };
+    let deep = json!({"scene":{"read_aloud":"你们看到一座破败的加油站。"}});
+    let client = ReplayClient { deep_args: deep, seen_user: std::sync::Mutex::new(String::new()) };
+    deep_extract_scene_in_place(&client, &ctx, &mut out, 0, 6).await;
+    assert_eq!(out.scenes[0].scene_mechanics.len(), 1, "旧式提交（缺键）不冲掉既有 intents");
+    assert_eq!(out.scenes[0].scene_mechanics[0].intent_id, "m0");
+}
+
+#[test]
+fn deep_sys_mentions_scene_mechanics() {
+    // prompt 字面回归（防手滑）：深抽 SYS 必须含 scene_mechanics 指引。
+    assert!(DEEP_SYS.contains("scene_mechanics"));
+}
+
+#[tokio::test]
 async fn fallback_when_no_pages_and_no_sidecar_is_fail_closed() {
     // 无页码 + 无 sidecar → 走 ReAct 回退；MockLlmClient 不支持 complete_with_tools →
     // run_module_loop None → 保持 SkeletonOnly，绝不编造。

@@ -23,6 +23,16 @@ const DEEP_SYS: &str = "你是模组场景深抽器。对给定的入口场景�
 links（出口）规则：to_node_id **只能从给定候选 node_id 里选**（不在候选里的一律不输出）；\
 每条 link 必须带 link_type∈{spatial,trigger,timeline,sequential,branch} 与 **source_anchor\
 （摘当前页原文片段，证明这条通路/触发存在）**，抽不出锚点就**不要**输出该条边，绝不编造。\
+scene_mechanics：仅当场景文本**明确写出**检定（技能/难度/后果）时编译为结构化条目 \
+{intent_id, description, tested_parameter, difficulty, effect_policy{on_success,on_failure}, \
+source_anchor}；source_anchor 必须摘当前页原文片段；文本没写明的**绝不编造**，没有就交空数组。\
+difficulty **必须**是结构化对象 {\"kind\":\"dv\"|\"static\"|\"target_number\",\"value\":整数}\
+——文本给了目标数就抽成数字进 value；条件变体/原文措辞写进 note 字段，绝不塞进 value；\
+只有文本确实给不出数字时才保留原文字符串（字符串不绑定结算目标，引擎 fail-closed 走规则核默认）。\
+effect_policy 条目字段**逐字对齐**：create_fact={kind,target,fact}（fact 是对象，没有 value 字段）；\
+modify_track={kind,owner_kind,owner_id?,track_id,op∈{add,subtract,set},amount 整数}；\
+set_object_state={kind,object_id,patch}；start_countdown={kind,label,amount,scale,payload}；\
+字段名/形态写错的条目引擎判不可执行（记录但不生效）。\
 用 get_toc/search/read/read_layout 检索（若已给页面文本则直接据此抽），最后 submit_deep。";
 
 /// 聚焦工具循环（镜像 `run_compile_loop`/`run_object_loop`）。返回 submit 工具的 args。
@@ -99,12 +109,16 @@ fn module_dispatch(ctx: &ModuleReaderCtx<'_>, name: &str, args: &Value) -> Strin
 }
 
 /// submit_deep 工具 schema（一次性路径与 ReAct 回退路径共用，单一事实源）。
+/// scene_mechanics 的字段形态 schema 在 scene_mechanics.rs（与解析器同源，C7）；
+/// scene 其余键保持开放对象（properties 不收口 additional 键）。
 fn submit_deep_tool() -> Value {
     tools::submit_tool(
         "submit_deep",
-        "Submit the entry scene's deep content (read_aloud/gm_notes/links/referenced_*_ids) + closure entity details.",
+        "Submit the entry scene's deep content (read_aloud/gm_notes/links/referenced_*_ids/scene_mechanics) + closure entity details.",
         json!({
-            "scene": {"type": "object"},
+            "scene": {"type": "object", "properties": {
+                "scene_mechanics": super::scene_mechanics::scene_mechanics_schema()
+            }},
             "entities": {"type": "array", "items": {"type": "object"}}
         }),
         &["scene"],
@@ -203,6 +217,7 @@ async fn oneshot_deep_extract(
 候选出口（links 的 to_node_id 只能从这里选；node_id|title）：\n{}\n\n\
 下面是该场景所在页（{pages}）的版面文本。据此填该场景的 read_aloud/gm_notes/referenced_*_ids\
 与 links（每条 link 的 to_node_id 必须取自上面候选、且必须带 source_anchor 摘自下文原文），\
+以及 scene_mechanics（仅当下文明确写出检定时才编译，source_anchor 摘自下文原文，没有就交空数组），\
 再补闭包实体详情，最后 **必须调用 submit_deep** 提交。\n\n=== 页面文本 ===\n{page_text}",
         serde_json::to_string(&cand_view).unwrap_or_default(),
     );

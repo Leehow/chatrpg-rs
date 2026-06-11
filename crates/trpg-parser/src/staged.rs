@@ -169,7 +169,7 @@ impl StagedParse {
         let object_schemas = reader::compile_object_schemas(compiler.as_ref(), &obj_ctx, budget).await;
 
         // 2d assemble + persist the full kernel.
-        if let Err(e) = crate::persist_stage2_kernel(&self.db, &self.ruleset_id, &self.title, rg.as_ref(), &template, &char_slice.option_catalogs, object_schemas).await {
+        if let Err(e) = crate::persist_stage2_kernel(&self.db, &self.ruleset_id, &self.title, rg.as_ref(), &template, &char_slice.option_catalogs, object_schemas, &self.units, self.sidecar_text.clone(), &self.llm).await {
             st.note(&format!("kernel persist failed: {e}"));
         }
 

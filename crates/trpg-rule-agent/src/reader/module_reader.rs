@@ -3,6 +3,10 @@
 //! fail-closed guardrail（提交解析失败/页面无内容 → 返回已得部分，绝不编造）。
 //! Pass A 读 TOC+前言建全书骨架；Pass B（loop 文件的 deep_extract_scene_in_place）深抽场景。
 //! 设计：docs/superpowers/specs/2026-06-09-module-reader-redesign-design.md
+// 入口选择纯函数已外移 module_graph_edges.rs 守 ≤400 行；再导出保持调用点/测试可见性不变。
+#[cfg(test)]
+pub(super) use super::module_graph_edges::entry_scene_index;
+pub(super) use super::module_graph_edges::resolve_entry_index;
 use super::module_reader_loop::run_module_loop;
 use super::tools;
 use super::units::Unit;
@@ -88,30 +92,6 @@ pub fn stub_to_node(v: &Value) -> Option<ScenarioNode> {
     Some(n)
 }
 
-/// 兜底入口选择（确定性）：首个 node_type=="scene"/"story" 的场景；无则首个。空 → None。
-/// 仅在 reader 没给出语义入口时使用，保留 reader 提交的顺序。
-fn entry_scene_index(scenes: &[ScenarioNode]) -> Option<usize> {
-    if scenes.is_empty() {
-        return None;
-    }
-    scenes
-        .iter()
-        .position(|n| matches!(n.node_type.as_str(), "scene" | "story"))
-        .or(Some(0))
-}
-
-/// 选取 Pass B 的入口场景索引。**语义优先**：先用 reader 自己判定的 entry_node_id
-/// （它读懂了这本模组、会跳过前言/安全提示/目录等非可玩前置）；reader 未给或 id 失效
-/// → 退到确定性 `entry_scene_index`。主路径不靠 node_type 字面关键词匹配，符合语义优先理念。
-fn resolve_entry_index(scenes: &[ScenarioNode], entry_node_id: Option<&str>) -> Option<usize> {
-    if let Some(id) = entry_node_id.map(str::trim).filter(|s| !s.is_empty()) {
-        if let Some(i) = scenes.iter().position(|n| n.node_id == id) {
-            return Some(i);
-        }
-    }
-    entry_scene_index(scenes)
-}
-
 /// fail-closed：把 Pass B 提交的 deep payload 就地填进入口 ScenarioNode。
 /// read_aloud 为空/缺 → 保持 None（绝不编造）；有内容才翻 DeepExtracted。
 pub(super) fn apply_deep_to_node(node: &mut ScenarioNode, deep: &Value) {
@@ -152,6 +132,12 @@ pub(super) fn apply_deep_to_node(node: &mut ScenarioNode, deep: &Value) {
     }
     if let Some(v) = ids("referenced_encounter_ids") {
         node.referenced_encounter_ids = v;
+    }
+    // 深抽交了非空 scene_mechanics 才覆盖；空/缺 → 保留既有（再抽不冲掉已得，
+    // 对标 referenced_*_ids 的 Some 才覆盖样板）。
+    let mechanics = super::scene_mechanics::parse_scene_mechanics(scene);
+    if !mechanics.is_empty() {
+        node.scene_mechanics = mechanics;
     }
     // 补充（非覆盖）：LLM 常把 NPC/线索放进 `deep.entities` + gm_notes 文字，却把
     // scene.referenced_* 留空 → 场景与实体断链、bridge_edges 连不出边。这里遍历

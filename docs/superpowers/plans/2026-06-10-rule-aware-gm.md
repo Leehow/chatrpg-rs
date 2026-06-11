@@ -2115,6 +2115,7 @@ PSQL "select turn_id, left(assistant_output, 300) from turns where session_id='$
 - 前置：**B6/B7**（ObligationLedger/RetroactiveEffectDebt/referenced_ledger_ids）——验收 11；**B1 + C3**（BP1 索引/BP2 intents 块）——验收 13；**全部任务 A1–C6 完成**——总对账才有意义。本任务是整个二期的**最后收口闸门**。
 - 唯一允许的新文件：`crates/trpg-gm/tests/retro_debt_e2e.rs`（`#[ignore]` 集成测试，真 DB + MockLlm 脚本——验收 11 的"叙事声称伤害但未调工具"靠真 LLM 不可复现，必须脚本可控；spec §8.11 原文即"MockLlm 脚本"）。
 - 产出：总验收报告（中文）落 `docs/规则感知GM二期验收报告_2026-06-10.md`，核心是下方对账表执行时逐条填实。
+- **对账注意（验收 10 承重数据修正，防静默回归）**：triangle_agency kernel `{resource_tracks,0,on_outcome,0,amount}` 在 C6 期间由坏值 `=chaos_generated`（抽取器把 derived_formulas field_id 混进 outcome 字段命名空间，引擎 outcome 词表里只有 `pool_miss_count`——trpg-contest lib.rs ~L49-56）修正为 `=pool_miss_count`，存档 `_fix_triangle_chaos_amount.sql`（幂等，先例对标 `_fix_coc_success_bands.sql`）。**任何规则书重抽都可能再产坏值**（A3 mechanics_finalize 不校验 `=field` 引用，护栏缺口已开 chip）——本任务凡触发 Triangle 重抽/缓存回归后，必须 `PSQL "select content_json#>>'{resource_tracks,0,on_outcome,0,amount}' from rule_kernels where ruleset_id='triangle_agency' and active=true"` 复核 = `=pool_miss_count`，回退则重放 fix SQL 并在对账表 10 行备注。A7 产物 `_a7_mech_audit/triangle_agency.final.json` 已同步修正值（分歧标注 `_a7_mech_audit/_DIVERGENCE_triangle_chaos_amount.md`），写回重放安全。
 
 ### ① 追溯债务闭环（验收 11，MockLlm 脚本可控 + 真库状态变化）
 
@@ -2218,12 +2219,88 @@ cd ../trpg-runtime && cargo test -p trpg-runtime && cd ../.. && cargo build -p t
 | party/world owner_kind 写路径维持现状（投影侧已通用） | B3 | validation 记录 |
 | band trigger 未解析出的规则集（若有） | A4/A5 | validation_report + 对账表 12② 备注 |
 | verifier 子串扫描回退路径 | B7 | finding detail 前缀 fallback:substring_scan（C7① 已断言） |
-| check_match regex 兼容回退（契约无 mechanic_id 时） | 护栏 §3.5.1 | 账本/validation_report 标注 |
+| check_match regex 兼容回退（契约无 mechanic_id 时） | 护栏 §3.5.1 | 账本标注已实现（终审修复）：regex 命中且契约无 "mechanic:" 引用 → 结算产物 CreateFact（reason=`check_match_fallback_observed`，fact 前缀 `fallback:check_match`；A5 band 触发路径不标注，单测钉死） |
 | （执行中发现的新债逐条追加） | | |
 
 ### 验证（任务收口 = 二期收口）
 - 验收 11：retro_debt_e2e 两用例过 + 库面 PSQL 原文；验收 13：两证据面 hash 恒等 + 前提断言留档。
 - 对账表 14 行 + 工程行全部填实（无空格无"已实现"），状态列出现「未通过」则二期不收口——指回任务修复后重跑该行证据。
 - 总报告落 `docs/规则感知GM二期验收报告_2026-06-10.md`（中文），含：对账表、三链计时表汇总（vs 一期基线，回答 spec §9 风险 4）、技术债清单、evaluator 对照结论摘要。
+
+---
+
+## C7 执行记录（2026-06-11，收口）
+
+> 环境：真库 :54347（docker `chatrpg-postgres-rulesets`）+ relay :18888（双查通过后开工）；e2e GM 模型 gpt-5.4（.env）。总报告：`docs/规则感知GM二期验收报告_2026-06-10.md`。
+
+### C7① 追溯债务闭环（验收 11）——DONE，两用例绿
+
+- 新文件 `crates/trpg-gm/tests/retro_debt_e2e.rs`（236 行）。TDD 首跑即红，**揪出 B6 真实缺口**：spec §5.3 的"补 apply_effect 落账"清债通路缺失（原实现只有 waive 一条路）——债务清不掉 → 门控反复回填 → 脚本耗尽。外科修复（B6 域）：`obligations.rs` 新增 `consumed_effect_ids` + `settle_retro_debts_with_effects`（FIFO、每 effect_id 只消费一次、begin_turn 重置）+ 单测 `settle_retro_debts_consumes_each_effect_once_fifo`；`turn_loop.rs` 门控同步块内接清偿。配对为粗粒度记账（记技术债）。
+- 实跑输出尾部：
+```
+SESSION_ID=session_1bdec455dde0410db52c98c67a521c85 HP_PATH=resources.hp.current BEFORE=10 AFTER=7
+test retro_debt_settled_by_apply_effect_changes_db_state ... ok
+SESSION_ID=session_e8dd31097d884542bbc42ecc51210e77 WAIVE_AUDIT_ROWS=1
+test retro_debt_waived_with_reason_unblocks_and_audits ... ok
+test result: ok. 2 passed; 0 failed
+```
+- 库面 PSQL 复核：`generic_parameter_states` → `pc.current | resources.hp.current | 7`（seed 10 − 3）；`memory_events` → `{gm_waive} | waived obligation debt_ad737745…(scope=turn): 叙事中已收回该说法`。
+- 断言含 B7 半边：账本为空 → finding detail 带 `fallback:substring_scan` 前缀（两用例均断言）。
+- 测试角色 seed 为合法 fixture（对标 `trpg-mechanics/tests/live_apply_effect_roll.rs::seed_actor` 前例）：无角色时 HP before=0，资源 Subtract 被引擎正确钳 0，伤害无从观测；效果链全走真实 mechanics 原语。
+
+### C7② 缓存回归 e2e（验收 13）——DONE，两对照面两证据面全恒等
+
+- Run A（CoC 血色公路 / scene_017 无 intents=BP2 fail-closed 面）：SID=session_eb5827c3f4c64300a09bd5be498d29f5，log `/tmp/c5_logs/c7_cache_run1.*`。
+  tracing 面（去 ANSI 后 uniq）：`3 prefix_hash=sha256:d3e95603…` / `3 pinned_hash=sha256:1437a225…` / `3 request_prefix_hash=sha256:504b0ee1…`（各只 1 值 ×3 轮）。
+  落库面：turns 3 行 prefix/pinned 逐字段相等、dynamic 各异（SQL 原文见总报告）。
+- Run B（Homecoming CPR / scene_01 含 3 intents=BP2 有块面）：SID=session_db7e08abfc8448c1b021c985b303c348，log `/tmp/c5_logs/c7_cache_run2_hc.*`。
+  tracing 面：`5 prefix_hash=sha256:5d335e85…` / `5 pinned_hash=sha256:574c329a…` / `5 request_prefix_hash=sha256:49cb0853…`（5 轮>3 回合：GM waive 了 5 条 turn_start hook dues——hook due 通路顺带 live 实证）。
+  落库面：turns 3 行 prefix/pinned 全等。
+- 前提断言：BP1 索引块在 `CacheZone::Prefix`（runtime L1444-1480；CoC/CPR 目录 39/42 条非空）；sessions.current_scene_id 三回合未动（Run A=scene_017、Run B=scene_01，SQL 复核）；B1/C3 单测半边照绿。
+- Triangle kernel 对账注意复核：`{resource_tracks,0,on_outcome,0,amount}` = `=pool_miss_count`（未回退，无需重放 fix SQL）。
+
+### 工程约束三查（输出原文）
+
+```
+$ wc -l（Create 清单全列）
+399 mechanics.rs / 373 mechanics_compile.rs / 248 mechanics_finalize.rs / 243 mechanics_proto.rs /
+100 scene_mechanics.rs / 350 watcher.rs / 304 obligations.rs / 357 scene_policy.rs / 185 tools/mechanic.rs /
+236 tests/retro_debt_e2e.rs / 199 mechanics_render.rs / 266 turn_loop.rs        ← 全部 ≤400
+$ grep -rn -iE "call_of_cthulhu|cthulhu|cyberpunk|triangle_agency|sword_world|dnd|d&d|coc[^a-z]" <逻辑文件清单>
+命中仅 2 处文档注释（mechanics.rs:213 / scene_policy.rs:24）+ 测试 fixture（tools/mechanic.rs tests）——零逻辑分支命中
+$ 回归矩阵：trpg-model 38+2+5 / trpg-rule-agent 全 suite ok（lib 93）/ trpg-mechanics 34+5+1 /
+  trpg-gm 64（+e2e 2）/ trpg-runtime 41+2+1 全绿；cargo build -p trpg-cli Finished
+$ live 库面测试：trpg-db live_mechanic_dues 2 passed / trpg-mechanics live_hook_dues 1 passed（:54347）
+```
+
+### C7③ 行 9 独立复查与修复（收口闸门权责内的"指回任务修复"）
+
+独立复查发现 C6① 的 e2e 半边未真正落地：全库 `world_events` 中 `event_kind='effect_applied' and source='scene.policy'` 为 **0 行**（C6 六把 + C7 补跑三把均未触发）。逐层确诊三处真实缺口并按责任面处置：
+
+1. **GM 无从知道 scene_mechanic_id 的存在（根因主件）**：BP2 意图块只render `id|desc|tested|difficulty` 裸表、gm_skill 全部文件 grep `scene_mechanic` 0 命中、roll_check schema 该属性无 description。修复（纯数据+单行 schema）：`data/agent/gm_skill/global/40_mechanics_catalog.md` 新增「场景机制意图」准则节；check.rs schema 给 `scene_mechanic_id` 补 description（schema_serialization_is_stable 只查确定性，安全）。修后 run4 立见效：契约 `advice_refs` 带 `scene_mechanic:disconnect_cable_brawling`（盖章落库）。
+2. **gate 路径结构性丢弃**：`build_player_contract_for_args`（check.rs L137）硬置 `scene_mechanic_id: None`，且 gate 结算后从不执行 effect_policy → GM 偏好玩家亲掷的场景里通道不可达。**超出 C7 外科边界（跨 B2/C4 接缝 + check.rs 已 400 行顶格）→ 开 chip `task_14dfb2ff`** 留专注一程。
+3. **C2 数据形态缺口**：深抽把 difficulty 写成纯字符串 `"DV13"`，`difficulty_to_target` 零硬编码设计只认结构化 `{kind,value}` → target 不绑定 → outcome.success=null → effect_policy **fail-closed 正确跳过**。修复（纯数据，先例对标 `_fix_triangle_chaos_amount.sql`）：`_fix_homecoming_intent_difficulty.sql`（幂等；无歧义 `DVnn` 升级为 `{kind:"dv",value:nn}`，含条件分支的字符串保持原样）。
+
+### spec §8 全 14 条对账表（填实终版）
+
+| # | spec §8 验收 | 实现位置 | 证据（实物） | 状态 |
+|---|---|---|---|---|
+| 1 | 六套规则目录生成 + validation_report 记录丢弃及原因 | A2/A3/A6 → A7 | A7 报告 `docs/机制目录跑批审计_2026-06-11.md`；SQL `jsonb_array_length(mechanics_catalog)`＝brp_orc 38 / coc 39 / cpr 42 / dnd 65 / sw 42 / triangle 25（6 行全非空）；validation_report.warnings 全六套非空（8/8/10/8/9/8），含 Triangle `followup_link_broken`（丢弃留证）+ 每套 `catalog_coverage_gap` 4-9 条 | 通过 |
+| 2 | CoC sanity_check/temporary_insanity followup 链通 + jump 带 when_to_use | A4/A7 | DB SQL：sanity 轨 `loss_in_one_go=5 → call_of_cthulhu_7e.temporary_insanity_trigger`，`followup_in_catalog=t`（hp 轨 zero_hp_state 同）；`skill_jump` when_to_use="Call for this when an investigator leaps a gap…"；A7 报告 §2/§7 同证 | 通过 |
+| 3 | 坏条目护栏（tested_parameter 不存在 → 丢弃且报告） | A3 | `cargo test -p trpg-rule-agent`：`mechanics_finalize::tests::bad_tested_parameter_dropped_and_reported` ok（同伴：no_source_refs_dropped / broken_followup_link_dropped_link_kept_entry / unknown_hook_stripped_entry_downgraded 全 ok） | 通过 |
+| 3a | 覆盖率审计 vs 附录 A 137 条 + 每套 ≥1 非预设/纯语义/EngineHook | A7 | A7 报告 §2-§5/§9：六套缺失清单全部经 `--missing` 落库（SQL coverage_gaps 4-9 条/套复核）；三抽查逐套 ✅（CoC 7 开放 kind+8 PM+6 hook 含 calendar 月度；CPR 12 开放 kind+9 hook；Triangle locked_until 实证；ORC/D&D/SW 同节）；Fate（A11）批外记录不计分母 | 通过 |
+| 4 | watcher 单测×4 | B4 | `cargo test -p trpg-mechanics`：san_loss_of_6_in_one_go_produces_crossing / san_loss_of_4_produces_no_crossing / hp_reaching_zero_crosses_at_or_below / threshold_without_followup_still_yields_due_with_prose 全 ok（34 绿）；live 面 `live_hook_dues::open_due_suppresses_refire_and_turn_waive_does_not` + `live_mechanic_dues` ×2 ok（:54347） | 通过 |
+| 5 | 债务门控单测×3 | B6 | `cargo test -p trpg-gm`：open_due_blocks_narration_round / waive_emits_audit_and_unblocks / round_exhaustion_carries_debt_to_next_turn 全 ok（64 绿） | 通过 |
+| 6 | lookup_mechanic / roll_check(mechanic_id) 继承绑定 | B2 | mechanic_inheritance_fills_tested_parameter_and_dice / explicit_args_beat_catalog / lookup_finds_entry_case_insensitive / lookup_missing_id_is_mechanic_not_found ok；schema_serialization_is_stable + registry_has_twelve_tools_in_stable_order 照绿；live：run5 契约 advice 含 `mechanic:cyberpunk_red.skill_check` | 通过 |
+| 7 | e2e CoC SAN→疯狂全链 SQL 可查 | C5① | 半链 live：c5_san_run10（SID=session_6ffe14b1…）SAN 检定 fail（total 80 vs 60，degree=strong_failure）→ `resources.sanity.current=52` 真实落库 + transcript「4 点 Sanity 损失」；一次性 -4<5 → **无 due=watcher 正确不触发**（与单测 san_loss_of_4 对齐）；≥5 疯狂 followup due 概率未观测（mechanic_dues threshold 0 行，1d6 需 5-6）；通路确定性护栏=行 4 单测×4 + 行 2 followup 链 SQL + hook due 通路 live（Run B 5 条 waived turn_start dues） | 通过（带缺口） |
+| 8 | e2e 跳坑感知（tested_parameter 与目录一致，不写死技能名） | C5② | c5_jump_run2（SID=session_c5dedd9d…）：输入「助跑跳过两米裂隙」→ 契约 tested=Jump、roll_under vs 20、total 57=failure（transcript「跳跃检定失败：57 / 20」）；目录条目 `call_of_cthulhu_7e.skill_jump` when_to_use 语义在档；逻辑零技能名字面（工程②grep）。备注：目录条目自身 tested_parameter=null（A7 §8 遗留），绑定为 agent 语义选取 | 通过 |
+| 9 | e2e Homecoming 切线缆 effect_policy 强制执行落库 | C6①（C2/C3/C4）+ C7③ 修复 | **C7 独立复查初判未落地**（全库 effect_applied 0 行，9 把 live 未触发）→ 三层根因修复后 run5（SID=session_d0d88cfc…）全链落库：契约 advice `scene_mechanic:disconnect_cable_brawling` + outcome total 3 vs target **13**（DV 绑定）success=false + `world_events` `event_kind=effect_applied, source=scene.policy, intent_id=disconnect_cable_brawling, success:false, patches=[create_fact "The PC fails to get a hold of Athena with force."]`，GM 叙事尊重失败（未编造成功）。缺口：①gate 路径结构性丢弃（chip `task_14dfb2ff`）②C2 difficulty/patch 字段形态需 schema 收紧（fix SQL `_fix_homecoming_intent_difficulty.sql` 存档 + chip `task_1a86349c`；patch 以 unexecutable_intent 可观测保留=fail-closed 正确） | 通过（带缺口） |
+| 10 | e2e Triangle chaos 累积+语义投影+行为反映 | C6②（A7/B3/B4） | 递增 SQL：c6_chaos_run4（SID=session_587b87ae…）5 检定 `pool_miss_count`=2,5,4,5,4 → `tracks.chaos_pool.current=20`（0→20 单调累积）；kernel `{resource_tracks,0,on_outcome,0,amount}`=`=pool_miss_count` 复核未回退（C7 未触发 Triangle 重抽，无需重放 fix SQL）；行为反映：run4 transcript 尾段 GM 基调「现实正在局部失稳…异常已开始主动引流」（evaluator 视角辅证）。备注：tracks.* 与 resources.* 双存储并存=slice B 既有债（chip task_7adb40cb） | 通过 |
+| 11 | e2e 追溯债务闭环 | C7①（B6/B7） | `retro_debt_e2e` ×2 ok：settled 用例（InventedEffect→债务→BP3 回填断言→apply_effect→narrated→HP 10→7 落库）+ waived 用例（waive 带理由→放行→memory_events `{gm_waive}` 1 行）；PSQL 原文见 C7① 节；含 B7 `fallback:substring_scan` 前缀断言；B6 清偿缺口 TDD 揪出并修复（settle_retro_debts_with_effects） | 通过 |
+| 12 | 成功度三件套 | ①A4 ②A5 ③B3+C5③ | ①CoC bands=hard/regular/failure/extreme/critical/fumble（critical+failure 双补全，A7 `success_band_completed` 留证）——缺口：critical/extreme/fumble 无 test 谓词（display-only；percentile 判档走 contest 逻辑不受阻）②A5 单测 amount_max_of_resolves_max / dice_max_forms / band_trigger_matches_outcome_band ok——缺口：六套 live kernel on_outcome 无 max_of/结构化 band trigger 形态（定性 SQL 0 行，fumble 实测不可达=预列债项）③roll_check_result_carries_band_semantics_when_kernel_has_it ok + live：san_run10 outcome `success_tier=failure/degree=strong_failure` + stakes 叙事分档原文落库 | 通过（带缺口） |
+| 13 | 缓存回归（目录注入后跨回合 prefix/pinned 不变） | B1（单测）+ C7②（e2e） | B1 单测：kernel_bp1_view_strips_catalog_only / catalog_index_text_is_deterministic… + prompts::cache_stability_tests ×5；e2e 两对照面：Run A（CoC 无 intents）3 轮 prefix/pinned/request_prefix 各恒 1 值 + turns 3 行落库相等；Run B（Homecoming 3 intents）5 轮同恒等；SQL/uniq 原文见 C7② 节 | 通过 |
+| 工程 | ≤400 行 / 零 per-ruleset 硬编码 / serde(default) | 全任务 | 三查输出见上节：12 文件全 ≤400（check.rs 顶格 400）；grep 命中仅 2 注释+测试 fixture；回归矩阵 trpg-model/rule-agent/mechanics/gm/runtime 全绿 + trpg-cli build ok | 通过 |
+
+**收口判定**：通过 11 行 + 通过（带缺口）3 行（行 7/9/12，全部为概率未观测或数据侧形态缺位，确定性通路均有单测护住且缺口全部进技术债清单/chip）+ 未通过 0 行 → **二期收口达成**。总报告（含技术债清单全文与三链计时表）：`docs/规则感知GM二期验收报告_2026-06-10.md`。
 
 ---

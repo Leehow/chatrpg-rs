@@ -536,6 +536,11 @@ impl ProjectParseService {
         // duotext tables + characteristic-derived skills), round-trip-validated.
         // Only when the reader produced a template; failure leaves prose intact.
         let mut object_schemas: Vec<serde_json::Value> = Vec::new();
+        // The mechanics third pass (at the kernel production point below) REUSES
+        // the units/sidecar/skills already loaded here — never re-reads disk.
+        let mut mech_units: Vec<reader::Unit> = Vec::new();
+        let mut mech_sidecar: Option<String> = None;
+        let mut mech_skills: Vec<String> = Vec::new();
         if reader_run_kit.is_some() {
             let units_path = self.config.data_dir.join("parsed/source_units").join(format!("{}.semantic_units.jsonl", doc.source_id));
             if let Ok(units) = reader::load_units(&units_path) {
@@ -562,6 +567,8 @@ impl ProjectParseService {
                         .filter_map(|o| o.get("title").and_then(|v| v.as_str()).map(String::from))
                         .collect())
                     .unwrap_or_default();
+                mech_sidecar = sidecar_text.clone();
+                mech_skills = skill_names.clone();
                 let ctx = reader::CompileCtx { units: &units, sidecar_text: sidecar_text.clone(), located_pages, skill_names: skill_names.clone() };
                 // The chargen compile pass is LOW-VOLUME (once per ruleset) but needs
                 // RELIABLE full-sheet extraction, so it runs on a stronger model
@@ -593,6 +600,7 @@ impl ProjectParseService {
                 if !object_schemas.is_empty() {
                     tracing::info!(categories = object_schemas.len(), "object/ability schemas compiled");
                 }
+                mech_units = units;
             }
         }
         normalize_character_sheet_template_schema(&mut character_template, &ruleset_id, &doc.title, book);
@@ -700,10 +708,14 @@ impl ProjectParseService {
         for block in onboarding_blocks(&gm_onboarding) {
             context_blocks.push(block);
         }
-        let rule_kernel = match &reader_run_kit {
+        let mut rule_kernel = match &reader_run_kit {
             Some(rk) => rule_kernel_from_run_kit(&ruleset_id, &doc.title, rk, &character_onboarding_pack, object_schemas),
             None => rule_kernel_from_onboarding(&ruleset_id, &doc.title, &gm_onboarding, &character_onboarding_pack, &procedures),
         };
+        // Rule agent's THIRD pass (mechanics catalog): compile BEFORE the
+        // artifact write and the BP1 context block so the catalog rides the
+        // kernel JSON everywhere it lands. Gated + fail-closed inside.
+        compile_mechanics_into_kernel(&self.llm, &mut rule_kernel, &mech_units, mech_sidecar, mech_skills).await;
         let _ = self.write_rule_kernel_artifact(&rule_kernel).await;
         context_blocks.push(rule_kernel_context_block(&rule_kernel));
         for locator in gm_onboarding.book_locator.iter().chain(gm_onboarding.cold_data_locator.iter()) {
@@ -1558,6 +1570,61 @@ pub(crate) fn build_module_reader_llm() -> Option<Arc<dyn LlmClient>> {
     OpenAiCompatibleClient::new(cfg).ok().map(|c| Arc::new(c) as Arc<dyn LlmClient>)
 }
 
+/// Build the dedicated LLM client for the mechanics-catalog compile pass (the
+/// rule agent's third pass): quality-first model (default gpt-5.4 — runs in the
+/// background, once per ruleset; NOT a `-fast` variant — bills more — and NOT
+/// codex-spark — empty tool args via this relay). `None` → caller falls back
+/// to the main client.
+pub(crate) fn build_mechanics_compiler_llm() -> Option<Arc<dyn LlmClient>> {
+    let mut cfg = LlmConfig::from_env().ok()?;
+    cfg.model = std::env::var("TRPG_MECHANICS_COMPILE_MODEL").unwrap_or_else(|_| "gpt-5.4".to_string());
+    OpenAiCompatibleClient::new(cfg).ok().map(|c| Arc::new(c) as Arc<dyn LlmClient>)
+}
+
+/// The ONE wiring primitive both parse paths (non-staged `parse_rulebook`,
+/// staged `persist_stage2_kernel`) share: gate + fail-closed wrapper around the
+/// rule agent's third pass. Gate OFF → return untouched; client build failure →
+/// fallback main client; the pass itself is fail-closed (no submit → kernel
+/// untouched; round-trip guard reverts in full) and this layer adds a final
+/// serialization belt: any non-panic failure leaves the kernel exactly as it
+/// entered. Gaps land in tracing (observable, never interrupts the parse).
+pub(crate) async fn compile_mechanics_into_kernel(
+    fallback: &Arc<dyn LlmClient>,
+    kernel: &mut RuleKernel,
+    units: &[reader::Unit],
+    sidecar_text: Option<String>,
+    skill_names: Vec<String>,
+) {
+    if !mechanics_compile_enabled() {
+        tracing::info!(ruleset = %kernel.ruleset_id, "mechanics catalog compile pass gated OFF (TRPG_MECHANICS_COMPILE)");
+        return;
+    }
+    if units.is_empty() {
+        tracing::info!(ruleset = %kernel.ruleset_id, "mechanics catalog compile pass skipped: no semantic units available");
+        return;
+    }
+    let client = build_mechanics_compiler_llm().unwrap_or_else(|| fallback.clone());
+    let before = kernel.clone();
+    let ctx = reader::MechCompileCtx {
+        units,
+        sidecar_text,
+        located_pages: String::new(),
+        skill_names,
+    };
+    let gaps = reader::compile_mechanics_catalog(client.as_ref(), kernel, ctx, 14).await;
+    if !gaps.is_empty() {
+        tracing::info!(ruleset = %kernel.ruleset_id, ?gaps, "mechanics compiler gaps (kernel kept consistent; see validation_report)");
+    }
+    // Belt over the pass's own round-trip guard: a kernel this layer cannot
+    // re-serialize must never reach upsert — restore the pre-pass state.
+    if serde_json::to_value(&*kernel).is_err() {
+        *kernel = before;
+        tracing::warn!(ruleset = %kernel.ruleset_id, "mechanics compile left kernel unserializable; reverted to pre-pass state");
+    } else {
+        tracing::info!(ruleset = %kernel.ruleset_id, entries = kernel.mechanics_catalog.len(), "mechanics catalog compile pass finished");
+    }
+}
+
 pub(crate) fn coerce_character_template(value: Value, ruleset_id: &str, title: &str) -> CharacterTemplate {
     let candidate = value.get("character_template")
         .or_else(|| value.get("template"))
@@ -1653,6 +1720,39 @@ fn module_reader_enabled() -> bool {
     std::env::var("TRPG_MODULE_READER")
         .map(|v| !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"))
         .unwrap_or(false)
+}
+
+/// Gate for the mechanics-catalog compile pass (rule agent's third pass).
+/// Same template as `module_reader_enabled` but the default is INVERTED:
+/// unset / anything but "0"/"false"-family -> true (ON by default).
+pub(crate) fn mechanics_compile_enabled() -> bool {
+    std::env::var("TRPG_MECHANICS_COMPILE")
+        .map(|v| !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"))
+        .unwrap_or(true)
+}
+
+#[cfg(test)]
+mod mechanics_wiring_tests {
+    use super::*;
+
+    #[test]
+    fn mechanics_gate_env_reads_three_states() {
+        // All three states run sequentially inside ONE test (no other test in
+        // this binary touches TRPG_MECHANICS_COMPILE); set then restore.
+        let saved = std::env::var("TRPG_MECHANICS_COMPILE").ok();
+        std::env::remove_var("TRPG_MECHANICS_COMPILE");
+        assert!(mechanics_compile_enabled(), "unset -> default ON");
+        std::env::set_var("TRPG_MECHANICS_COMPILE", "0");
+        assert!(!mechanics_compile_enabled(), "\"0\" -> OFF");
+        std::env::set_var("TRPG_MECHANICS_COMPILE", "false");
+        assert!(!mechanics_compile_enabled(), "\"false\" -> OFF");
+        std::env::set_var("TRPG_MECHANICS_COMPILE", "1");
+        assert!(mechanics_compile_enabled(), "\"1\" -> ON");
+        match saved {
+            Some(v) => std::env::set_var("TRPG_MECHANICS_COMPILE", v),
+            None => std::env::remove_var("TRPG_MECHANICS_COMPILE"),
+        }
+    }
 }
 
 /// Map the GmRunKit's structured `core.derived_formulas` into engine DerivedValues.
@@ -1814,7 +1914,11 @@ pub(crate) async fn persist_stage1_character_artifacts(db: &Db, data_dir: &Path,
 /// Stage-2 persistence: assemble the full RuleKernel from the resolution+gm slice,
 /// the (formula-compiled) character template, and the discovered object stubs, then
 /// upsert it. Reuses `rule_kernel_from_run_kit` by reconstructing a GmRunKit.
-pub(crate) async fn persist_stage2_kernel(db: &Db, ruleset_id: &str, title: &str, rg: Option<&reader::ResolutionGm>, template: &CharacterTemplate, option_catalogs: &Value, object_stubs: Vec<Value>) -> Result<()> {
+pub(crate) async fn persist_stage2_kernel(
+    db: &Db, ruleset_id: &str, title: &str, rg: Option<&reader::ResolutionGm>,
+    template: &CharacterTemplate, option_catalogs: &Value, object_stubs: Vec<Value>,
+    units: &[reader::Unit], sidecar_text: Option<String>, fallback_llm: &Arc<dyn LlmClient>,
+) -> Result<()> {
     let pack = stage1_onboarding_pack(ruleset_id, title, template, option_catalogs);
     let run_kit = reader::GmRunKit {
         game_identity: rg.map(|r| r.game_identity.clone()).unwrap_or_default(),
@@ -1832,6 +1936,10 @@ pub(crate) async fn persist_stage2_kernel(db: &Db, ruleset_id: &str, title: &str
     // Stage-2 kernel must carry the formula-compiled template, not just the pack's.
     kernel.character_sheet_schema = serde_json::to_value(template).unwrap_or_default();
     kernel.version = "v1_staged".into();
+    // Rule agent's THIRD pass (mechanics catalog) before the upsert — the
+    // staged path's twin of the parse_rulebook wiring. Gated + fail-closed.
+    let skills = skill_ids(template, option_catalogs);
+    compile_mechanics_into_kernel(fallback_llm, &mut kernel, units, sidecar_text, skills).await;
     db.upsert_rule_kernel(&kernel).await?;
     Ok(())
 }
