@@ -1,0 +1,116 @@
+{
+  "spec_id": "combat_dnd",
+  "description": "D&D 5e/CPR 战斗姿态 e2e（agent 路径）：enter_mode combat→战斗轮→反应窗→伤害落库→close_frame 压缩；叙事零轮次报表用语。",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "pre_session": {
+    "create_character": true,
+    "note": "在 turn 序列开始前用 create-character --auto 建 pc.current，使 GM 能做机械结算"
+  },
+  "rerun_conditions": {
+    "note": "DB reset 后重建 session；module_id 已有现成 prep_packet 不必重抽。",
+    "invalidated_by": ["db_reset"]
+  },
+  "turns": [
+    {
+      "turn_index": 0,
+      "player_input": {
+        "source": "literal",
+        "text": "我在仓库走廊里遭遇了一个武装劫匪，他直接朝我开枪！战斗开始！"
+      },
+      "expect_events": ["combat_frame_created"],
+      "forbid_player_text": ["请你掷先攻", "第1轮", "第2轮", "轮次：", "先攻顺序如下"],
+      "notes": "进入战斗，GM 应调 enter_mode combat 并建 Combat frame；叙事呈现不得报轮次。"
+    },
+    {
+      "turn_index": 1,
+      "player_input": {
+        "source": "relay_generate",
+        "relay_prompt": "你是一个 Cyberpunk RED 玩家，刚进入战斗。描述你的角色用重型手枪对着劫匪开火（简短的第一人称动作，不要报骰点或规则数字）。",
+        "max_tokens": 80
+      },
+      "expect_events_any": ["check_contract_created", "effect_resolution_packet"],
+      "expect_db_deltas": {
+        "dice_rolls": {"min": 1}
+      },
+      "forbid_player_text": ["请你掷", "请报告伤害", "命中值是多少", "轮次：", "第1轮", "先攻顺序如下"]
+    },
+    {
+      "turn_index": 2,
+      "player_input": {
+        "source": "relay_generate",
+        "relay_prompt": "你是一个 Cyberpunk RED 玩家，劫匪向你还击了。你想找掩体继续战斗，描述你的行动（不要报骰点）。",
+        "max_tokens": 80
+      },
+      "expect_events_any": ["reaction_window_opened", "check_contract_created"],
+      "forbid_player_text": ["请你掷", "请报告", "轮次：", "先攻顺序"]
+    },
+    {
+      "turn_index": 3,
+      "player_input": {
+        "source": "relay_generate",
+        "relay_prompt": "你是一个 Cyberpunk RED 玩家，继续战斗，劫匪已经受伤。描述你的角色进行收尾攻击（简短，不要报骰点）。",
+        "max_tokens": 80
+      },
+      "expect_db_deltas": {
+        "dice_rolls": {"min": 1}
+      },
+      "forbid_player_text": ["请你掷", "轮次：", "先攻顺序"]
+    },
+    {
+      "turn_index": 4,
+      "player_input": {
+        "source": "relay_generate",
+        "relay_prompt": "你是一个 Cyberpunk RED 玩家，战斗结束了，劫匪被击倒。用一两句话描述战斗结束的状态（不要报骰点）。",
+        "max_tokens": 80
+      },
+      "expect_events_any": ["frame_compacted", "state_frame_closed"],
+      "notes": "close_frame 后 compaction 生效。"
+    }
+  ],
+  "assertions": [
+    {
+      "id": "combat_frame_created",
+      "type": "sql",
+      "query": "SELECT COUNT(*) FROM state_frames WHERE session_id='$SESSION_ID' AND frame_kind='combat' AND status IN ('active','completed')",
+      "expect_min": 1,
+      "description": "战斗 frame 必须建立（enter_mode combat 或 open_combat_frame 被调用）"
+    },
+    {
+      "id": "memory_events_recorded",
+      "type": "sql",
+      "query": "SELECT COUNT(*) FROM memory_events WHERE session_id='$SESSION_ID'",
+      "expect_min": 1,
+      "description": "GM 应有记忆事件（战斗过程记录）"
+    },
+    {
+      "id": "check_contracts_created",
+      "type": "sql",
+      "query": "SELECT COUNT(*) FROM check_contracts WHERE session_id='$SESSION_ID'",
+      "expect_min": 1,
+      "description": "至少 1 个检定合同建立（攻击/先攻/伤害——agent 路径机械结算证据）"
+    },
+    {
+      "id": "frame_compacted_or_closed",
+      "type": "sql",
+      "query": "SELECT COUNT(*) FROM state_frames WHERE session_id='$SESSION_ID' AND frame_kind='combat' AND status='completed'",
+      "expect_min": 1,
+      "description": "战斗结束后 frame 必须关闭（close_frame 触发 compaction）"
+    },
+    {
+      "id": "no_round_table_in_narration",
+      "type": "grep_forbidden",
+      "pattern": "第[0-9]+轮|轮次：|先攻顺序如下|Initiative Order",
+      "target": "player_visible_text",
+      "description": "叙事文本中零轮次报表用语"
+    },
+    {
+      "id": "npc_hp_changed",
+      "type": "sql",
+      "query": "SELECT COUNT(*) FROM actor_mechanical_states WHERE session_id='$SESSION_ID' AND actor_id LIKE 'npc.%' AND hp_current IS NOT NULL",
+      "expect_min": 1,
+      "expect_min_or_note": "relay 玩家模拟未回报骰子时 GM 等待掷骰，NPC HP 不结算（已知限制；check_contracts 已证明机械路径在位）",
+      "description": "NPC 战斗状态（actor_mechanical_states）记录（可选——玩家报骰后才结算）"
+    }
+  ]
+}

@@ -83,10 +83,33 @@ impl GmLoop {
         // gm_skill 是 agent 路径硬依赖：fail-closed，Err 终止回合（契约第 7 节，
         // 绝不 unwrap_or_default；data_dir 由装配方传 default_data_dir()）。
         // 三期 §4.2：四级合并（mode=None 退化两级，字节不变——缓存稳定硬回归）。
-        let gm_skill = load_gm_skill_with_mode(&self.data_dir, &input.request.ruleset_id, mode_id.as_deref())?;
+        let mut gm_skill = load_gm_skill_with_mode(&self.data_dir, &input.request.ruleset_id, mode_id.as_deref())?;
+        // —— 三期 §4.5 目录联动（终审返工）：mode 激活 → kernel mechanics_catalog
+        //    经 manifest.catalog_filter 过滤，渲染为紧凑节拼进 mode 提示层尾部
+        //    （与 mode 提示同生命周期、同有因失效；BP1 目录索引保持 mode 无感
+        //    不动——缓存设计 §4.2 RarelyChanged 不随 mode 失效）。无 kernel/
+        //    空过滤结果/db 失败 → 不注入（fail-closed 不阻断回合，warn 可观测）。
+        if let Some(manifest) = &mode_manifest {
+            match self.engine.db.load_rule_kernel(&input.request.ruleset_id).await {
+                Ok(Some(kernel)) => {
+                    if let Some(section) = crate::mode_catalog::mode_catalog_section(&manifest.mode_id, &manifest.catalog_filter, &kernel.mechanics_catalog) {
+                        gm_skill.push_str("\n\n---\n\n");
+                        gm_skill.push_str(&section);
+                    }
+                }
+                Ok(None) => tracing::warn!(ruleset_id = %input.request.ruleset_id, "mode catalog subset skipped: no active rule kernel"),
+                Err(err) => tracing::warn!(error = %err, "mode catalog subset skipped: rule kernel load failed"),
+            }
+        }
         let mut errata_blocks = Vec::new();
         if let Some(block) = self.errata.errata_block() { errata_blocks.push(block); }
         if let Some(block) = self.errata.standing_reminder_block() { errata_blocks.push(block); }
+        // —— 三期 §5 novelty 复用（批2）：姿态激活时把 frame 状态里的已用战术
+        //    渲染为 BP3 尾段事实块（一期 novelty director 数据，零额外 LLM 调用）；
+        //    mode=None 绝不注入（二期行为字节级一致）。
+        if mode_id.is_some() {
+            if let Some(block) = crate::tools::frame::novelty_block(&active_frames) { errata_blocks.push(block); }
+        }
         let tail = DynamicTailInput { user_input: input.user_input, resolved_gate_facts: &resolved_gate_facts, errata_blocks: &errata_blocks, obligations_block: obligations_block.as_deref() };
         let mut messages = TurnMessages::assemble(&compiled, &gm_skill, input.history, &tail);
         // —— 三期 §4.3 工具按 mode 组装：mode 激活 → for_mode（基础 14 +
@@ -99,8 +122,10 @@ impl GmLoop {
         };
         let schemas = mode_tools.as_ref().unwrap_or(&self.tools).schemas();
         // —— 三期 §4.6 节拍参数：tempo.max_tool_rounds per-mode 覆盖 LoopConfig
-        //    （None = 沿用默认；effect_closure_per_cluster 由批2 交锋簇门控消费）。
+        //    （None = 沿用默认）；effect_closure_per_cluster 收紧交锋簇节拍
+        //    （批2：轮前债务判定时按账本重算簇闭合状态）。
         let max_tool_rounds = mode_manifest.as_ref().and_then(|m| m.tempo.max_tool_rounds).unwrap_or(self.cfg.max_tool_rounds);
+        let effect_closure_per_cluster = mode_manifest.as_ref().and_then(|m| m.tempo.effect_closure_per_cluster).unwrap_or(false);
         let mut visible_text = String::new();
         let mut awaiting: Option<AwaitingPlayerRoll> = None;
         let mut narrated = false;
@@ -145,6 +170,15 @@ impl GmLoop {
                     // effect 按 FIFO 结清追溯债务（effect_id 只消费一次，逐轮重扫安全）。
                     let effect_ids: Vec<String> = ledger.snapshot().effect_contracts.iter().map(|e| e.effect_id.clone()).collect();
                     obligations.settle_retro_debts_with_effects(&effect_ids);
+                    // 三期 §4.6 交锋簇节拍收紧（批2）：紧节拍下"已结算检定但零效果
+                    // 落账"（effect 契约 / track 落账 / 检定自带 committed patches
+                    // 皆无）⇒ 簇未闭合 ⇒ 本轮不得成为叙事终态。tight=false（mode=None
+                    // /幕间）恒清空——二期行为字节级一致。
+                    let snap = ledger.snapshot();
+                    let effects_booked = snap.effect_contracts.len()
+                        + snap.parameter_impacts.len()
+                        + snap.check_results.iter().filter(|r| !r.committed_patches.is_empty()).count();
+                    obligations.update_cluster_closure(effect_closure_per_cluster, snap.check_results.len(), effects_booked);
                     match obligations.block_text() {
                         Some(block) => { if round > 0 { messages.push_system_observation(&block); } true }
                         None => false,
@@ -295,3 +329,7 @@ fn drain_redactor(redactor: &mut RedactingBuffer, blocked: bool, on_delta: &mut 
 #[cfg(test)]
 #[path = "turn_loop_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "turn_loop_mode_tests.rs"]
+mod mode_tempo_tests;

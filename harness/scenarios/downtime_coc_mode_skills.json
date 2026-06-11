@@ -1,0 +1,36 @@
+{
+  "name": "downtime_coc_mode_skills",
+  "ruleset_id": "call_of_cthulhu_7e",
+  "module_id": null,
+  "forbidden_player_text": [
+    "请你掷",
+    "请你自己掷",
+    "请报告掷骰",
+    "请报告伤害",
+    "第1轮",
+    "轮次：",
+    "先攻顺序"
+  ],
+  "evaluator_instructions": "Judge this as a black-box solo TRPG product. Verify: (1) GM enters downtime mode with enter_mode downtime. (2) GM presents a proposal with ≥3 categories of downtime mechanics (healing/recovery, sanity/psychology, skill training, finances, social/contacts). (3) Player confirms and GM resolves batch settlement with advance_time + apply_effect/change_track. (4) A settlement summary is delivered. (5) GM calls exit_mode when downtime is complete. DB should show world_time_advances and generic_parameter_states records.",
+  "allow_debug_directives": true,
+  "allow_manual_roll_input": false,
+  "turns": [
+    {
+      "user_input": "调查结束了，我们回到波士顿安顿下来，打算好好休息几天，处理一些积压的事务。",
+      "notes": "Enter downtime. Expect GM to enter downtime mode, present proposal with ≥3 downtime categories.",
+      "forbid_player_text": ["debug", "JSON", "请你掷"]
+    },
+    {
+      "user_input": "好的，先把伤养好，然后再去心理医生那里聊聊，顺便整理一下这次调查的笔记。",
+      "notes": "Player approves plan. GM should start batch settlement: advance_time, apply_effect for HP+SAN recovery, remember_fact for notes."
+    },
+    {
+      "user_input": "继续，我准备好了。",
+      "notes": "Continue settlement. Expect time advances and calendar hooks triggered."
+    },
+    {
+      "user_input": "我准备好了，可以继续下一段冒险了。",
+      "notes": "Downtime end. GM should call exit_mode downtime, deliver settlement summary."
+    }
+  ]
+}

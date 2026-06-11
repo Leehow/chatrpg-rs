@@ -328,5 +328,46 @@ mod cache_stability_tests {
         assert!(err.to_string().contains("pinned"));
         assert!(validate_compiled_budget(&compiled(), &request).is_ok());
     }
+
+    /// 批5 mode 维度参数化夹具：建 global gm_skill + combat mode 包（含 mode-global 覆盖层）。
+    fn combat_mode_dir(suffix: &str) -> std::path::PathBuf {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("cache_mode_{}_{}", std::process::id(), suffix));
+        fs::create_dir_all(dir.join("agent/gm_skill/global")).unwrap();
+        fs::write(dir.join("agent/gm_skill/global/10_base.md"), "base skill").unwrap();
+        fs::create_dir_all(dir.join("agent/gm_skill/modes/combat")).unwrap();
+        fs::write(dir.join("agent/gm_skill/modes/combat/manifest.json"), r#"{"mode_id":"combat","frame_kind":"combat"}"#).unwrap();
+        fs::write(dir.join("agent/gm_skill/modes/combat/global.md"), "[combat-mode-overlay] cinematic").unwrap();
+        dir
+    }
+
+    /// 批5 ① mode 切换=有因失效断言：mode=None（两级）vs mode=combat（四级）gm_skill
+    /// 文本不同 → system 消息字节不同 → prefix_byte_hash(1) 互不相等（预期缓存失效）。
+    #[test]
+    fn mode_switch_invalidates_gm_skill_prefix_bytes() {
+        let dir = combat_mode_dir("inv");
+        let tail = DynamicTailInput { user_input: "x", resolved_gate_facts: &[], errata_blocks: &[], obligations_block: None };
+        let skill_none   = load_gm_skill_with_mode(&dir, "rs", None).unwrap();
+        let skill_combat = load_gm_skill_with_mode(&dir, "rs", Some("combat")).unwrap();
+        assert_ne!(skill_none.as_bytes(), skill_combat.as_bytes(), "mode overlay must change gm_skill text");
+        let hash_none   = TurnMessages::assemble(&compiled(), &skill_none,   &[], &tail).prefix_byte_hash(1);
+        let hash_combat = TurnMessages::assemble(&compiled(), &skill_combat, &[], &tail).prefix_byte_hash(1);
+        assert_ne!(hash_none, hash_combat, "mode switch must invalidate system prefix hash (justified cache miss)");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// 批5 ② 同 mode 内前缀字节稳定：gm_skill 不变、history 仅追加 → prefix_byte_hash(2) 不变。
+    #[test]
+    fn same_mode_prefix_bytes_stable_across_turns() {
+        let dir = combat_mode_dir("stable");
+        let skill = load_gm_skill_with_mode(&dir, "rs", Some("combat")).unwrap();
+        let tail1 = DynamicTailInput { user_input: "attack", resolved_gate_facts: &[], errata_blocks: &[], obligations_block: None };
+        let turn1 = TurnMessages::assemble(&compiled(), &skill, &[], &tail1);
+        let history = vec![ChatMessage { role: "user".to_string(), content: "attack".to_string() }, ChatMessage { role: "assistant".to_string(), content: "hit".to_string() }];
+        let tail2 = DynamicTailInput { user_input: "move", resolved_gate_facts: &[], errata_blocks: &[], obligations_block: None };
+        let turn2 = TurnMessages::assemble(&compiled(), &skill, &history, &tail2);
+        assert_eq!(turn1.prefix_byte_hash(2), turn2.prefix_byte_hash(2), "same mode across turns must keep prefix bytes stable");
+        std::fs::remove_dir_all(dir).ok();
+    }
 }
 

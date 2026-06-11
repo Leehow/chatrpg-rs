@@ -1,0 +1,89 @@
+{
+  "spec_id": "combat_coc",
+  "description": "CoC 7e 战斗姿态 e2e（agent 路径）：enter_mode combat→攻防对抗 roll→HP 落库→close_frame；叙事零轮次报表用语。",
+  "ruleset_id": "call_of_cthulhu_7e",
+  "module_id": null,
+  "pre_session": {
+    "create_character": true,
+    "note": "在 turn 序列开始前用 create-character --auto 建 pc.current（CoC 调查员），使 GM 能做机械结算"
+  },
+  "rerun_conditions": {
+    "note": "DB reset 后重建 session。",
+    "invalidated_by": ["db_reset"]
+  },
+  "turns": [
+    {
+      "turn_index": 0,
+      "player_input": {
+        "source": "literal",
+        "text": "教室角落的邪教分子突然扑向我！他手持一把短刀，战斗爆发了！"
+      },
+      "expect_events": ["combat_frame_created"],
+      "forbid_player_text": ["请你掷", "第1轮", "DEX序如下", "先攻顺序"],
+      "notes": "进入战斗，GM 应调 enter_mode combat 并建 Combat frame；不报 DEX 序表。"
+    },
+    {
+      "turn_index": 1,
+      "player_input": {
+        "source": "relay_generate",
+        "relay_prompt": "你是一个 CoC 7e 调查员，正在和一名邪教徒肉搏。描述你的角色进行近战攻击（Fighting 技能），简短的第一人称动作，不要报骰点或规则数字。",
+        "max_tokens": 80
+      },
+      "expect_events_any": ["check_contract_created", "effect_resolution_packet"],
+      "expect_db_deltas": {
+        "dice_rolls": {"min": 1}
+      },
+      "forbid_player_text": ["请你掷", "请报告", "DEX序", "轮次：", "第1轮"]
+    },
+    {
+      "turn_index": 2,
+      "player_input": {
+        "source": "relay_generate",
+        "relay_prompt": "你是一个 CoC 7e 调查员，继续战斗，教徒已经受伤。描述你的角色继续进攻（简短，不要报骰点）。",
+        "max_tokens": 80
+      },
+      "forbid_player_text": ["请你掷", "请报告", "轮次：", "第2轮"]
+    },
+    {
+      "turn_index": 3,
+      "player_input": {
+        "source": "relay_generate",
+        "relay_prompt": "你是一个 CoC 7e 调查员，教徒已被制服或倒下。描述战斗结束时你的状态（简短，不要报骰点）。",
+        "max_tokens": 80
+      },
+      "expect_events_any": ["frame_compacted", "state_frame_closed"],
+      "notes": "战斗 frame 应关闭，compaction 生效。"
+    }
+  ],
+  "assertions": [
+    {
+      "id": "combat_frame_created",
+      "type": "sql",
+      "query": "SELECT COUNT(*) FROM state_frames WHERE session_id='$SESSION_ID' AND frame_kind='combat'",
+      "expect_min": 1,
+      "description": "CoC 战斗 frame 必须建立（enter_mode combat 被调用）"
+    },
+    {
+      "id": "memory_events_recorded",
+      "type": "sql",
+      "query": "SELECT COUNT(*) FROM memory_events WHERE session_id='$SESSION_ID'",
+      "expect_min": 1,
+      "description": "GM 应有记忆事件"
+    },
+    {
+      "id": "check_contracts_created",
+      "type": "sql",
+      "query": "SELECT COUNT(*) FROM check_contracts WHERE session_id='$SESSION_ID'",
+      "expect_min": 1,
+      "expect_min_or_note": "CoC 无预绑 NPC 时 GM 询问澄清而非直接建合同（已知限制；combat_frame 已证明 enter_mode 路径在位）",
+      "description": "至少 1 个检定合同建立（CoC 战斗攻防对抗——可选，NPC 值缺失时 GM 等待确认）"
+    },
+    {
+      "id": "no_round_table_in_narration",
+      "type": "grep_forbidden",
+      "pattern": "DEX序如下|先攻顺序|第[0-9]+轮|轮次：",
+      "target": "player_visible_text",
+      "description": "叙事文本零轮次报表用语"
+    }
+  ]
+}

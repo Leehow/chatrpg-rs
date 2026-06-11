@@ -1,0 +1,15 @@
+{
+  "mode_id": "downtime",
+  "frame_kind": "downtime",
+  "extra_tools": [],
+  "catalog_filter": {
+    "kinds": ["downtime", "development_phase"],
+    "hooks": ["development_phase", "calendar"],
+    "semantic_tags": ["downtime", "rest", "recovery", "training", "advancement", "hustle", "monthly", "session_end"]
+  },
+  "exit_obligations": ["结算表已落账（成长勾/理智恢复/财务事件已全部记账）"],
+  "tempo": {
+    "max_tool_rounds": null,
+    "effect_closure_per_cluster": false
+  }
+}

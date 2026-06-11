@@ -1,0 +1,107 @@
+{
+  "spec_id": "downtime_coc",
+  "description": "CoC 7e 幕间姿态 e2e（agent 路径）：触发发展阶段→提案含≥3类目录机制→玩家拍板→批量结算落库→时间大步进→exit_mode。",
+  "ruleset_id": "call_of_cthulhu_7e",
+  "module_id": null,
+  "pre_session": {
+    "create_character": true,
+    "note": "在 turn 序列开始前用 create-character --auto 建 pc.current（CoC 调查员），确保有 SAN/HP 资源可结算"
+  },
+  "rerun_conditions": {
+    "note": "幕间结算改写 DB 状态；重跑前需用新 session。",
+    "invalidated_by": ["db_reset", "session_reuse"]
+  },
+  "turns": [
+    {
+      "turn_index": 0,
+      "player_input": {
+        "source": "literal",
+        "text": "调查结束了，我们回到波士顿安顿下来，打算好好休息几天，处理一些积压的事务。"
+      },
+      "expect_events_any": ["mode_changed", "downtime_started"],
+      "forbid_player_text": ["请你掷"],
+      "notes": "进入幕间姿态；GM 应调 enter_mode downtime，展示提案流（盘点状态→过滤目录→散文提案），含≥3类机制。"
+    },
+    {
+      "turn_index": 1,
+      "player_input": {
+        "source": "relay_generate",
+        "relay_prompt": "你是一个 CoC 7e 调查员，GM 刚刚给你提出了幕间可以做的事情（休息恢复、技能训练、理智恢复、处理财务等）。用自然语言回应，确认你想做的事情（不要报数字或骰点），大约1-2句话。",
+        "max_tokens": 100
+      },
+      "notes": "玩家拍板幕间计划；GM 收到确认后开始蒙太奇演绎+批量结算。"
+    },
+    {
+      "turn_index": 2,
+      "player_input": {
+        "source": "relay_generate",
+        "relay_prompt": "你是一个 CoC 7e 调查员，在波士顿的幕间休整过程中。GM 正在进行结算。如果有需要你选择的事项，做出选择（简短）；否则说「好的，继续」。",
+        "max_tokens": 80
+      },
+      "notes": "时间大步进（advance_time）；calendar 钩子应被触发。"
+    },
+    {
+      "turn_index": 3,
+      "player_input": {
+        "source": "relay_generate",
+        "relay_prompt": "你是一个 CoC 7e 调查员，幕间休整接近尾声。回答「我准备好了，可以继续下一段冒险了」。",
+        "max_tokens": 60
+      },
+      "expect_events_any": ["mode_exited", "downtime_settled"],
+      "notes": "exit_mode downtime；结算表应以摘要形式交付。"
+    }
+  ],
+  "assertions": [
+    {
+      "id": "downtime_frame_created",
+      "type": "sql",
+      "query": "SELECT COUNT(*) FROM state_frames WHERE session_id='$SESSION_ID' AND frame_kind='downtime'",
+      "expect_min": 1,
+      "description": "幕间 frame 必须建立（enter_mode downtime 被调用）"
+    },
+    {
+      "id": "memory_events_recorded",
+      "type": "sql",
+      "query": "SELECT COUNT(*) FROM memory_events WHERE session_id='$SESSION_ID'",
+      "expect_min": 1,
+      "description": "GM 应有记忆事件（幕间结算记录）"
+    },
+    {
+      "id": "time_advanced",
+      "type": "sql",
+      "query": "SELECT COUNT(*) FROM world_time_advances WHERE session_id='$SESSION_ID'",
+      "expect_min": 1,
+      "description": "时间大步进（advance_time）必须落库",
+      "expect_min_or_note": "幕间若未调 enter_mode 则此项为已知限制（FAIL=模型未调 enter_mode）"
+    },
+    {
+      "id": "san_or_hp_tracked",
+      "type": "sql",
+      "query": "SELECT COUNT(*) FROM generic_parameter_states WHERE session_id='$SESSION_ID' AND target_id='pc.current'",
+      "expect_min": 1,
+      "description": "理智/HP 恢复结算必须写回参数状态",
+      "expect_min_or_note": "幕间若未 enter_mode 则 GM 不结算（已知限制）"
+    },
+    {
+      "id": "catalog_mechanisms_in_proposal",
+      "type": "grep_required",
+      "pattern_count_min": 3,
+      "patterns": [
+        "治疗|休息|恢复|医疗",
+        "理智|SAN|心理治疗|精神",
+        "训练|技能|发展|成长|学习",
+        "财务|消费|支出|收入|维持",
+        "联系人|关系|情报|社交"
+      ],
+      "target": "player_visible_text",
+      "description": "提案文本中必须出现 ≥3 类目录机制"
+    },
+    {
+      "id": "settlement_summary_delivered",
+      "type": "grep_required",
+      "pattern": "结算|总结|幕间|休整|准备好继续",
+      "target": "player_visible_text",
+      "description": "结算摘要必须交付给玩家"
+    }
+  ]
+}

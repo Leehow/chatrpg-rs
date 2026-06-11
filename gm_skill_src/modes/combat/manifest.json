@@ -1,0 +1,18 @@
+{
+  "mode_id": "combat",
+  "frame_kind": "combat",
+  "extra_tools": ["open_combat_frame", "close_frame"],
+  "catalog_filter": {
+    "kinds": ["reaction", "combat_procedure"],
+    "hooks": ["combat_start", "combat_end", "combat_round"],
+    "semantic_tags": [
+      "combat", "attack", "damage", "initiative", "defense", "dodge",
+      "armor", "weapon", "wound", "reaction", "morale", "cover",
+      "ammunition", "grapple", "maneuver"
+    ]
+  },
+  "exit_obligations": [
+    "所有交锋簇效果已经 apply_effect/change_track 落账，战斗 frame 已 close_frame 压缩归档（close_frame 成功即视为闭合）"
+  ],
+  "tempo": { "max_tool_rounds": null, "effect_closure_per_cluster": true }
+}

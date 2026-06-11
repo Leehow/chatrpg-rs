@@ -1,0 +1,53 @@
+{
+  "name": "combat_cpr_mode_skills",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "forbidden_player_text": [
+    "请你掷",
+    "请你自己掷",
+    "请报告掷骰",
+    "请报告伤害",
+    "第1轮",
+    "第2轮",
+    "轮次：",
+    "先攻顺序如下",
+    "Initiative Order",
+    "请告诉我目标 SP",
+    "请告诉我命中 DV"
+  ],
+  "evaluator_instructions": "Judge this as a black-box solo TRPG product. Verify: (1) GM uses enter_mode combat or open_combat_frame on combat start — NOT a new sub-loop. (2) Initiative/round tracking is HIDDEN from the player — narration is cinematic prose, no round tables or initiative lists. (3) All damage/HP changes are persisted to DB via roll_check/apply_effect. (4) close_frame is called when combat ends, triggering compaction. (5) At least one reaction window or gate pause happens during combat. (6) mode=combat path is activated (check for mode_changed or combat姿态 in events).",
+  "allow_debug_directives": true,
+  "allow_manual_roll_input": false,
+  "turns": [
+    {
+      "user_input": "[debug]add {\"id\":\"npc.street_scav\",\"kind\":\"npc\",\"hp\":20,\"armor_sp\":4,\"weapon\":\"heavy_pistol\",\"initiative_bonus\":3,\"tags\":[\"test_only\"]}[/debug]\n我在仓库走廊里遇到一个持枪劫匪，他突然朝我开枪，战斗爆发了！",
+      "notes": "Combat start with debug-injected NPC. Expect enter_mode combat + open_combat_frame.",
+      "expect_phases": ["combat_frame_created"],
+      "forbid_phases": [],
+      "forbid_player_text": ["debug", "JSON", "npc.street_scav", "请你掷先攻", "第1轮", "先攻顺序如下"]
+    },
+    {
+      "user_input": "我用重型手枪朝他还击，压低身子藏在货架后面！",
+      "notes": "Player reaction or attack — first response after enemy attack. reaction_window_opened or check is valid (GM decides gate vs direct).",
+      "forbid_player_text": ["请你掷", "请报告", "轮次：", "第1轮", "第2轮", "先攻顺序"]
+    },
+    {
+      "user_input": "他向我反击，我试图找掩体躲避！",
+      "notes": "Enemy counter-attack — test reaction window or direct resolution.",
+      "forbid_player_text": ["请你掷", "轮次：", "先攻顺序"]
+    },
+    {
+      "user_input": "我继续压低枪口猛射，不给他抬头的机会！",
+      "notes": "Continued combat — at least 1 more dice roll expected.",
+      "require_db_deltas": {
+        "dice_rolls": 1
+      },
+      "forbid_player_text": ["请你掷", "第3轮", "轮次：", "先攻顺序"]
+    },
+    {
+      "user_input": "劫匪已经受了重伤，我趁他摔倒结束了这场战斗，战斗结束。",
+      "notes": "Combat end — expect close_frame + compaction. Frame status should become completed.",
+      "forbid_player_text": ["请你掷", "轮次：", "先攻顺序"]
+    }
+  ]
+}

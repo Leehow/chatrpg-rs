@@ -28,6 +28,10 @@ pub struct ObligationLedger {
     /// 三期 §4.4 mode 退出结算义务：只门 exit_mode（exit_blocking()），绝不进
     /// blocking()——否则姿态内每个叙事轮都会被自己的退出义务堵死（B6 复用 blocking）。
     mode_exit: Vec<ModeExitObligation>,
+    /// 三期 §4.6 交锋簇节拍（批2）：紧节拍下"本回合已结算检定但零效果落账"=
+    /// 簇未闭合（(target_id, summary)，id 确定性 "cluster.<turn_id>"）。每轮由
+    /// turn_loop 按账本重算；回合内节拍门，跨回合由 verifier 追溯债务兜底。
+    open_cluster: Option<(String, String)>,
 }
 
 /// mode 退出结算义务（manifest.exit_obligations 声明、进入姿态/回合头部挂账）。
@@ -75,6 +79,24 @@ impl ObligationLedger {
         self.current_turn_id = turn_id.to_string();
         self.waivers.retain(|w| w.scope == WaiveScope::Scene);
         self.consumed_effect_ids.clear();
+        // 簇债务是回合内节拍（账本随回合重建，证据不跨回合）。
+        self.open_cluster = None;
+    }
+
+    /// 三期 §4.6 交锋簇节拍收紧（批2）：tight=manifest.tempo.effect_closure_per_cluster；
+    /// settled_checks=本回合已结算检定数；effects_booked=效果落账证据数
+    /// （effect 契约 + track 落账 + 检定自带 committed patches）。
+    /// 紧节拍 + 有结算 + 零效果 ⇒ 簇未闭合（kind="cluster" 进 blocking()，
+    /// waive 通道照常）；其余情形清空——tight=false（mode=None/幕间）恒无簇债务，
+    /// 二期行为字节级一致。
+    pub fn update_cluster_closure(&mut self, tight: bool, settled_checks: usize, effects_booked: usize) {
+        if tight && settled_checks > 0 && effects_booked == 0 {
+            let target_id = format!("cluster.{}", self.current_turn_id);
+            let summary = format!("engagement cluster not effect-closed: {settled_checks} settled check(s) this turn but no effect/track entry booked; book the consequences via apply_effect/change_track before narrating past this cluster, or waive_obligation with a reason");
+            self.open_cluster = Some((target_id, summary));
+        } else {
+            self.open_cluster = None;
+        }
     }
 
     /// 追溯债务清偿（spec §5.3"补 apply_effect 落账"半边）：本回合每条新落账的
@@ -172,6 +194,11 @@ impl ObligationLedger {
             if self.waived(&debt.debt_id) { continue; }
             out.push(ObligationView { kind: "debt".to_string(), target_id: debt.debt_id.clone(), summary: format!("retroactive effect debt (turn {}): {}", debt.turn_id, debt.finding_detail) });
         }
+        if let Some((target_id, summary)) = &self.open_cluster {
+            if !self.waived(target_id) {
+                out.push(ObligationView { kind: "cluster".to_string(), target_id: target_id.clone(), summary: summary.clone() });
+            }
+        }
         out
     }
 
@@ -189,7 +216,8 @@ impl ObligationLedger {
         let exists = self.dues.iter().any(|d| d.due_id == target_id)
             || self.open_check_ids.iter().any(|c| c == target_id)
             || self.retro_debts.iter().any(|d| d.debt_id == target_id)
-            || self.mode_exit.iter().any(|o| o.obligation_id == target_id);
+            || self.mode_exit.iter().any(|o| o.obligation_id == target_id)
+            || self.open_cluster.as_ref().is_some_and(|(id, _)| id == target_id);
         if !exists { return Err(anyhow!("unknown obligation target: {target_id}")); }
         let record = WaiverRecord { target_id: target_id.to_string(), reason: reason.to_string(), scope, turn_id: self.current_turn_id.clone() };
         self.waivers.push(record.clone());

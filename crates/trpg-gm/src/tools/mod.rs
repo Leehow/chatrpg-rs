@@ -1,5 +1,6 @@
 pub mod check;
 pub mod effect;
+pub mod frame;
 pub mod mechanic;
 pub mod npc;
 pub mod world;
@@ -99,6 +100,7 @@ pub trait GmTool: Send + Sync {
 ///   mode_nesting_unsupported 已在某 mode 内再 enter（栈深 1，三期 spec §4.4）
 ///   no_active_mode           默认叙事姿态下调 exit_mode
 ///   exit_blocked_by_obligations exit_mode 被未清债务/退出结算义务拦截（waive 通道照常）
+///   frame_not_found          close_frame 无可关闭的活跃姿态 frame（先 open_combat_frame）
 ///   internal_error           db/IO 等内部错误（recoverable=false）
 #[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
 #[error("{code}: {message}")]
@@ -133,10 +135,12 @@ impl ToolError {
 }
 
 /// mode 专属工具名解析（manifest.extra_tools → 实例）；未知名 → None，
-/// for_mode fail-closed 报配置错误。批2/3 在此登记 open_combat_frame /
-/// close_frame 等（纯查表，零 per-ruleset 逻辑）。
+/// for_mode fail-closed 报配置错误。批2 登记战斗 frame 工具
+/// （纯查表，零 per-ruleset 逻辑）。
 fn extra_tool_by_name(name: &str) -> Option<Box<dyn GmTool>> {
     match name {
+        "open_combat_frame" => Some(Box::new(frame::OpenCombatFrameTool)),
+        "close_frame" => Some(Box::new(frame::CloseFrameTool)),
         _ => None,
     }
 }
@@ -291,12 +295,61 @@ mod tests {
 #[cfg(test)]
 mod schema_stability_tests {
     use super::*;
+    use std::fs;
+    use std::path::PathBuf;
 
     #[test]
     fn schema_serialization_is_stable() {
         let a = serde_json::to_vec(&ToolRegistry::standard().schemas()).unwrap();
         let b = serde_json::to_vec(&ToolRegistry::standard().schemas()).unwrap();
         assert_eq!(a, b);
+    }
+
+    fn temp_data_dir_with_manifest(mode: &str, manifest_body: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "schema_mode_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().subsec_nanos()
+        ));
+        let mode_dir = dir.join("agent/gm_skill/modes").join(mode);
+        fs::create_dir_all(&mode_dir).unwrap();
+        fs::write(mode_dir.join("manifest.json"), manifest_body).unwrap();
+        dir
+    }
+
+    /// 批5 mode 维度参数化 ③ — mode 切换=工具 schema 有因失效断言：
+    /// mode=None → 基础 14 工具 schema；mode="combat"（含 extra_tools）→ 16 工具
+    /// schema；两者序列化字节不同 → 工具 schema 变化是 mode 切换的有因失效依据。
+    #[test]
+    fn mode_switch_changes_tool_schema_bytes() {
+        let dir = temp_data_dir_with_manifest(
+            "combat",
+            r#"{"mode_id":"combat","frame_kind":"combat","extra_tools":["open_combat_frame","close_frame"]}"#,
+        );
+        let schemas_none   = serde_json::to_vec(&ToolRegistry::for_mode(&dir, None).unwrap().schemas()).unwrap();
+        let schemas_combat = serde_json::to_vec(&ToolRegistry::for_mode(&dir, Some("combat")).unwrap().schemas()).unwrap();
+        // mode=None → 14 工具；mode=combat → 16 工具（extra_tools 追加）。
+        assert_ne!(schemas_none, schemas_combat,
+            "mode switch with extra_tools must produce different schema bytes (justified cache invalidation)");
+        let count_none   = ToolRegistry::for_mode(&dir, None).unwrap().schemas().len();
+        let count_combat = ToolRegistry::for_mode(&dir, Some("combat")).unwrap().schemas().len();
+        assert_eq!(count_none, 14, "base registry must have exactly 14 tools");
+        assert_eq!(count_combat, 16, "combat mode with two extra_tools must have 16 tools");
+        fs::remove_dir_all(dir).ok();
+    }
+
+    /// 批5 mode 维度参数化 ④ — 同 mode 内工具 schema 字节稳定：
+    /// 同一 mode 连续调用 for_mode 两次 → 工具 schema 字节完全相同（确定性）。
+    #[test]
+    fn same_mode_tool_schema_bytes_are_stable() {
+        let dir = temp_data_dir_with_manifest(
+            "combat",
+            r#"{"mode_id":"combat","frame_kind":"combat","extra_tools":["open_combat_frame","close_frame"]}"#,
+        );
+        let a = serde_json::to_vec(&ToolRegistry::for_mode(&dir, Some("combat")).unwrap().schemas()).unwrap();
+        let b = serde_json::to_vec(&ToolRegistry::for_mode(&dir, Some("combat")).unwrap().schemas()).unwrap();
+        assert_eq!(a, b, "same mode must produce deterministic tool schema bytes across calls");
+        fs::remove_dir_all(dir).ok();
     }
 }
 

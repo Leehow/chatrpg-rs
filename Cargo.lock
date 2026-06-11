@@ -3503,6 +3503,7 @@ dependencies = [
  "tokio",
  "tracing",
  "trpg-agent",
+ "trpg-combat",
  "trpg-db",
  "trpg-interaction",
  "trpg-llm",
