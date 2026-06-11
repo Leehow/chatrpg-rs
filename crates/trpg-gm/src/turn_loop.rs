@@ -38,8 +38,9 @@ impl GmLoop {
         let _ = InteractionLifecycleKernel::new(self.engine.db.clone()).reconcile_session(&input.request.session_id).await;
         let mut ledger = TurnLedger::new();
         let mut resolved_gate_facts = Vec::new();
-        // gate 结算（含裸 "roll" 兜底与 Err 折叠两个 e2e must-fix）收口在 gate.rs 单点。
-        crate::gate::resolve_pending_gate(&self.engine, self.gate_resolver.as_ref(), &input.request.session_id, &input.request.turn_id, input.user_input, &mut ledger, &mut resolved_gate_facts).await;
+        // gate 结算（含裸 "roll" 兜底与 Err 折叠两个 e2e must-fix + C7 盖章契约的
+        // effect_policy 强制执行）收口在 gate.rs 单点。
+        crate::gate::resolve_pending_gate(&self.engine, self.gate_resolver.as_ref(), input.request, input.state.scene_id.as_deref(), input.user_input, &mut ledger, &mut resolved_gate_facts).await;
         // B5 第三触发通路：TurnStart hook dues 在 prepare_turn_context 之前落库
         // （B3 BP3 投影 / B6 债务装载同回合可见）。失败 unwrap_or_default()
         // ——头部任何 watcher 故障不得阻断回合（与既有 `let _ =` 风格一致）。

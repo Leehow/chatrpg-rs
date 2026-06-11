@@ -42,6 +42,7 @@ pub struct RequestPlayerRollArgs {
     pub stakes: StakesArgs,
     #[serde(default = "default_public")]
     pub visibility: String,
+    #[serde(default)] pub scene_mechanic_id: Option<String>, // C7：gate 路径盖章入口
 }
 
 fn default_public() -> String { "public".to_string() }
@@ -201,14 +202,8 @@ impl GmTool for RollCheckTool {
         if let Some(mechanic_id) = &args.mechanic_id {
             contract.advice_refs.push(format!("mechanic:{mechanic_id}"));
         }
-        // C4：场景意图继承——difficulty 认得的形态 → StaticNumber target（认不出保持
-        // UnknownUntilLookup，交给 kernel defaults，fail-closed）；结构化引用进账（护栏 §3.5.1）。
-        if let Some(intent) = &scene_intent {
-            if let Some(t) = crate::scene_policy::difficulty_to_target(intent.difficulty.as_ref()) {
-                contract.target = t;
-            }
-            contract.advice_refs.push(format!("scene_mechanic:{}", intent.intent_id));
-        }
+        // C4：盖章收口 stamp_scene_intent（难度→target + scene_mechanic: 引用进 advice_refs，护栏 §3.5.1）。
+        crate::scene_policy::stamp_scene_intent(&mut contract, scene_intent.as_ref());
         if let Some(opposed) = &args.opposed {
             let persona = trpg_runtime::npc_synth::NpcPersona { actor_id: opposed.npc_id.clone(), name: opposed.npc_id.clone(), prose: "opposition selected by GM agent".to_string() };
             // fail-closed 不静默：防御参数合成失败 ⇒ 结构化错误让 agent 改道
@@ -292,14 +287,17 @@ pub struct RequestPlayerRollTool;
 #[async_trait]
 impl GmTool for RequestPlayerRollTool {
     fn spec(&self) -> ToolSpec {
-        ToolSpec { name: "request_player_roll", schema: json!({"type":"function","function":{"name":"request_player_roll","description":"Open an InteractionGate and wait for the player to roll personally.","parameters":{"type":"object","properties":{"check_label":{"type":"string"},"tested_parameter":{"type":"string"},"stakes":{"type":"object","properties":{"before":{"type":"string"},"success":{"type":"string"},"failure":{"type":"string"}},"required":["before","success","failure"]},"visibility":{"type":"string","enum":["public","secret"]}},"required":["check_label","tested_parameter","stakes"]}}}) }
+        ToolSpec { name: "request_player_roll", schema: json!({"type":"function","function":{"name":"request_player_roll","description":"Open an InteractionGate and wait for the player to roll personally.","parameters":{"type":"object","properties":{"check_label":{"type":"string"},"tested_parameter":{"type":"string"},"stakes":{"type":"object","properties":{"before":{"type":"string"},"success":{"type":"string"},"failure":{"type":"string"}},"required":["before","success","failure"]},"visibility":{"type":"string","enum":["public","secret"]},"scene_mechanic_id":{"type":"string","description":"intent_id from the current scene's mechanic-intents block; inherits the module-stated difficulty and the engine enforces the stated consequences after the player's roll settles"}},"required":["check_label","tested_parameter","stakes"]}}}) }
     }
 
     async fn call(&self, ctx: &ToolCtx<'_>, ledger: &mut TurnLedger, args: Value) -> Result<ToolOutput> {
         let args = parse_player_args(args)?;
         let kernel = ctx.engine.db.load_rule_kernel(&ctx.request.ruleset_id).await?;
         let dice = kernel_dice_expr(kernel.as_ref())?;
-        let contract = build_player_contract_for_args(&ctx.request.session_id, &ctx.request.turn_id, &ctx.request.ruleset_id, ctx.request.module_id.as_deref(), &args, &dice)?;
+        // C7：玩家亲掷路径同样盖章（解析失败在 cancel/insert 副作用前直接报错）；effect_policy 下回合 gate 结算后经引用恢复执行（spec §6）。
+        let scene_intent = crate::scene_policy::resolve_scene_intent(ctx.engine, ctx.request, ctx.state.scene_id.as_deref(), args.scene_mechanic_id.as_deref()).await?;
+        let mut contract = build_player_contract_for_args(&ctx.request.session_id, &ctx.request.turn_id, &ctx.request.ruleset_id, ctx.request.module_id.as_deref(), &args, &dice)?;
+        crate::scene_policy::stamp_scene_intent(&mut contract, scene_intent.as_ref());
         // 对齐 persist_agent_plan 既有行为：插新 pending 前先作废旧 open gate，
         // 防同会话累积多个 open pending check。
         ctx.engine.db.cancel_open_pending_checks_for_session(&ctx.request.session_id, PendingCheckStatus::Superseded).await?;
@@ -393,7 +391,7 @@ mod tests {
 
     #[test]
     fn request_player_roll_contract_uses_player_authority() {
-        let args = RequestPlayerRollArgs { check_label: "Athletics".to_string(), tested_parameter: "Athletics".to_string(), stakes: StakesArgs { before: "The jump is risky.".to_string(), success: "You land cleanly.".to_string(), failure: "You fall short.".to_string() }, visibility: "public".to_string() };
+        let args = RequestPlayerRollArgs { check_label: "Athletics".to_string(), tested_parameter: "Athletics".to_string(), stakes: StakesArgs { before: "The jump is risky.".to_string(), success: "You land cleanly.".to_string(), failure: "You fall short.".to_string() }, visibility: "public".to_string(), scene_mechanic_id: None };
         let contract = build_player_contract_for_args("s", "t", "sw2_5", None, &args, "2d6").unwrap();
         assert_eq!(contract.roll_visibility, RollVisibility::PlayerRollRequired);
         assert_eq!(contract.roll_authority, RollAuthority::Player);

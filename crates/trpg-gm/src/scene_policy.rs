@@ -6,9 +6,9 @@ use crate::tools::ToolError;
 use serde_json::{json, Value};
 use trpg_mechanics::RefereeCombatService;
 use trpg_model::{
-    CheckTargetModel, ContextRequest, EffectPatchIntent, EffectPolicy, ModuleGraph,
-    SceneExtractionStatus, SceneMechanicIntent, StatePatch, TimeAmount, TimeScale, Visibility,
-    WorldEventKind,
+    CheckContract, CheckTargetModel, ContextRequest, EffectPatchIntent, EffectPolicy,
+    ModuleGraph, SceneExtractionStatus, SceneMechanicIntent, StatePatch, TimeAmount, TimeScale,
+    Visibility, WorldEventKind,
 };
 use trpg_object::ObjectService;
 use trpg_runtime::RuntimeEngine;
@@ -200,6 +200,18 @@ async fn execute_intent(
         // fail-closed：不执行、不中断，折 unexecutable 事实（可观测）。
         EffectPatchIntent::Other(_) => Ok(fold_unexecutable(item, reason)),
     }
+}
+
+/// PURE：契约盖章（roll_check / request_player_roll 共用惯例）：difficulty 认得的
+/// 形态 → StaticNumber target（认不出保持原 target，fail-closed）；结构化引用
+/// `scene_mechanic:<intent_id>` 进 advice_refs——gate 结算路径据此恢复绑定执行
+/// effect_policy。None → no-op。
+pub(crate) fn stamp_scene_intent(contract: &mut CheckContract, intent: Option<&SceneMechanicIntent>) {
+    let Some(intent) = intent else { return };
+    if let Some(t) = difficulty_to_target(intent.difficulty.as_ref()) {
+        contract.target = t;
+    }
+    contract.advice_refs.push(format!("scene_mechanic:{}", intent.intent_id));
 }
 
 /// roll_check 接线辅助：scene_mechanic_id → 当前场景 intent（按 intent_id 精确匹配，
