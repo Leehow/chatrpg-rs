@@ -3134,6 +3134,9 @@ pub enum FrameKind {
     DowntimeProject,
     AnomalyEncounter,
     HorrorEncounter,
+    /// 三期姿态框架：幕间/休整姿态的 frame 种类（serde snake_case = "downtime"；
+    /// 旧数据无此值 + Default=SideQuest ⇒ 向后兼容）。
+    Downtime,
 }
 
 impl Default for FrameKind {
@@ -3155,6 +3158,7 @@ impl FrameKind {
             FrameKind::DowntimeProject => "downtime_project",
             FrameKind::AnomalyEncounter => "anomaly_encounter",
             FrameKind::HorrorEncounter => "horror_encounter",
+            FrameKind::Downtime => "downtime",
         }
     }
 }

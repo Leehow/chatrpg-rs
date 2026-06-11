@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::future::Future;
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use trpg_llm::AggregatedToolCall;
@@ -41,6 +42,12 @@ pub struct ToolCtx<'a> {
     /// 共享引用，&mut 借用打架 → 互斥锁内点改，guard 绝不跨 await）。
     /// None = 单测/装配方未挂清单（waive 折 obligation_not_found）。
     pub obligations: Option<&'a Mutex<ObligationLedger>>,
+    /// mode 包根（data/）所在目录（enter/exit_mode 与 mode 专属工具用）；
+    /// None = 单测未挂（mode 工具折结构化错误，绝不 panic）。
+    pub data_dir: Option<&'a Path>,
+    /// 回合头部推导的当前姿态（turn_loop 注入 manifest.mode_id）；
+    /// None = 默认叙事姿态（三期 spec §4.1）。
+    pub current_mode: Option<&'a str>,
 }
 
 /// 工具单次执行的产物。
@@ -88,6 +95,10 @@ pub trait GmTool: Send + Sync {
 ///   mechanic_not_found       mechanic_id 不在 kernel.mechanics_catalog（或 kernel 无目录）
 ///   scene_mechanic_not_found scene_mechanic_id 不在当前场景 scene_mechanics（scene_policy 解析）
 ///   obligation_not_found     waive_obligation 的 target_id 不在未清债务清单
+///   mode_not_found           enter_mode 的 mode 无已安装 mode 包（agent/gm_skill/modes/<mode>）
+///   mode_nesting_unsupported 已在某 mode 内再 enter（栈深 1，三期 spec §4.4）
+///   no_active_mode           默认叙事姿态下调 exit_mode
+///   exit_blocked_by_obligations exit_mode 被未清债务/退出结算义务拦截（waive 通道照常）
 ///   internal_error           db/IO 等内部错误（recoverable=false）
 #[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
 #[error("{code}: {message}")]
@@ -121,6 +132,15 @@ impl ToolError {
     }
 }
 
+/// mode 专属工具名解析（manifest.extra_tools → 实例）；未知名 → None，
+/// for_mode fail-closed 报配置错误。批2/3 在此登记 open_combat_frame /
+/// close_frame 等（纯查表，零 per-ruleset 逻辑）。
+fn extra_tool_by_name(name: &str) -> Option<Box<dyn GmTool>> {
+    match name {
+        _ => None,
+    }
+}
+
 /// 一次 dispatch 的产物：tool role 回填消息 + 可能的回合终态信号。
 pub struct ToolDispatchOutcome {
     pub tool_call_id: String,
@@ -140,7 +160,8 @@ impl ToolRegistry {
     /// （roll_check, request_player_roll, apply_effect, change_track, retrieve_rules,
     /// get_actor, ensure_npc_param, navigate_scene, advance_time, remember）的
     /// schema 字节与顺序绝不动；二期工具只在尾部追加：lookup_mechanic,
-    /// waive_obligation（11→12）。
+    /// waive_obligation（11→12）；三期姿态工具继续尾部追加：enter_mode,
+    /// exit_mode（13→14，任何姿态下均可用 = 基础 14）。
     pub fn standard() -> Self {
         Self { tools: vec![
             Box::new(check::RollCheckTool),
@@ -155,7 +176,25 @@ impl ToolRegistry {
             Box::new(world::RememberTool),
             Box::new(mechanic::LookupMechanicTool),
             Box::new(mechanic::WaiveObligationTool),
+            Box::new(crate::mode::EnterModeTool),
+            Box::new(crate::mode::ExitModeTool),
         ] }
+    }
+
+    /// 三期 §4.3 工具按 mode 组装：基础 14（任何姿态可用）+ manifest.extra_tools
+    /// （按名解析，未知名 fail-closed 报配置错误）。mode=None ⇒ 与 standard()
+    /// 完全等同（schema 字节回归测试护）。
+    pub fn for_mode(data_dir: &Path, mode: Option<&str>) -> Result<Self> {
+        let mut registry = Self::standard();
+        let Some(mode) = mode else { return Ok(registry) };
+        let manifest = crate::mode::load_mode_manifest(data_dir, mode)?;
+        for name in &manifest.extra_tools {
+            let tool = extra_tool_by_name(name).ok_or_else(|| anyhow::anyhow!(
+                "mode '{mode}' manifest lists unknown extra tool '{name}' (fail-closed configuration error)"
+            ))?;
+            registry.tools.push(tool);
+        }
+        Ok(registry)
     }
 
     /// turn_loop 单测注入脚本化 GmTool 替身用（tools 字段私有，跨模块测试只能经此构造）。
@@ -229,7 +268,7 @@ mod tests {
     async fn dispatch_unknown_tool_returns_structured_error() {
         let registry = ToolRegistry::standard();
         let (engine, request, state) = dummy_ctx();
-        let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: None };
+        let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: None, data_dir: None, current_mode: None };
         let mut ledger = TurnLedger::new();
         let outcome = registry.dispatch(&ctx, &mut ledger, &trpg_llm::AggregatedToolCall { id: "c1".to_string(), name: "missing".to_string(), arguments: "{}".to_string() }).await;
         let v: Value = serde_json::from_str(&outcome.content).unwrap();
@@ -241,7 +280,7 @@ mod tests {
     async fn dispatch_invalid_arguments_returns_structured_error() {
         let registry = ToolRegistry { tools: vec![Box::new(EchoTool)] };
         let (engine, request, state) = dummy_ctx();
-        let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: None };
+        let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: None, data_dir: None, current_mode: None };
         let mut ledger = TurnLedger::new();
         let outcome = registry.dispatch(&ctx, &mut ledger, &trpg_llm::AggregatedToolCall { id: "c2".to_string(), name: "echo".to_string(), arguments: "not-json".to_string() }).await;
         let v: Value = serde_json::from_str(&outcome.content).unwrap();

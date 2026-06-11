@@ -148,10 +148,12 @@ mod tests {
 
     #[test]
     fn registry_has_twelve_tools_in_stable_order() {
+        // 三期批1 加入 enter_mode / exit_mode → 基础工具集扩为 14。
+        // 测试名保留（历史），断言更新到真实顺序。
         let names = crate::tools::ToolRegistry::standard().schemas().into_iter()
             .map(|v| v.pointer("/function/name").and_then(|x| x.as_str()).unwrap_or("").to_string())
             .collect::<Vec<_>>();
-        assert_eq!(names, vec!["roll_check", "request_player_roll", "apply_effect", "change_track", "retrieve_rules", "get_actor", "ensure_npc_param", "navigate_scene", "advance_time", "remember", "lookup_mechanic", "waive_obligation"]);
+        assert_eq!(names, vec!["roll_check", "request_player_roll", "apply_effect", "change_track", "retrieve_rules", "get_actor", "ensure_npc_param", "navigate_scene", "advance_time", "remember", "lookup_mechanic", "waive_obligation", "enter_mode", "exit_mode"]);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 pub mod errata;
 pub mod gate;
 pub mod ledger;
+pub mod mode;
 pub mod obligations;
 pub mod prompts;
 pub mod scene_policy;
@@ -10,8 +11,15 @@ pub mod turn_loop;
 
 pub use errata::{ErrataEntry, ErrataMemory};
 pub use ledger::TurnLedger;
-pub use obligations::{ObligationLedger, WaiveScope};
-pub use prompts::{load_gm_skill, validate_compiled_budget, DynamicTailInput, TurnMessages};
+pub use mode::{
+    active_mode_manifest, current_mode, load_mode_manifest, CatalogFilter, EnterModeTool,
+    ExitModeTool, ModeManifest, TempoOverrides,
+};
+pub use obligations::{ModeExitObligation, ObligationLedger, WaiveScope};
+pub use prompts::{
+    load_gm_skill, load_gm_skill_with_mode, validate_compiled_budget, DynamicTailInput,
+    TurnMessages,
+};
 pub use stream::RedactingBuffer;
 pub use tools::{
     AwaitingPlayerRoll, GmTool, SceneDeepExtractFn, ToolCtx, ToolDispatchOutcome,

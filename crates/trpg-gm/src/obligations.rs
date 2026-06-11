@@ -25,6 +25,18 @@ pub struct ObligationLedger {
     /// 本回合已用于清偿追溯债务的 effect_id（每条只消费一次；TurnLedger 每回合
     /// 新建，跨回合 id 不复现 → begin_turn 清空即可）。
     consumed_effect_ids: Vec<String>,
+    /// 三期 §4.4 mode 退出结算义务：只门 exit_mode（exit_blocking()），绝不进
+    /// blocking()——否则姿态内每个叙事轮都会被自己的退出义务堵死（B6 复用 blocking）。
+    mode_exit: Vec<ModeExitObligation>,
+}
+
+/// mode 退出结算义务（manifest.exit_obligations 声明、进入姿态/回合头部挂账）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModeExitObligation {
+    /// 确定性 id "mode_exit.<mode_id>.<idx>"（幂等 re-seed 去重 + waive 可寻址）。
+    pub obligation_id: String,
+    pub mode_id: String,
+    pub description: String,
 }
 
 /// 追溯债务：流后 verifier 抓到 InventedEffect（叙事已流出不可回收）。
@@ -118,6 +130,33 @@ impl ObligationLedger {
         self.waivers.iter().any(|w| w.target_id == target_id)
     }
 
+    /// 进入姿态 / 回合头部 re-seed（幂等：确定性 id "mode_exit.<mode>.<idx>"
+    /// 去重）。跨进程重启后由回合头部凭 manifest 重建，不依赖内存存活。
+    pub fn ensure_mode_exit_obligations(&mut self, mode_id: &str, descriptions: &[String]) {
+        for (idx, description) in descriptions.iter().enumerate() {
+            let obligation_id = format!("mode_exit.{mode_id}.{idx}");
+            if !self.mode_exit.iter().any(|o| o.obligation_id == obligation_id) {
+                self.mode_exit.push(ModeExitObligation { obligation_id, mode_id: mode_id.to_string(), description: description.clone() });
+            }
+        }
+    }
+
+    /// exit_mode 成功后清账（该 mode 的退出义务整体撤销；其它 mode 不受影响）。
+    pub fn clear_mode_exit_obligations(&mut self, mode_id: &str) {
+        self.mode_exit.retain(|o| o.mode_id != mode_id);
+    }
+
+    /// exit_mode 门控视图（三期 spec §4.4）：常规 blocking() ∪ 未豁免的
+    /// mode_exit 退出义务（kind="mode_exit"）。
+    pub fn exit_blocking(&self) -> Vec<ObligationView> {
+        let mut out = self.blocking();
+        for o in &self.mode_exit {
+            if self.waived(&o.obligation_id) { continue; }
+            out.push(ObligationView { kind: "mode_exit".to_string(), target_id: o.obligation_id.clone(), summary: format!("mode '{}' exit obligation: {}", o.mode_id, o.description) });
+        }
+        out
+    }
+
     /// 未清债务视图（已 resolve/waive 的剔除）；空 ⇒ 放行叙事轮。
     pub fn blocking(&self) -> Vec<ObligationView> {
         let mut out = Vec::new();
@@ -149,7 +188,8 @@ impl ObligationLedger {
     pub fn waive(&mut self, target_id: &str, reason: &str, scope: WaiveScope) -> Result<WaiverRecord> {
         let exists = self.dues.iter().any(|d| d.due_id == target_id)
             || self.open_check_ids.iter().any(|c| c == target_id)
-            || self.retro_debts.iter().any(|d| d.debt_id == target_id);
+            || self.retro_debts.iter().any(|d| d.debt_id == target_id)
+            || self.mode_exit.iter().any(|o| o.obligation_id == target_id);
         if !exists { return Err(anyhow!("unknown obligation target: {target_id}")); }
         let record = WaiverRecord { target_id: target_id.to_string(), reason: reason.to_string(), scope, turn_id: self.current_turn_id.clone() };
         self.waivers.push(record.clone());
@@ -237,7 +277,7 @@ mod tests {
         let request = ContextRequest { ruleset_id: "rs".to_string(), module_id: None, session_id: "s".to_string(), turn_id: "t".to_string(), viewer: VisibilityProfile::gm(), token_budget: TokenBudget::default() };
         let state = RuntimeState { ruleset_id: "rs".to_string(), ..Default::default() };
         let cell = std::sync::Mutex::new(ObligationLedger::default());
-        let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: Some(&cell) };
+        let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: Some(&cell), data_dir: None, current_mode: None };
         let mut turn_ledger = TurnLedger::new();
         let err = match crate::tools::mechanic::WaiveObligationTool.call(&ctx, &mut turn_ledger, json!({"target_id":"due_missing","reason":"r"})).await {
             Ok(_) => panic!("expected obligation_not_found error"),

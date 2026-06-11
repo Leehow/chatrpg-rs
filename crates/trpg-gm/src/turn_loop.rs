@@ -2,7 +2,7 @@ use crate::errata::ErrataMemory;
 use crate::gate::GateResolverFn;
 use crate::ledger::TurnLedger;
 use crate::obligations::{carryover_memory_event, ObligationLedger, RetroactiveEffectDebt};
-use crate::prompts::{load_gm_skill, DynamicTailInput, TurnMessages};
+use crate::prompts::{load_gm_skill_with_mode, DynamicTailInput, TurnMessages};
 use crate::stream::RedactingBuffer;
 use crate::tools::{AwaitingPlayerRoll, SceneDeepExtractFn, ToolCtx, ToolRegistry};
 use anyhow::Result;
@@ -48,11 +48,24 @@ impl GmLoop {
             .dues_for_hook(&input.request.session_id, &input.request.turn_id, &input.request.ruleset_id, &trpg_mechanics::watcher::HookEvent::TurnStart)
             .await
             .unwrap_or_default();
+        // —— 三期姿态推导（spec §4.1）：active state_frame → mode；无 frame /
+        //    frame 种类无 mode 包 → None（默认叙事姿态，与二期字节级一致）。db
+        //    失败 unwrap_or_default（与头部 watcher 同款绝不阻断回合）；mode 包
+        //    存在但 manifest 损坏 → Err fail-closed（配置错误终止回合，与
+        //    gm_skill 装载同级）。
+        let active_frames = self.engine.db.list_active_state_frames(&input.request.session_id, 8).await.unwrap_or_default();
+        let mode_manifest = crate::mode::active_mode_manifest(&self.data_dir, &active_frames)?;
+        let mode_id = mode_manifest.as_ref().map(|m| m.mode_id.clone());
         // —— B6 债务装载（spec §5.3）：turn-scope 豁免过期 → 跨回合遗留（持久
         //    字段 + db open dues）与 TurnStart hook dues 统一进 ObligationLedger
         //    （按 due_id 去重——watcher 产出即落库，两路可能是同一条）。db 失败
         //    unwrap_or_default：债务装载绝不阻断回合，in-memory 清单仍兜底。
         self.obligations.begin_turn(&input.request.turn_id);
+        // mode 退出结算义务（spec §4.4）：回合头部凭 manifest 幂等 re-seed（跨
+        // 进程重启不丢；只门 exit_mode，绝不门叙事轮——B6 blocking() 不含它）。
+        if let Some(m) = &mode_manifest {
+            self.obligations.ensure_mode_exit_obligations(&m.mode_id, &m.exit_obligations);
+        }
         let leftover_dues = self.engine.db.list_open_mechanic_dues(&input.request.session_id).await.unwrap_or_default();
         self.obligations.absorb_dues(leftover_dues);
         self.obligations.absorb_dues(hook_dues);
@@ -69,13 +82,25 @@ impl GmLoop {
         crate::prompts::validate_compiled_budget(&compiled, input.request)?;
         // gm_skill 是 agent 路径硬依赖：fail-closed，Err 终止回合（契约第 7 节，
         // 绝不 unwrap_or_default；data_dir 由装配方传 default_data_dir()）。
-        let gm_skill = load_gm_skill(&self.data_dir, &input.request.ruleset_id)?;
+        // 三期 §4.2：四级合并（mode=None 退化两级，字节不变——缓存稳定硬回归）。
+        let gm_skill = load_gm_skill_with_mode(&self.data_dir, &input.request.ruleset_id, mode_id.as_deref())?;
         let mut errata_blocks = Vec::new();
         if let Some(block) = self.errata.errata_block() { errata_blocks.push(block); }
         if let Some(block) = self.errata.standing_reminder_block() { errata_blocks.push(block); }
         let tail = DynamicTailInput { user_input: input.user_input, resolved_gate_facts: &resolved_gate_facts, errata_blocks: &errata_blocks, obligations_block: obligations_block.as_deref() };
         let mut messages = TurnMessages::assemble(&compiled, &gm_skill, input.history, &tail);
-        let schemas = self.tools.schemas();
+        // —— 三期 §4.3 工具按 mode 组装：mode 激活 → for_mode（基础 14 +
+        //    manifest.extra_tools；schema 变化 = 前缀缓存有因失效豁免项）；
+        //    mode=None → 沿用装配方注入的 self.tools（二期行为字节级一致 +
+        //    单测替身不被覆盖）。未知工具名 fail-closed Err 终止回合。
+        let mode_tools = match mode_id.as_deref() {
+            Some(mode) => Some(ToolRegistry::for_mode(&self.data_dir, Some(mode))?),
+            None => None,
+        };
+        let schemas = mode_tools.as_ref().unwrap_or(&self.tools).schemas();
+        // —— 三期 §4.6 节拍参数：tempo.max_tool_rounds per-mode 覆盖 LoopConfig
+        //    （None = 沿用默认；effect_closure_per_cluster 由批2 交锋簇门控消费）。
+        let max_tool_rounds = mode_manifest.as_ref().and_then(|m| m.tempo.max_tool_rounds).unwrap_or(self.cfg.max_tool_rounds);
         let mut visible_text = String::new();
         let mut awaiting: Option<AwaitingPlayerRoll> = None;
         let mut narrated = false;
@@ -85,8 +110,9 @@ impl GmLoop {
         // waive_obligation 需要点改清单；块结束取回持久字段。
         let obligations_cell = std::sync::Mutex::new(std::mem::take(&mut self.obligations));
         {
-            let ctx = ToolCtx { engine: &self.engine, request: input.request, state: &state_agent, scene_extractor: self.scene_extractor.as_ref(), obligations: Some(&obligations_cell) };
-            'rounds: for round in 0..self.cfg.max_tool_rounds {
+            let tools = mode_tools.as_ref().unwrap_or(&self.tools);
+            let ctx = ToolCtx { engine: &self.engine, request: input.request, state: &state_agent, scene_extractor: self.scene_extractor.as_ref(), obligations: Some(&obligations_cell), data_dir: Some(&self.data_dir), current_mode: mode_id.as_deref() };
+            'rounds: for round in 0..max_tool_rounds {
                 // §6.1 第 5 条可观测链前半：每轮请求前记缓存锚点（后半 cached_tokens
                 // 由下方 Usage 分支在同一 gm_cache target 下记录，relay 不透传则缺省）。
                 tracing::info!(
@@ -144,7 +170,7 @@ impl GmLoop {
                             saw_tool = true;
                             messages.push_assistant_tool_calls(&calls);
                             for call in calls {
-                                let outcome = self.tools.dispatch(&ctx, &mut ledger, &call).await;
+                                let outcome = tools.dispatch(&ctx, &mut ledger, &call).await;
                                 messages.push_tool_result(&outcome.tool_call_id, &outcome.name, &outcome.content);
                                 if let Some(gate) = outcome.awaiting_player_roll {
                                     drain_redactor(&mut redactor, blocked, on_delta, &mut visible_text);

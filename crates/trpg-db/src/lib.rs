@@ -3309,6 +3309,7 @@ fn row_to_state_frame(row: sqlx::postgres::PgRow) -> Result<StateFrame> {
         "infiltration" => FrameKind::Infiltration,
         "hazard_sequence" => FrameKind::HazardSequence,
         "downtime_project" => FrameKind::DowntimeProject,
+        "downtime" => FrameKind::Downtime,
         "anomaly_encounter" => FrameKind::AnomalyEncounter,
         "horror_encounter" => FrameKind::HorrorEncounter,
         _ => FrameKind::SideQuest,

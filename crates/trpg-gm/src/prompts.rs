@@ -106,6 +106,24 @@ pub fn load_gm_skill(data_dir: &Path, ruleset_id: &str) -> Result<String> {
     Ok(chunks.join("\n\n---\n\n"))
 }
 
+/// 三期 §4.2 提示四级合并：global/*.md → <ruleset>/*.md → modes/<mode>/global.md
+/// → modes/<mode>/<ruleset>.md（mode 层内部仍按 ruleset 覆盖）。mode=None 退化为
+/// load_gm_skill 两级合并（**字节不变**——缓存稳定硬回归）。mode 提示 md 缺失则
+/// 跳过（manifest.json 才是 mode 存在性的 fail-closed 锚点，且永不进提示文本）。
+pub fn load_gm_skill_with_mode(data_dir: &Path, ruleset: &str, mode: Option<&str>) -> Result<String> {
+    let mut text = load_gm_skill(data_dir, ruleset)?;
+    let Some(mode) = mode else { return Ok(text) };
+    let mode_dir = data_dir.join("agent/gm_skill/modes").join(mode);
+    for file in ["global.md".to_string(), format!("{ruleset}.md")] {
+        let path = mode_dir.join(&file);
+        if !path.exists() { continue; }
+        let chunk = fs::read_to_string(&path).with_context(|| format!("failed reading {}", path.display()))?;
+        text.push_str("\n\n---\n\n");
+        text.push_str(&chunk);
+    }
+    Ok(text)
+}
+
 /// §6.1 第 4 条 fail-closed：prefix/pinned 段超 TokenBudget ⇒ 配置错误
 /// （Err 信息含 "prefix"/"pinned" 段名），绝不静默裁剪。
 pub fn validate_compiled_budget(compiled: &CompiledContext, request: &ContextRequest) -> Result<()> {
@@ -186,6 +204,42 @@ mod tests {
         let p50 = text.find("due 必须回应").expect("50_obligation_policy content missing");
         assert!(p30 < p40, "40_ content must appear after 30_ ({p30} vs {p40})");
         assert!(p40 < p50, "50_ content must appear after 40_ ({p40} vs {p50})");
+    }
+
+    #[test]
+    fn gm_skill_with_mode_merges_four_levels_in_order() {
+        // 三期 §4.2：global → ruleset → mode-global → mode-ruleset；
+        // manifest.json 绝不进提示文本。
+        let dir = std::env::temp_dir().join(format!("gm_skill_mode_test_{}_{}", std::process::id(), uuid::Uuid::new_v4().simple()));
+        fs::create_dir_all(dir.join("agent/gm_skill/global")).unwrap();
+        fs::create_dir_all(dir.join("agent/gm_skill/coc")).unwrap();
+        fs::create_dir_all(dir.join("agent/gm_skill/modes/combat")).unwrap();
+        fs::write(dir.join("agent/gm_skill/global/10_a.md"), "L1-global").unwrap();
+        fs::write(dir.join("agent/gm_skill/coc/10_b.md"), "L2-ruleset").unwrap();
+        fs::write(dir.join("agent/gm_skill/modes/combat/global.md"), "L3-mode-global").unwrap();
+        fs::write(dir.join("agent/gm_skill/modes/combat/coc.md"), "L4-mode-ruleset").unwrap();
+        fs::write(dir.join("agent/gm_skill/modes/combat/manifest.json"), r#"{"mode_id":"combat","frame_kind":"combat"}"#).unwrap();
+        let text = load_gm_skill_with_mode(&dir, "coc", Some("combat")).unwrap();
+        let p1 = text.find("L1-global").expect("L1 missing");
+        let p2 = text.find("L2-ruleset").expect("L2 missing");
+        let p3 = text.find("L3-mode-global").expect("L3 missing");
+        let p4 = text.find("L4-mode-ruleset").expect("L4 missing");
+        assert!(p1 < p2 && p2 < p3 && p3 < p4, "merge order broken: {p1}/{p2}/{p3}/{p4}");
+        assert!(!text.contains("mode_id"), "manifest.json must never enter the prompt: {text}");
+        // mode 提示文件缺失（另一 ruleset）→ 仅 mode-global 追加，不 Err。
+        let other = load_gm_skill_with_mode(&dir, "__none__", Some("combat")).unwrap();
+        assert!(other.contains("L3-mode-global") && !other.contains("L4-mode-ruleset"));
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn gm_skill_with_mode_none_is_byte_identical_to_two_level_merge() {
+        // 硬验收：mode=None 路径与二期 load_gm_skill 字节级一致（仓库真实 data/，
+        // modes/ 目录已存在也绝不影响 None 路径）。
+        let data_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data");
+        let legacy = load_gm_skill(&data_dir, "__no_such_ruleset__").unwrap();
+        let with_mode = load_gm_skill_with_mode(&data_dir, "__no_such_ruleset__", None).unwrap();
+        assert_eq!(legacy.as_bytes(), with_mode.as_bytes());
     }
 
     #[test]

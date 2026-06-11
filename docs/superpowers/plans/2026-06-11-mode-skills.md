@@ -65,3 +65,9 @@ pub fn load_gm_skill_with_mode(data_dir: &Path, ruleset: &str, mode: Option<&str
 
 ## 验收映射（spec §8 ↔ 批）
 框架单测①-⑤=批1；战斗 e2e=批2+6；幕间 e2e=批3+6；跨期回归=批5；缓存基线=批5；产品评测=收官另行（chatrpg-product-evaluator）。
+
+## 执行记录
+
+### 2026-06-11 批1 审查修复（越界备案）
+- **批4 文件越界已回收**：批1 agent 预先创建了 `harness/relay_player_sim.sh`、`harness/e2e_assert.sh`、`harness/specs/{combat_coc,combat_dnd,downtime_coc}.json`（批4 声明范围）。已从工作区移除（备份于 `/tmp/batch1-overreach-backup-20260611/`），批4 按计划自行 TDD 交付，不得参考该备份跳过先红后绿。
+- **trpg-rule-agent 越界改动备案（保留在位）**：`crates/trpg-rule-agent/src/reader/agent.rs` + `reader/tools.rs` 的脏改动经 git 取证确认为批1 agent 同会话越界（mtime 11:35 与 mode.rs/prompts.rs 交错），但内容归属 **on_outcome =field 引用守卫线（commit 347ae81）的收尾**——把 AMOUNT_RESOLVABLE 词汇表教给 reader SYSTEM 提示与 on_outcome schema 文档（杜绝 `=damage_after_armor` 类死引用再生产）+ 两个防漂移守卫测试。本计划无任何批次声明 trpg-rule-agent 文件，"移至正确批次"不可行；改动功能正确（守卫测试在位、`cargo test -p trpg-rule-agent` 全绿），故按审查备选项就地备案。**主会话 commit 时请将这两个文件与 mode-skills 批次分开、单独作为 on_outcome 线的后续提交**。同窗口产生的未跟踪 `_fix_dead_on_outcome_refs.sql`（存量数据修复，对应已留 chip 的线）同属 on_outcome 线，未动、一并备案。
