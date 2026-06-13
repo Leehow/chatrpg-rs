@@ -50,6 +50,10 @@ pub struct ToolCtx<'a> {
     /// 回合头部推导的当前姿态（turn_loop 注入 manifest.mode_id）；
     /// None = 默认叙事姿态（三期 spec §4.1）。
     pub current_mode: Option<&'a str>,
+    /// Phase3 §4.1 对抗预 pass 备好的对抗参数（turn_loop 注入）：roll_check 在
+    /// `args.opposed` 缺失时注入它（GM 漏填对抗形态的兜底）。None = 本回合无攻击
+    /// 意图 / 预 pass 关 / 现搓不成（fail-closed，不注入）。
+    pub opposed_binding: Option<&'a crate::opposed_prepass::OpposedBinding>,
 }
 
 /// 工具单次执行的产物。
@@ -273,7 +277,7 @@ mod tests {
     async fn dispatch_unknown_tool_returns_structured_error() {
         let registry = ToolRegistry::standard();
         let (engine, request, state) = dummy_ctx();
-        let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: None, data_dir: None, current_mode: None };
+        let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: None, data_dir: None, current_mode: None, opposed_binding: None };
         let mut ledger = TurnLedger::new();
         let outcome = registry.dispatch(&ctx, &mut ledger, &trpg_llm::AggregatedToolCall { id: "c1".to_string(), name: "missing".to_string(), arguments: "{}".to_string() }).await;
         let v: Value = serde_json::from_str(&outcome.content).unwrap();
@@ -285,7 +289,7 @@ mod tests {
     async fn dispatch_invalid_arguments_returns_structured_error() {
         let registry = ToolRegistry { tools: vec![Box::new(EchoTool)] };
         let (engine, request, state) = dummy_ctx();
-        let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: None, data_dir: None, current_mode: None };
+        let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: None, data_dir: None, current_mode: None, opposed_binding: None };
         let mut ledger = TurnLedger::new();
         let outcome = registry.dispatch(&ctx, &mut ledger, &trpg_llm::AggregatedToolCall { id: "c2".to_string(), name: "echo".to_string(), arguments: "not-json".to_string() }).await;
         let v: Value = serde_json::from_str(&outcome.content).unwrap();

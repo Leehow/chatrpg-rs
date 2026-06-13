@@ -1,0 +1,44 @@
+{
+  "spec_id": "cpr_phase3_npc_hp",
+  "description": "Phase 3 黄金链 e2e：CPR Homecoming scene_01，玩家显式攻击 Athena 无人机。预期：opposed prepass 检测攻击→现搓 npc_athena stats.defense→roll_check 注入 opposed→contest meet_or_beat 对抗结算→HP 落库。验收：target_actor_id=npc_athena, opponent_tested_parameter非空, resolution_model 非 provisional, HP delta。",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "pre_session": {
+    "create_character": true,
+    "note": "建 pc.current 用于战斗结算"
+  },
+  "turns": [
+    {
+      "turn_index": 0,
+      "player_input": {
+        "source": "literal",
+        "text": "开始游戏。场景是什么？有什么威胁？"
+      },
+      "notes": "开场，建立场景语境"
+    },
+    {
+      "turn_index": 1,
+      "player_input": {
+        "source": "literal",
+        "text": "我拔枪朝Athena开枪！我直接向那个锈蚀的人形无人机Athena射击，开火！"
+      },
+      "notes": "触发战斗：显式攻击 npc_athena（名字明确）"
+    },
+    {
+      "turn_index": 2,
+      "player_input": {
+        "source": "literal",
+        "text": "我继续向Athena无人机射击，瞄准它胸口再开一枪！"
+      },
+      "notes": "战斗回合 1：第二次攻击 npc_athena"
+    },
+    {
+      "turn_index": 3,
+      "player_input": {
+        "source": "literal",
+        "text": "Athena还活着吗？我再补一枪，向它开枪！"
+      },
+      "notes": "战斗回合 2：第三次攻击验证 HP 落库"
+    }
+  ]
+}

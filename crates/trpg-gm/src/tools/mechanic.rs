@@ -170,7 +170,7 @@ mod tests {
     #[tokio::test]
     async fn lookup_missing_id_is_mechanic_not_found() {
         let (engine, request, state) = dummy_ctx();
-        let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: None, data_dir: None, current_mode: None };
+        let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: None, data_dir: None, current_mode: None, opposed_binding: None };
         let mut ledger = TurnLedger::new();
         // ToolOutput 无 Debug，unwrap_err 不可用——match 取 Err。
         let err = match LookupMechanicTool.call(&ctx, &mut ledger, json!({"id":"coc.never_exists"})).await {

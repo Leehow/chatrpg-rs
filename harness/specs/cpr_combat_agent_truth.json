@@ -1,0 +1,52 @@
+{
+  "spec_id": "cpr_combat_agent_truth",
+  "description": "坐实 agent 路径 CPR 战斗 HP 落库真相：agent path (play --agent) 3-4 回合战斗交换，检查 advice_refs 路径标记、roll_check opposed 形态、contest 结算、HP 落库。",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "pre_session": {
+    "create_character": true,
+    "note": "建 pc.current 用于战斗结算"
+  },
+  "turns": [
+    {
+      "turn_index": 0,
+      "player_input": {
+        "source": "literal",
+        "text": "开始游戏，我想看看我在哪里，周围有什么威胁。"
+      },
+      "notes": "开场探索"
+    },
+    {
+      "turn_index": 1,
+      "player_input": {
+        "source": "literal",
+        "text": "我拔枪朝那个人开枪，不废话直接打！"
+      },
+      "notes": "触发战斗"
+    },
+    {
+      "turn_index": 2,
+      "player_input": {
+        "source": "literal",
+        "text": "我继续向那个清道夫开枪，瞄准他的胸口射击。"
+      },
+      "notes": "战斗回合 1：射击攻击"
+    },
+    {
+      "turn_index": 3,
+      "player_input": {
+        "source": "literal",
+        "text": "他还活着吗？我再开一枪补刀！"
+      },
+      "notes": "战斗回合 2：跟进攻击"
+    },
+    {
+      "turn_index": 4,
+      "player_input": {
+        "source": "literal",
+        "text": "好，战斗结束了，我检查他的身上有什么值钱的东西。"
+      },
+      "notes": "战斗收尾"
+    }
+  ]
+}

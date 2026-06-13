@@ -165,13 +165,13 @@ async fn enter_mode_rejects_nesting_and_unknown_mode() {
     let (engine, request, state) = engine_request_state();
     let mut ledger = crate::ledger::TurnLedger::new();
     // 已在 combat 姿态内 enter downtime → mode_nesting_unsupported（栈深 1）。
-    let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: None, data_dir: Some(&dir), current_mode: Some("combat") };
+    let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: None, data_dir: Some(&dir), current_mode: Some("combat"), opposed_binding: None };
     let err = typed_err(EnterModeTool.call(&ctx, &mut ledger, json!({"mode":"downtime","reason":"rest"})).await);
     assert_eq!(err.code, "mode_nesting_unsupported");
     assert!(err.recoverable);
     assert!(err.message.contains("combat"), "must name the active mode: {}", err.message);
     // 默认姿态 enter 未安装 mode → mode_not_found。
-    let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: None, data_dir: Some(&dir), current_mode: None };
+    let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: None, data_dir: Some(&dir), current_mode: None, opposed_binding: None };
     let err = typed_err(EnterModeTool.call(&ctx, &mut ledger, json!({"mode":"no_such_mode","reason":"x"})).await);
     assert_eq!(err.code, "mode_not_found");
     assert!(err.recoverable);
@@ -186,7 +186,7 @@ async fn exit_mode_without_active_mode_is_no_active_mode() {
     let dir = temp_data_dir();
     let (engine, request, state) = engine_request_state();
     let mut ledger = crate::ledger::TurnLedger::new();
-    let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: None, data_dir: Some(&dir), current_mode: None };
+    let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: None, data_dir: Some(&dir), current_mode: None, opposed_binding: None };
     let err = typed_err(ExitModeTool.call(&ctx, &mut ledger, json!({"reason":"done"})).await);
     assert_eq!(err.code, "no_active_mode");
     assert!(err.recoverable);
@@ -231,7 +231,7 @@ async fn exit_mode_blocked_by_obligations_then_waive_releases() {
             status: trpg_model::DueStatus::Open, created_at: Utc::now(),
         }]);
     }
-    let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: Some(&cell), data_dir: Some(&dir), current_mode: Some("combat") };
+    let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: Some(&cell), data_dir: Some(&dir), current_mode: Some("combat"), opposed_binding: None };
     // 外部债务未清 → exit 被拦（waive 通道照常可用——hint 指路）。
     let err = typed_err(ExitModeTool.call(&ctx, &mut turn_ledger, json!({"reason":"flee"})).await);
     assert_eq!(err.code, "exit_blocked_by_obligations");

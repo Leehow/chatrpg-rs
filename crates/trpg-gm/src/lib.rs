@@ -4,6 +4,7 @@ pub mod ledger;
 pub mod mode;
 pub mod mode_catalog;
 pub mod obligations;
+pub mod opposed_prepass;
 pub mod prompts;
 pub mod scene_policy;
 pub mod stimulus;
@@ -19,6 +20,7 @@ pub use mode::{
 };
 pub use mode_catalog::{mode_catalog_section, MODE_CATALOG_HEADER};
 pub use obligations::{ModeExitObligation, ObligationLedger, WaiveScope};
+pub use opposed_prepass::{detect_attack_target, opposed_prepass_enabled, OpposedBinding};
 pub use prompts::{
     load_gm_skill, load_gm_skill_with_mode, validate_compiled_budget, DynamicTailInput,
     TurnMessages,

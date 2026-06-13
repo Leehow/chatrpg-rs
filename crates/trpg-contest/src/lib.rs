@@ -20,7 +20,7 @@ impl ContestService {
         let total = roll_total(roll);
         let rolls = roll_dice_array(roll);
         let profile = self.ensure_contest_profile(contract, Some(roll), total).await?;
-        let (mut target, mut success, mut degree) = resolve_against_model(&profile.resolution_model, total, &rolls);
+        let (mut target, mut success, mut degree, awaiting_binding) = resolve_against_model(&profile.resolution_model, total, &rolls);
         // 对抗结算覆盖：OpposedRoll + 防御方骰子都在时，用 resolve_opposed 算胜负。
         if let CheckResolutionModel::OpposedRoll { attacker_value, defender_value, .. } = &profile.resolution_model {
             let def_total = defender_roll.map(roll_total);
@@ -47,6 +47,18 @@ impl ContestService {
         outcome[outcome_fields::TOTAL] = json!(total);
         outcome[outcome_fields::TARGET] = json!(target);
         outcome[outcome_fields::SUCCESS] = json!(success);
+        // spec §4.3:fail-closed 不静默 miss。模型未绑定且对抗结算也没救回胜负
+        // (success 仍 None)时,把待绑理由作为**显式** awaiting_binding 信号透出,GM agent
+        // 据此改道(找 DV / request_player_roll / 叙事降级),而非默默当成 miss。
+        // 守卫 success.is_none():防御值齐备的对抗已由上面 resolve_opposed 算出胜负 → 不带信号。
+        // 注意 key 用裸字面量(对齐 "opposed"/"degree"/"success_tier"):awaiting_binding 是
+        // **字符串**信号,不是 amount-resolvable 字段,故不进 outcome_fields 词汇表(否则会被
+        // finalize 的 =field 守卫误当成可作金额的合法引用)。
+        if success.is_none() {
+            if let Some(reason) = &awaiting_binding {
+                outcome["awaiting_binding"] = json!(reason);
+            }
+        }
         // Dice-pool enrichment — GENERIC names (no game-specific vocabulary in
         // the resolver): success_count = dice showing the target face;
         // pool_miss_count = the rest (a kernel resource_track, e.g. Triangle's
@@ -176,29 +188,9 @@ impl ContestService {
                 // 缓存注意(m2)：本 model 经 ensure_contest_profile 按 check_id 缓存,含 defender_value。
                 // 若首次 resolve 早于 NPC 卡合成,defender_value 会缓存成 None 且不自愈。CLI 路径已保证
                 // 合成+盖章 await 早于 resolve(时序安全);API 路径(本期范围外)接 pre-pass 前勿提前 resolve。
-                let opposed = contract.target_actor.is_some() && contract.opponent_tested_parameter.is_some();
-                if opposed {
-                    let ta = contract.target_actor.as_ref().unwrap();
-                    let atk = self.resolve_percentile_target_for(
-                        &contract.initiator.actor_id,
-                        contract.tested_parameter.as_ref(),
-                        contract, &kernel,
-                    ).await.map(|(_, v)| v);
-                    let def = self.resolve_percentile_target_for(
-                        &ta.actor_id,
-                        contract.opponent_tested_parameter.as_ref(),
-                        contract, &kernel,
-                    ).await.map(|(_, v)| v);
-                    let def_expr = dc.get("dice").and_then(|v| v.as_str())
-                        .unwrap_or(&contract.dice_expression).to_string();
-                    return Some(CheckResolutionModel::OpposedRoll {
-                        attacker_expression: contract.dice_expression.clone(),
-                        attacker_value: atk,
-                        defender_actor_id: Some(ta.actor_id.clone()),
-                        defender_expression: def_expr,
-                        defender_value: def,
-                        defender_roll_visibility: RollVisibility::PrivateGmRoll,
-                    });
+                if contract_is_opposed(contract) {
+                    let (atk, def, def_expr) = self.resolve_opposed_values(contract, &kernel, dc).await;
+                    return Some(build_opposed_model(contract, &def_expr, atk, def));
                 }
                 // Percentile (roll-under) targets are PER-CHARACTER: the tested
                 // skill/characteristic/track rating on the actor's sheet — NOT a
@@ -218,10 +210,37 @@ impl ContestService {
                 }
             }
             "meet_or_beat" => {
+                // 对抗路径（对称 roll_under :173+）：target_actor + opponent_tested_parameter
+                // 都在时建 OpposedRoll，读防御方 NPC 卡防御值（defense/DV，由 derive_tested_source
+                // 数据映射），交 resolve_outcome 的 resolve_opposed（已支持 total>=value）。
+                // 无对抗时维持原静态目标（StaticTargetNumber by tnum）。零规则集硬编码。
+                if contract_is_opposed(contract) {
+                    let (atk, def, def_expr) = self.resolve_opposed_values(contract, &kernel, dc).await;
+                    return Some(build_opposed_model(contract, &def_expr, atk, def));
+                }
                 tnum.map(|v| CheckResolutionModel::StaticTargetNumber { value: v, label: "kernel core mechanic target".into() })
             }
             _ => None,
         }
+    }
+
+    /// 对抗双方值解析（async DB 读）。攻击方按 contract.tested_parameter、防御方按
+    /// opponent_tested_parameter 查真实技能/属性/轨值（derive_tested_source 数据驱动，
+    /// 防御键如 defense/DV/evasion 由 check_param_need 映射 + NPC 卡现搓供给）。
+    /// 返回 (attacker_value, defender_value, defender_expression)。两个 compare 模型共用。
+    async fn resolve_opposed_values(
+        &self, contract: &CheckContract, kernel: &RuleKernel, dc: &Value,
+    ) -> (Option<i32>, Option<i32>, String) {
+        let ta = match contract.target_actor.as_ref() { Some(a) => a, None => return (None, None, contract.dice_expression.clone()) };
+        let atk = self.resolve_percentile_target_for(
+            &contract.initiator.actor_id, contract.tested_parameter.as_ref(), contract, kernel,
+        ).await.map(|(_, v)| v);
+        let def = self.resolve_percentile_target_for(
+            &ta.actor_id, contract.opponent_tested_parameter.as_ref(), contract, kernel,
+        ).await.map(|(_, v)| v);
+        let def_expr = dc.get("dice").and_then(|v| v.as_str())
+            .unwrap_or(&contract.dice_expression).to_string();
+        (atk, def, def_expr)
     }
 
     /// For a percentile (roll-under) check, find the tested parameter's REAL
@@ -372,17 +391,32 @@ fn roll_total(roll: &DiceRollRecord) -> i64 {
         .unwrap_or_default()
 }
 
-fn resolve_against_model(model: &CheckResolutionModel, total: i64, rolls: &[i64]) -> (Option<i64>, Option<bool>, Option<String>) {
+/// 结算一个 resolution model。返回 (target, success, degree, awaiting_binding)。
+/// 第 4 元素 `awaiting_binding`(spec §4.3):当模型「未绑定」无法出胜负时给出**显式**
+/// 待绑理由(而非默默 success=null 静默 miss),resolve_outcome 把它写进 outcome 让 GM
+/// agent 改道(找 DV / request_player_roll / 叙事降级)。已结算模型一律 None,零回归。
+/// 注意:防御值齐备的 OpposedRoll 在此返 (None,None,None,None)——胜负由 resolve_outcome
+/// 的 resolve_opposed 覆盖算出,故**不**视作待绑;唯有缺攻/防值的 OpposedRoll 才待绑。
+fn resolve_against_model(model: &CheckResolutionModel, total: i64, rolls: &[i64]) -> (Option<i64>, Option<bool>, Option<String>, Option<String>) {
     match model {
-        CheckResolutionModel::StaticTargetNumber { value, .. } => (Some(*value as i64), Some(total >= *value as i64), degree_for(total - *value as i64)),
-        CheckResolutionModel::AttackVsDefense { defense_value, .. } => (Some(*defense_value as i64), Some(total >= *defense_value as i64), degree_for(total - *defense_value as i64)),
-        CheckResolutionModel::PercentileRollUnder { ability_value, .. } => (Some(*ability_value as i64), Some(total <= *ability_value as i64), degree_for(*ability_value as i64 - total)),
-        CheckResolutionModel::SavingThrow { dc, .. } => (Some(*dc as i64), Some(total >= *dc as i64), degree_for(total - *dc as i64)),
+        CheckResolutionModel::StaticTargetNumber { value, .. } => (Some(*value as i64), Some(total >= *value as i64), degree_for(total - *value as i64), None),
+        CheckResolutionModel::AttackVsDefense { defense_value, .. } => (Some(*defense_value as i64), Some(total >= *defense_value as i64), degree_for(total - *defense_value as i64), None),
+        CheckResolutionModel::PercentileRollUnder { ability_value, .. } => (Some(*ability_value as i64), Some(total <= *ability_value as i64), degree_for(*ability_value as i64 - total), None),
+        CheckResolutionModel::SavingThrow { dc, .. } => (Some(*dc as i64), Some(total >= *dc as i64), degree_for(total - *dc as i64), None),
         CheckResolutionModel::DicePoolCount { target_face, threshold, .. } => {
             let hits = rolls.iter().filter(|&&d| d == *target_face as i64).count() as i64;
-            (Some(*threshold as i64), Some(hits >= *threshold as i64), degree_for(hits - *threshold as i64))
+            (Some(*threshold as i64), Some(hits >= *threshold as i64), degree_for(hits - *threshold as i64), None)
         }
-        CheckResolutionModel::OpposedRoll { .. } | CheckResolutionModel::RulesetProcedureLookup { .. } | CheckResolutionModel::Provisional { .. } => (None, None, None),
+        // 缺值的对抗 = 现搓不成/查不到防御值 → fail-closed 但**显式**待绑(非静默 miss)。
+        // 防御值齐备时不待绑(resolve_outcome 的 resolve_opposed 会算出胜负)。
+        CheckResolutionModel::OpposedRoll { attacker_value, defender_value, .. } if attacker_value.is_none() || defender_value.is_none() => {
+            (None, None, None, Some("opposed check is unbound: the defender's contested value (defense/DV/evasion or the opponent's tested skill) was not found; synthesize or look it up, request_player_roll, or narratively de-escalate".into()))
+        }
+        CheckResolutionModel::OpposedRoll { .. } => (None, None, None, None),
+        CheckResolutionModel::Provisional { reason, .. } => (None, None, None, Some(reason.clone())),
+        CheckResolutionModel::RulesetProcedureLookup { procedure_label, unresolved_fields } => {
+            (None, None, None, Some(format!("ruleset procedure `{}` needs source-backed binding for {:?} before this check can resolve", procedure_label, unresolved_fields)))
+        }
     }
 }
 
@@ -432,6 +466,30 @@ fn env_i32(key: &str) -> Option<i32> { std::env::var(key).ok().and_then(|v| v.pa
 fn is_attack_contract(contract: &CheckContract) -> bool {
     let text = format!("{} {} {}", contract.intent_kind, contract.check_label, contract.action_summary).to_ascii_lowercase();
     text.contains("attack") || text.contains("combat") || text.contains("fire") || text.contains("shoot") || text.contains("开火") || text.contains("攻击") || text.contains("还击")
+}
+
+/// 对抗契约判定：必须同时有 target_actor 与 opponent_tested_parameter。
+/// 通用模型层共享谓词（roll_under / meet_or_beat 都用），零规则集硬编码。
+fn contract_is_opposed(contract: &CheckContract) -> bool {
+    contract.target_actor.is_some() && contract.opponent_tested_parameter.is_some()
+}
+
+/// 纯构造器：从已解析的攻/防值 + 防御掷式建 OpposedRoll。compare 方向无关
+/// （roll_under 与 meet_or_beat 共用同一形态；方向交 resolve_opposed 按 kernel.compare 算）。
+/// fail-closed 不变量在此体现：def=None 原样保留（绝不乱绑平衡值），
+/// 下游 resolve_opposed 见 None 返 (None,None,None) → success 维持 null（诚实 provisional）。
+fn build_opposed_model(
+    contract: &CheckContract, def_expr: &str, atk: Option<i32>, def: Option<i32>,
+) -> CheckResolutionModel {
+    let defender_actor_id = contract.target_actor.as_ref().map(|a| a.actor_id.clone());
+    CheckResolutionModel::OpposedRoll {
+        attacker_expression: contract.dice_expression.clone(),
+        attacker_value: atk,
+        defender_actor_id,
+        defender_expression: def_expr.to_string(),
+        defender_value: def,
+        defender_roll_visibility: RollVisibility::PrivateGmRoll,
+    }
 }
 
 fn defender_for_contract(contract: &CheckContract) -> Option<String> {
@@ -754,3 +812,8 @@ mod tested_param_tests {
         assert_eq!(tier(97, 75), "failure");
     }
 }
+
+// Phase 3：meet_or_beat 对抗读卡支路单测（拆出文件，文件 ≤400 行纪律）。
+#[cfg(test)]
+#[path = "opposed_meet_or_beat_tests.rs"]
+mod opposed_meet_or_beat_tests;

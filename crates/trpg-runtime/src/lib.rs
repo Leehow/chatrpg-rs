@@ -1612,8 +1612,13 @@ fn fail_on_missing_source_backed_parameters() -> bool {
         bucket: &str, param: &str, check_context: &str) -> anyhow::Result<Option<serde_json::Value>> {
         if !npc_synth::persona_synthesis_enabled() { return Ok(None); }
         let service = trpg_params::RuntimeParameterService::new(self.db.clone());
+        // §Phase3 bug-fix: load_actor_parameters返回None时（NPC行尚未在runtime_actor_parameters中）
+        // 使用ensure_actor_parameters按需创建行，再继续现搓。否则opposed prepass调用此方法时
+        // 由于npc_athena等真实NPC id尚未存在而提前返回Ok(None)、无法合成防御参数。
+        let world_tick = self.current_world_time(session_id).await.map(|t| t.world_tick).unwrap_or_default();
         let mut p = match service.load_actor_parameters(session_id, &npc.actor_id).await? {
-            Some(p) => p, None => return Ok(None),
+            Some(p) => p,
+            None => service.ensure_actor_parameters(session_id, ruleset_id, &npc.actor_id, trpg_model::ActorKind::Npc, world_tick).await?,
         };
         // per-parameter cache: already on the card?
         if let Some(v) = p.sheet_json.pointer(&format!("/{bucket}/{param}")).cloned() { return Ok(Some(v)); }
@@ -1680,6 +1685,37 @@ fn fail_on_missing_source_backed_parameters() -> bool {
         Some(npc_synth::NpcPersona { actor_id: "npc.opposition".to_string(), name, prose })
     }
 
+    /// §Phase3 §4.1 对抗预 pass 物料：当前场景在场的全部 NPC 作为 persona 列表，
+    /// 用其在 ModuleGraph 中的**真实 id**（非 `npc.opposition` 占位符，治 spec §6③
+    /// actor-id 对齐坑）。mirrors `current_check_npc_persona` 的场景选择（explicit
+    /// scene_id else first DeepExtracted）与 graph.npcs 解析（name + body|summary）。
+    /// fail-closed：无模组 / 无场景 / 无在场 NPC → 空 Vec。
+    pub async fn scene_npc_personas(
+        &self,
+        request: &ContextRequest,
+        state: &RuntimeState,
+    ) -> Vec<npc_synth::NpcPersona> {
+        let Some(module_id) = request.module_id.as_deref().or(state.module_id.as_deref()) else { return Vec::new() };
+        let Some(graph) = self.db.load_module_graph(module_id).await.ok().flatten() else { return Vec::new() };
+        let node = state
+            .scene_id
+            .as_deref()
+            .and_then(|sid| graph.scenes.iter().find(|s| s.node_id == sid))
+            .or_else(|| graph.scenes.iter().find(|s| s.extraction_status == SceneExtractionStatus::DeepExtracted));
+        let Some(node) = node else { return Vec::new() };
+        node.referenced_npc_ids
+            .iter()
+            .filter_map(|npc_id| {
+                let v = graph.npcs.iter().find(|v| v.get("id").and_then(|x| x.as_str()) == Some(npc_id.as_str()))?;
+                let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                let prose = v.get("body").or_else(|| v.get("summary")).and_then(|x| x.as_str()).unwrap_or("").to_string();
+                if name.trim().is_empty() && prose.trim().is_empty() { return None; }
+                // 真实 graph id 作 actor_id（per-NPC 卡，治占位符串台）。
+                Some(npc_synth::NpcPersona { actor_id: npc_id.clone(), name, prose })
+            })
+            .collect()
+    }
+
     /// §Task5/7 Map the typed semantic action kind to the NPC parameter the contest
     /// will need from the opposition. Loads the rule kernel to get compare model:
     /// meet_or_beat → defense DV; roll_under → dodge skill.
@@ -1689,6 +1725,14 @@ fn fail_on_missing_source_backed_parameters() -> bool {
             .and_then(|k| k.dice_core.get("compare").and_then(|v| v.as_str()).map(str::to_string))
             .unwrap_or_default();
         map_check_param_need(action_kind, &compare)
+    }
+
+    /// §Phase3 §4.1 攻击→防御键映射（对抗预 pass 专用）：预 pass 已语义判定本回合
+    /// 是攻击对手，故 action_kind 恒 Attack，只需按 kernel.compare 取该规则集的防御
+    /// 键（meet_or_beat→stats.defense / roll_under→skills.dodge）。复用同一份
+    /// `map_check_param_need` 数据映射，零 per-ruleset 硬编码。无 kernel / 无映射 → None。
+    pub async fn attack_defense_param(&self, ruleset_id: &str) -> Option<(String, String)> {
+        self.check_param_need(ruleset_id, &SituationActionKind::Attack).await
     }
 
     /// §Task5 Fire-and-forget wrapper: synthesize+write the NPC param BEFORE contest

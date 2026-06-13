@@ -54,7 +54,7 @@ async fn open_combat_frame_validates_arguments() {
     let dir = temp_data_dir();
     let (engine, request, state) = engine_request_state();
     let mut ledger = TurnLedger::new();
-    let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: None, data_dir: Some(&dir), current_mode: None };
+    let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: None, data_dir: Some(&dir), current_mode: None, opposed_binding: None };
     // participants 缺失 / 空数组 / stakes 缺失 → invalid_arguments（不打 db）。
     let err = typed_err(OpenCombatFrameTool.call(&ctx, &mut ledger, json!({"stakes":"伏击"})).await);
     assert_eq!(err.code, "invalid_arguments");
@@ -63,7 +63,7 @@ async fn open_combat_frame_validates_arguments() {
     let err = typed_err(OpenCombatFrameTool.call(&ctx, &mut ledger, json!({"participants":["pc.current"]})).await);
     assert_eq!(err.code, "invalid_arguments");
     // 已在另一姿态（downtime）内开战斗 frame → 嵌套拒绝（栈深 1）。
-    let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: None, data_dir: Some(&dir), current_mode: Some("downtime") };
+    let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: None, data_dir: Some(&dir), current_mode: Some("downtime"), opposed_binding: None };
     let err = typed_err(OpenCombatFrameTool.call(&ctx, &mut ledger, json!({"participants":["pc.current"],"stakes":"伏击"})).await);
     assert_eq!(err.code, "mode_nesting_unsupported");
     fs::remove_dir_all(dir).ok();
@@ -74,7 +74,7 @@ async fn open_combat_frame_creates_live_combat_frame_with_bp3_projection() {
     let dir = temp_data_dir();
     let (engine, request, state) = engine_request_state();
     let mut ledger = TurnLedger::new();
-    let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: None, data_dir: Some(&dir), current_mode: None };
+    let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: None, data_dir: Some(&dir), current_mode: None, opposed_binding: None };
     let output = OpenCombatFrameTool
         .call(&ctx, &mut ledger, json!({"participants":["pc.current","npc.ghoul"],"stakes":"食尸鬼从墓穴扑出"}))
         .await
@@ -107,7 +107,7 @@ async fn open_combat_frame_enriches_existing_mode_frame_instead_of_duplicating()
     let (engine, request, state) = engine_request_state();
     let mut ledger = TurnLedger::new();
     // 先 enter_mode 建姿态 frame（同生产顺序：enter → open_combat_frame 武装）。
-    let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: None, data_dir: Some(&dir), current_mode: None };
+    let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: None, data_dir: Some(&dir), current_mode: None, opposed_binding: None };
     crate::mode::EnterModeTool.call(&ctx, &mut ledger, json!({"mode":"combat","reason":"ambush"})).await.expect("enter_mode");
     let before = engine.db.list_active_state_frames(&request.session_id, 8).await.unwrap();
     assert_eq!(before.len(), 1);
@@ -128,7 +128,7 @@ async fn close_frame_without_live_frame_is_frame_not_found() {
     let dir = temp_data_dir();
     let (engine, request, state) = engine_request_state();
     let mut ledger = TurnLedger::new();
-    let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: None, data_dir: Some(&dir), current_mode: None };
+    let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: None, data_dir: Some(&dir), current_mode: None, opposed_binding: None };
     let err = typed_err(CloseFrameTool.call(&ctx, &mut ledger, json!({"summary":"战斗结束"})).await);
     assert_eq!(err.code, "frame_not_found");
     assert!(err.recoverable);
@@ -150,7 +150,7 @@ async fn close_frame_compacts_closes_and_settles_exit_obligations() {
         obligations.ensure_mode_exit_obligations("combat", &["所有交锋簇效果落账 + frame 压缩归档".to_string()]);
         assert_eq!(obligations.exit_blocking().len(), 1);
     }
-    let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: Some(&cell), data_dir: Some(&dir), current_mode: Some("combat") };
+    let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: Some(&cell), data_dir: Some(&dir), current_mode: Some("combat"), opposed_binding: None };
     OpenCombatFrameTool.call(&ctx, &mut ledger, json!({"participants":["pc.current","npc.ghoul"],"stakes":"墓地交锋"})).await.expect("open");
     let frame_id = engine.db.list_active_state_frames(&request.session_id, 8).await.unwrap()[0].frame_id.clone();
     let output = CloseFrameTool.call(&ctx, &mut ledger, json!({"summary":"食尸鬼被击退，调查员带伤撤入教堂"})).await.expect("close_frame must succeed");

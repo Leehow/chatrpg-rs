@@ -66,6 +66,13 @@ impl GmLoop {
                 _ => Vec::new(),
             }
         } else { Vec::new() };
+        // —— 对抗语义预 pass（Phase3 §4.1 上游"双保险"上半段）：回合头部一次小 LLM
+        //    语义判定本回合是否攻击场景对手 → 现搓防御方 NPC 防御键落卡（ensure_npc_
+        //    parameter，Phase1 通路）+ 备好 OpposedBinding 供 roll_check 在 GM 漏填
+        //    opposed 时注入。fail-closed：门关 / 无模组 NPC / 无攻击意图 / 现搓不成
+        //    → None，绝不阻断回合、绝不乱绑值。防御键由 kernel.compare 数据驱动
+        //    （meet_or_beat→defense / roll_under→dodge），零 per-ruleset 硬编码。
+        let opposed_binding = crate::opposed_prepass::prepare_binding(&self.engine, &self.llm, input.request, input.state, input.user_input, input.recent_transcript, input.history).await;
         // —— 三期姿态推导（spec §4.1）：active state_frame → mode；无 frame /
         //    frame 种类无 mode 包 → None（默认叙事姿态，与二期字节级一致）。db
         //    失败 unwrap_or_default（与头部 watcher 同款绝不阻断回合）；mode 包
@@ -155,7 +162,7 @@ impl GmLoop {
         let obligations_cell = std::sync::Mutex::new(std::mem::take(&mut self.obligations));
         {
             let tools = mode_tools.as_ref().unwrap_or(&self.tools);
-            let ctx = ToolCtx { engine: &self.engine, request: input.request, state: &state_agent, scene_extractor: self.scene_extractor.as_ref(), obligations: Some(&obligations_cell), data_dir: Some(&self.data_dir), current_mode: mode_id.as_deref() };
+            let ctx = ToolCtx { engine: &self.engine, request: input.request, state: &state_agent, scene_extractor: self.scene_extractor.as_ref(), obligations: Some(&obligations_cell), data_dir: Some(&self.data_dir), current_mode: mode_id.as_deref(), opposed_binding: opposed_binding.as_ref() };
             'rounds: for round in 0..max_tool_rounds {
                 // §6.1 第 5 条可观测链前半：每轮请求前记缓存锚点（后半 cached_tokens
                 // 由下方 Usage 分支在同一 gm_cache target 下记录，relay 不透传则缺省）。

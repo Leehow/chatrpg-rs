@@ -44,7 +44,7 @@ async fn waive_unknown_target_errs() {
     let request = ContextRequest { ruleset_id: "rs".to_string(), module_id: None, session_id: "s".to_string(), turn_id: "t".to_string(), viewer: VisibilityProfile::gm(), token_budget: TokenBudget::default() };
     let state = RuntimeState { ruleset_id: "rs".to_string(), ..Default::default() };
     let cell = std::sync::Mutex::new(ObligationLedger::default());
-    let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: Some(&cell), data_dir: None, current_mode: None };
+    let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: Some(&cell), data_dir: None, current_mode: None, opposed_binding: None };
     let mut turn_ledger = TurnLedger::new();
     let err = match crate::tools::mechanic::WaiveObligationTool.call(&ctx, &mut turn_ledger, json!({"target_id":"due_missing","reason":"r"})).await {
         Ok(_) => panic!("expected obligation_not_found error"),
