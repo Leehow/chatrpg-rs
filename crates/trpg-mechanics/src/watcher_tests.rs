@@ -121,6 +121,77 @@ fn turn_start_hook_entry_produces_due_with_mechanic_id() {
     assert_eq!(dues[0].hook_event.as_deref(), Some("turn_start"));
 }
 
+// ===== #5 Triangle Agency chaos pool threshold regression =====
+// Mirrors the structure injected by _fix_triangle_chaos_thresholds.sql so that
+// if the DB row or the watcher logic regresses, a test catches it before playtest.
+
+fn chaos_track_fixed() -> serde_json::Value {
+    // Replicates the chaos track AFTER _fix_triangle_chaos_thresholds.sql runs.
+    // Five cumulative `at` thresholds matching the Chaos Effects chart (pp104-105).
+    json!({
+        "id": "chaos",
+        "kind": "pool",
+        "name": "Chaos Pool",
+        "owner_kind": "scene",
+        "initial": 0,
+        "thresholds": [
+            {"at":  4, "consequence": "GM may use Chaos Effect: Manifest"},
+            {"at":  5, "consequence": "GM may use Chaos Effect: Attract"},
+            {"at":  6, "consequence": "GM may use Chaos Effect: Expand"},
+            {"at": 10, "consequence": "GM may use Chaos Effect: Kill"},
+            {"at": 30, "consequence": "GM may use Chaos Effect: Overwhelm"}
+        ]
+    })
+}
+
+#[test]
+fn chaos_pool_accumulating_past_4_produces_crossing() {
+    // 3 → 4: crosses the first threshold (Manifest unlocks).
+    let cs = detect_crossings(&chaos_track_fixed(), "scene", "scene.current", 3, 4, ParameterOperation::Add);
+    assert_eq!(cs.len(), 1, "exactly one crossing at at:4: {cs:?}");
+    assert_eq!(cs[0].kind, "cumulative");
+    assert_eq!(cs[0].track_id, "chaos");
+    assert_eq!(cs[0].threshold_at, Some(4));
+    assert!(cs[0].consequence.contains("Manifest"), "consequence must name the effect: {}", cs[0].consequence);
+}
+
+#[test]
+fn chaos_pool_no_crossing_before_threshold() {
+    // 0 → 3: below every `at` threshold — should fire nothing.
+    let cs = detect_crossings(&chaos_track_fixed(), "scene", "scene.current", 0, 3, ParameterOperation::Add);
+    assert!(cs.is_empty(), "no threshold crossed at 3: {cs:?}");
+}
+
+#[test]
+fn chaos_pool_multiple_thresholds_crossed_in_one_roll() {
+    // A large single roll can jump from 0 to 11, crossing at:4, 5, 6, 10.
+    let cs = detect_crossings(&chaos_track_fixed(), "scene", "scene.current", 0, 11, ParameterOperation::Add);
+    assert_eq!(cs.len(), 4, "should cross four thresholds (4, 5, 6, 10): {cs:?}");
+    let ats: Vec<i32> = cs.iter().filter_map(|c| c.threshold_at).collect();
+    assert_eq!(ats, vec![4, 5, 6, 10], "thresholds fired in order: {ats:?}");
+}
+
+#[test]
+fn chaos_pool_edge_exact_hit_does_not_re_cross() {
+    // Already at 4 → stays at 4: before==after, no crossing (edge-triggered).
+    let cs = detect_crossings(&chaos_track_fixed(), "scene", "scene.current", 4, 4, ParameterOperation::Add);
+    assert!(cs.is_empty(), "staying exactly at threshold must not re-cross: {cs:?}");
+}
+
+#[test]
+fn chaos_stub_without_at_produces_no_crossing() {
+    // Regression: the PRE-FIX chaos track had a single stub entry with NO `at`.
+    // detect_crossings must silently skip it (fail-closed), not panic.
+    let stub_track = json!({
+        "id": "chaos",
+        "kind": "pool",
+        "owner_kind": "scene",
+        "thresholds": [{"consequence": "GM spends Chaos when an Anomaly takes specific supernatural actions"}]
+    });
+    let cs = detect_crossings(&stub_track, "scene", "scene.current", 0, 12, ParameterOperation::Add);
+    assert!(cs.is_empty(), "stub-only threshold (no `at`) must fire nothing (was the pre-fix behavior): {cs:?}");
+}
+
 /// 重构回归金样：既有 `resource_threshold_consequence` CreateFact 的 fact JSON
 /// 在同输入下逐字节不变（以重构前 lib.rs L168–191 的字面构造为金样）。
 #[test]

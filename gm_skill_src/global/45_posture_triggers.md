@@ -40,4 +40,6 @@ enter_mode { "mode": "downtime", "reason": "玩家宣告调查结束，返回波
 - downtime：结算表落账（SAN/HP 恢复/财务）→ `exit_mode`
 - combat：所有敌人倒下/撤退，`close_frame` 已执行 → `exit_mode`
 
-未清义务时收到 `exit_blocked_by_obligations`，先用工具清债再重试。
+**姿态前提失效也必须退出**：幕间遇到突发袭击/恐怖刺激/紧迫威胁，先 `exit_mode` 再叙事处理该事件（幕间的放宽节拍会吞掉这些场面应有的检定）。完成结算后不要让姿态挂着不退——frame 滞留会让后续每一回合都在错误姿态下裁定。
+
+未清义务时收到 `exit_blocked_by_obligations`，先用工具清债再重试；除自身退出义务外无未清机械项时引擎会确定性放行。

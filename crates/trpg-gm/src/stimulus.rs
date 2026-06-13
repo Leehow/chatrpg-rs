@@ -53,6 +53,18 @@ fn parse_hits(raw: &Value, catalog: &[MechanicEntry]) -> Vec<(String, String)> {
     out
 }
 
+/// 语义判定的 system 提示。措辞分层而非一刀切"宁可漏报"：
+/// - 模糊/可能已结算 → 仍 fail-closed 不命中（防刷屏，靠 MAX_HITS_PER_TURN 封顶）；
+/// - **显式**且**被动触发**的暴露（角色直接目击/接触到某条目 when_to_use 描述的事物，
+///   典型如恐怖怪物/异常生物/腐尸/目睹死亡等"无须玩家声明动作即触发"的检定）→ 必须命中，
+///   不得因"玩家只是观察、没声明动作"而漏报。零 per-ruleset 硬编码：判据永远是条目自身的
+///   when_to_use 语义（CoC 的 SAN、CPR 的 Humanity、Triangle 的 Chaos 同一套）。
+fn system_prompt() -> &'static str {
+    "You are the rules watcher of a tabletop RPG engine. Given the mechanics catalog index (one entry per line: `id | name | when_to_use`), decide which entries' when_to_use semantics are CLEARLY triggered by what is happening in the fiction RIGHT NOW and demand a mechanical resolution this turn. Judge by meaning, never by keywords. \
+Calibrate strictness by trigger type. (1) For PASSIVE-EXPOSURE mechanics — ones whose when_to_use fires merely because the character witnesses, perceives, or is exposed to something (sanity-blasting horror, an anomalous or impossible creature, a corpse, witnessing violent death, a supernatural revelation, corruption, fear, stress) — flag the entry whenever the fiction plainly puts the character in that situation, EVEN IF the player only observed and declared no action; do not withhold a hit just because the player was passive or merely 'looked'. (2) For action-gated mechanics, flag only when the player's declared action clearly invokes the entry. In all cases skip an entry that has obviously already been resolved this scene. When a moment is genuinely ambiguous (no explicit exposure, no clear action), return no hits. \
+Respond with JSON only: {\"hits\":[{\"mechanic_id\":\"<id from the index>\",\"reason\":\"<one short sentence citing the fictional trigger>\"}]} (at most 2 hits) or {\"hits\":[]}."
+}
+
 /// 取字符串末尾至多 `n` 个字符（按 char 不按字节，CJK 安全）。
 fn tail_chars(s: &str, n: usize) -> String {
     let chars: Vec<char> = s.chars().collect();
@@ -104,7 +116,7 @@ pub async fn stimulus_due_candidates(
     let lines = candidate_lines(catalog);
     if lines.is_empty() { return Vec::new(); }
     let narration_tail = tail_chars(recent_narration.unwrap_or(""), NARRATION_TAIL_CHARS);
-    let system = "You are the rules watcher of a tabletop RPG engine. Given the mechanics catalog index (one entry per line: `id | name | when_to_use`), decide which entries' when_to_use semantics are CLEARLY triggered by what is happening in the fiction RIGHT NOW and demand a mechanical resolution this turn. Judge by meaning, never by keywords. Be strict: flag an entry only when the fictional trigger is explicit (e.g. the character is directly exposed to something the entry's when_to_use describes) and the mechanic has not obviously been resolved already; when in doubt return no hits. Respond with JSON only: {\"hits\":[{\"mechanic_id\":\"<id from the index>\",\"reason\":\"<one short sentence citing the fictional trigger>\"}]} (at most 2 hits) or {\"hits\":[]}.";
+    let system = system_prompt();
     let user = format!(
         "[catalog index]\n{}\n[/catalog index]\n\n[last GM narration tail]\n{}\n[/last GM narration tail]\n\n[player input this turn]\n{}\n[/player input]",
         lines.join("\n"),
@@ -172,6 +184,26 @@ mod tests {
         assert_eq!(due.hook_event.as_deref(), Some("stimulus_match"));
         assert!(due.threshold_desc.contains("roll_check"), "GM 修复指引必须在 desc 里: {}", due.threshold_desc);
         assert_eq!(due.status, DueStatus::Open);
+    }
+
+    #[test]
+    fn system_prompt_lowers_threshold_for_passive_exposure_but_keeps_ambiguity_fail_closed() {
+        let p = system_prompt();
+        // 显式被动暴露（恐怖/异常生物/腐尸/目睹死亡）必须命中，且不得因"玩家只观察未声明动作"漏报。
+        assert!(p.contains("PASSIVE-EXPOSURE"), "must carve out passive-exposure mechanics: {p}");
+        assert!(
+            p.to_lowercase().contains("even if the player only observed"),
+            "must forbid withholding a hit just because the player was passive: {p}"
+        );
+        // 仍保留模糊场合 fail-closed（无明确暴露/动作 → 不命中），防刷屏。
+        assert!(
+            p.contains("genuinely ambiguous") && p.contains("return no hits"),
+            "must keep fail-closed for ambiguous moments: {p}"
+        );
+        // 仍保留 2 命中上限的产出约束（与 MAX_HITS_PER_TURN 封顶呼应）。
+        assert!(p.contains("at most 2 hits"), "must keep the per-turn hit cap in the contract: {p}");
+        // 零 per-ruleset 硬编码：举例措辞不得把判据钉死成单一规则集机制名。
+        assert!(!p.contains("call_of_cthulhu"), "prompt must stay ruleset-agnostic: {p}");
     }
 
     #[test]
