@@ -881,38 +881,43 @@ fn steward_seeded_formula_pack_json(ruleset_id: &str, book: &PlainTextBook) -> V
     let pages = refs.iter().filter_map(|r| r.page.map(|p| p.to_string())).collect::<Vec<_>>().join(",");
     let note = |label: &str| format!("deterministic source-backed first-play formula seed from rulebook pages [{}]; {}", pages, label);
     let ruleset = ruleset_id.to_ascii_lowercase();
+    // All seeds injected here are provisional: they are deterministic first-play
+    // placeholders, not LLM-extracted source-backed formulas. Mark as
+    // "provisional_seed" so combat/effect executors can guard against using them
+    // for exact dice binding. See DerivedValue::is_provisional_seed().
+    let tier = "provisional_seed";
     let formulas = if ruleset.contains("cyberpunk") {
         json!([
-            {"field_id":"mechanic.skill_check.total", "formula":"1d10 + STAT + Skill + modifiers vs Difficulty Value (DV)", "depends_on":["stat","skill","modifiers","dv"], "evaluator":"contest_profile_static_dv_or_source_bound_dv", "notes": note("Cyberpunk RED core skill resolution")},
-            {"field_id":"mechanic.attack.ranged.total", "formula":"1d10 + REF + relevant weapon skill + modifiers vs source-bound range DV / target defense", "depends_on":["ref","weapon_skill","range_dv","target_defense","modifiers"], "evaluator":"attack_vs_defense_or_dv", "notes": note("ranged attack requires actor, weapon, range, and target facets")},
-            {"field_id":"mechanic.damage.weapon_effect", "formula":"weapon damage expression from equipped weapon; apply armor/SP mitigation and write remaining damage to target HP or source-bound resource", "depends_on":["weapon.damage","target.armor_sp","target.hp"], "evaluator":"effect_resolution_packet", "notes": note("damage is source-object/equipment driven; do not invent weapon damage")}
+            {"field_id":"mechanic.skill_check.total", "tier":tier, "formula":"1d10 + STAT + Skill + modifiers vs Difficulty Value (DV)", "depends_on":["stat","skill","modifiers","dv"], "evaluator":"contest_profile_static_dv_or_source_bound_dv", "notes": note("Cyberpunk RED core skill resolution")},
+            {"field_id":"mechanic.attack.ranged.total", "tier":tier, "formula":"1d10 + REF + relevant weapon skill + modifiers vs source-bound range DV / target defense", "depends_on":["ref","weapon_skill","range_dv","target_defense","modifiers"], "evaluator":"attack_vs_defense_or_dv", "notes": note("ranged attack requires actor, weapon, range, and target facets")},
+            {"field_id":"mechanic.damage.weapon_effect", "tier":tier, "formula":"weapon damage expression from equipped weapon; apply armor/SP mitigation and write remaining damage to target HP or source-bound resource", "depends_on":["weapon.damage","target.armor_sp","target.hp"], "evaluator":"effect_resolution_packet", "notes": note("damage is source-object/equipment driven; do not invent weapon damage")}
         ])
     } else if ruleset.contains("dnd") {
         json!([
-            {"field_id":"mechanic.d20_check.total", "formula":"1d20 + ability modifier + proficiency bonus + modifiers vs DC", "depends_on":["ability_modifier","proficiency_bonus","dc"], "evaluator":"static_dc_contest", "notes": note("D&D d20 check")},
-            {"field_id":"mechanic.attack.total", "formula":"1d20 + ability modifier + proficiency bonus + modifiers vs AC", "depends_on":["ability_modifier","proficiency_bonus","target.ac"], "evaluator":"attack_vs_ac", "notes": note("D&D attack roll")},
-            {"field_id":"mechanic.damage.weapon_or_spell", "formula":"damage dice from weapon/spell/ability source; apply resistance/immunity/vulnerability then write HP delta", "depends_on":["source.damage","target.hp","mitigation"], "evaluator":"effect_resolution_packet", "notes": note("D&D source-bound damage")}
+            {"field_id":"mechanic.d20_check.total", "tier":tier, "formula":"1d20 + ability modifier + proficiency bonus + modifiers vs DC", "depends_on":["ability_modifier","proficiency_bonus","dc"], "evaluator":"static_dc_contest", "notes": note("D&D d20 check")},
+            {"field_id":"mechanic.attack.total", "tier":tier, "formula":"1d20 + ability modifier + proficiency bonus + modifiers vs AC", "depends_on":["ability_modifier","proficiency_bonus","target.ac"], "evaluator":"attack_vs_ac", "notes": note("D&D attack roll")},
+            {"field_id":"mechanic.damage.weapon_or_spell", "tier":tier, "formula":"damage dice from weapon/spell/ability source; apply resistance/immunity/vulnerability then write HP delta", "depends_on":["source.damage","target.hp","mitigation"], "evaluator":"effect_resolution_packet", "notes": note("D&D source-bound damage")}
         ])
     } else if ruleset.contains("sword_world") {
         json!([
-            {"field_id":"mechanic.skill_check.total", "formula":"2d6 + skill package standard value vs target number", "depends_on":["class_level","ability_modifier","target_number"], "evaluator":"static_target_or_opposed_2d6", "notes": note("Sword World skill check")},
-            {"field_id":"mechanic.damage.power_table", "formula":"source-bound Power Table result + additional damage, then apply mitigation/defense as specified by source", "depends_on":["weapon_or_spell_power","additional_damage","target_defense"], "evaluator":"table_driven_effect_resolution", "notes": note("Sword World damage remains table-driven; exact table lookup required")}
+            {"field_id":"mechanic.skill_check.total", "tier":tier, "formula":"2d6 + skill package standard value vs target number", "depends_on":["class_level","ability_modifier","target_number"], "evaluator":"static_target_or_opposed_2d6", "notes": note("Sword World skill check")},
+            {"field_id":"mechanic.damage.power_table", "tier":tier, "formula":"source-bound Power Table result + additional damage, then apply mitigation/defense as specified by source", "depends_on":["weapon_or_spell_power","additional_damage","target_defense"], "evaluator":"table_driven_effect_resolution", "notes": note("Sword World damage remains table-driven; exact table lookup required")}
         ])
     } else if ruleset.contains("cthulhu") || ruleset.contains("coc") || ruleset.contains("brp") {
         json!([
-            {"field_id":"mechanic.percentile_check", "formula":"d100 roll-under against skill/characteristic rating", "depends_on":["skill_rating"], "evaluator":"percentile_roll_under", "notes": note("BRP/CoC percentile check")},
-            {"field_id":"mechanic.hit_points", "formula":"source-backed HP formula from CON/SIZ or ruleset-specific investigator sheet", "depends_on":["con","siz"], "evaluator":"character_derived_value", "notes": note("HP formula must be confirmed per ruleset/version")},
-            {"field_id":"mechanic.sanity", "formula":"source-backed SAN resource; losses write to sanity track, not HP", "depends_on":["sanity","san_loss"], "evaluator":"parameter_facet_executor", "notes": note("SAN is a separate parameter/resource")}
+            {"field_id":"mechanic.percentile_check", "tier":tier, "formula":"d100 roll-under against skill/characteristic rating", "depends_on":["skill_rating"], "evaluator":"percentile_roll_under", "notes": note("BRP/CoC percentile check")},
+            {"field_id":"mechanic.hit_points", "tier":tier, "formula":"source-backed HP formula from CON/SIZ or ruleset-specific investigator sheet", "depends_on":["con","siz"], "evaluator":"character_derived_value", "notes": note("HP formula must be confirmed per ruleset/version")},
+            {"field_id":"mechanic.sanity", "tier":tier, "formula":"source-backed SAN resource; losses write to sanity track, not HP", "depends_on":["sanity","san_loss"], "evaluator":"parameter_facet_executor", "notes": note("SAN is a separate parameter/resource")}
         ])
     } else if ruleset.contains("triangle") {
         json!([
-            {"field_id":"mechanic.conflict_roll", "formula":"roll 6d4 and evaluate 3s according to Triangle Agency conflict resolution", "depends_on":["six_d4","threes","chaos"], "evaluator":"triangle_conflict_resolution", "notes": note("Triangle Agency 6d4 conflict core")},
-            {"field_id":"mechanic.harm_chaos", "formula":"source-bound Harm/Chaos/Stability effects write to their tracks instead of HP", "depends_on":["harm","chaos","stability"], "evaluator":"parameter_facet_executor", "notes": note("Triangle resource tracks")}
+            {"field_id":"mechanic.conflict_roll", "tier":tier, "formula":"roll 6d4 and evaluate 3s according to Triangle Agency conflict resolution", "depends_on":["six_d4","threes","chaos"], "evaluator":"triangle_conflict_resolution", "notes": note("Triangle Agency 6d4 conflict core")},
+            {"field_id":"mechanic.harm_chaos", "tier":tier, "formula":"source-bound Harm/Chaos/Stability effects write to their tracks instead of HP", "depends_on":["harm","chaos","stability"], "evaluator":"parameter_facet_executor", "notes": note("Triangle resource tracks")}
         ])
     } else {
         json!([
-            {"field_id":"mechanic.core_check", "formula":"ruleset source-backed dice expression + actor facet + target/opposition facet", "depends_on":["dice","actor_facet","target_facet"], "evaluator":"contest_profile", "notes": note("generic source-backed first-play check")},
-            {"field_id":"mechanic.damage_or_effect", "formula":"source-bound effect expression writes to source-bound resource/condition/object state", "depends_on":["effect_source","target_parameter"], "evaluator":"effect_resolution_packet", "notes": note("generic source-bound effect")}
+            {"field_id":"mechanic.core_check", "tier":tier, "formula":"ruleset source-backed dice expression + actor facet + target/opposition facet", "depends_on":["dice","actor_facet","target_facet"], "evaluator":"contest_profile", "notes": note("generic source-backed first-play check")},
+            {"field_id":"mechanic.damage_or_effect", "tier":tier, "formula":"source-bound effect expression writes to source-bound resource/condition/object state", "depends_on":["effect_source","target_parameter"], "evaluator":"effect_resolution_packet", "notes": note("generic source-bound effect")}
         ])
     };
     json!({
@@ -1071,4 +1076,73 @@ fn sanitize_for_block_id(input: &str) -> String {
         .trim_matches('_')
         .to_string();
     if cleaned.is_empty() { "hit".into() } else { cleaned }
+}
+
+#[cfg(test)]
+mod seeded_formula_tier_tests {
+    use super::*;
+
+    fn dummy_book(source_id: &str) -> PlainTextBook {
+        PlainTextBook {
+            source_id: source_id.into(),
+            title: source_id.into(),
+            source_hash: String::new(),
+            pages: vec![],
+            chunks: vec![],
+        }
+    }
+
+    fn all_formulas_have_provisional_tier(ruleset_id: &str) {
+        let book = dummy_book(&format!("{ruleset_id}.document"));
+        let pack_json = steward_seeded_formula_pack_json(ruleset_id, &book);
+        let formulas = pack_json["derived_formula_pack"]["formulas"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{ruleset_id}: formulas must be array"));
+        assert!(!formulas.is_empty(), "{ruleset_id}: formulas must not be empty");
+        for f in formulas {
+            let tier = f["tier"].as_str()
+                .unwrap_or_else(|| panic!("{ruleset_id}: formula missing tier: {f}"));
+            assert_eq!(
+                tier, "provisional_seed",
+                "{ruleset_id}: expected provisional_seed, got {tier} in {f}"
+            );
+        }
+    }
+
+    // N1: every ruleset branch in steward_seeded_formula_pack_json emits tier=provisional_seed
+
+    #[test]
+    fn cyberpunk_seed_formulas_are_provisional() {
+        all_formulas_have_provisional_tier("cyberpunk_red");
+    }
+
+    #[test]
+    fn dnd_seed_formulas_are_provisional() {
+        all_formulas_have_provisional_tier("dnd5e");
+    }
+
+    #[test]
+    fn sword_world_seed_formulas_are_provisional() {
+        all_formulas_have_provisional_tier("sword_world");
+    }
+
+    #[test]
+    fn coc_seed_formulas_are_provisional() {
+        all_formulas_have_provisional_tier("coc");
+    }
+
+    #[test]
+    fn cthulhu_seed_formulas_are_provisional() {
+        all_formulas_have_provisional_tier("call_of_cthulhu");
+    }
+
+    #[test]
+    fn triangle_seed_formulas_are_provisional() {
+        all_formulas_have_provisional_tier("triangle_agency");
+    }
+
+    #[test]
+    fn generic_seed_formulas_are_provisional() {
+        all_formulas_have_provisional_tier("unknown_ruleset");
+    }
 }

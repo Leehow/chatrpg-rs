@@ -75,6 +75,8 @@ pub async fn play_cli_agent(ruleset: &str, module: Option<&str>) -> Result<()> {
         ).await?;
         println!();
         let do_scene_nav = matches!(outcome, TurnOutcome::Narration(_));
+        // 在 input 被 move 进 history 前保存，供 scene_navigator player_input 参数使用。
+        let player_input_for_nav = input.clone();
         match outcome {
             TurnOutcome::Narration(text) => {
                 history.push(ChatMessage { role: "user".to_string(), content: input });
@@ -87,12 +89,12 @@ pub async fn play_cli_agent(ruleset: &str, module: Option<&str>) -> Result<()> {
                 history.push(ChatMessage { role: "assistant".to_string(), content: if streamed.trim().is_empty() { prompt_public } else { streamed.clone() } });
             }
         }
-        // 模组场景导航：比照 main.rs play_cli 的回合末处理，语义判定本回合叙事后是否切场景，
-        // 更新 current_scene_id + 到场深抽。仅 Narration 终态触发；AwaitingPlayerRoll 跳过
-        // （GM 在等玩家掷骰，场景未结束）。fail-closed：失败仅 warn 不阻断回合。
+        // 模组场景导航：比照 main.rs play_cli 的回合末处理，语义判定本回合 player_input +
+        // GM 叙事后是否切场景，更新 current_scene_id + 到场深抽。仅 Narration 终态触发；
+        // AwaitingPlayerRoll 跳过（GM 在等玩家掷骰，场景未结束）。fail-closed：失败仅 warn 不阻断。
         if do_scene_nav {
             if let Some(mid) = module {
-                if let Err(err) = trpg_api::scene_navigator(&db, llm.as_ref(), &session_id, mid, data_dir.as_path(), &streamed).await {
+                if let Err(err) = trpg_api::scene_navigator(&db, llm.as_ref(), &session_id, mid, data_dir.as_path(), &player_input_for_nav, &streamed).await {
                     tracing::warn!("agent scene_navigator: {err:#}");
                 }
             }

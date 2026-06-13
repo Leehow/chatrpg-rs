@@ -2354,42 +2354,54 @@ fn source_backed_first_play_mechanical_formulas(ruleset_id: &str, book: &PlainTe
         .collect::<Vec<_>>()
         .join(",");
     let note = |label: &str| Some(format!("source-backed first-play formula seed; verify exact parameters against source pages [{}]; {}", pages, label));
+    // All entries produced here are provisional seeds — deterministic first-play
+    // placeholders, not LLM-extracted source-backed formulas. Mark tier so that
+    // combat/effect executors skip exact dice binding. (N1 seeded formula tiers)
+    let seed = |field_id: &str, formula: &str, depends: Vec<&str>, evaluator: &str, n: Option<String>| DerivedValue {
+        field_id: field_id.into(),
+        formula: formula.into(),
+        depends_on: depends.into_iter().map(|s| s.into()).collect(),
+        evaluator: evaluator.into(),
+        notes: n,
+        tier: Some("provisional_seed".into()),
+        ..Default::default()
+    };
     if ruleset.contains("cyberpunk") {
         return vec![
-            DerivedValue { field_id: "mechanic.skill_check.total".into(), formula: "1d10 + STAT + Skill + modifiers vs Difficulty Value (DV)".into(), depends_on: vec!["stat".into(), "skill".into(), "modifiers".into(), "dv".into()], evaluator: "contest_profile_static_dv_or_source_bound_dv".into(), notes: note("Cyberpunk RED core skill resolution") , ..Default::default() },
-            DerivedValue { field_id: "mechanic.attack.ranged.total".into(), formula: "1d10 + REF + relevant weapon skill + modifiers vs source-bound range DV / target defense".into(), depends_on: vec!["ref".into(), "weapon_skill".into(), "range_dv".into(), "target_defense".into(), "modifiers".into()], evaluator: "attack_vs_defense_or_dv".into(), notes: note("ranged attack requires actor, weapon, range, and target facets") , ..Default::default() },
-            DerivedValue { field_id: "mechanic.damage.weapon_effect".into(), formula: "weapon damage expression from equipped weapon; apply armor/SP mitigation and write remaining damage to target HP or source-bound resource".into(), depends_on: vec!["weapon.damage".into(), "target.armor_sp".into(), "target.hp".into()], evaluator: "effect_resolution_packet".into(), notes: note("damage is source-object/equipment driven; do not invent weapon damage") , ..Default::default() },
+            seed("mechanic.skill_check.total", "1d10 + STAT + Skill + modifiers vs Difficulty Value (DV)", vec!["stat","skill","modifiers","dv"], "contest_profile_static_dv_or_source_bound_dv", note("Cyberpunk RED core skill resolution")),
+            seed("mechanic.attack.ranged.total", "1d10 + REF + relevant weapon skill + modifiers vs source-bound range DV / target defense", vec!["ref","weapon_skill","range_dv","target_defense","modifiers"], "attack_vs_defense_or_dv", note("ranged attack requires actor, weapon, range, and target facets")),
+            seed("mechanic.damage.weapon_effect", "weapon damage expression from equipped weapon; apply armor/SP mitigation and write remaining damage to target HP or source-bound resource", vec!["weapon.damage","target.armor_sp","target.hp"], "effect_resolution_packet", note("damage is source-object/equipment driven; do not invent weapon damage")),
         ];
     }
     if ruleset.contains("dnd") {
         return vec![
-            DerivedValue { field_id: "mechanic.d20_check.total".into(), formula: "1d20 + ability modifier + proficiency bonus + modifiers vs DC".into(), depends_on: vec!["ability_modifier".into(), "proficiency_bonus".into(), "dc".into()], evaluator: "static_dc_contest".into(), notes: note("D&D d20 check") , ..Default::default() },
-            DerivedValue { field_id: "mechanic.attack.total".into(), formula: "1d20 + ability modifier + proficiency bonus + modifiers vs AC".into(), depends_on: vec!["ability_modifier".into(), "proficiency_bonus".into(), "target.ac".into()], evaluator: "attack_vs_ac".into(), notes: note("D&D attack roll") , ..Default::default() },
-            DerivedValue { field_id: "mechanic.damage.weapon_or_spell".into(), formula: "damage dice from weapon/spell/ability source; apply resistance/immunity/vulnerability then write HP delta".into(), depends_on: vec!["source.damage".into(), "target.hp".into(), "mitigation".into()], evaluator: "effect_resolution_packet".into(), notes: note("D&D source-bound damage") , ..Default::default() },
+            seed("mechanic.d20_check.total", "1d20 + ability modifier + proficiency bonus + modifiers vs DC", vec!["ability_modifier","proficiency_bonus","dc"], "static_dc_contest", note("D&D d20 check")),
+            seed("mechanic.attack.total", "1d20 + ability modifier + proficiency bonus + modifiers vs AC", vec!["ability_modifier","proficiency_bonus","target.ac"], "attack_vs_ac", note("D&D attack roll")),
+            seed("mechanic.damage.weapon_or_spell", "damage dice from weapon/spell/ability source; apply resistance/immunity/vulnerability then write HP delta", vec!["source.damage","target.hp","mitigation"], "effect_resolution_packet", note("D&D source-bound damage")),
         ];
     }
     if ruleset.contains("sword_world") {
         return vec![
-            DerivedValue { field_id: "mechanic.skill_check.total".into(), formula: "2d6 + skill package standard value vs target number".into(), depends_on: vec!["class_level".into(), "ability_modifier".into(), "target_number".into()], evaluator: "static_target_or_opposed_2d6".into(), notes: note("Sword World skill check") , ..Default::default() },
-            DerivedValue { field_id: "mechanic.damage.power_table".into(), formula: "source-bound Power Table result + additional damage, then apply mitigation/defense as specified by source".into(), depends_on: vec!["weapon_or_spell_power".into(), "additional_damage".into(), "target_defense".into()], evaluator: "table_driven_effect_resolution".into(), notes: note("Sword World damage remains table-driven; exact table lookup required") , ..Default::default() },
+            seed("mechanic.skill_check.total", "2d6 + skill package standard value vs target number", vec!["class_level","ability_modifier","target_number"], "static_target_or_opposed_2d6", note("Sword World skill check")),
+            seed("mechanic.damage.power_table", "source-bound Power Table result + additional damage, then apply mitigation/defense as specified by source", vec!["weapon_or_spell_power","additional_damage","target_defense"], "table_driven_effect_resolution", note("Sword World damage remains table-driven; exact table lookup required")),
         ];
     }
     if ruleset.contains("cthulhu") || ruleset.contains("brp") {
         return vec![
-            DerivedValue { field_id: "mechanic.percentile_check".into(), formula: "d100 roll-under against skill/characteristic rating".into(), depends_on: vec!["skill_rating".into()], evaluator: "percentile_roll_under".into(), notes: note("BRP/CoC percentile check") , ..Default::default() },
-            DerivedValue { field_id: "mechanic.hit_points".into(), formula: "source-backed HP formula from CON/SIZ or ruleset-specific investigator sheet".into(), depends_on: vec!["con".into(), "siz".into()], evaluator: "character_derived_value".into(), notes: note("HP formula must be confirmed per ruleset/version") , ..Default::default() },
-            DerivedValue { field_id: "mechanic.sanity".into(), formula: "source-backed SAN resource; losses write to sanity track, not HP".into(), depends_on: vec!["sanity".into(), "san_loss".into()], evaluator: "parameter_facet_executor".into(), notes: note("SAN is a separate parameter/resource") , ..Default::default() },
+            seed("mechanic.percentile_check", "d100 roll-under against skill/characteristic rating", vec!["skill_rating"], "percentile_roll_under", note("BRP/CoC percentile check")),
+            seed("mechanic.hit_points", "source-backed HP formula from CON/SIZ or ruleset-specific investigator sheet", vec!["con","siz"], "character_derived_value", note("HP formula must be confirmed per ruleset/version")),
+            seed("mechanic.sanity", "source-backed SAN resource; losses write to sanity track, not HP", vec!["sanity","san_loss"], "parameter_facet_executor", note("SAN is a separate parameter/resource")),
         ];
     }
     if ruleset.contains("triangle") {
         return vec![
-            DerivedValue { field_id: "mechanic.conflict_roll".into(), formula: "roll 6d4 and evaluate 3s according to Triangle Agency conflict resolution".into(), depends_on: vec!["six_d4".into(), "threes".into(), "chaos".into()], evaluator: "triangle_conflict_resolution".into(), notes: note("Triangle Agency 6d4 conflict core") , ..Default::default() },
-            DerivedValue { field_id: "mechanic.harm_chaos".into(), formula: "source-bound Harm/Chaos/Stability effects write to their tracks instead of HP".into(), depends_on: vec!["harm".into(), "chaos".into(), "stability".into()], evaluator: "parameter_facet_executor".into(), notes: note("Triangle resource tracks") , ..Default::default() },
+            seed("mechanic.conflict_roll", "roll 6d4 and evaluate 3s according to Triangle Agency conflict resolution", vec!["six_d4","threes","chaos"], "triangle_conflict_resolution", note("Triangle Agency 6d4 conflict core")),
+            seed("mechanic.harm_chaos", "source-bound Harm/Chaos/Stability effects write to their tracks instead of HP", vec!["harm","chaos","stability"], "parameter_facet_executor", note("Triangle resource tracks")),
         ];
     }
     vec![
-        DerivedValue { field_id: "mechanic.core_check".into(), formula: "ruleset source-backed dice expression + actor facet + target/opposition facet".into(), depends_on: vec!["dice".into(), "actor_facet".into(), "target_facet".into()], evaluator: "contest_profile".into(), notes: note("generic source-backed first-play check") , ..Default::default() },
-        DerivedValue { field_id: "mechanic.damage_or_effect".into(), formula: "source-bound effect expression writes to source-bound resource/condition/object state".into(), depends_on: vec!["effect_source".into(), "target_parameter".into()], evaluator: "effect_resolution_packet".into(), notes: note("generic source-bound effect") , ..Default::default() },
+        seed("mechanic.core_check", "ruleset source-backed dice expression + actor facet + target/opposition facet", vec!["dice","actor_facet","target_facet"], "contest_profile", note("generic source-backed first-play check")),
+        seed("mechanic.damage_or_effect", "source-bound effect expression writes to source-bound resource/condition/object state", vec!["effect_source","target_parameter"], "effect_resolution_packet", note("generic source-bound effect")),
     ]
 }
 

@@ -92,6 +92,17 @@ pub fn compile_formula(field_id: &str, formula: &str, stats: &Value, skills: &Va
     Some(CompiledFormula { field_id: field_id.to_string(), dice, expression, modifiers, unresolved })
 }
 
+/// Returns true when a formula is eligible for exact dice compilation (not a
+/// provisional seed or operational-abstract placeholder).  Exact compilation
+/// binds actor stats/skills to produce a real roll expression; doing so on a
+/// provisional seed would fabricate modifiers from generic role-labeled names
+/// (REF, Skill, ...) that have no confirmed source-backed binding.
+///
+/// N1 tier guard: callers should check this before invoking `compile_formula`.
+pub fn formula_eligible_for_exact_compilation(f: &trpg_model::DerivedValue) -> bool {
+    f.is_exact_executable()
+}
+
 /// Is `t` a dice term like "1d10", "d20", "2d6"?
 fn is_dice(t: &str) -> bool {
     let lower = t.to_ascii_lowercase();
@@ -251,6 +262,83 @@ mod tests {
             notes: Some(notes.into()),
             ..Default::default()
         }
+    }
+
+    fn seed_formula(field_id: &str, formula: &str) -> DerivedValue {
+        DerivedValue {
+            field_id: field_id.into(),
+            formula: formula.into(),
+            depends_on: vec!["stat".into(), "skill".into()],
+            evaluator: "contest_profile".into(),
+            tier: Some("provisional_seed".into()),
+            ..Default::default()
+        }
+    }
+
+    fn exact_formula(field_id: &str, formula: &str) -> DerivedValue {
+        DerivedValue {
+            field_id: field_id.into(),
+            formula: formula.into(),
+            depends_on: vec!["ref".into()],
+            evaluator: "contest_profile".into(),
+            tier: Some("exact_executable".into()),
+            ..Default::default()
+        }
+    }
+
+    // N1: executor guard — provisional_seed must not drive exact compilation
+
+    #[test]
+    fn provisional_seed_not_eligible_for_exact_compilation() {
+        let f = seed_formula("mechanic.attack.ranged.total", "1d10 + REF + ranged_weapon_skill");
+        assert!(!formula_eligible_for_exact_compilation(&f),
+            "provisional_seed must not be eligible for exact compilation");
+    }
+
+    #[test]
+    fn exact_executable_is_eligible_for_compilation() {
+        let f = exact_formula("mechanic.attack.ranged.total", "1d10 + REF + ranged_weapon_skill");
+        assert!(formula_eligible_for_exact_compilation(&f),
+            "exact_executable tier must be eligible for compilation");
+    }
+
+    #[test]
+    fn absent_tier_treated_as_exact_eligible() {
+        // Old packs without tier should still compile (backward compat).
+        let f = DerivedValue {
+            field_id: "attack".into(),
+            formula: "1d10 + REF".into(),
+            depends_on: vec![],
+            evaluator: "contest_profile".into(),
+            tier: None,
+            ..Default::default()
+        };
+        assert!(formula_eligible_for_exact_compilation(&f),
+            "absent tier => exact_executable (backward compat)");
+    }
+
+    #[test]
+    fn operational_abstract_not_eligible_for_exact_compilation() {
+        let f = DerivedValue {
+            field_id: "mechanic.damage".into(),
+            formula: "weapon damage table result".into(),
+            depends_on: vec![],
+            evaluator: "table_driven".into(),
+            tier: Some("operational_abstract".into()),
+            ..Default::default()
+        };
+        assert!(!formula_eligible_for_exact_compilation(&f),
+            "operational_abstract must not be eligible for exact compilation");
+    }
+
+    #[test]
+    fn provisional_seed_compile_still_produces_none_for_non_dice_formula() {
+        // Even if someone bypasses the guard, the formula text itself would
+        // return None from compile_formula (no dice term in generic seeds).
+        let (s, k) = solo();
+        let formula = "ruleset source-backed dice expression + actor facet + target/opposition facet";
+        let result = compile_formula("mechanic.core_check", formula, &s, &k);
+        assert!(result.is_none(), "generic seed formula has no dice term → compile returns None");
     }
 
     #[test]

@@ -312,16 +312,29 @@ impl CombatAgent {
                     .ok()
                     .flatten();
                 if let (Some(f), Some(actor)) = (chosen, actor.as_ref()) {
-                    let stats = actor.mechanical_profile.get("stats").cloned().unwrap_or_else(|| json!({}));
-                    let skills = actor.mechanical_profile.get("skills").cloned().unwrap_or_else(|| json!({}));
-                    if let Some(c) = compile_formula(&f.field_id, &f.formula, &stats, &skills) {
-                        check.dice_expression = c.expression.clone();
-                        check.modifiers = c.modifiers.clone();
-                        check.advice_refs.push(format!("formula.compiled:{}={}", f.field_id, c.expression));
-                        for u in &c.unresolved {
-                            check.advice_refs.push(format!("formula.unbound_modifier:{u}"));
+                    // N1 tier guard: provisional_seed formulas are first-play
+                    // placeholders — skip exact dice binding to avoid fabricating
+                    // actor-specific modifiers. Log as context-only advice instead.
+                    if f.is_provisional_seed() {
+                        check.advice_refs.push(format!(
+                            "formula.provisional_seed_context_only:{}",
+                            f.field_id
+                        ));
+                        check.advice_refs.push(
+                            "formula.exact_binding_skipped:source_backed_formula_required".into(),
+                        );
+                    } else {
+                        let stats = actor.mechanical_profile.get("stats").cloned().unwrap_or_else(|| json!({}));
+                        let skills = actor.mechanical_profile.get("skills").cloned().unwrap_or_else(|| json!({}));
+                        if let Some(c) = compile_formula(&f.field_id, &f.formula, &stats, &skills) {
+                            check.dice_expression = c.expression.clone();
+                            check.modifiers = c.modifiers.clone();
+                            check.advice_refs.push(format!("formula.compiled:{}={}", f.field_id, c.expression));
+                            for u in &c.unresolved {
+                                check.advice_refs.push(format!("formula.unbound_modifier:{u}"));
+                            }
+                            compiled_expr = Some(c.expression);
                         }
-                        compiled_expr = Some(c.expression);
                     }
                 }
                 // Defender DV binding (step-2 symmetric half): set a source-backed
@@ -1114,7 +1127,16 @@ fn apply_source_backed_formula_pack_to_check(check: &mut CheckContract, pack: &C
     if !check.advice_refs.iter().any(|r| r == "character_onboarding.derived_formula_pack") {
         check.advice_refs.push("character_onboarding.derived_formula_pack".into());
     }
-    check.ruling_status = RulingStatus::SourceBacked;
+    // N1 tier guard: if every formula in the pack is a provisional seed, mark
+    // the check as Provisional (not SourceBacked) to prevent downstream code
+    // from treating seeded placeholders as exact executable formulas.
+    let all_provisional = pack.derived_formula_pack.formulas.iter().all(|f| f.is_provisional_seed());
+    if all_provisional {
+        check.ruling_status = RulingStatus::Provisional;
+        check.advice_refs.push("formula.pack_all_provisional_seeds:exact_source_required".into());
+    } else {
+        check.ruling_status = RulingStatus::SourceBacked;
+    }
 
     let formulas_text = pack.derived_formula_pack.formulas.iter()
         .map(|f| format!("{} {} {}", f.field_id, f.formula, f.notes.clone().unwrap_or_default()))

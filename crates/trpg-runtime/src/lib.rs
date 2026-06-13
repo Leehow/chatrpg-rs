@@ -2322,6 +2322,65 @@ fn resolve_turn_scene_id(state_scene: Option<&str>, module_id: Option<&str>, loa
     }
 }
 
+/// SkeletonOnly 降级块内容（N2）：投影骨架元数据 + 禁编造指令，不含正文。
+fn skeleton_fallback_block(module_id: &str, n: &ScenarioNode, scenes: &[ScenarioNode]) -> ContextBlock {
+    let mut body = format!("【场景骨架·未深抽】status=SkeletonOnly\n标题：{}\n", n.title);
+    if !n.summary.trim().is_empty() {
+        body.push_str(&format!("摘要：{}\n", n.summary));
+    }
+    match (n.page_start, n.page_end) {
+        (Some(s), Some(e)) => body.push_str(&format!("页码：{s}–{e}\n")),
+        (Some(s), None)    => body.push_str(&format!("页码：{s}\n")),
+        _                  => {}
+    }
+    // 已知实体 id（骨架阶段 LLM 已识别的引用，供 GM 检索用）
+    let mut refs: Vec<String> = Vec::new();
+    refs.extend(n.referenced_npc_ids.iter().map(|id| format!("npc:{id}")));
+    refs.extend(n.referenced_clue_ids.iter().map(|id| format!("clue:{id}")));
+    refs.extend(n.referenced_location_ids.iter().map(|id| format!("loc:{id}")));
+    refs.extend(n.referenced_encounter_ids.iter().map(|id| format!("enc:{id}")));
+    if !refs.is_empty() {
+        body.push_str(&format!("已知实体：{}\n", refs.join(", ")));
+    }
+    // 出口（与 DeepExtracted 路径相同的 fail-closed 投影）
+    let exits: Vec<String> = n.links.iter().filter_map(|l| {
+        let title = scenes.iter().find(|s| s.node_id == l.to_node_id).map(|s| s.title.as_str()).unwrap_or("");
+        if title.trim().is_empty() { None } else { Some(format!("- {title} → {}", l.reason)) }
+    }).collect();
+    if !exits.is_empty() {
+        body.push_str(&format!("【已知出口】\n{}\n", exits.join("\n")));
+    }
+    // GM 防编造指令
+    body.push_str("\n⚠️ 此场景尚未深抽：叙述具体内容前先检索源文档；不要编造 read_aloud/数值/人物细节。\n");
+    let mut block = ContextBlock::new(
+        format!("module.{module_id}.scene.{}.skeleton", n.node_id),
+        BlockKind::SceneStatic,
+        format!("{}（骨架）", n.title),
+        BlockContent::Text(body),
+        Visibility::GmOnly,
+        Stability::SceneStable,
+        CacheZone::DynamicTail,
+        Scope { scope_type: ScopeType::Scene, scope_id: n.node_id.clone() },
+        20, // 低 token：骨架块只有元数据，不占满 context
+    );
+    block.expires_at_scene = Some(n.node_id.clone());
+    block.load_reason = Some("skeleton_fallback".into());
+    block.tags = vec!["module_scene".into(), "scene_skeleton".into(), "skeleton_only".into()];
+    block
+}
+
+/// N3: DeepExtracted 当前场景正文块的缓存区，受 `TRPG_SCENE_DEEP_BLOCK_CACHE_ZONE` 控制。
+/// 默认 `dynamic_tail`=当前行为（零变化）；设 `pinned_middle` 时正文（read_aloud/gm_notes/
+/// fixed exits）落 PinnedMiddle + expires_at_scene，使切场景才变 pinned_hash、普通输入
+/// 只变 dynamic_hash（更优缓存）。无法识别的值 fail-closed 回退 DynamicTail（不编造）。
+/// 注意：仅作用于 DeepExtracted 正文块；SkeletonOnly 降级块（N2，临时降级）恒 DynamicTail。
+fn scene_deep_block_cache_zone() -> CacheZone {
+    match std::env::var("TRPG_SCENE_DEEP_BLOCK_CACHE_ZONE") {
+        Ok(v) if v.trim().eq_ignore_ascii_case("pinned_middle") => CacheZone::PinnedMiddle,
+        _ => CacheZone::DynamicTail,
+    }
+}
+
 fn scene_node_to_blocks(
     module_id: &str,
     n: &ScenarioNode,
@@ -2329,7 +2388,9 @@ fn scene_node_to_blocks(
     scenes: &[ScenarioNode],
 ) -> Vec<ContextBlock> {
     if n.extraction_status != SceneExtractionStatus::DeepExtracted {
-        return Vec::new();
+        // N2: SkeletonOnly（及其他非 DeepExtracted 状态）产出轻量降级块，
+        // 防 GM 完全失去"我在哪个场景"。fail-closed：不含正文、不编造。
+        return vec![skeleton_fallback_block(module_id, n, scenes)];
     }
     let mut body = String::new();
     if let Some(ra) = &n.read_aloud {
@@ -2390,7 +2451,9 @@ fn scene_node_to_blocks(
         BlockContent::Text(body),
         Visibility::GmOnly,
         Stability::SceneStable,
-        CacheZone::DynamicTail,
+        // N3: 默认 DynamicTail（零变化）；TRPG_SCENE_DEEP_BLOCK_CACHE_ZONE=pinned_middle
+        // 时落 PinnedMiddle，配合下方 expires_at_scene 让切场景才变 pinned_hash。
+        scene_deep_block_cache_zone(),
         Scope { scope_type: ScopeType::Scene, scope_id: n.node_id.clone() },
         60,
     );
@@ -3161,6 +3224,8 @@ mod module_scene_proj_tests {
 
     #[test]
     fn deep_scene_projects_scenestatic_dynamictail() {
+        // N3: 此测试断言默认（env 未设）DynamicTail，须持锁+unset 隔离并行的 env 写测试。
+        let _g = DeepZoneEnvGuard::unset();
         let mut n = ScenarioNode::default();
         n.node_id = "loc1".into();
         n.title = "加油站".into();
@@ -3185,10 +3250,91 @@ mod module_scene_proj_tests {
 
     #[test]
     fn skeleton_scene_projects_nothing() {
+        // 旧行为：SkeletonOnly → 空（此测试会在 N2 改动后失败，改动前确认红）
+        // N2 改动后此测试预期改为：返回非空降级块。暂保留原名方便 diff 对比。
         let mut n = ScenarioNode::default();
         n.node_id = "loc2".into();
-        n.extraction_status = SceneExtractionStatus::SkeletonOnly; // 交给 materializer 降级
-        assert!(scene_node_to_blocks("mod1", &n, &[], &[]).is_empty());
+        n.extraction_status = SceneExtractionStatus::SkeletonOnly;
+        // After N2: must return a SceneSkeleton fallback block, NOT empty.
+        // This assertion will be RED until the implementation is done.
+        let blocks = scene_node_to_blocks("mod1", &n, &[], &[]);
+        assert!(!blocks.is_empty(), "N2: SkeletonOnly 场景应产出降级块（非空）");
+    }
+
+    /// N2: SkeletonOnly 降级块完整验收——不含编造内容，含骨架元数据与指令。
+    #[test]
+    fn skeleton_scene_fallback_block_has_no_readout_has_instruction() {
+        use trpg_model::{BlockKind, CacheZone, ScenarioLink, LinkType};
+        let mut n = ScenarioNode::default();
+        n.node_id = "sc02".into();
+        n.title = "镇中心广场".into();
+        n.summary = "玩家抵达镇中心，这里是全镇的心脏。".into();
+        n.page_start = Some(12);
+        n.page_end = Some(14);
+        n.referenced_npc_ids = vec!["npc_mayor".into()];
+        n.referenced_clue_ids = vec!["clue_letter".into()];
+        // 有出口链接
+        n.links = vec![ScenarioLink {
+            to_node_id: "sc03".into(),
+            reason: "通往邮局".into(),
+            clue_id: None,
+            link_type: LinkType::Spatial,
+            source_anchor: None,
+        }];
+        n.extraction_status = SceneExtractionStatus::SkeletonOnly;
+        // 相邻场景用于解析出口标题
+        let mut sc03 = ScenarioNode::default();
+        sc03.node_id = "sc03".into();
+        sc03.title = "邮局".into();
+        let scenes = vec![n.clone(), sc03];
+
+        let blocks = scene_node_to_blocks("mod_test", &n, &[], &scenes);
+        assert!(!blocks.is_empty(), "SkeletonOnly 应产降级块");
+        let b = &blocks[0];
+        // 复用 SceneStatic kind，放 DynamicTail
+        assert_eq!(b.kind, BlockKind::SceneStatic, "应复用 SceneStatic kind");
+        assert_eq!(b.cache_zone, CacheZone::DynamicTail, "应放 DynamicTail");
+        assert_eq!(b.scope.scope_type, trpg_model::ScopeType::Scene);
+        assert_eq!(b.scope.scope_id, "sc02");
+        assert_eq!(b.expires_at_scene.as_deref(), Some("sc02"));
+
+        let text = b.content.render_text();
+        // 含 summary / page 范围 / 出口 / 实体 id / 指令
+        assert!(text.contains("镇中心广场"), "应含 title: {text}");
+        assert!(text.contains("心脏"), "应含 summary: {text}");
+        assert!(text.contains("12"), "应含 page_start: {text}");
+        assert!(text.contains("14"), "应含 page_end: {text}");
+        assert!(text.contains("npc_mayor"), "应含 referenced_npc_ids: {text}");
+        assert!(text.contains("clue_letter"), "应含 referenced_clue_ids: {text}");
+        assert!(text.contains("邮局"), "应含出口目标标题: {text}");
+        assert!(text.contains("SkeletonOnly"), "应含 status=SkeletonOnly: {text}");
+        // 不含实际 read_aloud 内容——指令里提到 "read_aloud" 作关键词是允许的，
+        // 但不应有 【可念】 标题（DeepExtracted 路径才产这个标题）。
+        assert!(!text.contains("【可念】"), "不应含可念正文段落: {text}");
+        // 含 GM 指令防编造
+        assert!(text.contains("先检索") || text.contains("检索"), "应含检索指令: {text}");
+        assert!(text.contains("编造"), "应含禁止编造提示: {text}");
+    }
+
+    /// N2: DeepExtracted 路径行为不变（现有测试守护，新增专项冒烟）。
+    #[test]
+    fn deep_extracted_path_unchanged_after_n2() {
+        let mut n = ScenarioNode::default();
+        n.node_id = "loc1".into();
+        n.title = "加油站".into();
+        n.read_aloud = Some("你们看到一个褪色的广告牌……".into());
+        n.gm_notes = Some("老板拉斯藏着钥匙。".into());
+        n.extraction_status = SceneExtractionStatus::DeepExtracted;
+        n.referenced_npc_ids = vec!["npc1".into()];
+        let npcs = vec![serde_json::json!({"id":"npc1","name":"拉斯","summary":"老板"})];
+        let blocks = scene_node_to_blocks("mod1", &n, &npcs, &[]);
+        assert!(!blocks.is_empty());
+        let text = blocks[0].content.render_text();
+        assert!(text.contains("褪色的广告牌"), "DeepExtracted read_aloud 应存在: {text}");
+        assert!(text.contains("拉斯"), "DeepExtracted NPC 应存在: {text}");
+        // 不含 SkeletonOnly 降级指令
+        assert!(!text.contains("先检索"), "DeepExtracted 不应含降级指令: {text}");
+        assert!(!text.contains("SkeletonOnly"), "DeepExtracted 不应含 status 标记: {text}");
     }
 
     #[test]
@@ -3282,6 +3428,209 @@ mod module_scene_proj_tests {
         let a = serde_json::to_vec(&first[1]).expect("intents 块可序列化");
         let b = serde_json::to_vec(&second[1]).expect("intents 块可序列化");
         assert_eq!(a, b, "同节点两次投影的 intents 块字节必须一致（pinned_hash 场景内稳定的函数级前提）");
+    }
+
+    // ===== N3: SceneStatic 缓存区可配 PinnedMiddle =====
+
+    // env 是进程级全局：所有读/写 TRPG_SCENE_DEEP_BLOCK_CACHE_ZONE 的测试串行执行，
+    // 且每个写测试用 guard 在退出时恢复原值，避免污染默认行为断言（并行跑）。
+    static N3_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct DeepZoneEnvGuard {
+        prev: Option<String>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+    impl DeepZoneEnvGuard {
+        /// 持锁 + 把 env 设为 value，drop 时恢复原值（None→remove）。
+        fn set(value: &str) -> Self {
+            let lock = N3_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::var("TRPG_SCENE_DEEP_BLOCK_CACHE_ZONE").ok();
+            std::env::set_var("TRPG_SCENE_DEEP_BLOCK_CACHE_ZONE", value);
+            Self { prev, _lock: lock }
+        }
+        /// 持锁 + 把 env 清空（模拟"未设"默认），drop 时恢复原值。
+        fn unset() -> Self {
+            let lock = N3_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::var("TRPG_SCENE_DEEP_BLOCK_CACHE_ZONE").ok();
+            std::env::remove_var("TRPG_SCENE_DEEP_BLOCK_CACHE_ZONE");
+            Self { prev, _lock: lock }
+        }
+    }
+    impl Drop for DeepZoneEnvGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var("TRPG_SCENE_DEEP_BLOCK_CACHE_ZONE", v),
+                None => std::env::remove_var("TRPG_SCENE_DEEP_BLOCK_CACHE_ZONE"),
+            }
+        }
+    }
+
+    fn deep_scene_node(node_id: &str) -> ScenarioNode {
+        let mut n = ScenarioNode::default();
+        n.node_id = node_id.into();
+        n.title = "加油站".into();
+        n.read_aloud = Some("你们看到一个褪色的广告牌……".into());
+        n.gm_notes = Some("老板拉斯藏着钥匙。".into());
+        n.extraction_status = SceneExtractionStatus::DeepExtracted;
+        n
+    }
+
+    /// N3 默认=零变化：env 未设时 DeepExtracted 正文块必须仍落 DynamicTail，
+    /// 且块字节与"显式无 env"投影完全一致（字节回归，证明默认路径未被改动）。
+    #[test]
+    fn deep_block_default_zone_is_dynamic_tail_byte_regression() {
+        let _g = DeepZoneEnvGuard::unset();
+        let n = deep_scene_node("loc1");
+        let blocks = scene_node_to_blocks("mod1", &n, &[], &[]);
+        assert_eq!(
+            blocks[0].cache_zone,
+            CacheZone::DynamicTail,
+            "默认（env 未设）DeepExtracted 正文块必须落 DynamicTail=零行为变化"
+        );
+        // expires_at_scene 保持不变
+        assert_eq!(blocks[0].expires_at_scene.as_deref(), Some("loc1"));
+    }
+
+    /// N3：TRPG_SCENE_DEEP_BLOCK_CACHE_ZONE=pinned_middle → DeepExtracted 正文块落
+    /// PinnedMiddle + 保留 expires_at_scene（切场景失效语义）。
+    #[test]
+    fn deep_block_pinned_middle_when_configured() {
+        let _g = DeepZoneEnvGuard::set("pinned_middle");
+        let n = deep_scene_node("loc1");
+        let blocks = scene_node_to_blocks("mod1", &n, &[], &[]);
+        let sb = &blocks[0];
+        assert_eq!(sb.cache_zone, CacheZone::PinnedMiddle, "pinned_middle 配置下正文块应进 PinnedMiddle");
+        assert_eq!(sb.expires_at_scene.as_deref(), Some("loc1"), "仍带 expires_at_scene（切场景才失效）");
+        assert_eq!(sb.kind, BlockKind::SceneStatic);
+        // 正文内容不变（仅缓存区变）
+        let text = sb.content.render_text();
+        assert!(text.contains("褪色的广告牌"));
+        assert!(text.contains("钥匙"));
+    }
+
+    /// N3：大小写/前后空白容错走 pinned_middle；无法识别值 fail-closed 回退 DynamicTail。
+    #[test]
+    fn deep_block_zone_parsing_is_tolerant_and_fail_closed() {
+        {
+            let _g = DeepZoneEnvGuard::set("  Pinned_Middle  ");
+            let n = deep_scene_node("loc1");
+            let blocks = scene_node_to_blocks("mod1", &n, &[], &[]);
+            assert_eq!(blocks[0].cache_zone, CacheZone::PinnedMiddle, "大小写+空白容错");
+        }
+        {
+            let _g = DeepZoneEnvGuard::set("garbage_value");
+            let n = deep_scene_node("loc1");
+            let blocks = scene_node_to_blocks("mod1", &n, &[], &[]);
+            assert_eq!(blocks[0].cache_zone, CacheZone::DynamicTail, "无法识别值 fail-closed 回退 DynamicTail");
+        }
+    }
+
+    /// N3 不变量：SkeletonOnly 降级块（N2，临时降级）即便开 pinned_middle 也恒 DynamicTail。
+    #[test]
+    fn skeleton_fallback_stays_dynamic_tail_even_when_pinned_middle() {
+        let _g = DeepZoneEnvGuard::set("pinned_middle");
+        let mut n = ScenarioNode::default();
+        n.node_id = "sk1".into();
+        n.title = "未深抽场景".into();
+        n.extraction_status = SceneExtractionStatus::SkeletonOnly;
+        let blocks = scene_node_to_blocks("mod1", &n, &[], &[]);
+        assert_eq!(
+            blocks[0].cache_zone,
+            CacheZone::DynamicTail,
+            "SkeletonOnly 降级块是临时降级，不该进 pinned（恒 DynamicTail）"
+        );
+    }
+
+    /// N3 缓存收益验证：pinned_middle 下，经 ContextBuilder.build 编译——
+    /// 切场景 → pinned_hash 变；只改 DynamicTail 输入块 → pinned_hash 不变（dynamic_hash 变）。
+    #[test]
+    fn pinned_middle_scene_switch_changes_pinned_hash_input_does_not() {
+        let _g = DeepZoneEnvGuard::set("pinned_middle");
+        let req = ContextRequest {
+            ruleset_id: "call_of_cthulhu_7e".into(),
+            module_id: Some("mod1".into()),
+            session_id: "s".into(),
+            turn_id: "t".into(),
+            viewer: VisibilityProfile::player("p", "pc.current"),
+            token_budget: TokenBudget::default(),
+        };
+        let builder = ContextBuilder;
+
+        // 一个 DynamicTail 的"玩家输入"块（模拟每回合变化的尾部）。
+        let input_block = |text: &str| {
+            ContextBlock::new(
+                "turn.player_input",
+                BlockKind::SceneStatic,
+                "玩家输入",
+                BlockContent::Text(text.to_string()),
+                Visibility::GmOnly,
+                Stability::TurnDynamic,
+                CacheZone::DynamicTail,
+                Scope { scope_type: ScopeType::Global, scope_id: "*".into() },
+                10,
+            )
+        };
+
+        let scene_a = deep_scene_node("loc1");
+        let mut scene_b = deep_scene_node("loc2");
+        scene_b.title = "镇中心".into();
+        scene_b.read_aloud = Some("广场上人来人往。".into());
+
+        let pinned_a = scene_node_to_blocks("mod1", &scene_a, &[], &[]);
+        let pinned_b = scene_node_to_blocks("mod1", &scene_b, &[], &[]);
+        // 确认正文块确实进了 PinnedMiddle（前提成立）
+        assert_eq!(pinned_a[0].cache_zone, CacheZone::PinnedMiddle);
+        assert_eq!(pinned_b[0].cache_zone, CacheZone::PinnedMiddle);
+
+        let build = |scene_blocks: &[ContextBlock], input: ContextBlock| {
+            let planned = PlannedContext {
+                prefix_blocks: vec![],
+                pinned_blocks: scene_blocks.to_vec(),
+                dynamic_blocks: vec![input],
+            };
+            builder.build(planned, &req).expect("compile ok")
+        };
+
+        let c1 = build(&pinned_a, input_block("我环顾四周"));
+        let c2 = build(&pinned_a, input_block("我走向门口")); // 同场景，仅输入变
+        let c3 = build(&pinned_b, input_block("我环顾四周")); // 切场景，输入回到原值
+
+        // 1) 只改 DynamicTail 输入：pinned_hash 不变，dynamic_hash 变
+        assert_eq!(c1.pinned_hash, c2.pinned_hash, "普通输入只动 dynamic_hash，pinned_hash 应稳定");
+        assert_ne!(c1.dynamic_hash, c2.dynamic_hash, "输入变 → dynamic_hash 应变");
+        // 2) 切场景：pinned_hash 应变（场景正文进了 pinned 区）
+        assert_ne!(c1.pinned_hash, c3.pinned_hash, "切场景 → pinned_hash 应变");
+    }
+
+    /// N3 对照：默认 DynamicTail 下，切场景反而是 dynamic_hash 变、pinned_hash 不变
+    /// （场景正文在 dynamic 区）——这正是规划里要改善的现状，作对照锚点保留。
+    #[test]
+    fn default_dynamic_tail_scene_switch_only_changes_dynamic_hash() {
+        let _g = DeepZoneEnvGuard::unset();
+        let req = ContextRequest {
+            ruleset_id: "call_of_cthulhu_7e".into(),
+            module_id: Some("mod1".into()),
+            session_id: "s".into(),
+            turn_id: "t".into(),
+            viewer: VisibilityProfile::player("p", "pc.current"),
+            token_budget: TokenBudget::default(),
+        };
+        let builder = ContextBuilder;
+        let scene_a = deep_scene_node("loc1");
+        let mut scene_b = deep_scene_node("loc2");
+        scene_b.read_aloud = Some("广场上人来人往。".into());
+        let a = scene_node_to_blocks("mod1", &scene_a, &[], &[]);
+        let b = scene_node_to_blocks("mod1", &scene_b, &[], &[]);
+        assert_eq!(a[0].cache_zone, CacheZone::DynamicTail, "默认正文在 dynamic 区");
+
+        let build = |blk: &[ContextBlock]| {
+            let planned = PlannedContext { prefix_blocks: vec![], pinned_blocks: vec![], dynamic_blocks: blk.to_vec() };
+            builder.build(planned, &req).expect("compile ok")
+        };
+        let ca = build(&a);
+        let cb = build(&b);
+        assert_eq!(ca.pinned_hash, cb.pinned_hash, "默认下切场景 pinned_hash 不变（正文不在 pinned 区）");
+        assert_ne!(ca.dynamic_hash, cb.dynamic_hash, "默认下切场景动 dynamic_hash");
     }
 
     #[test]

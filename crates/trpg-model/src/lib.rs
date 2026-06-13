@@ -969,6 +969,34 @@ pub struct DerivedValue {
     #[serde(default)] pub clamp_max: Option<serde_json::Value>,
     #[serde(default)] pub source_ref: Option<serde_json::Value>,
     #[serde(default)] pub status: Option<String>,               // source_backed|provisional
+    /// Formula classification tier (N1).
+    /// - `"exact_executable"`: LLM extracted and source-backed; can drive exact resolution.
+    /// - `"provisional_seed"`: deterministic first-play seed injected by Rule Steward/parser;
+    ///   usable for context only — combat/effect executor must NOT use for exact dice binding.
+    /// - `"operational_abstract"`: extracted but missing numeric values; operational guide only.
+    /// Absent (None) → treat as `"exact_executable"` for backward-compat with old packs.
+    #[serde(default)] pub tier: Option<String>,
+}
+
+impl DerivedValue {
+    /// Returns true when this formula is a provisional seed injected by the
+    /// Rule Steward or parser — not an exact LLM-extracted source-backed formula.
+    /// Executors must NOT use provisional seeds for exact dice binding.
+    pub fn is_provisional_seed(&self) -> bool {
+        self.tier.as_deref() == Some("provisional_seed")
+    }
+
+    /// Returns true when this formula is operational-abstract (extracted but
+    /// missing concrete numeric values). Also not safe for exact binding.
+    pub fn is_operational_abstract(&self) -> bool {
+        self.tier.as_deref() == Some("operational_abstract")
+    }
+
+    /// Returns true when this formula can drive exact mechanical resolution.
+    /// Absent tier is treated as exact for backward-compat.
+    pub fn is_exact_executable(&self) -> bool {
+        !self.is_provisional_seed() && !self.is_operational_abstract()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
@@ -6633,5 +6661,81 @@ mod consumption_model_tests {
                 "failure_patches_allowed":[],"irreversible":false},
             "confidence":"medium","ruling_status":"provisional","advice_refs":[],"expires_at_turn":null
         })).unwrap()
+    }
+}
+
+#[cfg(test)]
+mod derived_value_tier_tests {
+    use super::*;
+    use serde_json::json;
+
+    // N1: tier field serde + helper methods
+
+    #[test]
+    fn tier_absent_deserializes_as_none_and_treated_as_exact() {
+        // Old packs without "tier" must parse fine and default to exact.
+        let v: DerivedValue = serde_json::from_value(json!({
+            "field_id": "mechanic.attack", "formula": "1d20+5",
+            "depends_on": [], "evaluator": "static_dc_contest"
+        })).unwrap();
+        assert_eq!(v.tier, None);
+        assert!(v.is_exact_executable(), "absent tier => exact (backward compat)");
+        assert!(!v.is_provisional_seed());
+        assert!(!v.is_operational_abstract());
+    }
+
+    #[test]
+    fn tier_provisional_seed_recognized() {
+        let v: DerivedValue = serde_json::from_value(json!({
+            "field_id": "mechanic.skill_check.total",
+            "formula": "1d10 + STAT + Skill vs DV",
+            "depends_on": ["stat","skill","dv"],
+            "evaluator": "contest_profile",
+            "tier": "provisional_seed"
+        })).unwrap();
+        assert_eq!(v.tier.as_deref(), Some("provisional_seed"));
+        assert!(v.is_provisional_seed());
+        assert!(!v.is_exact_executable());
+        assert!(!v.is_operational_abstract());
+    }
+
+    #[test]
+    fn tier_exact_executable_recognized() {
+        let v: DerivedValue = serde_json::from_value(json!({
+            "field_id": "hp_max", "formula": "floor(CON/2)+SIZ",
+            "depends_on": ["con","siz"], "evaluator": "character_derived_value",
+            "tier": "exact_executable"
+        })).unwrap();
+        assert_eq!(v.tier.as_deref(), Some("exact_executable"));
+        assert!(v.is_exact_executable());
+        assert!(!v.is_provisional_seed());
+    }
+
+    #[test]
+    fn tier_operational_abstract_recognized() {
+        let v: DerivedValue = serde_json::from_value(json!({
+            "field_id": "mechanic.damage", "formula": "weapon damage table result",
+            "depends_on": ["weapon"], "evaluator": "table_driven_effect_resolution",
+            "tier": "operational_abstract"
+        })).unwrap();
+        assert!(v.is_operational_abstract());
+        assert!(!v.is_exact_executable());
+        assert!(!v.is_provisional_seed());
+    }
+
+    #[test]
+    fn tier_roundtrips_through_serde() {
+        let orig = DerivedValue {
+            field_id: "mechanic.check".into(),
+            formula: "1d10+STAT".into(),
+            depends_on: vec!["stat".into()],
+            evaluator: "contest_profile".into(),
+            tier: Some("provisional_seed".into()),
+            ..Default::default()
+        };
+        let json_val = serde_json::to_value(&orig).unwrap();
+        assert_eq!(json_val["tier"], json!("provisional_seed"));
+        let back: DerivedValue = serde_json::from_value(json_val).unwrap();
+        assert_eq!(back.tier.as_deref(), Some("provisional_seed"));
     }
 }
