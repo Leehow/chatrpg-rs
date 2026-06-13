@@ -28,6 +28,13 @@ The key question is not “does the code run?” but:
 
 > Can a normal user upload a rulebook and module, create a character, and have a coherent, rule-aware, fun, single-player TRPG session without needing to act as the rulebook or debugger?
 
+## Non-negotiable run environment
+
+1. **Always run from the repo root of the version under test** (e.g. `chatrpg-rs-v1.20-formula/`). The `trpg` CLI loads `.env` and resolves `data/` from the **current working directory** — running from another version's directory silently swaps prompts, module bundles, search index, and env flags (this invalidated an entire SAN evaluation once).
+2. **Record cwd, binary path, `DATABASE_URL`, and `TRPG_LLM_MODEL` in the report.** If the binary mtime predates your code expectations, rebuild first.
+3. **Use `harness/relay_player_sim.sh` for turn-driving** instead of hand-rolling FIFO loops. It verifies after character creation that the character is bound to the live play session with a real (non-stub) sheet, and fails fast on the session-mismatch class of bugs. If you must hand-roll, replicate that guard.
+4. **Never start playing a mechanics-evaluation session whose `pc.current` has no real sheet.** Verify `runtime_actor_parameters.sheet_json` has `stats`/`skills`/`resources` before turn 1.
+
 ## Non-negotiable evaluation principles
 
 1. **Run a product journey, not just feature tests.** Include ingest/onboarding/materialization, character creation, and a playable session slice when possible.

@@ -73,6 +73,129 @@ async fn dnd_kernel_has_valid_hp_track_after_override() {
     assert_eq!(trpg_model::hp_resource_track_id(&kernel.resource_tracks).as_deref(), Some("hit_points"), "D&D HP track not resolvable after override");
 }
 
+// Triangle Agency: the pass-one reader extracted commendations/demerits as SHEET
+// fields but omitted them from core.resource_tracks (anchored on the survival-meter
+// examples), so the GM's apply_effect/change_track had no track to resolve and the
+// reward/discipline economy was un-awardable. The data-only override must inject
+// both ECONOMY tracks at read time without clobbering the extracted `chaos` track.
+#[tokio::test]
+async fn triangle_kernel_gains_commendation_demerit_economy_tracks_via_override() {
+    let url = match std::env::var("DATABASE_URL") { Ok(u) => u, Err(_) => { eprintln!("SKIP: DATABASE_URL unset"); return; } };
+    let db = match Db::connect(&url).await { Ok(d) => d, Err(e) => { eprintln!("SKIP: connect: {e}"); return; } };
+    let kernel = match db.load_rule_kernel("triangle_agency").await.ok().flatten() { Some(k) => k, None => { eprintln!("SKIP: no triangle_agency kernel in this DB"); return; } };
+    let dir = std::env::var("TRPG_DATA_DIR").unwrap_or_else(|_| "data".into());
+    let ov = std::path::Path::new(&dir).join("parsed/rules/triangle_agency.rule_kernel.override.json");
+    if !ov.exists() { eprintln!("SKIP: triangle override not found at {ov:?} (set TRPG_DATA_DIR to the Triangle data dir)"); return; }
+    let track = |id: &str| kernel.resource_tracks.iter().find(|t| t.get("id").and_then(|v| v.as_str()) == Some(id));
+    let comm = track("commendations").expect("commendations economy track missing after override");
+    let dem = track("demerits").expect("demerits economy track missing after override");
+    for (label, t) in [("commendations", comm), ("demerits", dem)] {
+        assert_eq!(t.get("owner_kind").and_then(|v| v.as_str()), Some("actor"), "{label} must be a per-Agent track");
+        assert_eq!(t.get("initial").and_then(|v| v.as_i64()), Some(0), "{label} must seed at 0 so load_resource_current resolves without a sheet seed");
+    }
+    assert!(dem.get("thresholds").and_then(|v| v.as_array()).map(|a| !a.is_empty()).unwrap_or(false),
+        "demerits must carry the Agency Standing ladder as thresholds");
+    assert!(track("chaos").is_some(), "override merge must not clobber the reader-extracted chaos track");
+}
+
+// CoC 7e: the reader extracted the survival meters (sanity/hp) but omitted the
+// book's two runtime SPEND economies — Luck (spend 1-for-1 after a skill roll to
+// alter the result, cap 99) and Magic Points (spell casting, regen 1/hour, POW/5).
+// The data-only override must inject both at read time without clobbering the
+// extracted tracks. Both are judgment spends: NO on_outcome, and NO static initial
+// (per-investigator values seed from the character sheet, fail-closed).
+#[tokio::test]
+async fn coc_kernel_gains_luck_and_magic_point_economy_tracks_via_override() {
+    let url = match std::env::var("DATABASE_URL") { Ok(u) => u, Err(_) => { eprintln!("SKIP: DATABASE_URL unset"); return; } };
+    let db = match Db::connect(&url).await { Ok(d) => d, Err(e) => { eprintln!("SKIP: connect: {e}"); return; } };
+    let kernel = match db.load_rule_kernel("call_of_cthulhu_7e").await.ok().flatten() { Some(k) => k, None => { eprintln!("SKIP: no call_of_cthulhu_7e kernel in this DB"); return; } };
+    let dir = std::env::var("TRPG_DATA_DIR").unwrap_or_else(|_| "data".into());
+    let ov = std::path::Path::new(&dir).join("parsed/rules/call_of_cthulhu_7e.rule_kernel.override.json");
+    if !ov.exists() { eprintln!("SKIP: CoC override not found at {ov:?} (set TRPG_DATA_DIR to the CoC data dir)"); return; }
+    let track = |id: &str| kernel.resource_tracks.iter().find(|t| t.get("id").and_then(|v| v.as_str()) == Some(id));
+    let luck = track("luck").expect("luck spend-economy track missing after override");
+    let mp = track("mp").expect("mp (Magic Points) spend-economy track missing after override");
+    assert_eq!(luck.get("max").and_then(|v| v.as_i64()), Some(99), "Luck may never exceed 99");
+    for (label, t) in [("luck", luck), ("mp", mp)] {
+        assert!(t.get("on_outcome").is_none(), "{label} is a judgment-spend economy: an on_outcome would be a dead rule");
+        assert!(t.get("initial").is_none(), "{label} is per-investigator: no static initial (fail-closed sheet seed)");
+    }
+    assert!(track("sanity").is_some() && track("hp").is_some(), "override merge must not clobber reader-extracted sanity/hp");
+}
+
+// BRP (ORC document): the reader extracted NOTHING into resource_tracks even
+// though the book defines four numeric pools and the sheet template already
+// derives hit_points/power_points. After the override, combat must resolve an HP
+// track semantically and the power-point spend economy must be addressable; the
+// optional systems (fatigue, sanity) ride along with judgment-driven losses only.
+#[tokio::test]
+async fn orc_kernel_gains_core_pools_via_override() {
+    let url = match std::env::var("DATABASE_URL") { Ok(u) => u, Err(_) => { eprintln!("SKIP: DATABASE_URL unset"); return; } };
+    let db = match Db::connect(&url).await { Ok(d) => d, Err(e) => { eprintln!("SKIP: connect: {e}"); return; } };
+    let kernel = match db.load_rule_kernel("brp_orc").await.ok().flatten() { Some(k) => k, None => { eprintln!("SKIP: no brp_orc kernel in this DB"); return; } };
+    let dir = std::env::var("TRPG_DATA_DIR").unwrap_or_else(|_| "data".into());
+    let ov = std::path::Path::new(&dir).join("parsed/rules/brp_orc.rule_kernel.override.json");
+    if !ov.exists() { eprintln!("SKIP: BRP override not found at {ov:?} (set TRPG_DATA_DIR to the ORC data dir)"); return; }
+    assert_eq!(trpg_model::hp_resource_track_id(&kernel.resource_tracks).as_deref(), Some("hit_points"),
+        "BRP combat HP must be semantically resolvable after the override (kernel shipped EMPTY)");
+    let track = |id: &str| kernel.resource_tracks.iter().find(|t| t.get("id").and_then(|v| v.as_str()) == Some(id));
+    assert!(track("power_points").is_some(), "power_points spend economy missing after override");
+    for id in ["power_points", "fatigue_points", "sanity"] {
+        let t = track(id).unwrap_or_else(|| panic!("{id} track missing after override"));
+        assert!(t.get("on_outcome").is_none(), "{id} losses are GM adjudication: no on_outcome");
+    }
+}
+
+// D&D 5e: Inspiration is the PHB's only universal DM-award/spend economy (cap 1,
+// no stacking, spend for advantage); it was absent from the kernel. The override
+// must add it NEXT TO the slice-B hit_points heal, not instead of it. XP stays in
+// the growth track layer on purpose, so it must NOT appear as a kernel track.
+#[tokio::test]
+async fn dnd_kernel_gains_inspiration_economy_track_via_override() {
+    let url = match std::env::var("DATABASE_URL") { Ok(u) => u, Err(_) => { eprintln!("SKIP: DATABASE_URL unset"); return; } };
+    let db = match Db::connect(&url).await { Ok(d) => d, Err(e) => { eprintln!("SKIP: connect: {e}"); return; } };
+    let kernel = match db.load_rule_kernel(DND).await.ok().flatten() { Some(k) => k, None => { eprintln!("SKIP: no {DND} kernel in this DB"); return; } };
+    let dir = std::env::var("TRPG_DATA_DIR").unwrap_or_else(|_| "data".into());
+    let ov = std::path::Path::new(&dir).join("parsed/rules/dnd5e.rule_kernel.override.json");
+    if !ov.exists() { eprintln!("SKIP: dnd5e override not found at {ov:?} (set TRPG_DATA_DIR to the D&D data dir)"); return; }
+    let track = |id: &str| kernel.resource_tracks.iter().find(|t| t.get("id").and_then(|v| v.as_str()) == Some(id));
+    let insp = track("inspiration").expect("inspiration economy track missing after override");
+    assert_eq!(insp.get("initial").and_then(|v| v.as_i64()), Some(0), "inspiration starts unawarded");
+    assert_eq!(insp.get("max").and_then(|v| v.as_i64()), Some(1), "you either have inspiration or you don't — it does not stack");
+    assert!(insp.get("on_outcome").is_none(), "inspiration is a pure GM-judgment economy: no on_outcome");
+    assert_eq!(trpg_model::hp_resource_track_id(&kernel.resource_tracks).as_deref(), Some("hit_points"),
+        "inspiration must not displace the slice-B HP heal");
+    assert!(track("xp").is_none() && track("experience_points").is_none(),
+        "XP is growth-layer state (sheet_json.tracks), never a kernel track");
+}
+
+// Cyberpunk RED: the kernel had only hp/wound_state. LUCK (spend 1-for-1 before a
+// roll, pool = LUCK STAT, refills each session) and Humanity (cyberware loss /
+// therapy recovery, EMP = HUM/10, cyberpsychosis ladder) are the two runtime
+// pools the GM operates; IP and REP stay in the growth layer on purpose.
+#[tokio::test]
+async fn cyberpunk_kernel_gains_luck_and_humanity_via_override() {
+    let url = match std::env::var("DATABASE_URL") { Ok(u) => u, Err(_) => { eprintln!("SKIP: DATABASE_URL unset"); return; } };
+    let db = match Db::connect(&url).await { Ok(d) => d, Err(e) => { eprintln!("SKIP: connect: {e}"); return; } };
+    let kernel = match db.load_rule_kernel("cyberpunk_red").await.ok().flatten() { Some(k) => k, None => { eprintln!("SKIP: no cyberpunk_red kernel in this DB"); return; } };
+    let dir = std::env::var("TRPG_DATA_DIR").unwrap_or_else(|_| "data".into());
+    let ov = std::path::Path::new(&dir).join("parsed/rules/cyberpunk_red.rule_kernel.override.json");
+    if !ov.exists() { eprintln!("SKIP: cyberpunk override not found at {ov:?} (set TRPG_DATA_DIR to the cyberpunk data dir)"); return; }
+    let track = |id: &str| kernel.resource_tracks.iter().find(|t| t.get("id").and_then(|v| v.as_str()) == Some(id));
+    let luck = track("luck").expect("luck spend-pool track missing after override");
+    let hum = track("humanity").expect("humanity track missing after override");
+    for (label, t) in [("luck", luck), ("humanity", hum)] {
+        assert!(t.get("on_outcome").is_none(), "{label} spends/losses are GM adjudication: no on_outcome");
+        assert!(t.get("initial").is_none(), "{label} is per-character (LUCK stat / EMP x10): no static initial");
+    }
+    assert!(hum.get("thresholds").and_then(|v| v.as_array()).map(|a| !a.is_empty()).unwrap_or(false),
+        "humanity must carry the cyberpsychosis threshold");
+    assert!(trpg_model::hp_resource_track_id(&kernel.resource_tracks).is_some(),
+        "override merge must not clobber the reader-extracted HP track");
+    assert!(track("improvement_points").is_none() && track("ip").is_none(),
+        "IP is growth-layer state (sheet_json.tracks), never a kernel track");
+}
+
 // End-to-end proof that the D&D fix makes combat HP NON-None: a D&D actor with a
 // character-derived hit_points resolves a real current value via the SSOT primitive
 // (formerly None, because the dirty kernel had no valid HP track). Throwaway session.

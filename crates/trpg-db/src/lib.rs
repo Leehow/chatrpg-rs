@@ -3497,7 +3497,7 @@ fn split_sql_statements(sql: &str) -> Vec<&str> {
 }
 
 fn due_source_str(s: &DueSource) -> &'static str {
-    match s { DueSource::Threshold => "threshold", DueSource::Hook => "hook" }
+    match s { DueSource::Threshold => "threshold", DueSource::Hook => "hook", DueSource::SemanticTrigger => "semantic_trigger" }
 }
 
 fn due_status_str(s: &DueStatus) -> &'static str {
@@ -3509,6 +3509,7 @@ fn row_to_mechanic_due(row: &sqlx::postgres::PgRow) -> Option<MechanicDue> {
     let source = match row.get::<String, _>("source").as_str() {
         "threshold" => DueSource::Threshold,
         "hook" => DueSource::Hook,
+        "semantic_trigger" => DueSource::SemanticTrigger,
         _ => return None,
     };
     let status = match row.get::<String, _>("status").as_str() {

@@ -1004,8 +1004,7 @@ fn make_direction_gate(input: ConflictTurnInput<'_>, frame: &StateFrame, stalema
 
 
 fn combat_roll_visibility_from_policy() -> (RollVisibility, RollAuthority) {
-    let v = std::env::var("TRPG_AGENT_TABLE_DICE_POLICY").unwrap_or_else(|_| "system_rolls_visible".into());
-    if matches!(v.to_ascii_lowercase().as_str(), "system_rolls_visible" | "system" | "gm_rolls_visible" | "auto" | "auto_visible") {
+    if system_rolls_visible_policy() {
         (RollVisibility::PublicGmRoll, RollAuthority::System)
     } else {
         (RollVisibility::PlayerRollRequired, RollAuthority::Player)

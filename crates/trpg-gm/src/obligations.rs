@@ -25,6 +25,8 @@ pub struct ObligationLedger {
     /// 本回合已用于清偿追溯债务的 effect_id（每条只消费一次；TurnLedger 每回合
     /// 新建，跨回合 id 不复现 → begin_turn 清空即可）。
     consumed_effect_ids: Vec<String>,
+    /// 同上，Check 类追溯债务的已消费 check_id。
+    consumed_check_ids: Vec<String>,
     /// 三期 §4.4 mode 退出结算义务：只门 exit_mode（exit_blocking()），绝不进
     /// blocking()——否则姿态内每个叙事轮都会被自己的退出义务堵死（B6 复用 blocking）。
     mode_exit: Vec<ModeExitObligation>,
@@ -43,16 +45,29 @@ pub struct ModeExitObligation {
     pub description: String,
 }
 
-/// 追溯债务：流后 verifier 抓到 InventedEffect（叙事已流出不可回收）。
+/// 追溯债务：流后 verifier 抓到 InventedEffect / MissingCheck（叙事已流出
+/// 不可回收）。kind 决定清偿通路（Effect=补 apply_effect；Check=补 roll_check）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetroactiveEffectDebt {
     /// "debt_{uuid simple}"。
     pub debt_id: String,
     /// 产生债务的回合。
     pub turn_id: String,
-    /// VerifierFinding::InventedEffect 的 detail 原文。
+    /// VerifierFinding 的 detail 原文。
     pub finding_detail: String,
+    /// 债务种类（serde default=Effect 向后兼容）。
+    #[serde(default)]
+    pub kind: RetroDebtKind,
     pub created_at: DateTime<Utc>,
+}
+
+/// Effect=叙事声称了未落账的机械效果；Check=叙事描绘了该掷未掷的检定时刻。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RetroDebtKind {
+    #[default]
+    Effect,
+    Check,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +94,7 @@ impl ObligationLedger {
         self.current_turn_id = turn_id.to_string();
         self.waivers.retain(|w| w.scope == WaiveScope::Scene);
         self.consumed_effect_ids.clear();
+        self.consumed_check_ids.clear();
         // 簇债务是回合内节拍（账本随回合重建，证据不跨回合）。
         self.open_cluster = None;
     }
@@ -107,8 +123,35 @@ impl ObligationLedger {
         for eid in effect_ids {
             if self.consumed_effect_ids.iter().any(|c| c == eid) { continue; }
             self.consumed_effect_ids.push(eid.clone());
-            if !self.retro_debts.is_empty() { self.retro_debts.remove(0); }
+            if let Some(pos) = self.retro_debts.iter().position(|d| d.kind == RetroDebtKind::Effect) {
+                self.retro_debts.remove(pos);
+            }
         }
+    }
+
+    /// Check 类追溯债务清偿（MissingCheck"补 roll_check"半边）：本回合每个新
+    /// 结算的 check_id 按 FIFO 结清一条 Check 债务（与 effect 通路同款粗粒度
+    /// 保守记账，语义配对留给 agent 的债务观察回填）。
+    pub fn settle_retro_debts_with_checks(&mut self, check_ids: &[String]) {
+        for cid in check_ids {
+            if self.consumed_check_ids.iter().any(|c| c == cid) { continue; }
+            self.consumed_check_ids.push(cid.clone());
+            if let Some(pos) = self.retro_debts.iter().position(|d| d.kind == RetroDebtKind::Check) {
+                self.retro_debts.remove(pos);
+            }
+        }
+    }
+
+    /// roll_check(mechanic_id) 结算成功后的确定性清账（J2 修复）：匹配该
+    /// mechanic_id 的 open dues 整体移除并返回 due_id 清单（DB 置 resolved 由
+    /// 调用方完成）。没有这一环，处理过的 due 仍会阻塞、逼 GM 对已结算的机制
+    /// 再 waive 一次。
+    pub fn resolve_dues_for_mechanic(&mut self, mechanic_id: &str) -> Vec<String> {
+        let (resolved, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.dues)
+            .into_iter()
+            .partition(|d| d.mechanic_id.as_deref() == Some(mechanic_id));
+        self.dues = kept;
+        resolved.into_iter().map(|d| d.due_id).collect()
     }
 
     /// 场景切换重开（spec §5.3：scene 豁免"场景切换时清除豁免"）：清除内存侧
@@ -192,7 +235,11 @@ impl ObligationLedger {
         }
         for debt in &self.retro_debts {
             if self.waived(&debt.debt_id) { continue; }
-            out.push(ObligationView { kind: "debt".to_string(), target_id: debt.debt_id.clone(), summary: format!("retroactive effect debt (turn {}): {}", debt.turn_id, debt.finding_detail) });
+            let summary = match debt.kind {
+                RetroDebtKind::Effect => format!("retroactive effect debt (turn {}): {} — book it via apply_effect or waive with a reason", debt.turn_id, debt.finding_detail),
+                RetroDebtKind::Check => format!("retroactive check debt (turn {}): {} — the moment demanded a check that was never rolled; settle via roll_check now or waive with a reason", debt.turn_id, debt.finding_detail),
+            };
+            out.push(ObligationView { kind: "debt".to_string(), target_id: debt.debt_id.clone(), summary });
         }
         if let Some((target_id, summary)) = &self.open_cluster {
             if !self.waived(target_id) {
@@ -258,115 +305,7 @@ pub fn carryover_memory_event(request: &ContextRequest, block: &str) -> MemoryEv
     MemoryEvent { event_id: format!("mem_obligations_{}", Uuid::new_v4().simple()), session_id: request.session_id.clone(), turn_id: Some(request.turn_id.clone()), ruleset_id: request.ruleset_id.clone(), module_id: request.module_id.clone(), scene_id: None, location_id: None, actor_ids: vec![], visibility: Visibility::GmOnly, event_kind: MemoryKind::Event, summary: block.chars().take(280).collect(), transcript_excerpt: None, source: json!({"source":"gm_agent.obligation_carryover"}), tags: vec!["gm_obligation_carryover".to_string()], importance: 2, occurred_at: Utc::now() }
 }
 
+
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ledger::TurnLedger;
-    use crate::tools::{GmTool, ToolCtx, ToolError};
-    use chrono::Utc;
-    use serde_json::json;
-    use sqlx::postgres::PgPoolOptions;
-    use trpg_db::Db;
-    use trpg_model::{ContextRequest, DueSource, DueStatus, MechanicDue, RuntimeState, TokenBudget, VisibilityProfile};
-    use trpg_runtime::RuntimeEngine;
-
-    fn due(id: &str, desc: &str) -> MechanicDue {
-        MechanicDue { due_id: id.to_string(), session_id: "s".to_string(), turn_id: "t".to_string(), source: DueSource::Threshold, source_track: Some("sanity".to_string()), hook_event: None, mechanic_id: None, threshold_desc: desc.to_string(), followup_procedure_id: Some("proc.followup".to_string()), owner_kind: "actor".to_string(), owner_id: "pc.current".to_string(), evidence: json!({"before": 38, "after": 32, "delta": -6}), status: DueStatus::Open, created_at: Utc::now() }
-    }
-
-    #[test]
-    fn blocking_view_excludes_settled_and_waived() {
-        let mut ledger = ObligationLedger::default();
-        ledger.begin_turn("t");
-        ledger.record_open_check("check_a");
-        ledger.record_open_check("check_b");
-        ledger.mark_check_settled("check_a");
-        ledger.absorb_dues(vec![due("due_1", "sanity threshold crossed")]);
-        ledger.waive("due_1", "narrative override", WaiveScope::Turn).expect("due_1 exists");
-        // record_open_check + mark_check_settled + waive 后 blocking() 只剩未处理项。
-        let blocking = ledger.blocking();
-        assert_eq!(blocking.len(), 1);
-        assert_eq!(blocking[0].kind, "check");
-        assert_eq!(blocking[0].target_id, "check_b");
-        // 空清单 block_text() 返回 None。
-        assert!(ObligationLedger::default().block_text().is_none());
-        // 非空清单 block_text() 含工具指引。
-        assert!(ledger.block_text().unwrap().contains("waive_obligation"));
-    }
-
-    #[tokio::test]
-    async fn waive_unknown_target_errs() {
-        let mut ledger = ObligationLedger::default();
-        ledger.begin_turn("t");
-        assert!(ledger.waive("不存在的 id", "reason", WaiveScope::Turn).is_err());
-        // 工具层断言折成 obligation_not_found recoverable 错误。
-        let pool = PgPoolOptions::new().connect_lazy("postgres://chatrpg:chatrpg@localhost:54347/chatrpg").expect("lazy pool");
-        let engine = RuntimeEngine::new(Db { pool });
-        let request = ContextRequest { ruleset_id: "rs".to_string(), module_id: None, session_id: "s".to_string(), turn_id: "t".to_string(), viewer: VisibilityProfile::gm(), token_budget: TokenBudget::default() };
-        let state = RuntimeState { ruleset_id: "rs".to_string(), ..Default::default() };
-        let cell = std::sync::Mutex::new(ObligationLedger::default());
-        let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: Some(&cell), data_dir: None, current_mode: None };
-        let mut turn_ledger = TurnLedger::new();
-        let err = match crate::tools::mechanic::WaiveObligationTool.call(&ctx, &mut turn_ledger, json!({"target_id":"due_missing","reason":"r"})).await {
-            Ok(_) => panic!("expected obligation_not_found error"),
-            Err(e) => e,
-        };
-        let tool_err = err.downcast_ref::<ToolError>().expect("typed ToolError");
-        assert_eq!(tool_err.code, "obligation_not_found");
-        assert!(tool_err.recoverable);
-    }
-
-    #[test]
-    fn scene_waivers_cleared_on_scene_change() {
-        let mut ledger = ObligationLedger::default();
-        ledger.begin_turn("t");
-        ledger.absorb_dues(vec![due("due_scene", "sanity threshold crossed")]);
-        ledger.record_open_check("check_turn");
-        ledger.waive("due_scene", "calm scene", WaiveScope::Scene).expect("due_scene exists");
-        ledger.waive("check_turn", "narrative override", WaiveScope::Turn).expect("check_turn exists");
-        assert!(ledger.blocking().is_empty(), "both waived → nothing blocking");
-        // 场景切换重开：Scene 豁免清除（该 due 立刻回到 blocking 视图）；
-        // Turn 豁免不受影响（本回合内仍有效，begin_turn 才过期）。
-        ledger.clear_scene_waivers();
-        let blocking = ledger.blocking();
-        assert_eq!(blocking.len(), 1, "scene-waived due must block again: {blocking:?}");
-        assert_eq!(blocking[0].kind, "due");
-        assert_eq!(blocking[0].target_id, "due_scene");
-    }
-
-    #[test]
-    fn settle_retro_debts_consumes_each_effect_once_fifo() {
-        let mut ledger = ObligationLedger::default();
-        ledger.begin_turn("t");
-        ledger.absorb_retro_debts(vec![
-            RetroactiveEffectDebt { debt_id: "debt_a".to_string(), turn_id: "t0".to_string(), finding_detail: "d".to_string(), created_at: Utc::now() },
-            RetroactiveEffectDebt { debt_id: "debt_b".to_string(), turn_id: "t0".to_string(), finding_detail: "d".to_string(), created_at: Utc::now() },
-        ]);
-        // 同一 effect_id 重复出现（门控块每轮重扫账本）只消费一次。
-        ledger.settle_retro_debts_with_effects(&["eff_1".to_string()]);
-        ledger.settle_retro_debts_with_effects(&["eff_1".to_string()]);
-        let blocking = ledger.blocking();
-        assert_eq!(blocking.len(), 1, "one effect settles exactly one debt: {blocking:?}");
-        assert_eq!(blocking[0].target_id, "debt_b", "FIFO: oldest debt settles first");
-        // 第二条 effect 结清剩余债务；多余 effect 在无债务时是 no-op。
-        ledger.settle_retro_debts_with_effects(&["eff_2".to_string(), "eff_3".to_string()]);
-        assert!(ledger.blocking().is_empty());
-        // 下回合 begin_turn 重置消费记录（TurnLedger 每回合新建，id 不复现）。
-        ledger.begin_turn("t2");
-        ledger.settle_retro_debts_with_effects(&["eff_1".to_string()]);
-        assert!(ledger.blocking().is_empty(), "no debts -> settle is a no-op");
-    }
-
-    #[test]
-    fn carryover_block_lists_unresolved_dues_with_evidence() {
-        let mut ledger = ObligationLedger::default();
-        ledger.begin_turn("t");
-        ledger.absorb_dues(vec![due("due_keep", "距临时疯狂阈值一步")]);
-        let block = ledger.carryover_block().expect("unresolved dues must carry over");
-        // 含 threshold_desc 与 evidence 摘要（前后值）+ followup_procedure_id。
-        assert!(block.contains("距临时疯狂阈值一步"), "missing threshold_desc: {block}");
-        assert!(block.contains("38") && block.contains("32"), "missing evidence summary: {block}");
-        assert!(block.contains("proc.followup"), "missing followup_procedure_id: {block}");
-        assert!(block.contains("due_keep"));
-    }
-}
+#[path = "obligations_tests.rs"]
+mod tests;

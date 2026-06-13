@@ -301,6 +301,9 @@ pub struct MechanicDue {
 pub enum DueSource {
     Threshold,
     Hook,
+    /// 刺激驱动检定预 pass：目录 when_to_use 与本回合虚构内容语义命中
+    /// （恐怖刺激→SAN 检定一类被动触发；数据驱动，零 per-ruleset 硬编码）。
+    SemanticTrigger,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]

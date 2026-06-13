@@ -1121,7 +1121,7 @@ async fn play_turn_sse(Path(session_id): Path<String>, State(state): State<AppSt
                 if result.outcome.get("contest_id").is_some() {
                     send_phase(&tx, "contest_resolved", json!({"check_id": &result.check_id, "contest_id": result.outcome.get("contest_id"), "success": result.outcome.get("success"), "target": result.outcome.get("target")})).await;
                 }
-                if pending.contract.roll_visibility != RollVisibility::PlayerRollRequired || table_dice_policy_system_rolls_visible_api() {
+                if pending.contract.roll_visibility != RollVisibility::PlayerRollRequired || system_rolls_visible_policy() {
                     match runtime.execute_system_roll_bundle(&session_id, &turn_id, &pending.contract).await {
                         Ok(execution) => {
                             send_auto_roll_execution_api(&tx, &execution).await;
@@ -1259,7 +1259,7 @@ async fn play_turn_sse(Path(session_id): Path<String>, State(state): State<AppSt
             send_phase(&tx, "agent_plan", serde_json::to_value(&plan).unwrap_or_else(|_| json!({}))).await;
             if let Some(check) = &plan.check {
                 send_phase(&tx, "check_contract_created", serde_json::to_value(check).unwrap_or_else(|_| json!({}))).await;
-                if check.roll_visibility == RollVisibility::PlayerRollRequired && !table_dice_policy_system_rolls_visible_api() {
+                if check.roll_visibility == RollVisibility::PlayerRollRequired && !system_rolls_visible_policy() {
                     let pending = trpg_agent::make_pending_check(check);
                     let _ = db.insert_pending_check(&pending).await;
                     let _ = db.insert_interaction_gate(&InteractionGate::from_pending_check(&pending)).await;
@@ -1294,7 +1294,7 @@ async fn play_turn_sse(Path(session_id): Path<String>, State(state): State<AppSt
                     if let Some(act) = &ability_result.activation { send_phase(&tx, "ability_activation_contract_created", serde_json::to_value(act).unwrap_or_else(|_| json!({}))).await; }
                     if let Some(check) = &ability_result.check {
                         send_phase(&tx, "check_contract_created", serde_json::to_value(check).unwrap_or_else(|_| json!({}))).await;
-                        if check.roll_visibility == RollVisibility::PlayerRollRequired && !table_dice_policy_system_rolls_visible_api() {
+                        if check.roll_visibility == RollVisibility::PlayerRollRequired && !system_rolls_visible_policy() {
                             let pending = trpg_agent::make_pending_check(check);
                             let _ = db.insert_pending_check(&pending).await;
                             let _ = db.insert_interaction_gate(&InteractionGate::from_pending_check(&pending)).await;
@@ -1351,7 +1351,7 @@ async fn play_turn_sse(Path(session_id): Path<String>, State(state): State<AppSt
                     }
                     if let Some(check) = &object_result.check {
                         send_phase(&tx, "check_contract_created", serde_json::to_value(check).unwrap_or_else(|_| json!({}))).await;
-                        if check.roll_visibility == RollVisibility::PlayerRollRequired && !table_dice_policy_system_rolls_visible_api() {
+                        if check.roll_visibility == RollVisibility::PlayerRollRequired && !system_rolls_visible_policy() {
                             let pending = trpg_agent::make_pending_check(check);
                             let _ = db.insert_pending_check(&pending).await;
                             let _ = db.insert_interaction_gate(&InteractionGate::from_pending_check(&pending)).await;
@@ -1404,7 +1404,7 @@ async fn play_turn_sse(Path(session_id): Path<String>, State(state): State<AppSt
                     }
                     if let Some(check) = &conflict.check {
                         send_phase(&tx, "check_contract_created", serde_json::to_value(check).unwrap_or_else(|_| json!({}))).await;
-                        if check.roll_visibility == RollVisibility::PlayerRollRequired && !table_dice_policy_system_rolls_visible_api() {
+                        if check.roll_visibility == RollVisibility::PlayerRollRequired && !system_rolls_visible_policy() {
                             let pending = trpg_agent::make_pending_check(check);
                             let _ = db.insert_pending_check(&pending).await;
                             let _ = db.insert_interaction_gate(&InteractionGate::from_pending_check(&pending)).await;
@@ -1460,7 +1460,7 @@ async fn play_turn_sse(Path(session_id): Path<String>, State(state): State<AppSt
                     if let Some(interaction) = &object_result.interaction { send_phase(&tx, "object_interaction_contract_created", serde_json::to_value(interaction).unwrap_or_else(|_| json!({}))).await; }
                     if let Some(check) = &object_result.check {
                         send_phase(&tx, "check_contract_created", serde_json::to_value(check).unwrap_or_else(|_| json!({}))).await;
-                        if check.roll_visibility == RollVisibility::PlayerRollRequired && !table_dice_policy_system_rolls_visible_api() {
+                        if check.roll_visibility == RollVisibility::PlayerRollRequired && !system_rolls_visible_policy() {
                             let pending = trpg_agent::make_pending_check(check);
                             let _ = db.insert_pending_check(&pending).await;
                             let _ = db.insert_interaction_gate(&InteractionGate::from_pending_check(&pending)).await;
@@ -1539,7 +1539,7 @@ async fn play_turn_sse(Path(session_id): Path<String>, State(state): State<AppSt
                     match plan.kind {
                         TurnPlanKind::AskPlayerRoll => {
                             let check = plan.check.as_ref().expect("AskPlayerRoll plan must contain check");
-                            if table_dice_policy_system_rolls_visible_api() {
+                            if system_rolls_visible_policy() {
                                 match runtime.execute_system_roll_bundle(&session_id, &turn_id, check).await {
                                     Ok(execution) => {
                                         send_auto_roll_execution_api(&tx, &execution).await;
@@ -1954,13 +1954,6 @@ fn roll_execution_context_tag_api(source: &str, execution: &AutoRollExecution) -
 ", payload_text, system_instruction)
 }
 
-
-
-fn table_dice_policy_system_rolls_visible_api() -> bool {
-    std::env::var("TRPG_AGENT_TABLE_DICE_POLICY")
-        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "system_rolls_visible" | "system" | "gm_rolls_visible" | "auto" | "auto_visible"))
-        .unwrap_or(true)
-}
 
 #[derive(Debug)]
 pub struct ApiError(anyhow::Error);

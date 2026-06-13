@@ -972,7 +972,7 @@ async fn run_turn_once(
             if result.outcome.get("contest_id").is_some() {
                 emit_phase(stream_format, "contest_resolved", json!({"check_id": &result.check_id, "contest_id": result.outcome.get("contest_id"), "success": result.outcome.get("success"), "target": result.outcome.get("target")}))?;
             }
-            if pending.contract.roll_visibility != RollVisibility::PlayerRollRequired || table_dice_policy_system_rolls_visible_cli() {
+            if pending.contract.roll_visibility != RollVisibility::PlayerRollRequired || system_rolls_visible_policy() {
                 let execution = runtime.execute_system_roll_bundle(session_id, &turn_id, &pending.contract).await?;
                 emit_auto_roll_execution_cli(stream_format, &execution)?;
                 early_tool_context.push_str(&roll_execution_context_tag("pending_followup_effect", &execution)?);
@@ -1140,7 +1140,7 @@ async fn run_turn_once(
         emit_phase(stream_format, "agent_plan", serde_json::to_value(&plan)?)?;
         if let Some(check) = &plan.check {
             emit_phase(stream_format, "check_contract_created", serde_json::to_value(check)?)?;
-            if check.roll_visibility == RollVisibility::PlayerRollRequired && !table_dice_policy_system_rolls_visible_cli() {
+            if check.roll_visibility == RollVisibility::PlayerRollRequired && !system_rolls_visible_policy() {
                 let pending = trpg_agent::make_pending_check(check);
                 db.insert_pending_check(&pending).await.ok();
                 db.insert_interaction_gate(&InteractionGate::from_pending_check(&pending)).await.ok();
@@ -1208,7 +1208,7 @@ async fn run_turn_once(
             }
             if let Some(check) = &object_result.check {
                 emit_phase(stream_format, "check_contract_created", serde_json::to_value(check)?)?;
-                if check.roll_visibility == RollVisibility::PlayerRollRequired && !table_dice_policy_system_rolls_visible_cli() {
+                if check.roll_visibility == RollVisibility::PlayerRollRequired && !system_rolls_visible_policy() {
                     let pending = trpg_agent::make_pending_check(check);
                     db.insert_pending_check(&pending).await.ok();
                     db.insert_interaction_gate(&InteractionGate::from_pending_check(&pending)).await.ok();
@@ -1259,7 +1259,7 @@ async fn run_turn_once(
             }
             if let Some(check) = &conflict.check {
                 emit_phase(stream_format, "check_contract_created", serde_json::to_value(check)?)?;
-                if check.roll_visibility == RollVisibility::PlayerRollRequired && !table_dice_policy_system_rolls_visible_cli() {
+                if check.roll_visibility == RollVisibility::PlayerRollRequired && !system_rolls_visible_policy() {
                     let pending = trpg_agent::make_pending_check(check);
                     db.insert_pending_check(&pending).await.ok();
                     db.insert_interaction_gate(&InteractionGate::from_pending_check(&pending)).await.ok();
@@ -1321,7 +1321,7 @@ async fn run_turn_once(
             if let Some(interaction) = &object_result.interaction { emit_phase(stream_format, "object_interaction_contract_created", serde_json::to_value(interaction)?)?; }
             if let Some(check) = &object_result.check {
                 emit_phase(stream_format, "check_contract_created", serde_json::to_value(check)?)?;
-                if check.roll_visibility == RollVisibility::PlayerRollRequired && !table_dice_policy_system_rolls_visible_cli() {
+                if check.roll_visibility == RollVisibility::PlayerRollRequired && !system_rolls_visible_policy() {
                     let pending = trpg_agent::make_pending_check(check);
                     db.insert_pending_check(&pending).await.ok();
                     db.insert_interaction_gate(&InteractionGate::from_pending_check(&pending)).await.ok();
@@ -1389,7 +1389,7 @@ async fn run_turn_once(
         match plan.kind {
             TurnPlanKind::AskPlayerRoll => {
                 let check = plan.check.as_ref().expect("AskPlayerRoll plan must contain check");
-                if table_dice_policy_system_rolls_visible_cli() {
+                if system_rolls_visible_policy() {
                     let execution = runtime.execute_system_roll_bundle(session_id, &turn_id, check).await?;
                     emit_auto_roll_execution_cli(stream_format, &execution)?;
                     agent_tool_context.push_str(&roll_execution_context_tag("generic_agent_plan", &execution)?);
@@ -2230,13 +2230,6 @@ fn roll_execution_context_tag(source: &str, execution: &AutoRollExecution) -> Re
 ", serde_json::to_string_pretty(&payload)?, system_instruction))
 }
 
-
-
-fn table_dice_policy_system_rolls_visible_cli() -> bool {
-    std::env::var("TRPG_AGENT_TABLE_DICE_POLICY")
-        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "system_rolls_visible" | "system" | "gm_rolls_visible" | "auto" | "auto_visible"))
-        .unwrap_or(true)
-}
 
 #[cfg(test)]
 mod guard_tests {

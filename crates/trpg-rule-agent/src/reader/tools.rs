@@ -134,7 +134,7 @@ pub fn core_schema() -> Value {
         "target_face":{"type":"integer","description":"count_faces only: which die face counts as a success, e.g. 3 for Triangle 6d4-count-3s"},
         "success_threshold":{"type":"integer","description":"count_faces only: how many counted dice are needed to succeed, e.g. 1"},
         "target_number":{"type":"integer","description":"meet_or_beat/roll_under with a FIXED number: the static target; omit when target is per-skill or a DV table"},
-        "resource_tracks":{"type":"array","description":"signature state tracks; include on_outcome so the engine updates them from a roll's result without hardcoding","items":{"type":"object","properties":{
+        "resource_tracks":{"type":"array","description":"every persistent numeric track the rules keep score with: survival/state meters AND reward/discipline/advancement economies (XP-style, merit/demerit currencies, standing ladders); include on_outcome so the engine updates them from a roll's result without hardcoding (GM-judgment economies get NO on_outcome)","items":{"type":"object","properties":{
             "id":{"type":"string","description":"snake_case key e.g. chaos, sanity, hp, harm"},
             "name":{"type":"string"},"kind":{"type":"string"},
             "owner_kind":{"type":"string","enum":["actor","scene"],"description":"who holds it: a shared scene pool (e.g. Chaos) or the actor (e.g. SAN/HP)"},

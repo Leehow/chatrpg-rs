@@ -239,9 +239,15 @@ impl GmTool for ExitModeTool {
             }
         };
         // 退出结算义务门控（spec §4.4）：blocking() ∪ mode_exit 任一未清 → 拦截。
+        // J2 修复（downtime frame 泄漏）：除本 mode 自身退出义务外无任何未清
+        // 机械项（due/check/debt/cluster 皆空）⇒ 退出义务确定性闭合——"结算表
+        // 已落账"在零应结项时为真。无确定性闭合事件的 mode（如 downtime）由此
+        // 能正常退出，不再只能靠 waive 逃生（frame 永久 active 的泄漏根源）。
         if let Some(cell) = ctx.obligations {
             let outstanding = { cell.lock().unwrap_or_else(|p| p.into_inner()).exit_blocking() };
-            if !outstanding.is_empty() {
+            let own_exit_prefix = format!("mode_exit.{mode_id}.");
+            let only_own_exit = outstanding.iter().all(|v| v.kind == "mode_exit" && v.target_id.starts_with(&own_exit_prefix));
+            if !outstanding.is_empty() && !only_own_exit {
                 let lines = outstanding.iter().map(|v| format!("- {} {}: {}", v.kind, v.target_id, v.summary)).collect::<Vec<_>>().join("\n");
                 return Err(ToolError::recoverable(
                     "exit_blocked_by_obligations",

@@ -1,0 +1,138 @@
+{
+  "spec_id": "j1_cpr_homecoming_eval",
+  "description": "J1 产品旅程评测：CPR Homecoming — 开场→首个场景转换（≥8 回合），含完整战斗段（≥4 回合）。测试项：电影化叙事、机械落库、怪玩家输入×3。",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "pre_session": {
+    "create_character": true,
+    "note": "用 create-character --auto 建 pc.current"
+  },
+  "turns": [
+    {
+      "turn_index": 0,
+      "player_input": {
+        "source": "literal",
+        "text": "开始游戏吧，我想看看周围发生了什么。"
+      },
+      "notes": "开场：GM 应给出场景描述和行动选项，不应报轮次或要求骰子。",
+      "forbid_player_text": ["轮次：", "先攻顺序", "请掷", "HP=", "DV="]
+    },
+    {
+      "turn_index": 1,
+      "player_input": {
+        "source": "literal",
+        "text": "继续。"
+      },
+      "notes": "懒输入测试：玩家只说「继续」，GM 应根据上下文推进，不应卡住或给菜单列表。",
+      "forbid_player_text": ["请选择", "选项：", "1.", "2.", "3."]
+    },
+    {
+      "turn_index": 2,
+      "player_input": {
+        "source": "literal",
+        "text": "我环顾四周，寻找可以利用的掩护或后路——假如接下来出了什么麻烦，我想先确认退路。"
+      },
+      "notes": "创造性/谨慎输入：提前探路。GM 应描述环境细节而非要求骰子报数。",
+      "forbid_player_text": ["请报告", "需要提供", "DV", "SP="]
+    },
+    {
+      "turn_index": 3,
+      "player_input": {
+        "source": "literal",
+        "text": "我想试着跟那个人搭话，看看他是干嘛的，能不能避免冲突。"
+      },
+      "notes": "社交路径探测：GM 应走社交而非直接触发战斗。"
+    },
+    {
+      "turn_index": 4,
+      "player_input": {
+        "source": "literal",
+        "text": "算了，谈判破裂了，我马上拔枪朝他开枪！"
+      },
+      "expect_events": ["combat_frame_created"],
+      "notes": "战斗触发。GM 应创建战斗帧，叙事描述战斗开始而非报轮次表格。",
+      "forbid_player_text": ["第1轮", "轮次：", "先攻顺序如下", "请掷先攻"]
+    },
+    {
+      "turn_index": 5,
+      "player_input": {
+        "source": "literal",
+        "text": "我趁他还没反应过来，冲到左边那辆报废的汽车后面，然后从掩体里再开一枪！"
+      },
+      "expect_events_any": ["check_contract_created", "effect_resolution_packet", "damage_packet_created"],
+      "notes": "战斗回合 1：移动+射击。GM 应自动处理命中检定，叙事给出结果，不要求玩家报骰点。",
+      "forbid_player_text": ["请你掷", "命中值是多少", "请告诉我你的骰点", "DV="]
+    },
+    {
+      "turn_index": 6,
+      "player_input": {
+        "source": "literal",
+        "text": "他还在？我继续压制，不让他靠近我。"
+      },
+      "notes": "战斗回合 2：懒+战术输入组合（懒于细节，战术于压制）。GM 应推进战斗不卡。",
+      "forbid_player_text": ["请你掷", "轮次：", "先攻顺序"]
+    },
+    {
+      "turn_index": 7,
+      "player_input": {
+        "source": "literal",
+        "text": "我用那辆车的油箱开枪——能不能引爆它来一举解决战斗？"
+      },
+      "notes": "歧义/创造性环境利用：射击油箱引爆。GM 应给出裁定（风险描述）而非拒绝。",
+      "forbid_player_text": ["无法执行", "规则不允许", "请告诉我"]
+    },
+    {
+      "turn_index": 8,
+      "player_input": {
+        "source": "literal",
+        "text": "战斗结束了，我检查现场，看看有没有可以拿走的东西或者关于这次任务的线索。"
+      },
+      "expect_events_any": ["frame_compacted", "state_frame_closed"],
+      "notes": "战斗收尾+场景探索。GM 应关闭战斗帧并过渡到探索状态。"
+    }
+  ],
+  "assertions": [
+    {
+      "id": "combat_frame_created",
+      "type": "sql",
+      "query": "SELECT COUNT(*) FROM state_frames WHERE session_id='$SESSION_ID' AND frame_kind='combat' AND status IN ('active','completed')",
+      "expect_min": 1,
+      "description": "战斗 frame 必须建立"
+    },
+    {
+      "id": "check_contracts_created",
+      "type": "sql",
+      "query": "SELECT COUNT(*) FROM check_contracts WHERE session_id='$SESSION_ID'",
+      "expect_min": 1,
+      "description": "至少 1 个检定合同（机械结算证据）"
+    },
+    {
+      "id": "dice_rolls_recorded",
+      "type": "sql",
+      "query": "SELECT COUNT(*) FROM dice_rolls WHERE session_id='$SESSION_ID'",
+      "expect_min": 1,
+      "description": "骰子投掷记录落库"
+    },
+    {
+      "id": "no_round_table_in_narration",
+      "type": "grep_forbidden",
+      "pattern": "第[0-9]+轮|轮次：|先攻顺序如下|Initiative Order",
+      "target": "player_visible_text",
+      "description": "叙事零轮次报表"
+    },
+    {
+      "id": "no_manual_roll_request",
+      "type": "grep_forbidden",
+      "pattern": "请你掷|请掷|请报告你的|告诉我你的骰|你的命中是多少|你的伤害是多少",
+      "target": "player_visible_text",
+      "description": "GM 不得要求玩家自报骰点（硬性 FAIL 条件）"
+    },
+    {
+      "id": "memory_events_recorded",
+      "type": "sql",
+      "query": "SELECT COUNT(*) FROM memory_events WHERE session_id='$SESSION_ID'",
+      "expect_min": 1,
+      "description": "GM 记忆事件记录"
+    }
+  ]
+}

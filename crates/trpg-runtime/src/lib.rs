@@ -134,10 +134,15 @@ impl RuntimeEngine {
         let _ = WorldTimeService::new(self.db.clone()).ensure_session_time(&session_id, Some(&session_id)).await;
         let _ = self.db.ensure_interaction_generation(&session_id).await;
         if let Some(mid) = module_id {
-            if let Ok(Some(graph)) = self.db.load_module_graph(mid).await {
-                if let Some(entry) = module_entry_scene_id(&graph) {
-                    let _ = self.db.set_session_scene(&session_id, &entry).await; // fail-closed：失败不阻断开局
-                }
+            // fail-closed：任何失败仅 warn，不阻断开局；但必须可见——曾有空图谱静默
+            // 跳过激活，导致整局 current_scene_id=NULL 而无任何线索。
+            match self.db.load_module_graph(mid).await {
+                Ok(Some(graph)) => match module_entry_scene_id(&graph) {
+                    Some(entry) => { let _ = self.db.set_session_scene(&session_id, &entry).await; }
+                    None => tracing::warn!(module_id = mid, "module graph has no scenes; entry scene not activated — re-run parse-all with the module reader enabled"),
+                },
+                Ok(None) => tracing::warn!(module_id = mid, "no module graph found; entry scene not activated — run parse-all for this module first"),
+                Err(err) => tracing::warn!(error = %err, module_id = mid, "load_module_graph failed; entry scene not activated"),
             }
         }
         Ok(session_id)
@@ -3004,10 +3009,9 @@ pub fn wants_system_roll(input: &str) -> bool {
     terms.iter().any(|term| lower.contains(term))
 }
 
-pub fn system_rolls_visible_policy() -> bool {
-    let v = std::env::var("TRPG_AGENT_TABLE_DICE_POLICY").unwrap_or_else(|_| "system_rolls_visible".into());
-    matches!(v.to_ascii_lowercase().as_str(), "system_rolls_visible" | "system" | "gm_rolls_visible" | "auto" | "auto_visible")
-}
+// 桌面骰权政策谓词的单一事实源在 trpg_model::table_dice_policy;此处再导出
+// 以保持 trpg_runtime::system_rolls_visible_policy() 既有公共路径(trpg-gm 在用)。
+pub use trpg_model::system_rolls_visible_policy;
 
 pub fn normalize_contract_for_system_roll(contract: &CheckContract) -> CheckContract {
     if !system_rolls_visible_policy() {

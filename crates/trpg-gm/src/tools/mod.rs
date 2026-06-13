@@ -3,6 +3,7 @@ pub mod effect;
 pub mod frame;
 pub mod mechanic;
 pub mod npc;
+pub(crate) mod settle;
 pub mod world;
 
 use crate::ledger::TurnLedger;

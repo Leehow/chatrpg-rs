@@ -6,6 +6,7 @@ pub mod mode_catalog;
 pub mod obligations;
 pub mod prompts;
 pub mod scene_policy;
+pub mod stimulus;
 pub mod stream;
 pub mod tools;
 pub mod turn_loop;

@@ -218,20 +218,34 @@ async fn exit_mode_blocked_by_obligations_then_waive_releases() {
         assert_eq!(view.target_id, "mode_exit.combat.0");
         assert!(view.summary.contains("所有交锋簇效果落账"));
     }
+    // J2 修复后的语义：自身退出义务之外还有未清机械项（这里挂一笔 due）⇒
+    // exit 被拦并列出该项；外部项清空后，纯自身退出义务=确定性闭合 ⇒ 放行
+    // （不再要求 waive 自身退出义务——那是 downtime frame 永久泄漏的根源）。
+    {
+        let mut obligations = cell.lock().unwrap();
+        obligations.absorb_dues(vec![trpg_model::MechanicDue {
+            due_id: "due_exit_gate".to_string(), session_id: "s".to_string(), turn_id: "t".to_string(),
+            source: trpg_model::DueSource::Threshold, source_track: Some("hp".to_string()), hook_event: None,
+            mechanic_id: None, threshold_desc: "未结算的交锋效果".to_string(), followup_procedure_id: None,
+            owner_kind: "actor".to_string(), owner_id: "pc.current".to_string(), evidence: json!({}),
+            status: trpg_model::DueStatus::Open, created_at: Utc::now(),
+        }]);
+    }
     let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: Some(&cell), data_dir: Some(&dir), current_mode: Some("combat") };
-    // 义务未清 → exit 被拦（waive 通道照常可用——hint 指路）。
+    // 外部债务未清 → exit 被拦（waive 通道照常可用——hint 指路）。
     let err = typed_err(ExitModeTool.call(&ctx, &mut turn_ledger, json!({"reason":"flee"})).await);
     assert_eq!(err.code, "exit_blocked_by_obligations");
     assert!(err.recoverable);
-    assert!(err.message.contains("mode_exit.combat.0"), "must list outstanding items: {}", err.message);
+    assert!(err.message.contains("due_exit_gate"), "must list outstanding items: {}", err.message);
     assert!(err.hint.as_deref().unwrap_or("").contains("waive_obligation"));
-    // waive 带理由 → 放行（frame 已不在 db = 幂等成功路径，姿态下回合回落叙事）。
+    // 外部债务 waive 带理由 → 只剩自身退出义务 → 确定性闭合放行
+    // （frame 已不在 db = 幂等成功路径，姿态下回合回落叙事）。
     {
         let mut obligations = cell.lock().unwrap();
-        obligations.waive("mode_exit.combat.0", "player flees mid-fight", WaiveScope::Turn).expect("mode_exit target must be waivable");
-        assert!(obligations.exit_blocking().is_empty());
+        obligations.waive("due_exit_gate", "敌人逃散，效果并入下一幕", WaiveScope::Turn).expect("due target must be waivable");
+        assert_eq!(obligations.exit_blocking().len(), 1, "own mode_exit obligation still listed pre-exit");
     }
-    let output = ExitModeTool.call(&ctx, &mut turn_ledger, json!({"reason":"flee"})).await.expect("exit must pass after waive");
+    let output = ExitModeTool.call(&ctx, &mut turn_ledger, json!({"reason":"flee"})).await.expect("exit must pass once only own exit obligations remain");
     assert_eq!(output.result.get("exited_mode").and_then(|v| v.as_str()), Some("combat"));
     // 成功退出后该 mode 的退出义务整体清账。
     let obligations = cell.lock().unwrap();

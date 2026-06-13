@@ -171,9 +171,13 @@ impl ProjectParseService {
 
             let bundle = if !self.config.force {
                 match self.db.load_module_bundle_by_source(&extracted.source_document.source_hash, &self.config.parse_config_hash).await? {
-                    Some(cached) => {
+                    Some(cached) if cached_module_bundle_reusable(&cached.module_graph, module_reader_enabled()) => {
                         info!(bundle_id = %cached.bundle_id, "using cached module bundle");
                         cached
+                    }
+                    Some(cached) => {
+                        info!(bundle_id = %cached.bundle_id, "cached module bundle has an empty scene graph (pre-reader artifact); re-extracting with the module reader");
+                        self.parse_module(&extracted.source_document, &book, &project_ruleset_ids).await?
                     }
                     None => self.parse_module(&extracted.source_document, &book, &project_ruleset_ids).await?,
                 }
@@ -1715,11 +1719,22 @@ fn reader_agent_enabled() -> bool {
 }
 
 /// Mirror of `reader_agent_enabled` for the module reader (structured BP2/BP3
-/// extraction). Defaults OFF — opt in via TRPG_MODULE_READER until Phase 6 e2e.
+/// extraction). Defaults ON since the Phase 6 cross-structure e2e passed
+/// (2026-06-09); opt out via TRPG_MODULE_READER=0.
 fn module_reader_enabled() -> bool {
     std::env::var("TRPG_MODULE_READER")
         .map(|v| !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"))
-        .unwrap_or(false)
+        .unwrap_or(true)
+}
+
+/// Whether a cached module bundle can be reused as-is. With the module reader
+/// enabled, an empty scene graph is a pre-reader (or failed-extraction)
+/// artifact — `module_entry_scene_id` keys off `scenes`, so such a bundle can
+/// never activate a session's entry scene and must be re-extracted. With the
+/// reader disabled the old behavior stands (empty graphs are the norm there;
+/// re-parsing would never improve them).
+fn cached_module_bundle_reusable(graph: &ModuleGraph, reader_enabled: bool) -> bool {
+    !reader_enabled || !graph.scenes.is_empty()
 }
 
 /// Gate for the mechanics-catalog compile pass (rule agent's third pass).
@@ -1729,6 +1744,38 @@ pub(crate) fn mechanics_compile_enabled() -> bool {
     std::env::var("TRPG_MECHANICS_COMPILE")
         .map(|v| !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"))
         .unwrap_or(true)
+}
+
+#[cfg(test)]
+mod module_reader_gate_tests {
+    use super::*;
+
+    #[test]
+    fn module_reader_gate_defaults_on_and_reads_env() {
+        // All states run sequentially inside ONE test (no other test in this
+        // binary touches TRPG_MODULE_READER); set then restore.
+        let saved = std::env::var("TRPG_MODULE_READER").ok();
+        std::env::remove_var("TRPG_MODULE_READER");
+        assert!(module_reader_enabled(), "unset -> default ON (post Phase 6 e2e)");
+        std::env::set_var("TRPG_MODULE_READER", "0");
+        assert!(!module_reader_enabled(), "\"0\" -> OFF");
+        std::env::set_var("TRPG_MODULE_READER", "1");
+        assert!(module_reader_enabled(), "\"1\" -> ON");
+        match saved {
+            Some(v) => std::env::set_var("TRPG_MODULE_READER", v),
+            None => std::env::remove_var("TRPG_MODULE_READER"),
+        }
+    }
+
+    #[test]
+    fn empty_scene_graph_cache_is_not_reusable_when_reader_enabled() {
+        let empty = ModuleGraph::default();
+        let mut populated = ModuleGraph::default();
+        populated.scenes.push(ScenarioNode { node_id: "sc01".to_string(), ..Default::default() });
+        assert!(!cached_module_bundle_reusable(&empty, true), "reader on + empty graph -> re-extract");
+        assert!(cached_module_bundle_reusable(&populated, true), "reader on + scenes present -> reuse");
+        assert!(cached_module_bundle_reusable(&empty, false), "reader off -> old behavior, reuse");
+    }
 }
 
 #[cfg(test)]

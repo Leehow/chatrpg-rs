@@ -147,6 +147,14 @@ pub fn build_player_contract_for_args(session_id: &str, turn_id: &str, ruleset_i
     Ok(c)
 }
 
+/// PURE：政策转换——玩家亲掷契约 → 系统代掷（复用 runtime normalize 单一原语；
+/// 政策关闭时 normalize 原样返回），advice_refs 打 provenance 标记（库面可审计）。
+fn convert_player_gate_to_system(contract: &CheckContract) -> CheckContract {
+    let mut c = trpg_runtime::normalize_contract_for_system_roll(contract);
+    c.advice_refs.push("gm_agent.request_player_roll:converted:system_rolls_visible".to_string());
+    c
+}
+
 /// 纯辅助：kernel 缺省骰式。B3 小重构——call 顶部 load_rule_kernel 一次后复用
 /// （band_semantics 也要同一 kernel），不再每处各查一遍 db。
 fn kernel_dice_expr(kernel: Option<&RuleKernel>) -> Result<String> {
@@ -231,54 +239,19 @@ impl GmTool for RollCheckTool {
             }
             trpg_runtime::stamp_opposed_check(&mut contract, &persona, &opposed.bucket, &opposed.opponent_parameter);
         }
-        // 契约落 check_contracts 表（对齐旧路径 persist_agent_plan 的 db.insert_check_contract；
-        // 只入内存 ledger 的话 Task 11 验收 SQL 对 agent 路径恒为空）。
-        ctx.engine.db.insert_check_contract(&contract, "created").await?;
-        ledger.record_contract(&contract);
-        let exec = ctx.engine.execute_system_roll_bundle(&ctx.request.session_id, &ctx.request.turn_id, &contract).await?;
-        ledger.record_execution(&exec);
-        // B3：成功度的剧情/机制语义随结果带回（success_bands[*].semantics 渲染）。
-        // None → 整键缺省（fail-closed：裸 band 仍在 outcome 里，绝不编造语义）。
-        let band_line = kernel.as_ref().and_then(|k| band_semantics_line(&k.dice_core, &exec.primary.outcome));
-        let mut out = json!({
-            "check_id": contract.check_id,
-            "check_label": contract.check_label,
-            "roll_policy": exec.roll_policy,
-            "outcome": exec.primary.outcome,
-            "primary_roll": exec.primary.roll.result,
-            "committed_patch_count": exec.primary.committed_patches.len(),
-            "followup_count": exec.followups.len()
-        });
-        if let Some(line) = band_line {
-            if let Some(obj) = out.as_object_mut() {
-                obj.insert("band_semantics".into(), json!(line));
+        // 结算尾段（落库入账 → 系统掷骰 → band 语义 → effect_policy → 债务带回）
+        // 收口 settle.rs 单点，与 request_player_roll 的政策转换路径共用。
+        let output = crate::tools::settle::settle_system_check(ctx, ledger, kernel.as_ref(), scene_intent.as_ref(), parameter_overridden, &contract).await?;
+        // J2 修复：带 mechanic_id 的结算成功 ⇒ 匹配该机制的 open dues 确定性置
+        // resolved（内存+DB）——处理过的债务不再要求 GM 额外 waive。落库失败
+        // `let _ =` 吞（内存侧已清，下回合 leftover 重捞由 DB 状态兜底）。
+        if let (Some(mechanic_id), Some(cell)) = (args.mechanic_id.as_deref(), ctx.obligations) {
+            let resolved = { cell.lock().unwrap_or_else(|p| p.into_inner()).resolve_dues_for_mechanic(mechanic_id) };
+            for due_id in &resolved {
+                let _ = ctx.engine.db.update_mechanic_due_status(due_id, "resolved", Some("settled via roll_check"), None).await;
             }
         }
-        // C4：结算后 effect_policy Rust 强制执行（spec §6"效果不留给叙事"——结算完成后
-        // 由 Rust 立即执行、不经叙事；outcome 无 success 布尔则 fail-closed 跳过并标记）。
-        if let Some(intent) = &scene_intent {
-            if parameter_overridden {
-                if let Some(obj) = out.as_object_mut() {
-                    obj.insert("parameter_overridden_from_intent".into(), json!(true));
-                }
-            }
-            crate::scene_policy::run_policy_after_settlement(ctx.engine, ctx.request, intent, &exec.primary.outcome, &mut out, ledger).await?;
-        }
-        // B4：本回合结算新产的机械债务当场带回（spec §5.2 agent 当场看见）。
-        // 轻查询：复用 list_open（回合内行数极小），按 turn_id 过滤本回合新产；
-        // 查询失败按空处理（fail-closed，不阻断结果）；空数组时整键缺省。
-        let dues: Vec<Value> = ctx.engine.db.list_open_mechanic_dues(&ctx.request.session_id).await
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|d| d.turn_id == ctx.request.turn_id)
-            .map(|d| json!({"due_id": d.due_id, "threshold_desc": d.threshold_desc, "followup_procedure_id": d.followup_procedure_id, "evidence": d.evidence}))
-            .collect();
-        if !dues.is_empty() {
-            if let Some(obj) = out.as_object_mut() {
-                obj.insert("dues".into(), json!(dues));
-            }
-        }
-        Ok(ToolOutput::ok(out))
+        Ok(output)
     }
 }
 
@@ -287,7 +260,7 @@ pub struct RequestPlayerRollTool;
 #[async_trait]
 impl GmTool for RequestPlayerRollTool {
     fn spec(&self) -> ToolSpec {
-        ToolSpec { name: "request_player_roll", schema: json!({"type":"function","function":{"name":"request_player_roll","description":"Open an InteractionGate and wait for the player to roll personally.","parameters":{"type":"object","properties":{"check_label":{"type":"string"},"tested_parameter":{"type":"string"},"stakes":{"type":"object","properties":{"before":{"type":"string"},"success":{"type":"string"},"failure":{"type":"string"}},"required":["before","success","failure"]},"visibility":{"type":"string","enum":["public","secret"]},"scene_mechanic_id":{"type":"string","description":"intent_id from the current scene's mechanic-intents block; inherits the module-stated difficulty and the engine enforces the stated consequences after the player's roll settles"}},"required":["check_label","tested_parameter","stakes"]}}}) }
+        ToolSpec { name: "request_player_roll", schema: json!({"type":"function","function":{"name":"request_player_roll","description":"Open an InteractionGate and wait for the player to roll personally. Under a system-rolls table dice policy the engine instead rolls on the player's behalf immediately and returns the settled result; narrate the stakes and the outcome without asking the player to roll.","parameters":{"type":"object","properties":{"check_label":{"type":"string"},"tested_parameter":{"type":"string"},"stakes":{"type":"object","properties":{"before":{"type":"string"},"success":{"type":"string"},"failure":{"type":"string"}},"required":["before","success","failure"]},"visibility":{"type":"string","enum":["public","secret"]},"scene_mechanic_id":{"type":"string","description":"intent_id from the current scene's mechanic-intents block; inherits the module-stated difficulty and the engine enforces the stated consequences after the player's roll settles"}},"required":["check_label","tested_parameter","stakes"]}}}) }
     }
 
     async fn call(&self, ctx: &ToolCtx<'_>, ledger: &mut TurnLedger, args: Value) -> Result<ToolOutput> {
@@ -298,6 +271,21 @@ impl GmTool for RequestPlayerRollTool {
         let scene_intent = crate::scene_policy::resolve_scene_intent(ctx.engine, ctx.request, ctx.state.scene_id.as_deref(), args.scene_mechanic_id.as_deref()).await?;
         let mut contract = build_player_contract_for_args(&ctx.request.session_id, &ctx.request.turn_id, &ctx.request.ruleset_id, ctx.request.module_id.as_deref(), &args, &dice)?;
         crate::scene_policy::stamp_scene_intent(&mut contract, scene_intent.as_ref());
+        // 桌面骰权政策守卫（对齐 legacy CLI/API 路径与 NarrationVerifier 的
+        // ManualRollRequest 红线）：system_rolls_visible 下玩家从不手掷——此处若
+        // 仍开 gate，下一回合的叙事输入不是骰值应答，gate 永不结算只会被新 gate
+        // 作废，战斗冻在 awaiting_player_roll、零掷骰落账。转系统代掷当场结算
+        // （normalize 原语是 runtime 单一事实源），盖章后果照常强制执行，
+        // 戏剧 stakes 仍由 agent 叙入散文。政策关（真人摇骰桌）gate 路径原样。
+        if trpg_runtime::system_rolls_visible_policy() {
+            let contract = convert_player_gate_to_system(&contract);
+            let parameter_overridden = scene_intent.as_ref().is_some_and(|i| args.tested_parameter.trim() != i.tested_parameter.trim());
+            let mut output = crate::tools::settle::settle_system_check(ctx, ledger, kernel.as_ref(), scene_intent.as_ref(), parameter_overridden, &contract).await?;
+            if let Some(obj) = output.result.as_object_mut() {
+                obj.insert("player_roll_converted".into(), json!("table dice policy system_rolls_visible: the engine rolled on the player's behalf; narrate the stakes and this settled result, do not ask the player to roll"));
+            }
+            return Ok(output);
+        }
         // 对齐 persist_agent_plan 既有行为：插新 pending 前先作废旧 open gate，
         // 防同会话累积多个 open pending check。
         ctx.engine.db.cancel_open_pending_checks_for_session(&ctx.request.session_id, PendingCheckStatus::Superseded).await?;
@@ -396,5 +384,20 @@ mod tests {
         assert_eq!(contract.roll_visibility, RollVisibility::PlayerRollRequired);
         assert_eq!(contract.roll_authority, RollAuthority::Player);
         assert_eq!(contract.stakes.before_roll_public, "The jump is risky.");
+    }
+
+    // 桌面骰权政策守卫：system_rolls_visible 下玩家亲掷契约必须转系统代掷
+    // （GM agent 战斗冻结修复——gate 开出去叙事输入永不结算）；stakes 与
+    // provenance 标记保留。env 显式置位防外部 shell 注入 player 政策时误红。
+    #[test]
+    fn system_policy_converts_player_gate_to_system_authority() {
+        std::env::set_var("TRPG_AGENT_TABLE_DICE_POLICY", "system_rolls_visible");
+        let args = RequestPlayerRollArgs { check_label: "Dodge".to_string(), tested_parameter: "dodge".to_string(), stakes: StakesArgs { before: "Claws rake at your throat.".to_string(), success: "You twist away.".to_string(), failure: "It tears into you.".to_string() }, visibility: "public".to_string(), scene_mechanic_id: None };
+        let player = build_player_contract_for_args("s", "t", "call_of_cthulhu_7e", None, &args, "1d100").unwrap();
+        let converted = convert_player_gate_to_system(&player);
+        assert_eq!(converted.roll_authority, RollAuthority::System);
+        assert_eq!(converted.roll_visibility, RollVisibility::PublicGmRoll);
+        assert_eq!(converted.stakes.before_roll_public, "Claws rake at your throat.");
+        assert!(converted.advice_refs.iter().any(|r| r.contains("request_player_roll:converted:system_rolls_visible")), "provenance marker missing: {:?}", converted.advice_refs);
     }
 }

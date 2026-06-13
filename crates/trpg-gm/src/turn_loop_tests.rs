@@ -21,7 +21,8 @@
     #[async_trait]
     impl LlmClient for MockLlm {
         async fn complete_text(&self, _: Vec<ChatMessage>, _: f32) -> Result<String> { unimplemented!("MockLlm complete_text is unused by run_gm_turn tests") }
-        async fn complete_json(&self, _: Vec<ChatMessage>, _: f32) -> Result<Value> { unimplemented!("MockLlm complete_json is unused by run_gm_turn tests") }
+        // 刺激预 pass 走 complete_json：恒回空命中（这些测试不测该通路）。
+        async fn complete_json(&self, _: Vec<ChatMessage>, _: f32) -> Result<Value> { Ok(json!({"hits": []})) }
         async fn stream_chat(&self, _: Vec<ChatMessage>, _: f32) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> { unimplemented!("MockLlm stream_chat is unused by run_gm_turn tests") }
         async fn complete_with_tools(&self, _: Vec<Value>, _: Vec<Value>) -> Result<Value> { unimplemented!("MockLlm complete_with_tools is unused by run_gm_turn tests") }
         async fn stream_chat_with_tools(&self, messages: Vec<Value>, _: Vec<Value>, tool_choice: ToolChoice) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {

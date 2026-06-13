@@ -264,7 +264,7 @@ impl NarrationVerifier {
             ));
         }
 
-        if text_asks_player_for_manual_roll(&text) && table_policy_system_rolls_visible() {
+        if text_asks_player_for_manual_roll(&text) && system_rolls_visible_policy() {
             findings.push(VerifierFinding::blocker(
                 VerifierFindingKind::ManualRollRequest,
                 "final narration asks the player to provide dice totals under system-rolls-visible policy",
@@ -475,16 +475,6 @@ fn text_asks_player_for_manual_roll(text: &str) -> bool {
         .iter()
         .any(|term| text.contains(term));
     asks_roll && asks_total
-}
-
-fn table_policy_system_rolls_visible() -> bool {
-    let value = std::env::var("TRPG_AGENT_TABLE_DICE_POLICY")
-        .unwrap_or_else(|_| "system_rolls_visible".into())
-        .to_ascii_lowercase();
-    matches!(
-        value.as_str(),
-        "system_rolls_visible" | "system" | "gm_rolls_visible" | "auto" | "auto_visible"
-    )
 }
 
 #[cfg(test)]

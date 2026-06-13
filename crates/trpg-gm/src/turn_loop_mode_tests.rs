@@ -22,7 +22,9 @@ struct MockLlm { scripts: Mutex<Vec<Vec<StreamEvent>>>, requests: Mutex<Vec<Vec<
 #[async_trait]
 impl LlmClient for MockLlm {
     async fn complete_text(&self, _: Vec<ChatMessage>, _: f32) -> Result<String> { unimplemented!() }
-    async fn complete_json(&self, _: Vec<ChatMessage>, _: f32) -> Result<Value> { unimplemented!() }
+    // 刺激预 pass 走 complete_json：mock 恒回空命中（语义="本回合无刺激"），
+    // 不消费 scripts——脚本只属于 stream_chat_with_tools 的工具轮。
+    async fn complete_json(&self, _: Vec<ChatMessage>, _: f32) -> Result<Value> { Ok(json!({"hits": []})) }
     async fn stream_chat(&self, _: Vec<ChatMessage>, _: f32) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> { unimplemented!() }
     async fn complete_with_tools(&self, _: Vec<Value>, _: Vec<Value>) -> Result<Value> { unimplemented!() }
     async fn stream_chat_with_tools(&self, messages: Vec<Value>, _: Vec<Value>, _: ToolChoice) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {

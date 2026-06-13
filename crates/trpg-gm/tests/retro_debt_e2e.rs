@@ -45,7 +45,8 @@ impl LlmClient for MockLlm {
         unimplemented!("unused by run_gm_turn e2e")
     }
     async fn complete_json(&self, _: Vec<ChatMessage>, _: f32) -> Result<Value> {
-        unimplemented!("unused by run_gm_turn e2e")
+        // 刺激预 pass 走 complete_json：恒回空命中（本测试不测该通路）。
+        Ok(serde_json::json!({"hits": []}))
     }
     async fn stream_chat(&self, _: Vec<ChatMessage>, _: f32) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
         unimplemented!("unused by run_gm_turn e2e")

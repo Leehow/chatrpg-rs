@@ -80,7 +80,7 @@ impl GmAgent {
             plan.reasoning_summary = rule.advice_summary.clone().unwrap_or_else(|| format!("matched agent advice rule {}", rule.rule_id));
             match rule.plan_kind {
                 AgentPlanAdviceKind::AskPlayerRoll => {
-                    if table_dice_policy_system_rolls_visible() {
+                    if system_rolls_visible_policy() {
                         let mut check = build_check_contract(input, text, rule, RollVisibility::PublicGmRoll);
                         check.roll_authority = RollAuthority::System;
                         plan.kind = TurnPlanKind::GmRollThenNarrate;
@@ -133,12 +133,6 @@ impl GmAgent {
         plan.reasoning_summary = "no agent advice rule matched; continue with normal narration path".into();
         plan
     }
-}
-
-
-fn table_dice_policy_system_rolls_visible() -> bool {
-    let v = std::env::var("TRPG_AGENT_TABLE_DICE_POLICY").unwrap_or_else(|_| "system_rolls_visible".into());
-    matches!(v.to_ascii_lowercase().as_str(), "system_rolls_visible" | "system" | "gm_rolls_visible" | "auto" | "auto_visible")
 }
 
 fn build_check_contract(input: AgentTurnInput<'_>, text: &str, rule: &AgentAdviceRule, visibility: RollVisibility) -> CheckContract {

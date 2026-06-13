@@ -282,6 +282,15 @@ if [[ "$PRE_CC" == "true" && -n "$SESSION_ID" ]]; then
   kill "$CC_PID" 2>/dev/null || true; wait "$CC_PID" 2>/dev/null || true
   set -e
   log "pre_session: create-character done (${CC_ELAPSED}s)"
+  # 防串台 guard（J2 SAN 评测根因之一）：角色必须绑在本次 play 的 session 上
+  # 且非 stub——否则评测全程玩的是无数值占位卡，GM 会理性回避一切机械检定。
+  BOUND_SESSION="$(grep -m1 '\[phase\] bound' "$CC_ERR" 2>/dev/null | sed 's/^\[phase\] bound //' | jq -r '.session_id // empty' || true)"
+  [[ -n "$BOUND_SESSION" ]] || die "create-character produced no '[phase] bound' record — see $CC_ERR"
+  [[ "$BOUND_SESSION" == "$SESSION_ID" ]] || die "character bound to $BOUND_SESSION but play session is $SESSION_ID (play 进程重启过？串台！)"
+  SHEET_OK="$(docker exec "$DB_CONTAINER" psql "$DB_CONN" -At -c \
+    "select count(*) from runtime_actor_parameters where session_id='$SESSION_ID' and actor_id='pc.current' and (sheet_json ?| array['stats','skills','resources'])" 2>/dev/null || echo 0)"
+  [[ "$SHEET_OK" == "1" ]] || die "pc.current sheet in session $SESSION_ID is a stub (no stats/skills/resources) — character binding failed"
+  log "pre_session: character verified — bound to $SESSION_ID with a real sheet"
   # 短暂等 agent prompt 恢复（create-char 不干扰 play 进程，但 DB 写入需稳定）
   sleep 2
 fi

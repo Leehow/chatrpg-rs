@@ -10,6 +10,8 @@ pub use mechanics::*;
 pub mod mechanics_render;
 pub use mechanics_render::*;
 pub mod outcome_fields;
+pub mod table_dice_policy;
+pub use table_dice_policy::*;
 
 pub const PROJECT_SCHEMA_VERSION: &str = "chatrpg.project_bundle.v1";
 pub const RULE_SCHEMA_VERSION: &str = "chatrpg.rule_bundle.v1";

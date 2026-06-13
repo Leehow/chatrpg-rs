@@ -1,7 +1,7 @@
 use crate::errata::ErrataMemory;
 use crate::gate::GateResolverFn;
 use crate::ledger::TurnLedger;
-use crate::obligations::{carryover_memory_event, ObligationLedger, RetroactiveEffectDebt};
+use crate::obligations::{carryover_memory_event, ObligationLedger, RetroDebtKind, RetroactiveEffectDebt};
 use crate::prompts::{load_gm_skill_with_mode, DynamicTailInput, TurnMessages};
 use crate::stream::RedactingBuffer;
 use crate::tools::{AwaitingPlayerRoll, SceneDeepExtractFn, ToolCtx, ToolRegistry};
@@ -48,6 +48,24 @@ impl GmLoop {
             .dues_for_hook(&input.request.session_id, &input.request.turn_id, &input.request.ruleset_id, &trpg_mechanics::watcher::HookEvent::TurnStart)
             .await
             .unwrap_or_default();
+        // —— 刺激驱动检定预 pass（J2 SAN 修复）：目录 when_to_use × 本回合虚构
+        //    内容（玩家输入+上回合叙事尾段）语义命中 → 阻塞债务候选，经 watcher
+        //    admit_dues（与 hook 通路同套抑制+落库）收编。fail-closed：门关/
+        //    无目录/LLM 失败 → 空，头部绝不因它阻断回合。
+        let stimulus_dues = if crate::stimulus::stimulus_pass_enabled() {
+            match self.engine.db.load_rule_kernel(&input.request.ruleset_id).await {
+                Ok(Some(kernel)) if !kernel.mechanics_catalog.is_empty() => {
+                    let recent = input.recent_transcript
+                        .or_else(|| input.history.iter().rev().find(|m| m.role == "assistant").map(|m| m.content.as_str()));
+                    let candidates = crate::stimulus::stimulus_due_candidates(&self.llm, &kernel.mechanics_catalog, &input.request.session_id, &input.request.turn_id, input.user_input, recent).await;
+                    trpg_mechanics::RefereeCombatService::new(self.engine.db.clone())
+                        .admit_dues(&input.request.session_id, candidates)
+                        .await
+                        .unwrap_or_default()
+                }
+                _ => Vec::new(),
+            }
+        } else { Vec::new() };
         // —— 三期姿态推导（spec §4.1）：active state_frame → mode；无 frame /
         //    frame 种类无 mode 包 → None（默认叙事姿态，与二期字节级一致）。db
         //    失败 unwrap_or_default（与头部 watcher 同款绝不阻断回合）；mode 包
@@ -69,6 +87,7 @@ impl GmLoop {
         let leftover_dues = self.engine.db.list_open_mechanic_dues(&input.request.session_id).await.unwrap_or_default();
         self.obligations.absorb_dues(leftover_dues);
         self.obligations.absorb_dues(hook_dues);
+        self.obligations.absorb_dues(stimulus_dues);
         // 上回合遗留债务 → 本回合 BP3 尾段（errata 之后、Player Input 之前）。
         let obligations_block = self.obligations.carryover_block();
         // —— 2. 上下文（agent_loop_protocol 强制置位 → BP1 出 agent-loop 版 engine protocol）——
@@ -170,6 +189,10 @@ impl GmLoop {
                     // effect 按 FIFO 结清追溯债务（effect_id 只消费一次，逐轮重扫安全）。
                     let effect_ids: Vec<String> = ledger.snapshot().effect_contracts.iter().map(|e| e.effect_id.clone()).collect();
                     obligations.settle_retro_debts_with_effects(&effect_ids);
+                    // Check 类追溯债务（MissingCheck"补 roll_check"半边）：本回合新
+                    // 结算的检定按 FIFO 结清（同款逐轮重扫安全）。
+                    let settled_check_ids: Vec<String> = settled.iter().map(|c| c.to_string()).collect();
+                    obligations.settle_retro_debts_with_checks(&settled_check_ids);
                     // 三期 §4.6 交锋簇节拍收紧（批2）：紧节拍下"已结算检定但零效果
                     // 落账"（effect 契约 / track 落账 / 检定自带 committed patches
                     // 皆无）⇒ 簇未闭合 ⇒ 本轮不得成为叙事终态。tight=false（mode=None
@@ -205,6 +228,24 @@ impl GmLoop {
                             messages.push_assistant_tool_calls(&calls);
                             for call in calls {
                                 let outcome = tools.dispatch(&ctx, &mut ledger, &call).await;
+                                // 可观测性（J2 修复）：每次 dispatch 落 agent_tool_calls
+                                // ——此前 GM loop 工具活动除骰子外全程不可见，评测
+                                // 无法对账。落库失败 `let _ =` 吞，绝不阻断回合。
+                                let output_value = serde_json::from_str::<serde_json::Value>(&outcome.content)
+                                    .unwrap_or_else(|_| json!({"raw": outcome.content.as_str()}));
+                                let status = if output_value.get("error").is_some() { "error" } else { "done" };
+                                let _ = ctx.engine.db.insert_agent_tool_call(&trpg_model::AgentToolCallRecord {
+                                    tool_call_id: outcome.tool_call_id.clone(),
+                                    session_id: input.request.session_id.clone(),
+                                    turn_id: input.request.turn_id.clone(),
+                                    tool_name: outcome.name.clone(),
+                                    visibility: Visibility::GmOnly,
+                                    input_json: serde_json::from_str(&call.arguments).unwrap_or_else(|_| json!({"raw": call.arguments.as_str()})),
+                                    output_json: Some(output_value),
+                                    status: status.to_string(),
+                                    error: None,
+                                    created_at: Utc::now(),
+                                }).await;
                                 messages.push_tool_result(&outcome.tool_call_id, &outcome.name, &outcome.content);
                                 if let Some(gate) = outcome.awaiting_player_roll {
                                     drain_redactor(&mut redactor, blocked, on_delta, &mut visible_text);
@@ -283,11 +324,18 @@ impl GmLoop {
             let event = self.errata.to_memory_event(request, &entries);
             let _ = self.engine.db.save_memory_event(&event).await;
         }
-        // B6：InventedEffect → 追溯债务（叙事已流出不可回收）进下回合清单——
-        // 补 apply_effect 落账或 waive_obligation 带理由，债务必清。
+        // B6：InventedEffect → Effect 追溯债务（补 apply_effect 落账）；J2 修复：
+        // MissingCheck → Check 追溯债务（补 roll_check）。叙事已流出不可回收，
+        // 债务进下回合清单——处理或 waive_obligation 带理由，债务必清。
         let debts = result.findings.iter()
-            .filter(|f| matches!(f.kind, trpg_agent::VerifierFindingKind::InventedEffect))
-            .map(|f| RetroactiveEffectDebt { debt_id: format!("debt_{}", Uuid::new_v4().simple()), turn_id: request.turn_id.clone(), finding_detail: f.detail.clone(), created_at: Utc::now() })
+            .filter_map(|f| {
+                let kind = match f.kind {
+                    trpg_agent::VerifierFindingKind::InventedEffect => Some(RetroDebtKind::Effect),
+                    trpg_agent::VerifierFindingKind::MissingCheck => Some(RetroDebtKind::Check),
+                    _ => None,
+                };
+                kind.map(|kind| RetroactiveEffectDebt { debt_id: format!("debt_{}", Uuid::new_v4().simple()), turn_id: request.turn_id.clone(), finding_detail: f.detail.clone(), kind, created_at: Utc::now() })
+            })
             .collect::<Vec<_>>();
         self.obligations.absorb_retro_debts(debts);
     }

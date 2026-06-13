@@ -614,7 +614,7 @@ impl RefereeCombatService {
         check.intent_kind = "effect_roll".into();
         check.check_label = "effect roll".into();
         check.dice_expression = dice_expression.into();
-        if effect_roll_policy_system_visible() {
+        if system_rolls_visible_policy() {
             check.roll_visibility = RollVisibility::PublicGmRoll;
             check.roll_authority = RollAuthority::System;
             check.disclosure = RollDisclosurePolicy::for_visibility(RollVisibility::PublicGmRoll);
@@ -977,11 +977,6 @@ impl RefereeCombatService {
         Ok(())
     }
 
-}
-
-fn effect_roll_policy_system_visible() -> bool {
-    let v = std::env::var("TRPG_AGENT_TABLE_DICE_POLICY").unwrap_or_else(|_| "system_rolls_visible".into());
-    matches!(v.to_ascii_lowercase().as_str(), "system_rolls_visible" | "system" | "gm_rolls_visible" | "auto" | "auto_visible")
 }
 
 pub fn make_roll_plan_from_check(session_id: &str, turn_id: &str, check_id: Option<&str>, contract: &CheckContract, expression: &str, result_json: &Value) -> RollPlan {

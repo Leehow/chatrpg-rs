@@ -288,6 +288,19 @@ impl RefereeCombatService {
             return Ok(Vec::new());
         }
         let candidates = hook_due_candidates(&kernel.mechanics_catalog, event, session_id, turn_id);
+        self.admit_dues(session_id, candidates).await
+    }
+
+    /// 抑制+落库共用尾段（hook 事件点与语义触发预 pass 两路共用）：
+    /// ① 同 (mechanic_id, hook_event) 已有 open due → 跳过；② waived 且
+    /// waive_scope=="scene" → 跳过（场景内豁免有效）；waive_scope=="turn" 不
+    /// 抑制（下回合仍提醒，spec §5.3）。通过者落库（失败 .ok() 吞——主链绝不
+    /// 因 watcher 持久化失败中断）并返回。
+    pub async fn admit_dues(
+        &self,
+        session_id: &str,
+        candidates: Vec<MechanicDue>,
+    ) -> Result<Vec<MechanicDue>> {
         if candidates.is_empty() {
             return Ok(Vec::new());
         }
@@ -319,7 +332,6 @@ impl RefereeCombatService {
                     continue;
                 }
             }
-            // 落库失败 .ok() 吞——事件点主链绝不因 watcher 持久化失败中断（B4 同款）。
             self.db.insert_mechanic_due(&due).await.ok();
             out.push(due);
         }
