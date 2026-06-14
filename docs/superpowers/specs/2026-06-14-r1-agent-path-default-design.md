@@ -96,7 +96,7 @@ enum TurnEvent {
 | errata 记忆 | ✓(332) | 缺 | 缺 | **补给 API/CLI** |
 | world event(PlayerAction 头) | ✓ | ✓ | ✓ | ✓ record_player_action phase |
 
-**scene_navigator 下沉**：现定义在 `trpg-api/src/lib.rs:2068`（pub，被 API + CLI legacy 调）。统一执行器在 trpg-gm，需把 scene_navigator + validate_transition + build_nav_prompt **下沉**到 trpg-gm 或 trpg-runtime（runtime 更合适：它已 own extract_module_scenes/prefetch_frontier/set_session_scene/load_module_graph）。下沉后 trpg-api 的 scene_navigator 改为 re-export 或删，调用方改引 runtime/gm。
+**scene_navigator 下沉**：现定义在 `trpg-api/src/lib.rs`（scene_navigator/validate_transition/build_nav_prompt + 内部 prefetch_frontier，pub，被 API + CLI 调）。统一执行器在 trpg-gm，需把这组函数 **下沉**到 trpg-runtime（set_session_scene/load_module_graph 是 db 方法已可达；runtime 加 `trpg-rule-agent` 依赖即可达 reader 深抽原语，无循环：rule-agent 不依赖 runtime）。**关键修正**：`extract_module_scenes`（约 api:289，scene_navigator/prefetch_frontier 依赖它做到场深抽）当前**也在 trpg-api**（非 runtime），且非薄 wrapper（编排 `trpg_rule_agent::reader::{load_units,deep_extract_scene_in_place,apply_bridge_edges}` + bundle 读写），必须**随之一并下沉** runtime（其依赖 db/llm/model/rule-agent 均低于 runtime）。下沉后 trpg-api 对这些函数改 `pub use trpg_runtime::...` re-export（保留 continue_module_extraction/背景 gleaning 等仍在 api 的调用方），CLI 调用改引 runtime。
 
 ### 4.4 传输适配（唯一各写各的，transport 决定尾部前台/后台）
 - **CLI**（agent_play 取代 run_turn_once）：drain Stream 到底（同步），Delta→stdout 逐 token，AwaitingPlayerRoll→提示，SceneTransition/Errata→打印。
