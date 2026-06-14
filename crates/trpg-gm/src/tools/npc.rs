@@ -33,6 +33,10 @@ impl GmTool for EnsureNpcParamTool {
         let module_id = ctx.request.module_id.as_ref().ok_or_else(|| ToolError::recoverable("no_module_loaded", "ensure_npc_param requires a module", None))?;
         let graph = ctx.engine.db.load_module_graph(module_id).await?.ok_or_else(|| ToolError::recoverable("no_module_loaded", format!("module graph not loaded: {module_id}"), None))?;
         let persona = persona_from_graph(&graph.npcs, &args.npc_id)?;
+        // R2 note (T6): GM agent tool 的现搓属工具调用副作用（AI 决策驱动按需现搓），
+        // 不经 NeedBus——NeedBus 收口的是回合头部 Rust 确定性发 Need（opposed_prepass
+        // 的自动现搓已迁移到 EntityNeedResolver，TRPG_NEED_BUS_ENTITY 控制）。此处保持直连
+        // ensure_npc_parameter（同理 tools/check.rs 的 opposed check 工具内现搓）。
         let value = ctx.engine.ensure_npc_parameter(&ctx.request.session_id, &ctx.request.ruleset_id, &persona, &args.bucket, &args.param, &args.context).await?;
         Ok(ToolOutput::ok(json!({"npc_id": args.npc_id, "bucket": args.bucket, "param": args.param, "value": value})))
     }

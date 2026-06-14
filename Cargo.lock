@@ -3511,6 +3511,7 @@ dependencies = [
  "trpg-llm",
  "trpg-mechanics",
  "trpg-model",
+ "trpg-need",
  "trpg-object",
  "trpg-params",
  "trpg-runtime",

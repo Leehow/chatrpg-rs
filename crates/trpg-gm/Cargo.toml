@@ -27,6 +27,7 @@ trpg-mechanics = { path = "../trpg-mechanics" }
 trpg-model = { path = "../trpg-model" }
 trpg-object = { path = "../trpg-object" }
 trpg-runtime = { path = "../trpg-runtime" }
+trpg-need = { path = "../trpg-need" }
 trpg-params = { path = "../trpg-params" }
 trpg-time = { path = "../trpg-time" }
 tokio-stream.workspace = true

@@ -36,6 +36,9 @@ pub mod material_need_resolver;
 
 pub mod parameter_need_resolver;
 
+pub mod entity_need_resolver;
+pub use entity_need_resolver::{EntityNeedResolver, encode_entity_hint};
+
 pub mod npc_synth;
 
 mod scene_projection;
@@ -2533,6 +2536,15 @@ fn runtime_need_bus_material_enabled() -> bool {
 /// `actor_parameter_blocks_for_turn` direct call (kept until Task 7 removes it).
 fn runtime_need_bus_param_enabled() -> bool {
     !std::env::var("TRPG_NEED_BUS_PARAM").map(|v| v == "false" || v == "0").unwrap_or(false)
+}
+
+/// R2 T6: route the turn's NPC on-demand synthesis (opposed-prepass `ensure_npc_parameter`)
+/// through the Need bus (EntityNeedResolver). Side-effect dominant: the resolver writes
+/// the NPC card; it produces no context blocks. Default ON; `TRPG_NEED_BUS_ENTITY=0`/`=false`
+/// falls back to the legacy direct `ensure_npc_parameter` calls in opposed_prepass (kept
+/// until Task 7 removes them). The gate is read at the emit site (trpg-gm opposed_prepass).
+pub fn runtime_need_bus_entity_enabled() -> bool {
+    !std::env::var("TRPG_NEED_BUS_ENTITY").map(|v| v == "false" || v == "0").unwrap_or(false)
 }
 
 /// Deterministically map a turn's request/state/input into a `RuleNeed` the bus
