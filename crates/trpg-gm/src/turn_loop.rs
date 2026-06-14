@@ -110,6 +110,7 @@ impl GmLoop {
         {
             let tools = mode_tools.as_ref().unwrap_or(&self.tools);
             let ctx = ToolCtx { engine: &self.engine, request: input.request, state: &state_agent, scene_extractor: self.scene_extractor.as_ref(), obligations: Some(&obligations_cell), data_dir: Some(&self.data_dir), current_mode: mode_id.as_deref(), opposed_binding: opposed_binding.as_ref() };
+            // R1 follow-up: run_agent_loop (execute.rs) duplicates this loop; dedupe when run_gm_turn is retired.
             'rounds: for round in 0..max_tool_rounds {
                 // §6.1 第 5 条可观测链前半：每轮请求前记缓存锚点（后半 cached_tokens
                 // 由下方 Usage 分支在同一 gm_cache target 下记录，relay 不透传则缺省）。
@@ -232,7 +233,7 @@ impl GmLoop {
                 self.verify_after_stream(input.request, &ledger, &visible_text).await;
             }
             let assistant_output = if visible_text.trim().is_empty() { gate.prompt_public.clone() } else { visible_text.clone() };
-            self.finalize_turn(input.request, &compiled, input.user_input, &assistant_output, "awaiting_player_roll").await;
+            self.finalize_turn(input.request, input.state, &compiled, input.user_input, &assistant_output, "awaiting_player_roll").await;
             return Ok(TurnOutcome::AwaitingPlayerRoll { check_id: gate.check_id, prompt_public: gate.prompt_public });
         }
         // —— 4. 仅当轮数自然耗尽且模型仍要工具：追加唯一一轮 ToolChoice::None 逼散文 ——
@@ -257,7 +258,7 @@ impl GmLoop {
         // —— 5. 流后校验（不阻塞交付：叙事已全部流出）——
         self.verify_after_stream(input.request, &ledger, &visible_text).await;
         // —— 6. 确定性收尾 ——
-        self.finalize_turn(input.request, &compiled, input.user_input, &visible_text, "ready").await;
+        self.finalize_turn(input.request, input.state, &compiled, input.user_input, &visible_text, "ready").await;
         Ok(TurnOutcome::Narration(visible_text))
     }
 
@@ -564,14 +565,22 @@ impl GmLoop {
     /// 本回合 + 回合摘要 + 学习审计。叙事已流出不可回收，收尾失败 tracing::warn
     /// 不 panic（也让 MockLlm 单测在 lazy pool 下保持绿）；真实落库由 Task 11 的
     /// turns 表 SQL 验证。
-    pub(crate) async fn finalize_turn(&self, request: &ContextRequest, compiled: &CompiledContext, user_input: &str, assistant_output: &str, status: &str) {
+    pub(crate) async fn finalize_turn(&self, request: &ContextRequest, state: &RuntimeState, compiled: &CompiledContext, user_input: &str, assistant_output: &str, status: &str) {
         let hashes = json!({"prefix": compiled.prefix_hash, "pinned": compiled.pinned_hash, "dynamic": compiled.dynamic_hash});
         if let Err(err) = self.engine.db.save_turn(&request.session_id, &request.turn_id, user_input, assistant_output, hashes, status).await {
             tracing::warn!(error = %err, "agent path save_turn failed");
         }
         if !assistant_output.trim().is_empty() {
             let summary: String = assistant_output.chars().take(280).collect();
-            let event = MemoryEvent { event_id: format!("mem_turn_{}", Uuid::new_v4().simple()), session_id: request.session_id.clone(), turn_id: Some(request.turn_id.clone()), ruleset_id: request.ruleset_id.clone(), module_id: request.module_id.clone(), scene_id: None, location_id: None, actor_ids: vec![], visibility: Visibility::GmOnly, event_kind: MemoryKind::Event, summary, transcript_excerpt: None, source: json!({"source":"gm_agent.turn_summary"}), tags: vec!["gm_turn".to_string()], importance: 1, occurred_at: Utc::now() };
+            // 富版回合记忆（与退役 API turn_postprocess 对齐，spec §4.3）：importance 50、
+            // scene/location/actor 取自本回合 RuntimeState、含转录摘录，tags 用
+            // ["turn","session_memory"] 并保留 "gm_turn" 便于沿用旧检索。
+            let transcript_excerpt = Some(format!(
+                "Player: {}\nGM: {}",
+                user_input,
+                assistant_output.chars().take(2000).collect::<String>()
+            ));
+            let event = MemoryEvent { event_id: format!("mem_turn_{}", Uuid::new_v4().simple()), session_id: request.session_id.clone(), turn_id: Some(request.turn_id.clone()), ruleset_id: request.ruleset_id.clone(), module_id: request.module_id.clone(), scene_id: state.scene_id.clone(), location_id: state.location_id.clone(), actor_ids: state.active_npc_ids.clone(), visibility: Visibility::GmOnly, event_kind: MemoryKind::Event, summary, transcript_excerpt, source: json!({"source":"gm_agent.turn_summary"}), tags: vec!["turn".to_string(), "session_memory".to_string(), "gm_turn".to_string()], importance: 50, occurred_at: Utc::now() };
             if let Err(err) = self.engine.db.save_memory_event(&event).await {
                 tracing::warn!(error = %err, "agent path turn summary memory event failed");
             }
@@ -605,7 +614,7 @@ impl GmLoop {
             Some(gate) if ctx.visible_text.trim().is_empty() => gate.prompt_public.clone(),
             _ => ctx.visible_text.clone(),
         };
-        self.finalize_turn(input.request, &ctx.compiled, input.user_input, &assistant_output, status).await;
+        self.finalize_turn(input.request, input.state, &ctx.compiled, input.user_input, &assistant_output, status).await;
     }
 
     /// PhaseId::SceneNavigate — 语义场景导航（吸收原 CLI agent_play 回合末逻辑）。

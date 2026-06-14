@@ -4,7 +4,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{BTreeMap, HashSet};
-use trpg_agent::{contract_block, looks_like_new_action_or_abandon, make_pending_check, parse_roll_text, GmAgent, ParsedRollText};
+use trpg_agent::{contract_block, looks_like_new_action_or_abandon, make_pending_check, parse_roll_text, ParsedRollText};
 use trpg_ability::{AbilityService, AbilityTurnInput, AbilityTurnResult};
 use trpg_semantics::SemanticRuleBindingService;
 use trpg_combat::{CombatAgent, ConflictTurnInput, ConflictTurnResult};
@@ -340,27 +340,6 @@ impl RuntimeEngine {
     }
 
 
-
-    /// Rust-owned GM Agent planning step. The policy/advice content is loaded
-    /// from JSON advice layers and is not mixed into the LLM system prompt.
-    pub async fn plan_agent_turn(
-        &self,
-        request: &ContextRequest,
-        state: &RuntimeState,
-        user_input: &str,
-    ) -> Result<AgentTurnPlan> {
-        let agent = GmAgent::from_env_or_default();
-        let actor_id = request.viewer.actor_id.as_deref().or(Some("pc.current"));
-        let plan = agent.plan_turn(trpg_agent::AgentTurnInput {
-            session_id: &request.session_id,
-            turn_id: &request.turn_id,
-            ruleset_id: &request.ruleset_id,
-            module_id: request.module_id.as_deref().or(state.module_id.as_deref()),
-            actor_id,
-            user_input,
-        });
-        Ok(plan)
-    }
 
     pub async fn persist_agent_plan(&self, plan: &AgentTurnPlan) -> Result<()> {
         self.db.insert_agent_turn(plan, "planned").await?;

@@ -6,7 +6,6 @@ use serde_json::json;
 use std::fs;
 use std::path::Path;
 use trpg_model::*;
-use uuid::Uuid;
 
 pub mod gm_loop;
 pub use gm_loop::*;
@@ -56,143 +55,6 @@ impl GmAgent {
         }
     }
 
-    pub fn plan_turn(&self, input: AgentTurnInput<'_>) -> AgentTurnPlan {
-        let text = input.user_input.trim();
-        let mut plan = AgentTurnPlan::new(input.session_id, input.turn_id, input.ruleset_id, input.module_id.map(str::to_string));
-        plan.input_summary = text.chars().take(320).collect();
-        plan.policy_layers_used = self.policy.advice_layers.iter().map(|l| l.layer_id.clone()).collect();
-
-        if text.is_empty() {
-            plan.kind = TurnPlanKind::NarrateOnly;
-            plan.reasoning_summary = "empty player input; no mechanical gate".into();
-            return plan;
-        }
-
-        // The decision rules are data-driven. We intentionally do not hard-code
-        // a table like "NPC pickpocket -> secret roll" in this function. The
-        // JSON advice layer declares suggestions and priorities; Rust only
-        // matches generic conditions and validates the resulting plan.
-        let mut matches = self.policy.matching_rules(text);
-        matches.sort_by(|a, b| b.priority.cmp(&a.priority).then(a.rule_id.cmp(&b.rule_id)));
-
-        if let Some(rule) = matches.first() {
-            plan.advice_refs.push(rule.rule_id.clone());
-            plan.reasoning_summary = rule.advice_summary.clone().unwrap_or_else(|| format!("matched agent advice rule {}", rule.rule_id));
-            match rule.plan_kind {
-                AgentPlanAdviceKind::AskPlayerRoll => {
-                    if system_rolls_visible_policy() {
-                        let mut check = build_check_contract(input, text, rule, RollVisibility::PublicGmRoll);
-                        check.roll_authority = RollAuthority::System;
-                        plan.kind = TurnPlanKind::GmRollThenNarrate;
-                        plan.check = Some(check);
-                    } else {
-                        let check = build_check_contract(input, text, rule, RollVisibility::PlayerRollRequired);
-                        plan.kind = TurnPlanKind::AskPlayerRoll;
-                        plan.check = Some(check);
-                    }
-                }
-                AgentPlanAdviceKind::GmPublicRoll => {
-                    let check = build_check_contract(input, text, rule, RollVisibility::PublicGmRoll);
-                    plan.kind = TurnPlanKind::GmRollThenNarrate;
-                    plan.check = Some(check);
-                }
-                AgentPlanAdviceKind::GmSecretRoll => {
-                    let check = build_check_contract(input, text, rule, RollVisibility::PrivateGmRoll);
-                    plan.kind = TurnPlanKind::SecretRollThenNarrate;
-                    plan.check = Some(check);
-                }
-                AgentPlanAdviceKind::PassiveResolution => {
-                    let mut check = build_check_contract(input, text, rule, RollVisibility::PassiveResolution);
-                    check.dice_expression = rule.dice_expression_hint.clone().unwrap_or_else(|| "passive".into());
-                    plan.kind = TurnPlanKind::PassiveResolution;
-                    plan.check = Some(check);
-                }
-                AgentPlanAdviceKind::FreeRead => {
-                    plan.kind = TurnPlanKind::NarrateOnly;
-                    plan.free_read = Some(FreeReadContract {
-                        free_read_id: format!("freeread_{}", Uuid::new_v4().simple()),
-                        action_summary: text.chars().take(500).collect(),
-                        reason: rule.free_read_reason.clone().unwrap_or_else(|| "The matched advice layer says this is surface information with no material state change.".into()),
-                        information_level: InformationLevel::Surface,
-                        source_refs: vec![],
-                        no_state_change: true,
-                    });
-                }
-                AgentPlanAdviceKind::NarrateOnly => {
-                    plan.kind = TurnPlanKind::NarrateOnly;
-                }
-            }
-            return plan;
-        }
-
-        // If no advice rule matches, stay conservative: do not force mechanics.
-        // The normal LLM narration path still has the player-facing output
-        // contract. Product behavior should be improved by editing JSON advice
-        // layers, not by hardcoding more decisions here.
-        plan.kind = TurnPlanKind::NarrateOnly;
-        plan.reasoning_summary = "no agent advice rule matched; continue with normal narration path".into();
-        plan
-    }
-}
-
-fn build_check_contract(input: AgentTurnInput<'_>, text: &str, rule: &AgentAdviceRule, visibility: RollVisibility) -> CheckContract {
-    let actor_id = input.actor_id.unwrap_or("pc.current").to_string();
-    let check_id = format!("check_{}", Uuid::new_v4().simple());
-    let label = rule.check_label_hint.clone().unwrap_or_else(|| "Appropriate check".to_string());
-    let dice_expression = rule.dice_expression_hint.clone().unwrap_or_else(|| "1d10".to_string());
-    let target = rule.static_target.map(|value| CheckTargetModel::StaticNumber { value, label: rule.target_label.clone().unwrap_or_else(|| "difficulty".into()) })
-        .unwrap_or(CheckTargetModel::UnknownUntilLookup);
-    CheckContract {
-        check_id,
-        session_id: input.session_id.to_string(),
-        turn_id: input.turn_id.to_string(),
-        ruleset_id: input.ruleset_id.to_string(),
-        module_id: input.module_id.map(str::to_string),
-        initiator: ActorRef { actor_id: actor_id.clone(), actor_kind: ActorKind::PlayerCharacter, display_name: Some("current PC".into()) },
-        target_actor: None,
-        opposition: OppositionModel::NoMechanicalOpposition,
-        action_summary: text.chars().take(500).collect(),
-        intent_kind: rule.intent_kind.clone().unwrap_or_else(|| "unknown".into()),
-        check_label: label,
-        dice_expression,
-        modifiers: vec![],
-        target,
-        tested_parameter: None,
-        opponent_tested_parameter: None,
-        actor_snapshot_ids: vec![],
-        source_refs: vec![],
-        learned_packet_ids: vec![],
-        roll_visibility: visibility,
-        roll_authority: match visibility {
-            RollVisibility::PlayerRollRequired => RollAuthority::Player,
-            RollVisibility::PublicGmRoll | RollVisibility::PrivateGmRoll | RollVisibility::PassiveResolution | RollVisibility::NoRoll => RollAuthority::GmAgent,
-        },
-        disclosure: RollDisclosurePolicy::for_visibility(visibility),
-        stakes: CheckStakes {
-            before_roll_public: rule.before_roll_public.clone().unwrap_or_else(|| "This action has uncertainty and meaningful consequences.".into()),
-            success_public: rule.success_public.clone().unwrap_or_else(|| "You get what you were trying to achieve.".into()),
-            failure_public: rule.failure_public.clone().unwrap_or_else(|| "The situation gets worse or you pay a cost.".into()),
-            critical_public: rule.critical_public.clone(),
-            fumble_public: rule.fumble_public.clone(),
-            success_patches_allowed: vec![],
-            failure_patches_allowed: vec![],
-            irreversible: rule.irreversible.unwrap_or(false),
-        },
-        confidence: rule.confidence.clone().unwrap_or(RulingConfidence::Low),
-        ruling_status: RulingStatus::Provisional,
-        advice_refs: vec![rule.rule_id.clone()],
-        expires_at_turn: Some(input.turn_id.to_string()),
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct AgentTurnInput<'a> {
-    pub session_id: &'a str,
-    pub turn_id: &'a str,
-    pub ruleset_id: &'a str,
-    pub module_id: Option<&'a str>,
-    pub actor_id: Option<&'a str>,
-    pub user_input: &'a str,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -218,21 +80,6 @@ impl AgentPolicyPack {
         }
         layers.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.layer_id.cmp(&b.layer_id)));
         Ok(Self { advice_layers: layers })
-    }
-
-    pub fn matching_rules(&self, input: &str) -> Vec<AgentAdviceRule> {
-        let lowered = input.to_lowercase();
-        let mut out = Vec::new();
-        for layer in &self.advice_layers {
-            if !layer.enabled { continue; }
-            for rule in &layer.rules {
-                if !rule.enabled { continue; }
-                if matches_conditions(&lowered, &rule.match_conditions) {
-                    out.push(rule.clone());
-                }
-            }
-        }
-        out
     }
 }
 
@@ -319,18 +166,6 @@ pub struct MatchConditions {
     pub not_terms: Vec<String>,
     #[serde(default)]
     pub regex_any: Vec<String>,
-}
-
-fn matches_conditions(lowered_input: &str, conditions: &MatchConditions) -> bool {
-    if !conditions.not_terms.is_empty() && conditions.not_terms.iter().any(|term| lowered_input.contains(&term.to_lowercase())) {
-        return false;
-    }
-    if !conditions.all_terms.is_empty() && !conditions.all_terms.iter().all(|term| lowered_input.contains(&term.to_lowercase())) {
-        return false;
-    }
-    let any_ok = conditions.any_terms.is_empty() || conditions.any_terms.iter().any(|term| lowered_input.contains(&term.to_lowercase()));
-    let regex_ok = conditions.regex_any.is_empty() || conditions.regex_any.iter().any(|pat| Regex::new(pat).map(|re| re.is_match(lowered_input)).unwrap_or(false));
-    any_ok && regex_ok
 }
 
 pub fn pending_check_prompt(contract: &CheckContract) -> String {

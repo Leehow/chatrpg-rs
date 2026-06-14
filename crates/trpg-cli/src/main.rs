@@ -22,7 +22,7 @@ use trpg_model::*;
 use trpg_parser::{ParserConfig, ProjectParseService};
 use trpg_rule_agent::RuleStewardAgent;
 use trpg_runtime::scene_navigation::extract_module_scenes;
-use trpg_runtime::{roll_dice, validate_character_template_sheet, AutoRollExecution, RuntimeEngine};
+use trpg_runtime::{roll_dice, validate_character_template_sheet, RuntimeEngine};
 use trpg_search::{load_search_source_configs, SearchConfig, SearchService};
 
 mod agent_play;
@@ -904,37 +904,6 @@ async fn turn_cli(args: TurnArgs) -> Result<()> {
     Ok(())
 }
 
-async fn compact_memory_cli(db: &Db, session_id: &str, ruleset: &str, module: Option<&str>) -> Result<()> {
-    let events = db.list_memory_events(session_id, 24).await?;
-    let facts = db.list_memory_facts(session_id, 40).await?;
-    let mut summary = String::from("# GM Memory Snapshot\n\n## Recent Events\n");
-    for event in events.iter().rev() {
-        summary.push_str(&format!("- {}\n", event.summary));
-    }
-    if !facts.is_empty() {
-        summary.push_str("\n## Active Facts\n");
-        for fact in &facts {
-            summary.push_str(&format!("- {}\n", fact.summary));
-        }
-    }
-    let snapshot = MemorySnapshot::new(
-        format!("memory.snapshot.{}.session", session_id),
-        session_id.to_string(),
-        ruleset.to_string(),
-        module.map(str::to_string),
-        Scope { scope_type: ScopeType::Session, scope_id: session_id.to_string() },
-        Visibility::GmOnly,
-        "GM Memory Snapshot",
-        summary,
-        events.iter().map(|e| e.event_id.clone()).collect(),
-        facts.iter().map(|f| f.fact_id.clone()).collect(),
-        1,
-    );
-    db.upsert_memory_snapshot(&snapshot).await?;
-    println!("memory snapshot saved: {} v{}", snapshot.snapshot_id, snapshot.version);
-    Ok(())
-}
-
 async fn resolve_text_input(
     inline: Option<String>,
     file: Option<PathBuf>,
@@ -1012,10 +981,6 @@ fn emit_named_event(format: StreamFormat, event: &str, data: Value) -> Result<()
     Ok(())
 }
 
-fn agent_v09_enabled() -> bool {
-    std::env::var("TRPG_AGENT_ENABLE_V09").map(|v| v != "0" && v.to_lowercase() != "false").unwrap_or(true)
-}
-
 fn emit_error(format: StreamFormat, message: &str) -> Result<()> {
     match format {
         StreamFormat::Text => eprintln!("[error] {message}"),
@@ -1037,24 +1002,6 @@ fn emit_sse(event: &str, data: &str) {
     println!();
     io::stdout().flush().ok();
 }
-
-fn summarize_turn_for_memory(user_input: &str, assistant_output: &str) -> String {
-    let mut summary = String::new();
-    summary.push_str("Player: ");
-    summary.push_str(&user_input.chars().take(240).collect::<String>());
-    summary.push_str(" | GM: ");
-    summary.push_str(&assistant_output.chars().take(360).collect::<String>());
-    summary
-}
-
-fn take_tail_chars(input: &str, max_chars: usize) -> String {
-    let mut chars: Vec<char> = input.chars().rev().take(max_chars).collect();
-    chars.reverse();
-    chars.into_iter().collect()
-}
-
-
-
 
 async fn time_command_cli(command: TimeCommand) -> Result<()> {
     let db = connect_db().await?;
@@ -1376,94 +1323,6 @@ fn make_llm() -> Result<Arc<dyn LlmClient>> {
     Ok(Arc::new(OpenAiCompatibleClient::new(config)?))
 }
 
-fn gm_agentic_retrieve_enabled() -> bool {
-    std::env::var("TRPG_GM_AGENTIC_RETRIEVE")
-        .map(|v| !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"))
-        .unwrap_or(true)
-}
-
-/// Agentic GM rule retrieval (B): before narrating, the GM may call `retrieve`
-/// (OpenAI function-calling) to fetch SPECIFIC parsed rules for the action,
-/// rather than inventing them. Returns the concatenated source-backed snippets
-/// it pulled (empty if it decided the core mechanic suffices).
-async fn gm_retrieve_phase(llm: &dyn LlmClient, runtime: &RuntimeEngine, ruleset_id: &str, session_id: &str, user_input: &str) -> String {
-    let tool = json!({"type":"function","function":{
-        "name":"retrieve",
-        "description":"Search the parsed rulebook for a SPECIFIC rule needed to resolve the player's action (e.g. surprise, stealth, grappling, a named maneuver, a status effect). Returns rule snippets with pages. Use only when the action needs a rule beyond the core mechanic already in context.",
-        "parameters":{"type":"object","properties":{"query":{"type":"string","description":"keywords, e.g. 'surprise ambush', 'sleight of hand pickpocket'"}},"required":["query"]}}});
-    let grow_tool = json!({"type":"function","function":{
-        "name":"apply_track_change",
-        "description":"Apply a character-growth change when the fiction calls for it (level up, raise a skill, spend points, raise a stat). Sets or adds a value to a track (class level, pool, rank) or a base stat, then the engine re-derives. You decide the rule-appropriate amount; the engine only moves the value.",
-        "parameters":{"type":"object","properties":{
-            "bucket":{"type":"string","enum":["tracks","stats","skills","field"]},
-            "id":{"type":"string","description":"track id (e.g. 'fighter') or stat id (e.g. 'dexterity')"},
-            "op":{"type":"string","enum":["set","add"]},
-            "amount":{"type":"number"},
-            "value":{"type":"string","description":"a categorical value to SET (e.g. a race/ancestry/class choice like 'red' or 'wizard'); use instead of amount for non-numeric inputs"},
-            "kind":{"type":"string","description":"semantic tag for a new track, e.g. class_level / magical_class_level / pool / rank"},
-            "category":{"type":"string"}
-        },"required":["bucket","id","op"]}}});
-    let sys = "You are the GM about to resolve a player's action. The core rules (resolution mechanic, state tracks, character) are ALREADY in your context. If correctly resolving THIS action needs a SPECIFIC rule you don't already have, call retrieve(query) to fetch it from the rulebook — NEVER invent rules. Call retrieve up to 3 times. \
-When the fiction grants concrete character growth (a level up, raising a skill, spending earned points, raising a stat), call apply_track_change to move the value; the engine re-derives. Decide the rule-appropriate amount yourself. Do NOT call it for transient effects, damage, or resource spends handled by the dice/effect tools. \
-ITEM POLICY — when the player INTRODUCES or CREATES an item not already established, NEVER fabricate its mechanical parameters: \
-(1) If its identity is AMBIGUOUS or you cannot match it to a real rules/genre item (any object flagged clarification_needed in your context is this case), ASK the player what it is before assigning any mechanics. \
-(2) If they give a reasonable real-world / genre-appropriate analog (e.g. 'a pistol like a Desert Eagle'), treat it as the matching rules item and retrieve THAT item's stats from the source. \
-(3) If it is clearly over-power or genre-inappropriate for THIS module (e.g. a Warhammer 40k Astartes in a mundane setting), push back and advise the player to reconsider; they MAY insist, in which case allow it but warn clearly that it will severely hurt the game experience — never silently assign 'balanced' stats. \
-NPC POLICY — when an NPC the player INTRODUCES or you must voice has no established stat block or persona, NEVER fabricate 'balanced' mechanics: \
-(1) If who the NPC is is AMBIGUOUS or no persona is established, ASK the player to establish who they are (or what they want from this NPC) before assigning any stats or motives — do not invent an identity. \
-(2) If a fitting NPC fits the module/genre, use the module NPC card if one exists, otherwise a fitting genre archetype, and retrieve its stats from the source. \
-(3) If the NPC is clearly over-powered or genre-mismatched for THIS module, push back and warn the player; you MAY proceed but FLAG it as provisional / off-power — never silently fabricate 'balanced' stats. \
-When you have what you need (or the action only needs the core mechanic), reply with the single word READY and no tool call.";
-    let mut msgs = vec![
-        json!({"role":"system","content": sys}),
-        json!({"role":"user","content": format!("Ruleset: {ruleset_id}\nPlayer action: {user_input}\nRetrieve any specific rule you need, then reply READY.")}),
-    ];
-    let mut fetched = String::new();
-    for _ in 0..4 {
-        let resp = match llm.complete_with_tools(msgs.clone(), vec![tool.clone(), grow_tool.clone()]).await {
-            Ok(r) => r,
-            Err(_) => break,
-        };
-        let msg = resp.pointer("/choices/0/message").cloned().unwrap_or_else(|| json!({}));
-        let tcs = msg.get("tool_calls").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-        if tcs.is_empty() {
-            break;
-        }
-        msgs.push(msg);
-        for tc in &tcs {
-            let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("");
-            let name = tc.pointer("/function/name").and_then(|v| v.as_str()).unwrap_or("");
-            let args: serde_json::Value = tc
-                .pointer("/function/arguments")
-                .and_then(|v| v.as_str())
-                .and_then(|s| serde_json::from_str(s).ok())
-                .unwrap_or_else(|| json!({}));
-            if name == "apply_track_change" {
-                let b = args.get("bucket").and_then(Value::as_str).unwrap_or("tracks");
-                let tid = args.get("id").and_then(Value::as_str).unwrap_or("");
-                let op = args.get("op").and_then(Value::as_str).unwrap_or("add");
-                let amt = args.get("amount").and_then(Value::as_f64).unwrap_or(0.0);
-                let val = args.get("value").and_then(Value::as_str);
-                let kind = args.get("kind").and_then(Value::as_str);
-                let cat = args.get("category").and_then(Value::as_str);
-                let ok = runtime
-                    .apply_track_change(session_id, "pc.current", b, tid, op, amt, val, kind, cat)
-                    .await
-                    .unwrap_or(false);
-                let res = json!({"applied": ok, "bucket": b, "id": tid, "op": op, "amount": amt, "value": val}).to_string();
-                fetched.push_str(&format!("\n## apply_track_change({b}/{tid} {op} {amt}) -> applied={ok}\n"));
-                msgs.push(json!({"role":"tool","tool_call_id": id, "content": res}));
-                continue;
-            }
-            let q = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
-            let res = runtime.retrieve_rules(ruleset_id, q, 4).await;
-            fetched.push_str(&format!("\n## retrieve(\"{q}\")\n{res}\n"));
-            msgs.push(json!({"role":"tool","tool_call_id": id, "content": res}));
-        }
-    }
-    fetched
-}
-
 fn default_data_dir() -> PathBuf {
     std::env::var("TRPG_DATA_DIR").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("./data"))
 }
@@ -1550,104 +1409,4 @@ fn extract_fenced_cli(text: &str, lang: &str) -> Option<String> {
     let rest = &text[start..];
     let end = rest.find("```")?;
     Some(rest[..end].trim().to_string())
-}
-
-fn emit_check_result_cli(stream_format: StreamFormat, result: &CheckResultRecord) -> Result<()> {
-    emit_phase(stream_format, "pending_check_resolved", serde_json::to_value(result)?)?;
-    if result.roll.visibility == RollVisibility::PrivateGmRoll {
-        emit_named_event(stream_format, "tool", json!({"tool":"roll_dice", "visibility":"gm_only", "check_id": &result.check_id}))?;
-    } else {
-        emit_named_event(stream_format, "dice", json!({"visibility": result.roll.visibility, "roll": result.roll.clone(), "outcome": result.outcome.clone()}))?;
-    }
-    for patch in &result.committed_patches {
-        match patch {
-            StatePatch::ActorHpDelta { actor_id, from, delta, to, reason } => {
-                emit_phase(stream_format, "actor_hp_updated", json!({"actor_id": actor_id, "from": from, "delta": delta, "to": to, "reason": reason}))?;
-                emit_named_event(stream_format, "damage_packet", json!({"actor_id": actor_id, "from": from, "delta": delta, "to": to, "reason": reason}))?;
-            }
-            StatePatch::ModifyTrack { target, amount, reason } => {
-                emit_phase(stream_format, "parameter_impact_applied", json!({"target": target, "amount": amount, "reason": reason}))?;
-                emit_named_event(stream_format, "effect_resolution_packet", json!({"target": target, "amount": amount, "reason": reason}))?;
-            }
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-fn emit_auto_roll_execution_cli(stream_format: StreamFormat, execution: &AutoRollExecution) -> Result<()> {
-    emit_check_result_cli(stream_format, &execution.primary)?;
-    for followup in &execution.followups {
-        emit_check_result_cli(stream_format, followup)?;
-    }
-    Ok(())
-}
-
-/// An outcome that ROLLED but bound NO verdict (no target / pass-fail): the
-/// contest resolver returned a no-verdict model (provisional / ruleset_procedure_lookup)
-/// or left success+degree null. Distinct from `blocked` (refused to roll).
-/// Used to tell the narrator NOT to invent a success/failure.
-fn outcome_is_provisional(outcome: &serde_json::Value) -> bool {
-    // Already resolved: success or degree field is non-null (opposed rolls produce
-    // success=false/true + degree even when target is null).
-    let has_verdict = outcome.get("success").map(|v| !v.is_null()).unwrap_or(false)
-        || outcome.get("degree").map(|v| !v.is_null()).unwrap_or(false);
-    if has_verdict { return false; }
-    // No verdict yet: only provisional/ruleset_procedure_lookup models are genuinely
-    // unresolved. OpposedRoll is serialized as "opposed_roll" (snake_case) and will
-    // always carry success+degree when resolved, so it never reaches here.
-    let model = outcome.get("resolution_model").map(|m| m.to_string()).unwrap_or_default();
-    model.contains("provisional") || model.contains("ruleset_procedure_lookup")
-}
-
-fn roll_execution_context_tag(source: &str, execution: &AutoRollExecution) -> Result<String> {
-    let blocked = execution.roll_policy == "blocked_missing_source" || execution.primary.outcome.get("blocked").and_then(|v| v.as_bool()).unwrap_or(false);
-    let provisional = !blocked && outcome_is_provisional(&execution.primary.outcome);
-    let instruction = if blocked {
-        "Rust mechanics refused to roll because source-backed actor/target/weapon/defense/damage facets are missing. Do not invent DV, HP, SP, damage, or skill totals. Narrate the visible uncertainty/action beat and surface that the rules steward must hydrate the missing facets before mechanical resolution."
-    } else if provisional {
-        "Rust rolled the dice but could NOT bind a target number / pass-fail verdict for this step (provisional, needs source binding). Narrate ONLY the kinetic action and visible tension of the roll; do NOT state or imply success or failure, and do NOT invent a target number, DV, HP/SP, or verdict. Surface that the outcome is pending until the rules steward binds the missing skill/DV."
-    } else {
-        "Rust dice/effect tools have already resolved and written this mechanical step. Narrate the visible fictional outcome; do not ask for dice, damage, target numbers, HP/SP, or resource totals."
-    };
-    let payload = json!({
-        "source": source,
-        "roll_policy": &execution.roll_policy,
-        "primary": &execution.primary,
-        "followups": &execution.followups,
-        "narration_instruction": instruction
-    });
-    let system_instruction = if blocked {
-        "[system]本次机械结算因缺少 source-backed 参数被暂停。请不要编造骰子、伤害、DV、HP、SP 或技能值；只叙述玩家可见的行动推进，并说明需要规则管家先水合缺失参数。[/system]"
-    } else if provisional {
-        "[system]骰子已掷出，但本次结算尚未绑定目标值/成败判定（provisional，待规则绑定）。请只叙述掷骰的动作与张力，不要陈述或暗示成功/失败，也不要编造目标值、DV、HP、SP 或判定结果；说明结果待规则管家绑定后再确定。[/system]"
-    } else {
-        "[system]骰子与效果工具已经完成本次机械结算。请只叙述玩家可见后果，并在下一个有意义的玩家决策点停下；不要要求玩家提供骰子结果、伤害、DV、HP、SP 或其他规则数值。[/system]"
-    };
-    Ok(format!("
-
-[roll]
-{}
-[/roll]
-{}
-", serde_json::to_string_pretty(&payload)?, system_instruction))
-}
-
-
-#[cfg(test)]
-mod guard_tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn resolved_opposed_outcome_is_not_provisional() {
-        // 对抗已出胜负:success 非空(target 可为 null)。守卫不得判 provisional。
-        let resolved = json!({"success": false, "degree": "defender_wins", "target": null,
-            "resolution_model": {"kind":"opposed_roll"}});
-        assert!(!outcome_is_provisional(&resolved));
-        // 真未判定:success/degree 都 null。
-        let unresolved = json!({"success": null, "degree": null, "target": null,
-            "resolution_model": {"kind":"provisional","reason":"x"}});
-        assert!(outcome_is_provisional(&unresolved));
-    }
 }

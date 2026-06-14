@@ -18,15 +18,13 @@ use tokio_stream::wrappers::ReceiverStream;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info};
-use trpg_agent::pending_check_prompt;
-use trpg_combat::ConflictTurnResult;
 use trpg_db::Db;
 use trpg_ingest::PdfBackendKind;
 use trpg_llm::LlmClient;
 use trpg_model::*;
 use trpg_parser::{ParserConfig, ProjectParseService};
 use trpg_rule_agent::RuleStewardAgent;
-use trpg_runtime::{validate_character_template_sheet, AutoRollExecution, RuntimeEngine};
+use trpg_runtime::{validate_character_template_sheet, RuntimeEngine};
 use trpg_gm::{
     execute_turn, GmLoop, LoopConfig, OwnedTurnRequest, SceneDeepExtractFn, ToolRegistry,
     TurnEvent, TurnOutcome, CANONICAL_TURN_PLAN,
@@ -61,7 +59,6 @@ pub fn router(state: AppState) -> Router {
         .route("/api/rulesets/{id}/identity", get(ruleset_identity))
         .route("/api/rulesets/{id}/character-template", get(ruleset_character_template))
         .route("/api/context/compile", post(compile_context))
-        .route("/api/agent/plan", post(agent_plan_api))
         .route("/api/checks/resolve", post(resolve_check_api))
         .route("/api/conflict/start", post(conflict_start_api))
         .route("/api/conflict/{session_id}/frames", get(conflict_frames_api))
@@ -115,7 +112,6 @@ async fn openapi_json() -> Json<Value> {
             "/api/rulesets/{id}/identity": {"get": {"summary": "Ruleset identity once Stage 0 done (else 202)"}},
             "/api/rulesets/{id}/character-template": {"get": {"summary": "Character sheet schema once Stage 1 done (else 202)"}},
             "/api/context/compile": {"post": {"summary": "Compile BP1/BP2/BP3 context"}},
-            "/api/agent/plan": {"post": {"summary": "Run Rust GM Agent planning without streaming narration"}},
             "/api/checks/resolve": {"post": {"summary": "Resolve an open pending check from player roll input"}},
             "/api/conflict/start": {"post": {"summary": "Start or continue a ConflictFrame/CombatFrame through the Rust CombatAgent"}},
             "/api/conflict/{session_id}/frames": {"get": {"summary": "List active combat/conflict working-state frames"}},
@@ -831,22 +827,6 @@ async fn approve_learning_candidate_api(Path(candidate_id): Path<String>, State(
 
 
 #[derive(Debug, Deserialize)]
-pub struct AgentPlanRequest {
-    pub context_request: ContextRequest,
-    pub runtime_state: RuntimeState,
-    pub user_input: String,
-}
-
-async fn agent_plan_api(State(state): State<AppState>, Json(req): Json<AgentPlanRequest>) -> Result<Json<Value>, ApiError> {
-    let plan = state.runtime.plan_agent_turn(&req.context_request, &req.runtime_state, &req.user_input).await?;
-    state.runtime.persist_agent_plan(&plan).await?;
-    let prompt_public = plan.check.as_ref()
-        .filter(|_| matches!(plan.kind, TurnPlanKind::AskPlayerRoll))
-        .map(pending_check_prompt);
-    Ok(Json(json!({"plan": plan, "prompt_public": prompt_public})))
-}
-
-#[derive(Debug, Deserialize)]
 pub struct ResolveCheckRequest {
     pub session_id: String,
     pub turn_id: Option<String>,
@@ -1259,15 +1239,6 @@ fn default_memory_limit() -> u32 {
     std::env::var("TRPG_MEMORY_RETRIEVAL_LIMIT").ok().and_then(|v| v.parse().ok()).unwrap_or(8)
 }
 
-fn summarize_turn_for_memory(user_input: &str, assistant_output: &str) -> String {
-    let mut summary = String::new();
-    summary.push_str("Player: ");
-    summary.push_str(&user_input.chars().take(240).collect::<String>());
-    summary.push_str(" | GM: ");
-    summary.push_str(&assistant_output.chars().take(360).collect::<String>());
-    summary
-}
-
 async fn send_phase(tx: &mpsc::Sender<Result<Event, Infallible>>, phase: &str, data: Value) {
     let _ = tx.send(Ok(Event::default().event("phase").data(json!({"phase": phase, "data": data}).to_string()))).await;
 }
@@ -1279,10 +1250,6 @@ async fn send_delta(tx: &mpsc::Sender<Result<Event, Infallible>>, delta: &str) {
 
 async fn send_event(tx: &mpsc::Sender<Result<Event, Infallible>>, event: &str, data: Value) {
     let _ = tx.send(Ok(Event::default().event(event).data(data.to_string()))).await;
-}
-
-fn agent_v09_enabled_api() -> bool {
-    std::env::var("TRPG_AGENT_ENABLE_V09").map(|v| v != "0" && v.to_lowercase() != "false").unwrap_or(true)
 }
 
 async fn send_error(tx: &mpsc::Sender<Result<Event, Infallible>>, error: &str) {
@@ -1302,83 +1269,6 @@ fn extract_fenced(text: &str, lang: &str) -> Option<String> {
     Some(rest[..end].trim().to_string())
 }
 
-
-
-async fn send_check_result_api(tx: &mpsc::Sender<Result<Event, Infallible>>, result: &CheckResultRecord) {
-    send_phase(tx, "pending_check_resolved", serde_json::to_value(result).unwrap_or_else(|_| json!({}))).await;
-    if result.roll.visibility == RollVisibility::PrivateGmRoll {
-        send_event(tx, "tool", json!({"tool":"roll_dice", "visibility":"gm_only", "check_id": &result.check_id})).await;
-    } else {
-        send_event(tx, "dice", json!({"visibility": result.roll.visibility, "roll": result.roll.clone(), "outcome": result.outcome.clone()})).await;
-    }
-    for patch in &result.committed_patches {
-        match patch {
-            StatePatch::ActorHpDelta { actor_id, from, delta, to, reason } => {
-                send_phase(tx, "actor_hp_updated", json!({"actor_id": actor_id, "from": from, "delta": delta, "to": to, "reason": reason})).await;
-                send_event(tx, "damage_packet", json!({"actor_id": actor_id, "from": from, "delta": delta, "to": to, "reason": reason})).await;
-            }
-            StatePatch::ModifyTrack { target, amount, reason } => {
-                send_phase(tx, "parameter_impact_applied", json!({"target": target, "amount": amount, "reason": reason})).await;
-                send_event(tx, "effect_resolution_packet", json!({"target": target, "amount": amount, "reason": reason})).await;
-            }
-            _ => {}
-        }
-    }
-}
-
-async fn send_auto_roll_execution_api(tx: &mpsc::Sender<Result<Event, Infallible>>, execution: &AutoRollExecution) {
-    send_check_result_api(tx, &execution.primary).await;
-    for followup in &execution.followups {
-        send_check_result_api(tx, followup).await;
-    }
-}
-
-fn outcome_is_provisional_api(outcome: &serde_json::Value) -> bool {
-    // Already resolved: success or degree field is non-null (opposed rolls produce
-    // success=false/true + degree even when target is null).
-    let has_verdict = outcome.get("success").map(|v| !v.is_null()).unwrap_or(false)
-        || outcome.get("degree").map(|v| !v.is_null()).unwrap_or(false);
-    if has_verdict { return false; }
-    // No verdict yet: only provisional/ruleset_procedure_lookup models are genuinely
-    // unresolved. OpposedRoll is serialized as "opposed_roll" (snake_case) and will
-    // always carry success+degree when resolved, so it never reaches here.
-    let model = outcome.get("resolution_model").map(|m| m.to_string()).unwrap_or_default();
-    model.contains("provisional") || model.contains("ruleset_procedure_lookup")
-}
-
-fn roll_execution_context_tag_api(source: &str, execution: &AutoRollExecution) -> String {
-    let blocked = execution.roll_policy == "blocked_missing_source" || execution.primary.outcome.get("blocked").and_then(|v| v.as_bool()).unwrap_or(false);
-    let provisional = !blocked && outcome_is_provisional_api(&execution.primary.outcome);
-    let instruction = if blocked {
-        "Rust mechanics refused to roll because source-backed actor/target/weapon/defense/damage facets are missing. Do not invent DV, HP, SP, damage, or skill totals. Narrate the visible uncertainty/action beat and surface that the rules steward must hydrate the missing facets before mechanical resolution."
-    } else if provisional {
-        "Rust rolled the dice but could NOT bind a target number / pass-fail verdict for this step (provisional, needs source binding). Narrate ONLY the kinetic action and visible tension of the roll; do NOT state or imply success or failure, and do NOT invent a target number, DV, HP/SP, or verdict. Surface that the outcome is pending until the rules steward binds the missing skill/DV."
-    } else {
-        "Rust dice/effect tools have already resolved and written this mechanical step. Narrate the visible fictional outcome; do not ask for dice, damage, target numbers, HP/SP, or resource totals."
-    };
-    let payload = json!({
-        "source": source,
-        "roll_policy": &execution.roll_policy,
-        "primary": &execution.primary,
-        "followups": &execution.followups,
-        "narration_instruction": instruction
-    });
-    let payload_text = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".into());
-    let system_instruction = if blocked {
-        "[system]本次机械结算因缺少 source-backed 参数被暂停。请不要编造骰子、伤害、DV、HP、SP 或技能值；只叙述玩家可见的行动推进，并说明需要规则管家先水合缺失参数。[/system]"
-    } else if provisional {
-        "[system]骰子已掷出，但本次结算尚未绑定目标值/成败判定（provisional，待规则绑定）。请只叙述掷骰的动作与张力，不要陈述或暗示成功/失败，也不要编造目标值、DV、HP、SP 或判定结果；说明结果待规则管家绑定后再确定。[/system]"
-    } else {
-        "[system]骰子与效果工具已经完成本次机械结算。请只叙述玩家可见后果，并在下一个有意义的玩家决策点停下；不要要求玩家提供骰子结果、伤害、DV、HP、SP 或其他规则数值。[/system]"
-    };
-    format!("
-
-[roll]
-{}
-[/roll]
-{}
-", payload_text, system_instruction)
-}
 
 
 #[derive(Debug)]
