@@ -3368,6 +3368,7 @@ dependencies = [
  "trpg-agent",
  "trpg-combat",
  "trpg-db",
+ "trpg-gm",
  "trpg-ingest",
  "trpg-interaction",
  "trpg-llm",

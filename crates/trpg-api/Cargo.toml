@@ -31,3 +31,4 @@ trpg-time = { path = "../trpg-time" }
 trpg-interaction = { path = "../trpg-interaction" }
 
 trpg-object = { path = "../trpg-object" }
+trpg-gm = { path = "../trpg-gm" }

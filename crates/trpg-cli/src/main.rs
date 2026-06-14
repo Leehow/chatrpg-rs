@@ -5,16 +5,23 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::io::{self, IsTerminal, Read, Write};
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use trpg_api::{serve, AppState};
 use trpg_db::Db;
+use trpg_gm::{
+    execute_turn, GmLoop, LoopConfig, OwnedTurnRequest, SceneDeepExtractFn, ToolRegistry,
+    TurnEvent, TurnOutcome, CANONICAL_TURN_PLAN,
+};
 use trpg_llm::{LlmClient, LlmConfig, OpenAiCompatibleClient};
 use trpg_model::*;
 use trpg_parser::{ParserConfig, ProjectParseService};
 use trpg_rule_agent::RuleStewardAgent;
+use trpg_runtime::scene_navigation::extract_module_scenes;
 use trpg_runtime::{roll_dice, validate_character_template_sheet, AutoRollExecution, RuntimeEngine};
 use trpg_search::{load_search_source_configs, SearchConfig, SearchService};
 
@@ -811,18 +818,89 @@ async fn turn_cli(args: TurnArgs) -> Result<()> {
     let db = connect_db().await?;
     db.migrate().await?;
     let llm = make_llm()?;
-    let search = make_search(&db, default_data_dir())?;
+    let data_dir = default_data_dir();
+    let search = make_search(&db, data_dir.clone())?;
     let runtime = RuntimeEngine::new(db.clone()).with_search(search);
+    let module_id = req.module_id.clone();
     let session_id = match req.session_id {
         Some(id) => id,
-        None => runtime.start_session(&ruleset_id, req.module_id.as_deref()).await?,
+        None => runtime.start_session(&ruleset_id, module_id.as_deref()).await?,
     };
 
     emit_phase(args.stream_format, "session", json!({"session_id": session_id.clone()}))?;
-    // run_turn_once 已删（R1 T5 删除 legacy CLI 回合路径）。`trpg turn` 改走统一
-    // execute_turn 的工作与 T6 API 迁移同步，不在 T5 范围；此处临时 stub 占位。
-    let _ = (&db, &runtime, &llm, &ruleset_id, &session_id); // 抑制 unused 直至 T6 接 execute_turn
-    tracing::warn!("turn_cli: run_turn_once deleted (R1 T5); pending T6 execute_turn migration");
+
+    // 一次性单回合（无交互循环）：建 GmLoop + OwnedTurnRequest → drain execute_turn 流。
+    // GmLoop 含不可 Clone 字段，单回合即用即弃；scene_extractor 仅模组在场时装配。
+    let engine = RuntimeEngine::new(db.clone()).with_search(make_search(&db, data_dir.clone())?);
+    let mut gm = GmLoop::new(engine, llm.clone(), ToolRegistry::standard(), LoopConfig::default(), data_dir.clone());
+    if let Some(mid) = module_id.clone() {
+        let db2 = db.clone();
+        let llm2 = llm.clone();
+        let rs2 = ruleset_id.clone();
+        let dir2 = data_dir.clone();
+        gm.scene_extractor = Some(Arc::new(move |node_id: String| {
+            let db3 = db2.clone();
+            let llm3 = llm2.clone();
+            let mid3 = mid.clone();
+            let rs3 = rs2.clone();
+            let dir3 = dir2.clone();
+            Box::pin(async move {
+                extract_module_scenes(&db3, llm3.as_ref(), &mid3, None, Some(&rs3), &dir3, 12, Some(&node_id)).await
+            }) as Pin<Box<dyn Future<Output = Result<usize>> + Send>>
+        }) as SceneDeepExtractFn);
+    }
+
+    let turn_id = format!("turn_{}", uuid::Uuid::new_v4().simple());
+    let request = ContextRequest {
+        ruleset_id: ruleset_id.clone(),
+        module_id: module_id.clone(),
+        session_id: session_id.clone(),
+        turn_id,
+        viewer: VisibilityProfile::gm(),
+        token_budget: TokenBudget::default(),
+    };
+    let scene_id = db.load_session_scene(&session_id).await.ok().flatten();
+    let state = RuntimeState {
+        ruleset_id: ruleset_id.clone(),
+        module_id: module_id.clone(),
+        scene_id,
+        ..Default::default()
+    };
+    let owned = OwnedTurnRequest {
+        request,
+        state,
+        user_input: req.user_input.clone(),
+        history: Vec::new(),
+        recent_transcript: req.recent_transcript.clone(),
+        module_id: module_id.clone(),
+        data_dir: data_dir.clone(),
+    };
+
+    let mut stream = Box::pin(execute_turn(gm, owned, CANONICAL_TURN_PLAN));
+    while let Some(event) = stream.next().await {
+        match event {
+            TurnEvent::Delta(delta) => emit_delta(args.stream_format, &delta)?,
+            TurnEvent::AwaitingPlayerRoll { check_id, prompt_public } => {
+                emit_phase(args.stream_format, "pending_check_created", json!({"check_id": check_id}))?;
+                emit_delta(args.stream_format, &prompt_public)?;
+                emit_phase(args.stream_format, "done", json!({"reason":"awaiting_player_roll"}))?;
+            }
+            TurnEvent::SceneTransition { from, to, reason } => {
+                emit_named_event(args.stream_format, "scene_transition", json!({"from": from, "to": to, "reason": reason}))?;
+            }
+            TurnEvent::Errata(entry) => {
+                emit_phase(args.stream_format, "errata", serde_json::to_value(&entry).unwrap_or_else(|_| json!({})))?;
+            }
+            TurnEvent::PostprocessScheduled => {
+                emit_phase(args.stream_format, "postprocess_scheduled", json!({}))?;
+            }
+            TurnEvent::TurnComplete { outcome } => {
+                if let TurnOutcome::Narration(_) = outcome {
+                    emit_phase(args.stream_format, "done", json!({}))?;
+                }
+            }
+        }
+    }
     Ok(())
 }
 

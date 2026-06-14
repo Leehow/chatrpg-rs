@@ -10,6 +10,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -26,6 +27,10 @@ use trpg_model::*;
 use trpg_parser::{ParserConfig, ProjectParseService};
 use trpg_rule_agent::RuleStewardAgent;
 use trpg_runtime::{validate_character_template_sheet, AutoRollExecution, RuntimeEngine};
+use trpg_gm::{
+    execute_turn, GmLoop, LoopConfig, OwnedTurnRequest, SceneDeepExtractFn, ToolRegistry,
+    TurnEvent, TurnOutcome, CANONICAL_TURN_PLAN,
+};
 use trpg_search::{load_search_source_configs, upsert_search_source_config, SearchService, SearchSourceConfig};
 use uuid::Uuid;
 
@@ -962,26 +967,60 @@ pub struct PlayTurnRequest {
 }
 
 async fn play_turn_sse(Path(session_id): Path<String>, State(state): State<AppState>, Json(req): Json<PlayTurnRequest>) -> impl IntoResponse {
+    // SSE transport channel: TurnEvent (from execute_turn) → axum Event。
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(128);
-    let runtime = state.runtime.clone();
+    let data_dir = state.parser_config.data_dir.clone();
     let llm = state.llm.clone();
     let db = state.db.clone();
-    // Captured into the turn body (then moved into turn_postprocess) so the
-    // scene_navigator can locate semantic units / read the module bundle.
-    let data_dir = state.parser_config.data_dir.clone();
+    // 每请求重建 GmLoop（含 ToolRegistry(Box<dyn GmTool>)/ErrataMemory/ObligationLedger
+    // 等不可 Clone 字段）。RuntimeEngine 持 Arc<Db> 克隆，成本极低；errata/obligations
+    // 是 per-turn 状态，随 spawned 任务结束丢弃，不跨回合。
+    let engine = state.runtime.clone();
+    let mut gm = GmLoop::new(
+        engine,
+        llm.clone(),
+        ToolRegistry::standard(),
+        LoopConfig::default(),
+        data_dir.clone(),
+    );
+    // 装配到场深抽闭包（scene_navigate phase 切场景到达时深抽目标场景），
+    // 仅模组在场时——与 CLI agent_play::wire_scene_extractor 同约定。
+    if let Some(mid) = req.module_id.clone() {
+        let db2 = db.clone();
+        let llm2 = llm.clone();
+        let rs2 = req.ruleset_id.clone();
+        let dir2 = data_dir.clone();
+        gm.scene_extractor = Some(Arc::new(move |node_id: String| {
+            let db3 = db2.clone();
+            let llm3 = llm2.clone();
+            let mid3 = mid.clone();
+            let rs3 = rs2.clone();
+            let dir3 = dir2.clone();
+            Box::pin(async move {
+                extract_module_scenes(&db3, llm3.as_ref(), &mid3, None, Some(&rs3), &dir3, 12, Some(&node_id)).await
+            }) as Pin<Box<dyn std::future::Future<Output = anyhow::Result<usize>> + Send>>
+        }) as SceneDeepExtractFn);
+    }
+    let runtime = state.runtime.clone();
     tokio::spawn(async move {
         let turn_id = format!("turn_{}", Uuid::new_v4().simple());
         send_phase(&tx, "start", json!({"kind":"play_turn", "turn_id": turn_id.clone()})).await;
+        // world_time 注入 RuntimeState（execute_turn 不替我们查时间）。PlayerAction
+        // 世界事件由 execute_turn 的 phase_record_player_action 接管（不在此手写，避免双记）。
         let world_time = match runtime.current_world_time(&session_id).await {
             Ok(t) => t,
             Err(err) => { send_error(&tx, &err.to_string()).await; return; }
         };
         send_phase(&tx, "world_time", serde_json::to_value(&world_time).unwrap_or_else(|_| json!({}))).await;
-        let _ = runtime.record_world_event(&session_id, Some(&turn_id), None, WorldEventKind::PlayerAction, json!({"input": req.user_input.clone(), "ruleset_id": req.ruleset_id.clone(), "module_id": req.module_id.clone()}), Visibility::GmOnly).await;
-        let mut runtime_state = req.runtime_state.unwrap_or_else(|| RuntimeState { world_time: Some(world_time.clone()), ruleset_id: req.ruleset_id.clone(), module_id: req.module_id.clone(), ..Default::default() });
+        let mut runtime_state = req.runtime_state.clone().unwrap_or_default();
         runtime_state.world_time = Some(world_time);
         runtime_state.ruleset_id = req.ruleset_id.clone();
         runtime_state.module_id = req.module_id.clone();
+        // 持久化的 current_scene_id 填进 RuntimeState（对齐 prepare_turn_context
+        // 单点约定；scene_navigate phase 切换后下一回合在此读到新场景）。
+        if runtime_state.scene_id.is_none() {
+            runtime_state.scene_id = db.load_session_scene(&session_id).await.ok().flatten();
+        }
         let context_request = ContextRequest {
             ruleset_id: req.ruleset_id.clone(),
             module_id: req.module_id.clone(),
@@ -990,562 +1029,49 @@ async fn play_turn_sse(Path(session_id): Path<String>, State(state): State<AppSt
             viewer: VisibilityProfile::gm(),
             token_budget: TokenBudget::default(),
         };
-        let turn_orchestration = match runtime.orchestrate_turn(&context_request, &runtime_state, &req.user_input).await {
-            Ok(r) => r,
-            Err(err) => { send_error(&tx, &err.to_string()).await; return; }
+        let owned = OwnedTurnRequest {
+            request: context_request,
+            state: runtime_state,
+            user_input: req.user_input.clone(),
+            history: Vec::new(),
+            recent_transcript: req.recent_transcript.clone(),
+            module_id: req.module_id.clone(),
+            data_dir: data_dir.clone(),
         };
-        send_phase(&tx, "turn_orchestrator", serde_json::to_value(&turn_orchestration).unwrap_or_else(|_| json!({}))).await;
-        for phase in &turn_orchestration.phases {
-            send_phase(&tx, phase, serde_json::to_value(&turn_orchestration).unwrap_or_else(|_| json!({}))).await;
-        }
-        if let Some(gate_id) = &turn_orchestration.superseded_gate_id {
-            send_phase(&tx, "gate_superseded", json!({"gate_id": gate_id, "reason":"turn_orchestrator_superseded_gate"})).await;
-        }
-        let mut early_tool_context = String::new();
-        let gate_outcome = if turn_orchestration.route.should_resolve_gate_first {
-            match runtime.handle_open_interaction_gate(&session_id, &turn_id, &req.user_input).await {
-                Ok(r) => r,
-                Err(err) => { send_error(&tx, &err.to_string()).await; return; }
-            }
-        } else { GateHandlingResult::None };
-        let mut gate_notice_for_context = turn_orchestration.superseded_gate_id.as_ref().map(|gate_id| format!("\n\n[Turn Orchestrator Superseded Gate] gate_id={}\n", gate_id)).unwrap_or_default();
-        let resolved_pending = match &gate_outcome {
-            GateHandlingResult::PendingCheckResolved { result } => {
-                if result.outcome.get("contest_id").is_some() {
-                    send_phase(&tx, "contest_resolved", json!({"check_id": &result.check_id, "contest_id": result.outcome.get("contest_id"), "success": result.outcome.get("success"), "target": result.outcome.get("target")})).await;
+        // execute_turn 内部已 tokio::spawn pipeline 并经自带 mpsc 推 TurnEvent。
+        // 本 handler 只做「TurnEvent→SSE Event」翻译：narration Delta 逐 token 直通，
+        // 尾部 phase（verify/finalize/save_turn/memory/audit/scene_nav/carryover）在
+        // execute_turn 的任务里继续跑——对客户端=后台，连接保持到 TurnComplete。
+        let mut stream = execute_turn(gm, owned, CANONICAL_TURN_PLAN);
+        while let Some(ev) = stream.next().await {
+            match ev {
+                TurnEvent::Delta(delta) => {
+                    // 真流式：逐 token 直通，不缓冲（一期硬性原则）。
+                    send_delta(&tx, &delta).await;
                 }
-                Some(result.clone())
-            },
-            GateHandlingResult::PendingFollowupCheckCreated { result, pending, prompt_public, reason } => {
-                send_check_result_api(&tx, result).await;
-                if result.outcome.get("contest_id").is_some() {
-                    send_phase(&tx, "contest_resolved", json!({"check_id": &result.check_id, "contest_id": result.outcome.get("contest_id"), "success": result.outcome.get("success"), "target": result.outcome.get("target")})).await;
-                }
-                if pending.contract.roll_visibility != RollVisibility::PlayerRollRequired || system_rolls_visible_policy() {
-                    match runtime.execute_system_roll_bundle(&session_id, &turn_id, &pending.contract).await {
-                        Ok(execution) => {
-                            send_auto_roll_execution_api(&tx, &execution).await;
-                            early_tool_context.push_str(&roll_execution_context_tag_api("pending_followup_effect", &execution));
-                            Some(result.clone())
-                        }
-                        Err(err) => { send_error(&tx, &err.to_string()).await; return; }
-                    }
-                } else {
-                    send_phase(&tx, "attack_resolution_contract", json!({"check_id": &result.check_id, "reason": reason, "followup_check_id": pending.check_id})).await;
-                    send_phase(&tx, "pending_damage_roll_created", json!({"check_id": pending.check_id, "prompt": prompt_public, "reason": reason})).await;
-                    send_phase(&tx, "pending_effect_roll_created", json!({"check_id": pending.check_id, "prompt": prompt_public, "reason": reason})).await;
-                    send_delta(&tx, prompt_public).await;
-                    send_phase(&tx, "done", json!({"reason": reason})).await;
-                    return;
-                }
-            },
-            GateHandlingResult::GateReprompt { gate_id, check_id, reason, prompt_public } => {
-                send_phase(&tx, "gate_reprompt", json!({"gate_id": gate_id, "check_id": check_id, "reason": reason})).await;
-                send_delta(&tx, prompt_public).await;
-                send_phase(&tx, "done", json!({"reason":"awaiting_player_roll"})).await;
-                return;
-            }
-            GateHandlingResult::GateAbandoned { gate_id, check_id, reason, prompt_public } => {
-                send_phase(&tx, "gate_abandoned", json!({"gate_id": gate_id, "check_id": check_id, "reason": reason})).await;
-                send_delta(&tx, prompt_public).await;
-                gate_notice_for_context = format!("\n\n[Interaction Gate Abandoned]\n{}\n", prompt_public);
-                None
-            }
-            GateHandlingResult::GateChoiceResolved { gate_id, option_id, option_label, resolution_json } => {
-                send_phase(&tx, "reaction_window_resolved", json!({"gate_id": gate_id, "option_id": option_id, "option_label": option_label, "resolution": resolution_json})).await;
-                gate_notice_for_context = format!("\n\n[Interaction Gate Resolved] option={} label={}\n", option_id, option_label);
-                None
-            }
-            GateHandlingResult::GateChoiceReprompt { gate_id, reason, prompt_public } => {
-                let is_reaction_prompt = prompt_public.contains("反应") || prompt_public.contains("闪避") || prompt_public.contains("承受") || prompt_public.contains("reaction");
-                if is_reaction_prompt {
-                    send_phase(&tx, "reaction_window_opened", json!({"gate_id": gate_id, "reason": reason, "source":"gate_reprompt", "prompt_public": prompt_public})).await;
-                }
-                send_phase(&tx, "gate_reprompt", json!({"gate_id": gate_id, "reason": reason})).await;
-                send_delta(&tx, prompt_public).await;
-                send_phase(&tx, "done", json!({"reason": if is_reaction_prompt { "awaiting_required_reaction" } else { "awaiting_required_choice" }})).await;
-                return;
-            }
-            GateHandlingResult::GateSuperseded { gate_id, reason, prompt_public } => {
-                send_phase(&tx, "gate_superseded", json!({"gate_id": gate_id, "reason": reason})).await;
-                send_delta(&tx, prompt_public).await;
-                gate_notice_for_context = format!("\n\n[Interaction Gate Superseded]\n{}\n", prompt_public);
-                None
-            }
-            GateHandlingResult::None => None,
-        };
-        if let Some(result) = &resolved_pending {
-            send_phase(&tx, "pending_check_resolved", serde_json::to_value(result).unwrap_or_else(|_| json!({}))).await;
-            if result.roll.visibility == RollVisibility::PrivateGmRoll {
-                send_event(&tx, "tool", json!({"tool":"roll_dice", "visibility":"gm_only", "check_id": &result.check_id})).await;
-            } else {
-                send_event(&tx, "dice", json!({"visibility": result.roll.visibility, "roll": result.roll.clone(), "outcome": result.outcome.clone()})).await;
-            }
-            for patch in &result.committed_patches {
-                match patch {
-                    StatePatch::ActorHpDelta { actor_id, from, delta, to, reason } => {
-                        send_phase(&tx, "actor_hp_updated", json!({"actor_id": actor_id, "from": from, "delta": delta, "to": to, "reason": reason})).await;
-                        send_event(&tx, "damage_packet", json!({"actor_id": actor_id, "from": from, "delta": delta, "to": to, "reason": reason})).await;
-                    }
-                    StatePatch::ModifyTrack { target, amount, reason } => {
-                        send_phase(&tx, "parameter_impact_applied", json!({"target": target, "amount": amount, "reason": reason})).await;
-                        send_event(&tx, "effect_resolution_packet", json!({"target": target, "amount": amount, "reason": reason})).await;
-                    }
-                    _ => {}
-                }
-            }
-        }
-        let effective_user_input = if let Some(result) = &resolved_pending {
-            format!("{}\n\n[Resolved Pending Check]\n```json\n{}\n```", req.user_input, serde_json::to_string_pretty(result).unwrap_or_default())
-        } else { format!("{}{}", req.user_input, gate_notice_for_context) };
-        let player_value_referee_result = runtime.verify_player_supplied_values(&context_request, &req.user_input).await.ok().flatten();
-        if let Some(referee) = &player_value_referee_result {
-            send_phase(&tx, "player_value_referee", serde_json::to_value(referee).unwrap_or_else(|_| json!({}))).await;
-            for claim in &referee.claims { send_phase(&tx, "player_value_claim_detected", serde_json::to_value(claim).unwrap_or_else(|_| json!({}))).await; }
-            for verification in &referee.verifications { send_phase(&tx, "player_value_verified", serde_json::to_value(verification).unwrap_or_else(|_| json!({}))).await; }
-            for agreement in &referee.table_overrides { send_phase(&tx, "table_override_proposed", serde_json::to_value(agreement).unwrap_or_else(|_| json!({}))).await; }
-        }
-        let materialization_result = if resolved_pending.is_none() {
-            runtime.try_materialize_turn(&context_request, &runtime_state, &req.user_input).await.ok()
-        } else { None };
-        if let Some(materialization) = &materialization_result {
-            if materialization.handled {
-                send_phase(&tx, "materialization_kernel", serde_json::to_value(materialization).unwrap_or_else(|_| json!({}))).await;
-                for phase in &materialization.phases { send_phase(&tx, phase, serde_json::to_value(materialization).unwrap_or_else(|_| json!({}))).await; }
-                for demand in &materialization.demands { send_phase(&tx, "materialization_demand_created", serde_json::to_value(demand).unwrap_or_else(|_| json!({}))).await; }
-                for binding in &materialization.rule_bindings { send_phase(&tx, "rule_binding_packet_created", serde_json::to_value(binding).unwrap_or_else(|_| json!({}))).await; }
-                for verification in &materialization.verifications { send_phase(&tx, "binding_verification_created", serde_json::to_value(verification).unwrap_or_else(|_| json!({}))).await; }
-            }
-        }
-        send_phase(&tx, "context_compile_start", json!({})).await;
-        let compiled = match runtime.prepare_turn_context(&context_request, &runtime_state, Some(&effective_user_input), req.recent_transcript.as_deref()).await {
-            Ok(c) => c,
-            Err(err) => { send_error(&tx, &err.to_string()).await; return; }
-        };
-        send_phase(&tx, "context_compiled", json!({
-            "prefix_hash": compiled.prefix_hash.clone(),
-            "pinned_hash": compiled.pinned_hash.clone(),
-            "dynamic_hash": compiled.dynamic_hash.clone(),
-            "cache_key": compiled.cache_key.clone(),
-            "token_estimate": compiled.token_estimate
-        })).await;
-        let mut agent_tool_context = early_tool_context;
-        if let Some(referee) = &player_value_referee_result {
-            if let Some(ctx) = &referee.narration_context {
-                agent_tool_context.push_str("
-
-[Player-Supplied Value Referee Context]
-");
-                agent_tool_context.push_str(ctx);
-                agent_tool_context.push_str("
-```json
-");
-                agent_tool_context.push_str(&serde_json::to_string_pretty(referee).unwrap_or_default());
-                agent_tool_context.push_str("
-```
-");
-            }
-        }
-        if resolved_pending.is_none() && matches!(turn_orchestration.intent.target_kind.as_str(), "assessment_check" | "named_check") && turn_orchestration.route.allow_agent_plan && agent_v09_enabled_api() {
-            // Named-check signal: prefer the orchestrator's classification, then
-            // fall back to the materialization pass (a separate, more reliable
-            // classify call) when the orchestrator's non-deterministic call did
-            // not name the tested parameter — reliable trigger, no 5th LLM call.
-            let materialized_named = materialization_result.as_ref().and_then(trpg_runtime::materialization_named_parameter);
-            let named_param = turn_orchestration.intent.named_parameter.as_deref().or(materialized_named.as_deref());
-            let source = if named_param.is_some() { "explicit_named_check" } else { "forced_technical_assessment" };
-            let plan = runtime.named_or_forced_assessment_plan(&context_request, &req.user_input, named_param).await;
-            let _ = runtime.persist_agent_plan(&plan).await;
-            send_phase(&tx, "agent_plan", serde_json::to_value(&plan).unwrap_or_else(|_| json!({}))).await;
-            if let Some(check) = &plan.check {
-                send_phase(&tx, "check_contract_created", serde_json::to_value(check).unwrap_or_else(|_| json!({}))).await;
-                if check.roll_visibility == RollVisibility::PlayerRollRequired && !system_rolls_visible_policy() {
-                    let pending = trpg_agent::make_pending_check(check);
-                    let _ = db.insert_pending_check(&pending).await;
-                    let _ = db.insert_interaction_gate(&InteractionGate::from_pending_check(&pending)).await;
-                    let prompt = pending_check_prompt(check);
-                    send_phase(&tx, "pending_check_created", json!({"check_id": &check.check_id, "label": &check.check_label, "roll_visibility": check.roll_visibility, "source": source})).await;
-                    send_delta(&tx, &prompt).await;
-                    let context_hashes = json!({"prefix_hash": compiled.prefix_hash, "pinned_hash": compiled.pinned_hash, "dynamic_hash": compiled.dynamic_hash, "cache_key": compiled.cache_key});
-                    let _ = db.save_turn(&session_id, &turn_id, &req.user_input, &prompt, context_hashes, "awaiting_player_roll").await;
+                TurnEvent::AwaitingPlayerRoll { check_id, prompt_public } => {
+                    send_delta(&tx, &prompt_public).await;
+                    send_phase(&tx, "pending_check_created", json!({"check_id": check_id})).await;
                     send_phase(&tx, "done", json!({"reason":"awaiting_player_roll"})).await;
-                    return;
-                } else {
-                    match runtime.execute_system_roll_bundle(&session_id, &turn_id, check).await {
-                        Ok(execution) => {
-                            send_auto_roll_execution_api(&tx, &execution).await;
-                            agent_tool_context.push_str(&roll_execution_context_tag_api(source, &execution));
-                        }
-                        Err(err) => { send_error(&tx, &err.to_string()).await; return; }
+                }
+                TurnEvent::SceneTransition { from, to, reason } => {
+                    send_event(&tx, "scene_transition", json!({"from": from, "to": to, "reason": reason})).await;
+                }
+                TurnEvent::Errata(entry) => {
+                    send_phase(&tx, "errata", serde_json::to_value(&entry).unwrap_or_else(|_| json!({}))).await;
+                }
+                TurnEvent::PostprocessScheduled => {
+                    // 叙事已流完，尾部 phase 即将（在同一任务继续 drain）跑——对客户端=后台。
+                    send_phase(&tx, "postprocess_scheduled", json!({})).await;
+                }
+                TurnEvent::TurnComplete { outcome } => {
+                    // AwaitingPlayerRoll 终态的 done 已在上面发过；仅 Narration 终态发常规 done。
+                    if let TurnOutcome::Narration(_) = outcome {
+                        send_phase(&tx, "done", json!({})).await;
                     }
                 }
             }
         }
-        let mut ability_handled_for_turn = false;
-        if resolved_pending.is_none() && turn_orchestration.route.prefer_ability_first {
-            match runtime.try_handle_ability_turn(&context_request, &runtime_state, &req.user_input).await {
-                Ok(ability_result) if ability_result.handled => {
-                    ability_handled_for_turn = true;
-                    send_phase(&tx, "ability_kernel", serde_json::to_value(&ability_result).unwrap_or_else(|_| json!({}))).await;
-                    for phase in &ability_result.phases { send_phase(&tx, phase, serde_json::to_value(&ability_result).unwrap_or_else(|_| json!({}))).await; }
-                    if let Some(binding) = &ability_result.rule_binding { send_phase(&tx, "rule_binding_packet_created", serde_json::to_value(binding).unwrap_or_else(|_| json!({}))).await; }
-                    if let Some(def) = &ability_result.ability_definition { send_phase(&tx, "ability_definition_hydrated", serde_json::to_value(def).unwrap_or_else(|_| json!({}))).await; }
-                    if let Some(inst) = &ability_result.ability_instance { send_phase(&tx, "ability_instance_hydrated", serde_json::to_value(inst).unwrap_or_else(|_| json!({}))).await; }
-                    if let Some(act) = &ability_result.activation { send_phase(&tx, "ability_activation_contract_created", serde_json::to_value(act).unwrap_or_else(|_| json!({}))).await; }
-                    if let Some(check) = &ability_result.check {
-                        send_phase(&tx, "check_contract_created", serde_json::to_value(check).unwrap_or_else(|_| json!({}))).await;
-                        if check.roll_visibility == RollVisibility::PlayerRollRequired && !system_rolls_visible_policy() {
-                            let pending = trpg_agent::make_pending_check(check);
-                            let _ = db.insert_pending_check(&pending).await;
-                            let _ = db.insert_interaction_gate(&InteractionGate::from_pending_check(&pending)).await;
-                            let prompt = pending_check_prompt(check);
-                            send_phase(&tx, "pending_check_created", json!({"check_id": &check.check_id, "label": &check.check_label, "roll_visibility": check.roll_visibility, "source":"ability_kernel"})).await;
-                            send_delta(&tx, &prompt).await;
-                            let context_hashes = json!({"prefix_hash": compiled.prefix_hash, "pinned_hash": compiled.pinned_hash, "dynamic_hash": compiled.dynamic_hash, "cache_key": compiled.cache_key});
-                            let _ = db.save_turn(&session_id, &turn_id, &req.user_input, &prompt, context_hashes, "awaiting_player_roll").await;
-                            send_phase(&tx, "done", json!({"reason":"awaiting_player_roll"})).await;
-                            return;
-                        } else {
-                            match runtime.execute_system_roll_bundle(&session_id, &turn_id, check).await {
-                                Ok(execution) => {
-                                    send_auto_roll_execution_api(&tx, &execution).await;
-                                    agent_tool_context.push_str(&roll_execution_context_tag_api("ability_kernel", &execution));
-                                }
-                                Err(err) => { send_error(&tx, &err.to_string()).await; return; }
-                            }
-                        }
-                    }
-                    if let Some(ctx_text) = &ability_result.narration_context {
-                        agent_tool_context.push_str("
-
-[Ability & Rule Binding Kernel Context]
-");
-                        agent_tool_context.push_str(ctx_text);
-                        agent_tool_context.push_str("
-```json
-");
-                        agent_tool_context.push_str(&serde_json::to_string_pretty(&ability_result).unwrap_or_default());
-                        agent_tool_context.push_str("
-```
-");
-                    }
-                }
-                Ok(_) => {}
-                Err(err) => { send_error(&tx, &err.to_string()).await; return; }
-            }
-        }
-        let mut object_handled_for_turn = false;
-        if resolved_pending.is_none() && !ability_handled_for_turn && turn_orchestration.route.prefer_object_first && !turn_orchestration.route.prefer_conflict_first {
-            match runtime.try_handle_object_turn(&context_request, &runtime_state, &req.user_input).await {
-                Ok(object_result) if object_result.handled => {
-                    object_handled_for_turn = true;
-                    send_phase(&tx, "object_kernel", serde_json::to_value(&object_result).unwrap_or_else(|_| json!({}))).await;
-                    for phase in &object_result.phases {
-                        send_phase(&tx, phase, serde_json::to_value(&object_result).unwrap_or_else(|_| json!({}))).await;
-                    }
-                    for event in &object_result.object_events {
-                        send_event(&tx, "object_event", serde_json::to_value(event).unwrap_or_else(|_| json!({}))).await;
-                    }
-                    if let Some(interaction) = &object_result.interaction {
-                        send_phase(&tx, "object_interaction_contract_created", serde_json::to_value(interaction).unwrap_or_else(|_| json!({}))).await;
-                    }
-                    if let Some(check) = &object_result.check {
-                        send_phase(&tx, "check_contract_created", serde_json::to_value(check).unwrap_or_else(|_| json!({}))).await;
-                        if check.roll_visibility == RollVisibility::PlayerRollRequired && !system_rolls_visible_policy() {
-                            let pending = trpg_agent::make_pending_check(check);
-                            let _ = db.insert_pending_check(&pending).await;
-                            let _ = db.insert_interaction_gate(&InteractionGate::from_pending_check(&pending)).await;
-                            let prompt = pending_check_prompt(check);
-                            send_phase(&tx, "pending_check_created", json!({"check_id": &check.check_id, "label": &check.check_label, "roll_visibility": check.roll_visibility, "source":"object_kernel"})).await;
-                            send_delta(&tx, &prompt).await;
-                            let context_hashes = json!({"prefix_hash": compiled.prefix_hash, "pinned_hash": compiled.pinned_hash, "dynamic_hash": compiled.dynamic_hash, "cache_key": compiled.cache_key});
-                            let _ = db.save_turn(&session_id, &turn_id, &req.user_input, &prompt, context_hashes, "awaiting_player_roll").await;
-                            send_phase(&tx, "done", json!({"reason":"awaiting_player_roll"})).await;
-                            return;
-                        } else {
-                            match runtime.execute_system_roll_bundle(&session_id, &turn_id, check).await {
-                                Ok(execution) => {
-                                    send_auto_roll_execution_api(&tx, &execution).await;
-                                    agent_tool_context.push_str(&roll_execution_context_tag_api("object_kernel", &execution));
-                                }
-                                Err(err) => { send_error(&tx, &err.to_string()).await; return; }
-                            }
-                        }
-                    }
-                    if let Some(ctx) = &object_result.narration_context {
-                        agent_tool_context.push_str("\n\n[Object & Possession Kernel Context]\n");
-                        agent_tool_context.push_str(ctx);
-                        agent_tool_context.push_str("\n```json\n");
-                        agent_tool_context.push_str(&serde_json::to_string_pretty(&object_result).unwrap_or_default());
-                        agent_tool_context.push_str("\n```\n");
-                    }
-                }
-                Ok(_) => {}
-                Err(err) => { send_error(&tx, &err.to_string()).await; return; }
-            }
-        }
-        let mut conflict_handled_for_turn = false;
-        let mut conflict_result_for_director: Option<ConflictTurnResult> = None;
-        if resolved_pending.is_none() && !ability_handled_for_turn && !object_handled_for_turn && turn_orchestration.route.prefer_conflict_first {
-            match runtime.try_handle_conflict_turn(&context_request, &runtime_state, &req.user_input, Some(&turn_orchestration)).await {
-                Ok(conflict) if conflict.handled => {
-                    conflict_handled_for_turn = true;
-                    conflict_result_for_director = Some(conflict.clone());
-                    send_phase(&tx, "conflict_agent", serde_json::to_value(&conflict).unwrap_or_else(|_| json!({}))).await;
-                    for phase in &conflict.phases {
-                        send_phase(&tx, phase, serde_json::to_value(&conflict).unwrap_or_else(|_| json!({}))).await;
-                    }
-                    for event in &conflict.events {
-                        send_event(&tx, "combat_event", serde_json::to_value(event).unwrap_or_else(|_| json!({}))).await;
-                    }
-                    if let Some(novelty) = &conflict.novelty {
-                        send_phase(&tx, "novelty_director", serde_json::to_value(novelty).unwrap_or_else(|_| json!({}))).await;
-                        send_event(&tx, "fresh_change", serde_json::to_value(novelty).unwrap_or_else(|_| json!({}))).await;
-                    }
-                    if let Some(check) = &conflict.check {
-                        send_phase(&tx, "check_contract_created", serde_json::to_value(check).unwrap_or_else(|_| json!({}))).await;
-                        if check.roll_visibility == RollVisibility::PlayerRollRequired && !system_rolls_visible_policy() {
-                            let pending = trpg_agent::make_pending_check(check);
-                            let _ = db.insert_pending_check(&pending).await;
-                            let _ = db.insert_interaction_gate(&InteractionGate::from_pending_check(&pending)).await;
-                            let prompt = pending_check_prompt(check);
-                            send_phase(&tx, "pending_check_created", json!({"check_id": &check.check_id, "label": &check.check_label, "roll_visibility": check.roll_visibility, "source":"combat_agent"})).await;
-                            send_delta(&tx, &prompt).await;
-                            let context_hashes = json!({"prefix_hash": compiled.prefix_hash, "pinned_hash": compiled.pinned_hash, "dynamic_hash": compiled.dynamic_hash, "cache_key": compiled.cache_key});
-                            let _ = db.save_turn(&session_id, &turn_id, &req.user_input, &prompt, context_hashes, "awaiting_player_roll").await;
-                            send_phase(&tx, "done", json!({"reason":"awaiting_player_roll"})).await;
-                            return;
-                        } else {
-                            match runtime.execute_system_roll_bundle(&session_id, &turn_id, check).await {
-                                Ok(execution) => {
-                                    send_auto_roll_execution_api(&tx, &execution).await;
-                                    agent_tool_context.push_str(&roll_execution_context_tag_api("combat_agent", &execution));
-                                }
-                                Err(err) => { send_error(&tx, &err.to_string()).await; return; }
-                            }
-                        }
-                    }
-                    if let Some(effect) = &conflict.effect {
-                        send_phase(&tx, "effect_contract_created", serde_json::to_value(effect).unwrap_or_else(|_| json!({}))).await;
-                    }
-                    if let Some(gate) = &conflict.gate {
-                        send_phase(&tx, "reaction_window_opened", serde_json::to_value(gate).unwrap_or_else(|_| json!({}))).await;
-                        send_delta(&tx, &gate.prompt_public).await;
-                        if let Some(reason) = &conflict.done_reason {
-                            let context_hashes = json!({"prefix_hash": compiled.prefix_hash, "pinned_hash": compiled.pinned_hash, "dynamic_hash": compiled.dynamic_hash, "cache_key": compiled.cache_key});
-                            let _ = db.save_turn(&session_id, &turn_id, &req.user_input, &gate.prompt_public, context_hashes, reason).await;
-                            send_phase(&tx, "done", json!({"reason": reason})).await;
-                            return;
-                        }
-                    }
-                    if let Some(ctx) = &conflict.narration_context {
-                        agent_tool_context.push_str("\n\n[Conflict Frame / Combat Agent Context]\n");
-                        agent_tool_context.push_str(ctx);
-                        agent_tool_context.push_str("\n```json\n");
-                        agent_tool_context.push_str(&serde_json::to_string_pretty(&conflict).unwrap_or_default());
-                        agent_tool_context.push_str("\n```\n");
-                    }
-                }
-                Ok(_) => {}
-                Err(err) => { send_error(&tx, &err.to_string()).await; return; }
-            }
-        }
-        if resolved_pending.is_none() && !ability_handled_for_turn && !object_handled_for_turn && !conflict_handled_for_turn && turn_orchestration.route.prefer_conflict_first && turn_orchestration.route.prefer_object_first {
-            match runtime.try_handle_object_turn(&context_request, &runtime_state, &req.user_input).await {
-                Ok(object_result) if object_result.handled => {
-                    object_handled_for_turn = true;
-                    send_phase(&tx, "object_kernel", serde_json::to_value(&object_result).unwrap_or_else(|_| json!({}))).await;
-                    for phase in &object_result.phases { send_phase(&tx, phase, serde_json::to_value(&object_result).unwrap_or_else(|_| json!({}))).await; }
-                    for event in &object_result.object_events { send_event(&tx, "object_event", serde_json::to_value(event).unwrap_or_else(|_| json!({}))).await; }
-                    if let Some(interaction) = &object_result.interaction { send_phase(&tx, "object_interaction_contract_created", serde_json::to_value(interaction).unwrap_or_else(|_| json!({}))).await; }
-                    if let Some(check) = &object_result.check {
-                        send_phase(&tx, "check_contract_created", serde_json::to_value(check).unwrap_or_else(|_| json!({}))).await;
-                        if check.roll_visibility == RollVisibility::PlayerRollRequired && !system_rolls_visible_policy() {
-                            let pending = trpg_agent::make_pending_check(check);
-                            let _ = db.insert_pending_check(&pending).await;
-                            let _ = db.insert_interaction_gate(&InteractionGate::from_pending_check(&pending)).await;
-                            let prompt = pending_check_prompt(check);
-                            send_phase(&tx, "pending_check_created", json!({"check_id": &check.check_id, "label": &check.check_label, "roll_visibility": check.roll_visibility, "source":"object_kernel"})).await;
-                            send_delta(&tx, &prompt).await;
-                            let context_hashes = json!({"prefix_hash": compiled.prefix_hash, "pinned_hash": compiled.pinned_hash, "dynamic_hash": compiled.dynamic_hash, "cache_key": compiled.cache_key});
-                            let _ = db.save_turn(&session_id, &turn_id, &req.user_input, &prompt, context_hashes, "awaiting_player_roll").await;
-                            send_phase(&tx, "done", json!({"reason":"awaiting_player_roll"})).await;
-                            return;
-                        } else {
-                            match runtime.execute_system_roll_bundle(&session_id, &turn_id, check).await {
-                                Ok(execution) => {
-                                    send_auto_roll_execution_api(&tx, &execution).await;
-                                    agent_tool_context.push_str(&roll_execution_context_tag_api("object_kernel", &execution));
-                                }
-                                Err(err) => { send_error(&tx, &err.to_string()).await; return; }
-                            }
-                        }
-                    }
-                    if let Some(ctx) = &object_result.narration_context {
-                        agent_tool_context.push_str("
-
-[Object & Possession Kernel Context]
-");
-                        agent_tool_context.push_str(ctx);
-                        agent_tool_context.push_str("
-```json
-");
-                        agent_tool_context.push_str(&serde_json::to_string_pretty(&object_result).unwrap_or_default());
-                        agent_tool_context.push_str("
-```
-");
-                    }
-                }
-                Ok(_) => {}
-                Err(err) => { send_error(&tx, &err.to_string()).await; return; }
-            }
-        }
-
-        if resolved_pending.is_none() {
-            match runtime.prepare_actionable_situation(&context_request, &runtime_state, &compiled, &req.user_input, conflict_result_for_director.as_ref()).await {
-                Ok(director) if director.handled => {
-                    send_phase(&tx, "director", serde_json::to_value(&director).unwrap_or_else(|_| json!({}))).await;
-                    for phase in &director.phases {
-                        send_phase(&tx, phase, serde_json::to_value(&director).unwrap_or_else(|_| json!({}))).await;
-                    }
-                    for tick in &director.clock_ticks {
-                        send_event(&tx, "clock_tick", serde_json::to_value(tick).unwrap_or_else(|_| json!({}))).await;
-                    }
-                    if let Some(novelty) = &director.novelty {
-                        send_event(&tx, "fresh_change", serde_json::to_value(novelty).unwrap_or_else(|_| json!({}))).await;
-                    }
-                    if let Some(brief) = &director.brief {
-                        send_event(&tx, "actionable_situation", serde_json::to_value(brief).unwrap_or_else(|_| json!({}))).await;
-                    }
-                    if let Some(ctx) = &director.narration_context {
-                        agent_tool_context.push_str("\n\n[Actionable Situation Director Context]\n");
-                        agent_tool_context.push_str(ctx);
-                        agent_tool_context.push_str("\n");
-                    }
-                }
-                Ok(_) => {}
-                Err(err) => { send_error(&tx, &err.to_string()).await; return; }
-            }
-        }
-
-        if resolved_pending.is_none() && !ability_handled_for_turn && !object_handled_for_turn && !conflict_handled_for_turn && turn_orchestration.route.allow_agent_plan && agent_v09_enabled_api() {
-            match runtime.plan_agent_turn(&context_request, &runtime_state, &req.user_input).await {
-                Ok(plan) => {
-                    let _ = runtime.persist_agent_plan(&plan).await;
-                    send_phase(&tx, "agent_plan", serde_json::to_value(&plan).unwrap_or_else(|_| json!({}))).await;
-                    if let Some(check) = &plan.check {
-                        send_phase(&tx, "check_contract_created", serde_json::to_value(check).unwrap_or_else(|_| json!({}))).await;
-                    }
-                    match plan.kind {
-                        TurnPlanKind::AskPlayerRoll => {
-                            let check = plan.check.as_ref().expect("AskPlayerRoll plan must contain check");
-                            if system_rolls_visible_policy() {
-                                match runtime.execute_system_roll_bundle(&session_id, &turn_id, check).await {
-                                    Ok(execution) => {
-                                        send_auto_roll_execution_api(&tx, &execution).await;
-                                        agent_tool_context.push_str(&roll_execution_context_tag_api("generic_agent_plan", &execution));
-                                    }
-                                    Err(err) => { send_error(&tx, &err.to_string()).await; return; }
-                                }
-                            } else {
-                                let prompt = pending_check_prompt(check);
-                                send_phase(&tx, "pending_check_created", json!({"check_id": &check.check_id, "label": &check.check_label, "roll_visibility": check.roll_visibility})).await;
-                                send_delta(&tx, &prompt).await;
-                                let context_hashes = json!({"prefix_hash": compiled.prefix_hash, "pinned_hash": compiled.pinned_hash, "dynamic_hash": compiled.dynamic_hash, "cache_key": compiled.cache_key});
-                                let _ = db.save_turn(&session_id, &turn_id, &req.user_input, &prompt, context_hashes, "awaiting_player_roll").await;
-                                send_phase(&tx, "done", json!({"reason":"awaiting_player_roll"})).await;
-                                return;
-                            }
-                        }
-                        TurnPlanKind::GmRollThenNarrate | TurnPlanKind::SecretRollThenNarrate | TurnPlanKind::PassiveResolution => {
-                            if let Some(check) = &plan.check {
-                                match runtime.execute_system_roll_bundle(&session_id, &turn_id, check).await {
-                                    Ok(execution) => {
-                                        send_auto_roll_execution_api(&tx, &execution).await;
-                                        agent_tool_context.push_str(&roll_execution_context_tag_api("generic_agent_plan", &execution));
-                                    }
-                                    Err(err) => { send_error(&tx, &err.to_string()).await; return; }
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                Err(err) => { send_error(&tx, &err.to_string()).await; return; }
-            }
-        }
-        let effective_user_input = format!("{}{}", effective_user_input, agent_tool_context);
-        let messages = match runtime.play_turn_messages(&compiled, &effective_user_input).await {
-            Ok(m) => m,
-            Err(err) => { send_error(&tx, &err.to_string()).await; return; }
-        };
-        send_phase(&tx, "llm_stream_start", json!({})).await;
-        let mut full = String::new();
-        match llm.stream_chat(messages, 0.8).await {
-            Ok(mut stream) => {
-                while let Some(item) = stream.next().await {
-                    match item {
-                        Ok(delta) => { full.push_str(&delta); send_delta(&tx, &delta).await; }
-                        Err(err) => { send_error(&tx, &err.to_string()).await; return; }
-                    }
-                }
-            }
-            Err(err) => { send_error(&tx, &err.to_string()).await; return; }
-        }
-        let job_id = format!("turn_postprocess_{}", Uuid::new_v4().simple());
-        let context_hashes = json!({"prefix_hash": compiled.prefix_hash.clone(), "pinned_hash": compiled.pinned_hash.clone(), "dynamic_hash": compiled.dynamic_hash.clone(), "cache_key": compiled.cache_key.clone()});
-        send_phase(&tx, "postprocess_scheduled", json!({"job_id": job_id.clone()})).await;
-        let db2 = db.clone();
-        let runtime2 = runtime.clone();
-        let user_input = req.user_input.clone();
-        let audit_user_input = effective_user_input.clone();
-        // Captured for the in-spawn scene_navigator (semantic scene navigation).
-        let llm_for_nav = llm.clone();
-        let data_dir_for_nav = data_dir.clone();
-        tokio::spawn(async move {
-            let _ = db2.insert_background_job(&job_id, "turn_postprocess", json!({"session_id": session_id.clone(), "turn_id": turn_id.clone()})).await;
-            let memory_event = MemoryEvent {
-                event_id: format!("memory.event.{}", turn_id),
-                session_id: session_id.clone(),
-                turn_id: Some(turn_id.clone()),
-                ruleset_id: runtime_state.ruleset_id.clone(),
-                module_id: runtime_state.module_id.clone(),
-                scene_id: runtime_state.scene_id.clone(),
-                location_id: runtime_state.location_id.clone(),
-                actor_ids: runtime_state.active_npc_ids.clone(),
-                visibility: Visibility::GmOnly,
-                event_kind: MemoryKind::Event,
-                summary: summarize_turn_for_memory(&user_input, &full),
-                transcript_excerpt: Some(format!("Player: {}\nGM: {}", user_input, full.chars().take(2000).collect::<String>())),
-                source: json!({"source":"turn_postprocess", "context_hashes": context_hashes.clone()}),
-                tags: vec!["turn".to_string(), "session_memory".to_string()],
-                importance: 50,
-                occurred_at: Utc::now(),
-            };
-            match db2.save_turn(&session_id, &turn_id, &user_input, &full, context_hashes, "ready").await {
-                Ok(_) => {
-                    let _ = db2.save_memory_event(&memory_event).await;
-                    let audit = runtime2.audit_learning_for_turn(
-                        &session_id,
-                        &runtime_state.ruleset_id,
-                        runtime_state.module_id.as_deref(),
-                        &turn_id,
-                        &audit_user_input,
-                        &full,
-                    ).await.ok();
-                    // Module scene navigation: semantically decide whether the GM
-                    // narration moved the party to another real module scene; on a
-                    // valid transition update current_scene_id + deep-extract on
-                    // arrival. fail-closed (stays put on any failure).
-                    if let Some(mid) = runtime_state.module_id.clone() {
-                        let _ = scene_navigator(&db2, llm_for_nav.as_ref(), &session_id, &mid, &data_dir_for_nav, &user_input, &full).await;
-                    }
-                    let _ = db2.update_background_job(&job_id, "done", json!({"memory_event_id": memory_event.event_id, "learning_audit": audit}), None).await;
-                }
-                Err(err) => { let _ = db2.update_background_job(&job_id, "error", json!({}), Some(&err.to_string())).await; }
-            }
-        });
-        send_phase(&tx, "done", json!({})).await;
     });
     Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default())
 }
