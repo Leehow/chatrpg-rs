@@ -29,6 +29,7 @@ trpg-object = { path = "../trpg-object" }
 trpg-runtime = { path = "../trpg-runtime" }
 trpg-params = { path = "../trpg-params" }
 trpg-time = { path = "../trpg-time" }
+tokio-stream.workspace = true
 
 [dev-dependencies]
 async-stream.workspace = true

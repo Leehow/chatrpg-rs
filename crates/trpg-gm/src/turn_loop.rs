@@ -29,9 +29,10 @@ pub struct GmLoop { pub engine: RuntimeEngine, pub llm: Arc<dyn LlmClient>, pub 
 pub struct GmTurnInput<'a> { pub request: &'a ContextRequest, pub state: &'a RuntimeState, pub user_input: &'a str, pub history: &'a [ChatMessage], pub recent_transcript: Option<&'a str> }
 
 /// 头部确定性 phase 的累积上下文（原 run_gm_turn 局部变量集中到此，供 phase
-/// handler 顺序填充；本任务私有、不导出）。`messages` 用 Option（TurnMessages
-/// 未实现 Default——assemble 一次性产出，context_assembly 之前为 None）。
-struct TurnContext {
+/// handler 顺序填充）。`messages` 用 Option（TurnMessages 未实现 Default——
+/// assemble 一次性产出，context_assembly 之前为 None）。T4：execute.rs 解释器
+/// 需在兄弟模块构建+驱动它，故 `pub(crate)`；agent_loop 产物字段供尾部 phase 读。
+pub(crate) struct TurnContext {
     ledger: TurnLedger,
     resolved_gate_facts: Vec<String>,
     active_frames: Vec<StateFrame>,
@@ -48,9 +49,12 @@ struct TurnContext {
     max_tool_rounds: u8,
     effect_closure_per_cluster: bool,
     messages: Option<TurnMessages>,
+    // —— T4 agent_loop 产物（run_agent_loop 填，尾部 phase 读）——
+    visible_text: String,
+    awaiting_gate: Option<AwaitingPlayerRoll>,
 }
 impl TurnContext {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             ledger: TurnLedger::new(),
             resolved_gate_facts: Vec::new(),
@@ -68,6 +72,8 @@ impl TurnContext {
             max_tool_rounds: 0,
             effect_closure_per_cluster: false,
             messages: None,
+            visible_text: String::new(),
+            awaiting_gate: None,
         }
     }
 }
@@ -255,32 +261,181 @@ impl GmLoop {
         Ok(TurnOutcome::Narration(visible_text))
     }
 
+    /// T4 AgentLoop body：run_gm_turn 工具轮循环体的 channel 变体。头部 phase
+    /// 已由解释器经 `ctx` 跑完——本方法接管「工具轮 + gate 终态 + 轮耗尽逼散文」
+    /// 三段，把 Delta 经 `tx.send(TurnEvent::Delta)` 实时直通（字节级等价
+    /// on_delta），命中 gate 时 `tx.send(TurnEvent::AwaitingPlayerRoll)` 并返回
+    /// `AgentSignal::AwaitingPlayerRoll`；正常散文返回 `AgentSignal::Narration`。
+    /// 产物（visible_text / awaiting_gate）写回 `ctx` 供尾部 phase 读。verify /
+    /// finalize 不在此跑——解释器作为 Postprocess phase 跑。run_gm_turn 与本方法
+    /// 暂时共存（重复可接受、临时——run_gm_turn 在 Task 5/7 删除）。
+    pub(crate) async fn run_agent_loop(
+        &mut self,
+        ctx: &mut TurnContext,
+        input: &GmTurnInput<'_>,
+        tx: &tokio::sync::mpsc::Sender<crate::turn_event::TurnEvent>,
+    ) -> crate::execute::AgentSignal {
+        use crate::turn_event::TurnEvent;
+        let messages = ctx.messages.as_mut().expect("context_assembly assembles messages");
+        let schemas = ctx.mode_tools.as_ref().unwrap_or(&self.tools).schemas();
+        let max_tool_rounds = ctx.max_tool_rounds;
+        let effect_closure_per_cluster = ctx.effect_closure_per_cluster;
+        let mode_id = ctx.mode_id.clone();
+        let opposed_binding = ctx.opposed_binding.clone();
+        let ledger = &mut ctx.ledger;
+        let mut visible_text = String::new();
+        let mut awaiting: Option<AwaitingPlayerRoll> = None;
+        let mut narrated = false;
+        // B6：obligations 暂入互斥单元——与 run_gm_turn 同款（dispatch 链上 ToolCtx
+        // 是共享引用，waive_obligation 需点改清单；块结束取回持久字段）。
+        let obligations_cell = std::sync::Mutex::new(std::mem::take(&mut self.obligations));
+        {
+            let tools = ctx.mode_tools.as_ref().unwrap_or(&self.tools);
+            let tool_ctx = ToolCtx { engine: &self.engine, request: input.request, state: &ctx.state_agent, scene_extractor: self.scene_extractor.as_ref(), obligations: Some(&obligations_cell), data_dir: Some(&self.data_dir), current_mode: mode_id.as_deref(), opposed_binding: opposed_binding.as_ref() };
+            'rounds: for round in 0..max_tool_rounds {
+                tracing::info!(
+                    target: "gm_cache",
+                    session_id = %input.request.session_id,
+                    turn_id = %input.request.turn_id,
+                    prefix_hash = %ctx.compiled.prefix_hash,
+                    pinned_hash = %ctx.compiled.pinned_hash,
+                    request_prefix_hash = %messages.prefix_byte_hash(2),
+                    tool_round = round,
+                    "gm agent prompt cache anchors"
+                );
+                let blocked = {
+                    let mut obligations = obligations_cell.lock().unwrap_or_else(|p| p.into_inner());
+                    let settled: std::collections::BTreeSet<&str> = ledger.snapshot().check_results.iter().map(|r| r.check_id.as_str()).collect();
+                    for contract in &ledger.snapshot().check_contracts {
+                        if settled.contains(contract.check_id.as_str()) { obligations.mark_check_settled(&contract.check_id); } else { obligations.record_open_check(&contract.check_id); }
+                    }
+                    let effect_ids: Vec<String> = ledger.snapshot().effect_contracts.iter().map(|e| e.effect_id.clone()).collect();
+                    obligations.settle_retro_debts_with_effects(&effect_ids);
+                    let settled_check_ids: Vec<String> = settled.iter().map(|c| c.to_string()).collect();
+                    obligations.settle_retro_debts_with_checks(&settled_check_ids);
+                    let snap = ledger.snapshot();
+                    let effects_booked = snap.effect_contracts.len()
+                        + snap.parameter_impacts.len()
+                        + snap.check_results.iter().filter(|r| !r.committed_patches.is_empty()).count();
+                    obligations.update_cluster_closure(effect_closure_per_cluster, snap.check_results.len(), effects_booked);
+                    match obligations.block_text() {
+                        Some(block) => { if round > 0 { messages.push_system_observation(&block); } true }
+                        None => false,
+                    }
+                };
+                let mut stream = match self.llm.stream_chat_with_tools(messages.to_request_messages(), schemas.clone(), ToolChoice::Auto).await {
+                    Ok(s) => s,
+                    Err(err) => { tracing::warn!(error = %err, "agent loop stream failed; ending turn"); break 'rounds; }
+                };
+                let mut saw_tool = false;
+                let mut redactor = RedactingBuffer::new(ledger.private_roll_tokens());
+                while let Some(event) = stream.next().await {
+                    let event = match event { Ok(e) => e, Err(err) => { tracing::warn!(error = %err, "agent loop stream event error"); break; } };
+                    match event {
+                        StreamEvent::ContentDelta(delta) => {
+                            if !blocked {
+                                let safe = redactor.push(&delta);
+                                if !safe.is_empty() { let _ = tx.send(TurnEvent::Delta(safe.clone())).await; visible_text.push_str(&safe); }
+                            }
+                        }
+                        StreamEvent::Usage(usage) => {
+                            tracing::info!(target: "gm_cache", cached_tokens = ?usage.pointer("/prompt_tokens_details/cached_tokens"), "upstream usage reported");
+                        }
+                        StreamEvent::ToolCalls(calls) => {
+                            saw_tool = true;
+                            messages.push_assistant_tool_calls(&calls);
+                            for call in calls {
+                                let outcome = tools.dispatch(&tool_ctx, ledger, &call).await;
+                                let output_value = serde_json::from_str::<serde_json::Value>(&outcome.content)
+                                    .unwrap_or_else(|_| json!({"raw": outcome.content.as_str()}));
+                                let status = if output_value.get("error").is_some() { "error" } else { "done" };
+                                let _ = tool_ctx.engine.db.insert_agent_tool_call(&trpg_model::AgentToolCallRecord {
+                                    tool_call_id: outcome.tool_call_id.clone(),
+                                    session_id: input.request.session_id.clone(),
+                                    turn_id: input.request.turn_id.clone(),
+                                    tool_name: outcome.name.clone(),
+                                    visibility: Visibility::GmOnly,
+                                    input_json: serde_json::from_str(&call.arguments).unwrap_or_else(|_| json!({"raw": call.arguments.as_str()})),
+                                    output_json: Some(output_value),
+                                    status: status.to_string(),
+                                    error: None,
+                                    created_at: Utc::now(),
+                                }).await;
+                                messages.push_tool_result(&outcome.tool_call_id, &outcome.name, &outcome.content);
+                                if let Some(gate) = outcome.awaiting_player_roll {
+                                    drain_redactor_tx(&mut redactor, blocked, tx, &mut visible_text).await;
+                                    awaiting = Some(gate);
+                                    break 'rounds;
+                                }
+                            }
+                            drain_redactor_tx(&mut redactor, blocked, tx, &mut visible_text).await;
+                            redactor = RedactingBuffer::new(ledger.private_roll_tokens());
+                        }
+                        StreamEvent::Done { .. } => {}
+                    }
+                }
+                drain_redactor_tx(&mut redactor, blocked, tx, &mut visible_text).await;
+                if saw_tool || blocked { continue 'rounds; }
+                narrated = true;
+                break 'rounds;
+            }
+        }
+        self.obligations = obligations_cell.into_inner().unwrap_or_else(|p| p.into_inner());
+        // —— 终态 A：request_player_roll gate ——
+        if let Some(gate) = awaiting {
+            ctx.visible_text = visible_text;
+            let _ = tx.send(TurnEvent::AwaitingPlayerRoll { check_id: gate.check_id.clone(), prompt_public: gate.prompt_public.clone() }).await;
+            ctx.awaiting_gate = Some(gate);
+            return crate::execute::AgentSignal::AwaitingPlayerRoll;
+        }
+        // —— 轮数耗尽且模型仍要工具：追加唯一一轮 ToolChoice::None 逼散文 ——
+        if !narrated {
+            match self.llm.stream_chat_with_tools(messages.to_request_messages(), schemas, ToolChoice::None).await {
+                Ok(mut stream) => {
+                    let mut redactor = RedactingBuffer::new(ledger.private_roll_tokens());
+                    while let Some(event) = stream.next().await {
+                        let event = match event { Ok(e) => e, Err(err) => { tracing::warn!(error = %err, "agent loop forced-prose stream error"); break; } };
+                        if let StreamEvent::ContentDelta(delta) = event {
+                            let safe = redactor.push(&delta);
+                            if !safe.is_empty() { let _ = tx.send(TurnEvent::Delta(safe.clone())).await; visible_text.push_str(&safe); }
+                        }
+                    }
+                    let rest = redactor.finish();
+                    if !rest.is_empty() { let _ = tx.send(TurnEvent::Delta(rest.clone())).await; visible_text.push_str(&rest); }
+                }
+                Err(err) => tracing::warn!(error = %err, "agent loop forced-prose stream failed"),
+            }
+        }
+        ctx.visible_text = visible_text;
+        crate::execute::AgentSignal::Narration
+    }
+
     /// PhaseId::RecordPlayerAction — world event PlayerAction（spec §4 头部第 1）。
-    async fn phase_record_player_action(&self, _ctx: &mut TurnContext, input: &GmTurnInput<'_>) {
+    pub(crate) async fn phase_record_player_action(&self, _ctx: &mut TurnContext, input: &GmTurnInput<'_>) {
         let _ = self.engine.record_world_event(&input.request.session_id, Some(&input.request.turn_id), None, WorldEventKind::PlayerAction, json!({"input": input.user_input}), Visibility::GmOnly).await;
     }
 
     /// PhaseId::RefreshLiveDerived — refresh_actor_live_derived（spec §4 头部第 2）。
-    async fn phase_refresh_live_derived(&self, _ctx: &mut TurnContext, input: &GmTurnInput<'_>) {
+    pub(crate) async fn phase_refresh_live_derived(&self, _ctx: &mut TurnContext, input: &GmTurnInput<'_>) {
         let _ = self.engine.refresh_actor_live_derived(&input.request.session_id, input.request.viewer.actor_id.as_deref().unwrap_or("pc.current")).await;
     }
 
     /// PhaseId::Reconcile — 机制对账（spec §4 顺序：gate 结算之前显式调，幂等；
     /// prepare_turn_context 内部也会 reconcile，但那发生在 gate 结算之后）。
-    async fn phase_reconcile(&self, _ctx: &mut TurnContext, input: &GmTurnInput<'_>) {
+    pub(crate) async fn phase_reconcile(&self, _ctx: &mut TurnContext, input: &GmTurnInput<'_>) {
         let _ = InteractionLifecycleKernel::new(self.engine.db.clone()).reconcile_session(&input.request.session_id).await;
     }
 
     /// PhaseId::Gate — request_player_roll 闸门结算（gate.rs 单点；含裸 "roll"
     /// 兜底 + Err 折叠 + C7 effect_policy 强制；spec §4 头部第 4）。
-    async fn phase_gate(&self, ctx: &mut TurnContext, input: &GmTurnInput<'_>) {
+    pub(crate) async fn phase_gate(&self, ctx: &mut TurnContext, input: &GmTurnInput<'_>) {
         crate::gate::resolve_pending_gate(&self.engine, self.gate_resolver.as_ref(), input.request, input.state.scene_id.as_deref(), input.user_input, &mut ctx.ledger, &mut ctx.resolved_gate_facts).await;
     }
 
     /// PhaseId::StimulusPass — TurnStart hook dues + 语义被动刺激预 pass（J2 SAN）。
     /// hook 先、stimulus 后并入 ctx.pending_dues，供 debt_load 按序吸收。
     /// fail-closed：门关/无目录/LLM 失败 → 空，绝不阻断回合（unwrap_or_default）。
-    async fn phase_stimulus_pass(&self, ctx: &mut TurnContext, input: &GmTurnInput<'_>) {
+    pub(crate) async fn phase_stimulus_pass(&self, ctx: &mut TurnContext, input: &GmTurnInput<'_>) {
         let hook_dues = trpg_mechanics::RefereeCombatService::new(self.engine.db.clone())
             .dues_for_hook(&input.request.session_id, &input.request.turn_id, &input.request.ruleset_id, &trpg_mechanics::watcher::HookEvent::TurnStart)
             .await
@@ -305,13 +460,13 @@ impl GmLoop {
 
     /// PhaseId::OpposedPrepass — 回合头部对抗绑定（现搓防御方 NPC + 备 OpposedBinding
     /// 供 roll_check 注入）。fail-closed：门关/无 NPC/无攻击意图 → None。
-    async fn phase_opposed_prepass(&self, ctx: &mut TurnContext, input: &GmTurnInput<'_>) {
+    pub(crate) async fn phase_opposed_prepass(&self, ctx: &mut TurnContext, input: &GmTurnInput<'_>) {
         ctx.opposed_binding = crate::opposed_prepass::prepare_binding(&self.engine, &self.llm, input.request, input.state, input.user_input, input.recent_transcript, input.history).await;
     }
 
     /// PhaseId::ModeInference — active state_frame → mode 推导（三期 §4.1）。manifest
     /// 损坏 → Err fail-closed 终止回合；db 失败 unwrap_or_default 绝不阻断。
-    async fn phase_mode_inference(&self, ctx: &mut TurnContext, input: &GmTurnInput<'_>) -> Result<()> {
+    pub(crate) async fn phase_mode_inference(&self, ctx: &mut TurnContext, input: &GmTurnInput<'_>) -> Result<()> {
         ctx.active_frames = self.engine.db.list_active_state_frames(&input.request.session_id, 8).await.unwrap_or_default();
         ctx.mode_manifest = crate::mode::active_mode_manifest(&self.data_dir, &ctx.active_frames)?;
         ctx.mode_id = ctx.mode_manifest.as_ref().map(|m| m.mode_id.clone());
@@ -320,7 +475,7 @@ impl GmLoop {
 
     /// PhaseId::DebtLoad — B6 债务装载（spec §5.3）：begin_turn + mode 退出义务
     /// re-seed + leftover/hook/stimulus dues 吸收（按 due_id 去重）→ carryover block。
-    async fn phase_debt_load(&mut self, ctx: &mut TurnContext, input: &GmTurnInput<'_>) {
+    pub(crate) async fn phase_debt_load(&mut self, ctx: &mut TurnContext, input: &GmTurnInput<'_>) {
         self.obligations.begin_turn(&input.request.turn_id);
         if let Some(m) = &ctx.mode_manifest {
             self.obligations.ensure_mode_exit_obligations(&m.mode_id, &m.exit_obligations);
@@ -334,7 +489,7 @@ impl GmLoop {
     /// PhaseId::ContextAssembly — prepare_turn_context + 四级 gm_skill 合并 + mode
     /// 目录联动 + errata/novelty BP3 块 + TurnMessages 组装 + mode 工具/节拍参数。
     /// fail-closed：budget 超限 / gm_skill 缺 / 未知工具名 → Err 终止回合。
-    async fn phase_context_assembly(&self, ctx: &mut TurnContext, input: &GmTurnInput<'_>) -> Result<()> {
+    pub(crate) async fn phase_context_assembly(&self, ctx: &mut TurnContext, input: &GmTurnInput<'_>) -> Result<()> {
         ctx.state_agent = input.state.clone();
         ctx.state_agent.agent_loop_protocol = true;
         ctx.compiled = match &self.ctx_provider {
@@ -375,7 +530,7 @@ impl GmLoop {
     /// 流后校验（spec §4 第 5 步）：NarrationVerifier 对账已流出全文 → 勘误记忆
     /// （注入下一轮 dynamic tail）→ 新增勘误折 MemoryEvent 持久化（tags 含
     /// "gm_errata"；落库失败 `let _ =` 吞错——叙事已交付，校验绝不反向中断回合）。
-    async fn verify_after_stream(&mut self, request: &ContextRequest, ledger: &TurnLedger, visible_text: &str) {
+    pub(crate) async fn verify_after_stream(&mut self, request: &ContextRequest, ledger: &TurnLedger, visible_text: &str) {
         let verifier = trpg_agent::NarrationVerifier;
         // B7 语义决策：agent 不显式声明引用，引擎代填"已落账事实全集"
         // （ledger_id_set 物化，排序保证确定性）——结构化核对退化为"声称的
@@ -409,7 +564,7 @@ impl GmLoop {
     /// 本回合 + 回合摘要 + 学习审计。叙事已流出不可回收，收尾失败 tracing::warn
     /// 不 panic（也让 MockLlm 单测在 lazy pool 下保持绿）；真实落库由 Task 11 的
     /// turns 表 SQL 验证。
-    async fn finalize_turn(&self, request: &ContextRequest, compiled: &CompiledContext, user_input: &str, assistant_output: &str, status: &str) {
+    pub(crate) async fn finalize_turn(&self, request: &ContextRequest, compiled: &CompiledContext, user_input: &str, assistant_output: &str, status: &str) {
         let hashes = json!({"prefix": compiled.prefix_hash, "pinned": compiled.pinned_hash, "dynamic": compiled.dynamic_hash});
         if let Err(err) = self.engine.db.save_turn(&request.session_id, &request.turn_id, user_input, assistant_output, hashes, status).await {
             tracing::warn!(error = %err, "agent path save_turn failed");
@@ -428,6 +583,89 @@ impl GmLoop {
             }
         }
     }
+
+    // ====================== T4 解释器尾部 phase wrappers ======================
+    // execute.rs 解释器经这些 pub(crate) 方法跑后置 phase，全部从 `ctx` 读
+    // run_agent_loop 写回的产物（visible_text / ledger / compiled / awaiting_gate）。
+
+    /// PhaseId::VerifyAfterStream — 流后校验（与 run_gm_turn 同语义：visible_text
+    /// 非空才跑；空文本无可对账内容）。
+    pub(crate) async fn phase_verify_after_stream(&mut self, ctx: &mut TurnContext, input: &GmTurnInput<'_>) {
+        if ctx.visible_text.trim().is_empty() && ctx.awaiting_gate.is_some() { return; }
+        let visible = std::mem::take(&mut ctx.visible_text);
+        self.verify_after_stream(input.request, &ctx.ledger, &visible).await;
+        ctx.visible_text = visible;
+    }
+
+    /// PhaseId::Finalize — 确定性收尾（save_turn + memory + audit_learning 都在
+    /// finalize_turn 内部，故 AuditLearning phase 是 no-op）。awaiting 终态用 gate
+    /// prompt_public 兜底空 visible_text（与 run_gm_turn assistant_output 选择一致）。
+    pub(crate) async fn phase_finalize(&mut self, ctx: &mut TurnContext, input: &GmTurnInput<'_>, status: &str) {
+        let assistant_output = match &ctx.awaiting_gate {
+            Some(gate) if ctx.visible_text.trim().is_empty() => gate.prompt_public.clone(),
+            _ => ctx.visible_text.clone(),
+        };
+        self.finalize_turn(input.request, &ctx.compiled, input.user_input, &assistant_output, status).await;
+    }
+
+    /// PhaseId::SceneNavigate — 语义场景导航（吸收原 CLI agent_play 回合末逻辑）。
+    /// fail-closed：无 module / scene_navigator Err → None（仅 warn）。scene_navigator
+    /// 现签名返回 `anyhow::Result<()>`（不回传切换详情），故只跑副作用、不发
+    /// SceneTransition 事件——见 §报告「scene_navigator 处理」。
+    pub(crate) async fn phase_scene_navigate(&mut self, ctx: &mut TurnContext, input: &GmTurnInput<'_>) -> Option<SceneTransitionInfo> {
+        let module_id = input.request.module_id.as_deref()?;
+        if let Err(err) = trpg_runtime::scene_navigation::scene_navigator(
+            &self.engine.db, self.llm.as_ref(), &input.request.session_id, module_id,
+            self.data_dir.as_path(), input.user_input, &ctx.visible_text,
+        ).await {
+            tracing::warn!(error = %err, "agent path scene_navigator failed");
+        }
+        None
+    }
+
+    /// PhaseId::CarryoverDebt — 轮耗尽带债的债务跨回合落账（吸收原 run_gm_turn
+    /// `!narrated` 分支的 carryover_block → carryover_memory_event → save_memory_event；
+    /// fail-closed：落库失败仅 warn，BP3 注入由下回合 carryover_block 完成）。
+    pub(crate) async fn phase_carryover_debt(&mut self, _ctx: &mut TurnContext, input: &GmTurnInput<'_>) {
+        if let Some(block) = self.obligations.carryover_block() {
+            let event = carryover_memory_event(input.request, &block);
+            if let Err(err) = self.engine.db.save_memory_event(&event).await {
+                tracing::warn!(error = %err, "agent path debt carryover memory event failed");
+            }
+        }
+    }
+
+    /// 是否有未决义务（CarryoverDebt phase 的运行期条件位；select_phases 用）。
+    pub(crate) fn has_pending_obligations(&self) -> bool {
+        self.obligations.carryover_block().is_some()
+    }
+
+    /// 把 agent 终态折成 TurnOutcome（TurnComplete 事件载荷）。awaiting_gate 优先。
+    pub(crate) fn take_outcome(&self, ctx: &mut TurnContext) -> TurnOutcome {
+        match ctx.awaiting_gate.take() {
+            Some(gate) => TurnOutcome::AwaitingPlayerRoll { check_id: gate.check_id, prompt_public: gate.prompt_public },
+            None => TurnOutcome::Narration(std::mem::take(&mut ctx.visible_text)),
+        }
+    }
+}
+
+/// run_agent_loop 私骰尾窗排空：经 mpsc 发 Delta（与 drain_redactor 同语义，
+/// 但走 tx.send 而非 on_delta；被门轮 blocked 丢弃）。
+async fn drain_redactor_tx(redactor: &mut RedactingBuffer, blocked: bool, tx: &tokio::sync::mpsc::Sender<crate::turn_event::TurnEvent>, visible_text: &mut String) {
+    let rest = redactor.finish();
+    if blocked || rest.is_empty() { return; }
+    let _ = tx.send(crate::turn_event::TurnEvent::Delta(rest.clone())).await;
+    visible_text.push_str(&rest);
+}
+
+/// scene_navigate 切换详情（execute.rs 折成 TurnEvent::SceneTransition）。
+/// scene_navigator 现返回 `()` 不回传切换详情，故 phase_scene_navigate 暂恒
+/// 返 None；保留此类型供后续 scene_navigator 返回类型升级（Task 5/6）对接。
+#[derive(Debug, Clone)]
+pub(crate) struct SceneTransitionInfo {
+    pub from: String,
+    pub to: String,
+    pub reason: String,
 }
 
 /// 排空 RedactingBuffer 尾窗并直通 on_delta（混合轮重建 / 轮收尾 / awaiting

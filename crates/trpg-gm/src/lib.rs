@@ -1,4 +1,5 @@
 pub mod errata;
+pub mod execute;
 pub mod gate;
 pub mod ledger;
 pub mod mode;
@@ -15,6 +16,7 @@ pub mod turn_loop;
 pub mod turn_plan;
 
 pub use errata::{ErrataEntry, ErrataMemory};
+pub use execute::{execute_turn, OwnedTurnRequest};
 pub use ledger::TurnLedger;
 pub use mode::{
     active_mode_manifest, current_mode, load_mode_manifest, CatalogFilter, EnterModeTool,
