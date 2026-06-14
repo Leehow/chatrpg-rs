@@ -10,6 +10,7 @@
 
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
+use trpg_db::Db;
 use trpg_llm::{self, LlmClient};
 use trpg_model::{ActorKind, CharacterOnboardingPack, CharacterSheet, CharacterTemplate, ValidationReport, Visibility};
 use trpg_params::{RuntimeActorParameters, RuntimeParameterService};
@@ -134,6 +135,23 @@ pub fn refresh_mechanical_profile(profile: &mut Value, sheet: &Value) {
     let mut fields = sheet.clone();
     if let Some(o) = fields.as_object_mut() { o.remove("stats"); o.remove("skills"); }
     p.insert("fields".into(), fields);
+}
+
+/// §10.1 LIVE linkage (single impl): reload the actor's params, re-derive
+/// `recompute=live` values from CURRENT base stats, refresh the mechanical-profile
+/// view, and persist if anything changed. Idempotent; no-op when there is no stored
+/// chargen_spec. Shared by `RuntimeEngine::refresh_actor_live_derived` and the
+/// `ParameterNeedResolver` so the two stay byte-equivalent from one source.
+pub async fn refresh_actor_live_derived_db(db: &Db, session_id: &str, actor_id: &str) -> Result<bool> {
+    let service = RuntimeParameterService::new(db.clone());
+    if let Some(mut p) = service.load_actor_parameters(session_id, actor_id).await? {
+        if recompute_live_derived(&mut p.sheet_json) {
+            refresh_mechanical_profile(&mut p.mechanical_profile, &p.sheet_json);
+            service.upsert_actor_parameters(&p).await?;
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Build runtime actor parameters from a generated sheet so the engine plays AS

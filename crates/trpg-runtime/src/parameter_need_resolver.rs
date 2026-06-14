@@ -47,8 +47,8 @@ impl ParameterNeedResolver {
             )
             .await;
 
-        // §10.1 LIVE linkage（等价旧 refresh_actor_live_derived 调用）
-        let _ = self.refresh_live_derived(&need.scopes.session_id, actor_id).await;
+        // §10.1 LIVE linkage（与 RuntimeEngine::refresh_actor_live_derived 共用单一实现）
+        let _ = chargen::refresh_actor_live_derived_db(&self.db, &need.scopes.session_id, actor_id).await;
 
         // ensure NPC 参数（等价旧 active_frame_exists || mentions_npc 分支）
         let active_frame_exists = self
@@ -78,19 +78,6 @@ impl ParameterNeedResolver {
             .actor_parameters_context_block(&need.scopes.session_id, world_tick)
             .await?;
         Ok(NeedOutcome { blocks: vec![block], source_refs: vec![] })
-    }
-
-    /// §10.1: 重算 live 派生值并持久化（等价 RuntimeEngine::refresh_actor_live_derived）。
-    async fn refresh_live_derived(&self, session_id: &str, actor_id: &str) -> Result<bool> {
-        let service = RuntimeParameterService::new(self.db.clone());
-        if let Some(mut p) = service.load_actor_parameters(session_id, actor_id).await? {
-            if chargen::recompute_live_derived(&mut p.sheet_json) {
-                chargen::refresh_mechanical_profile(&mut p.mechanical_profile, &p.sheet_json);
-                service.upsert_actor_parameters(&p).await?;
-                return Ok(true);
-            }
-        }
-        Ok(false)
     }
 }
 

@@ -1390,6 +1390,13 @@ fn fail_on_missing_source_backed_parameters() -> bool {
         use crate::need_resolvers::{runtime_steward_data_dir, RuleNeedResolver};
         use trpg_need::{Need, NeedBus};
 
+        // Ops escape hatch (restored from pre-R2 `auto_search_blocks_for_turn`):
+        // TRPG_RUNTIME_AUTO_SEARCH=0/false → no in-turn rule retrieval at all.
+        // Gate BEFORE building the bus / calling the resolver.
+        if !runtime_auto_search_enabled() {
+            return Ok(vec![]);
+        }
+
         let Some(search) = &self.search else { return Ok(vec![]); };
         let trimmed = input.trim();
         // Align with legacy auto_search short-circuits: empty / non-rule-sensitive
@@ -1551,15 +1558,7 @@ fn fail_on_missing_source_backed_parameters() -> bool {
     /// call at the start of every turn so derived values stay current even on
     /// blocked/early-returning turns. No-op when there is no stored chargen_spec.
     pub async fn refresh_actor_live_derived(&self, session_id: &str, actor_id: &str) -> Result<bool> {
-        let service = RuntimeParameterService::new(self.db.clone());
-        if let Some(mut p) = service.load_actor_parameters(session_id, actor_id).await? {
-            if chargen::recompute_live_derived(&mut p.sheet_json) {
-                chargen::refresh_mechanical_profile(&mut p.mechanical_profile, &p.sheet_json);
-                service.upsert_actor_parameters(&p).await?;
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        chargen::refresh_actor_live_derived_db(&self.db, session_id, actor_id).await
     }
 
     /// Ensure an NPC's parameter is on its card: if absent, run the hybrid ladder
@@ -2311,6 +2310,13 @@ pub(crate) fn build_rule_need_for_turn(
     }
 }
 
+/// Ops escape hatch (preserved from the pre-R2 `auto_search_blocks_for_turn`):
+/// `TRPG_RUNTIME_AUTO_SEARCH=0`/`=false` disables in-turn rule retrieval entirely.
+/// Default (unset / any other value) → enabled. Matches the OLD semantics exactly.
+fn runtime_auto_search_enabled() -> bool {
+    !std::env::var("TRPG_RUNTIME_AUTO_SEARCH").map(|v| v == "false" || v == "0").unwrap_or(false)
+}
+
 fn looks_rule_or_module_sensitive(input: &str) -> bool {
     let lowered = input.to_lowercase();
     let keywords = [
@@ -2709,5 +2715,72 @@ mod build_rule_need_tests {
         let need = build_rule_need_for_turn("orc", None, "s", "t", None, "look around");
         assert!(need.module_id.is_none());
         assert!(need.scene_id.is_none());
+    }
+}
+
+#[cfg(test)]
+mod runtime_auto_search_gate_tests {
+    use super::*;
+
+    // TRPG_RUNTIME_AUTO_SEARCH is process-global env; serialize all read/write
+    // tests on this lock and restore the prior value on drop so the default-on
+    // assertion is not polluted when tests run in parallel.
+    static AUTO_SEARCH_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct AutoSearchEnvGuard {
+        prev: Option<String>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+    impl AutoSearchEnvGuard {
+        fn set(value: &str) -> Self {
+            let lock = AUTO_SEARCH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::var("TRPG_RUNTIME_AUTO_SEARCH").ok();
+            std::env::set_var("TRPG_RUNTIME_AUTO_SEARCH", value);
+            Self { prev, _lock: lock }
+        }
+        fn unset() -> Self {
+            let lock = AUTO_SEARCH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::var("TRPG_RUNTIME_AUTO_SEARCH").ok();
+            std::env::remove_var("TRPG_RUNTIME_AUTO_SEARCH");
+            Self { prev, _lock: lock }
+        }
+    }
+    impl Drop for AutoSearchEnvGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var("TRPG_RUNTIME_AUTO_SEARCH", v),
+                None => std::env::remove_var("TRPG_RUNTIME_AUTO_SEARCH"),
+            }
+        }
+    }
+
+    /// `runtime_auto_search_enabled()` is the sole predicate gating
+    /// `rule_need_blocks_for_turn` at its top: when it returns false the method
+    /// short-circuits to `Ok(vec![])` BEFORE building the bus / calling the
+    /// resolver. Constructing a `RuntimeEngine` here would need a live Postgres
+    /// (`Db` wraps a real `PgPool`, no mock), so we assert the gate decision via
+    /// this predicate — `false` is exactly equivalent to "returns empty".
+    #[test]
+    fn auto_search_disabled_when_zero() {
+        let _g = AutoSearchEnvGuard::set("0");
+        assert!(!runtime_auto_search_enabled(), "=0 must disable in-turn rule retrieval (empty blocks)");
+    }
+
+    #[test]
+    fn auto_search_disabled_when_false() {
+        let _g = AutoSearchEnvGuard::set("false");
+        assert!(!runtime_auto_search_enabled(), "=false must disable in-turn rule retrieval (empty blocks)");
+    }
+
+    #[test]
+    fn auto_search_enabled_by_default_when_unset() {
+        let _g = AutoSearchEnvGuard::unset();
+        assert!(runtime_auto_search_enabled(), "unset must keep default-ON behavior unchanged");
+    }
+
+    #[test]
+    fn auto_search_enabled_for_other_values() {
+        let _g = AutoSearchEnvGuard::set("1");
+        assert!(runtime_auto_search_enabled(), "any value other than 0/false stays enabled (matches old semantics)");
     }
 }

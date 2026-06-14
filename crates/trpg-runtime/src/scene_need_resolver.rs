@@ -32,11 +32,6 @@ pub(crate) fn resolve_scene_blocks(
     blocks
 }
 
-/// fail-closed 空路径：无 module_id 时返回空 Vec，不 panic。
-pub(crate) fn resolve_scene_blocks_no_module() -> Vec<ContextBlock> {
-    Vec::new()
-}
-
 /// 从 ModuleGraph 选出当前场景节点：
 /// 显式 scene_id 优先，缺失/不匹配则回退首个 DeepExtracted（入口场景）。
 /// fail-closed：无匹配 → None。与 `module_scene_blocks_for_turn` 逻辑完全相同。
@@ -158,13 +153,6 @@ mod tests {
     }
 
     #[test]
-    fn scene_resolver_no_module_returns_empty() {
-        // 无 module_id → fail-closed → 空 Vec
-        let result = resolve_scene_blocks_no_module();
-        assert!(result.is_empty());
-    }
-
-    #[test]
     fn pick_scene_prefers_explicit_scene_id_over_deep_fallback() {
         let mk = |id: &str, st: SceneExtractionStatus| {
             let mut n = ScenarioNode::default();
@@ -198,13 +186,5 @@ mod tests {
         g.scenes = vec![n];
         let result = pick_scene_node(&g, None);
         assert!(result.is_none(), "无 DeepExtracted 场景应 fail-closed 返回 None");
-    }
-
-    #[test]
-    fn resolver_blocks_empty_on_no_module_id() {
-        // SceneNeed 无 module_id → outcome.blocks 必须为空（不 panic）
-        // 纯路径测试（不启动 DB），直接调 resolve_scene_blocks_no_module()。
-        let blocks = resolve_scene_blocks_no_module();
-        assert!(blocks.is_empty());
     }
 }
