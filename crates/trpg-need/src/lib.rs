@@ -60,6 +60,9 @@ pub struct MaterialNeed {
 #[derive(Debug, Clone)]
 pub struct SceneNeed {
     pub scopes: NeedScopes,
+    /// project.modules 中所有 module_id 列表，用于 resolver 做成员校验（防跨 project 泄漏）。
+    /// 由 prepare_turn_context 在构造 Need 时填入（project 已在调用方加载）。
+    pub project_module_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone)]

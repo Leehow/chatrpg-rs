@@ -69,7 +69,7 @@ impl NeedResolver for ErroringResolver {
 fn need_kind_covers_five_variants() {
     assert_eq!(rule_need().kind(), NeedKind::Rule);
     assert_eq!(Need::Material(MaterialNeed { scopes: scopes(), user_input: None }).kind(), NeedKind::Material);
-    assert_eq!(Need::Scene(SceneNeed { scopes: scopes() }).kind(), NeedKind::Scene);
+    assert_eq!(Need::Scene(SceneNeed { scopes: scopes(), project_module_ids: vec![] }).kind(), NeedKind::Scene);
     assert_eq!(Need::Entity(EntityNeed { scopes: scopes(), entity_hint: None }).kind(), NeedKind::Entity);
     assert_eq!(
         Need::Parameter(ParameterNeed { scopes: scopes(), actor_id: None, current_input: None }).kind(),
@@ -96,7 +96,7 @@ async fn unclaimed_kind_is_skipped_not_errored() {
     let mut bus = NeedBus::new();
     // Only a Rule resolver registered; emit a Scene need (unclaimed).
     bus.register(Box::new(CountingResolver { kind: NeedKind::Rule, calls: calls.clone() }));
-    bus.emit(Need::Scene(SceneNeed { scopes: scopes() }));
+    bus.emit(Need::Scene(SceneNeed { scopes: scopes(), project_module_ids: vec![] }));
     let outcomes = bus.resolve_all().await;
     assert_eq!(calls.load(Ordering::SeqCst), 0, "rule resolver not called for scene need");
     assert!(outcomes.is_empty(), "unclaimed need yields no outcome, no panic");

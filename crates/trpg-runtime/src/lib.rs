@@ -29,6 +29,9 @@ pub use chargen::{generate_starter_character, materialize_actor_params, CreatedC
 
 mod need_resolvers;
 
+mod scene_need_resolver;
+use scene_need_resolver::SceneNeedResolver;
+
 pub mod npc_synth;
 
 mod scene_projection;
@@ -260,9 +263,32 @@ impl RuntimeEngine {
             Ok(mut frame_blocks) => blocks.append(&mut frame_blocks),
             Err(err) => tracing::warn!(error = %err, "working state frame retrieval failed; continuing without frame blocks"),
         }
-        match self.module_scene_blocks_for_turn(request, state, &project).await {
-            Ok(mut scene_blocks) => blocks.append(&mut scene_blocks),
-            Err(err) => tracing::warn!(error = %err, "module_scene_blocks_for_turn failed; continuing without current-scene projection"),
+        // TRPG_NEED_BUS_SCENE=0 → 回退旧直连（A/B 等价验证用）；默认走 NeedBus 路径。
+        if runtime_need_bus_scene_enabled() {
+            let project_module_ids: Vec<String> =
+                project.modules.iter().map(|m| m.module_id.clone()).collect();
+            let scene_need = trpg_need::Need::Scene(trpg_need::SceneNeed {
+                scopes: trpg_need::NeedScopes {
+                    ruleset_id: request.ruleset_id.clone(),
+                    module_id: request.module_id.clone().or_else(|| state.module_id.clone()),
+                    session_id: request.session_id.clone(),
+                    turn_id: request.turn_id.clone(),
+                    scene_id: state.scene_id.clone(),
+                },
+                project_module_ids,
+            });
+            let mut scene_bus = trpg_need::NeedBus::new();
+            scene_bus.register(Box::new(SceneNeedResolver { db: self.db.clone() }));
+            scene_bus.emit(scene_need);
+            let outcomes = scene_bus.resolve_all().await;
+            for outcome in outcomes {
+                blocks.extend(outcome.blocks);
+            }
+        } else {
+            match self.module_scene_blocks_for_turn(request, state, &project).await {
+                Ok(mut scene_blocks) => blocks.append(&mut scene_blocks),
+                Err(err) => tracing::warn!(error = %err, "module_scene_blocks_for_turn failed; continuing without current-scene projection"),
+            }
         }
         match self.world_time_blocks_for_turn(request).await {
             Ok(mut time_blocks) => blocks.append(&mut time_blocks),
@@ -2417,6 +2443,13 @@ fn runtime_auto_search_enabled() -> bool {
 /// falls back to the legacy `auto_search` + `learned_packet` direct path.
 fn runtime_need_bus_rule_enabled() -> bool {
     !std::env::var("TRPG_NEED_BUS_RULE").map(|v| v == "false" || v == "0").unwrap_or(false)
+}
+
+/// R2 T3: route turn's scene-block assembly through the Need bus (SceneNeedResolver).
+/// Default ON; `TRPG_NEED_BUS_SCENE=0`/`=false` falls back to the legacy
+/// `module_scene_blocks_for_turn` direct call (kept until Task 7 removes it).
+fn runtime_need_bus_scene_enabled() -> bool {
+    !std::env::var("TRPG_NEED_BUS_SCENE").map(|v| v == "false" || v == "0").unwrap_or(false)
 }
 
 /// Deterministically map a turn's request/state/input into a `RuleNeed` the bus
