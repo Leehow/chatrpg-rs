@@ -1493,7 +1493,7 @@ async fn run_turn_once(
     // 模组场景导航（与 API turn_postprocess 共享）：本回合叙事后语义判定党是否走到另一场景，
     // 更新 current_scene_id + 到场深抽。fail-closed：失败仅 warn，不影响回合返回。
     if let Some(mid) = module {
-        if let Err(err) = trpg_api::scene_navigator(db, llm.as_ref(), session_id, mid, &default_data_dir(), user_input, &full).await {
+        if let Err(err) = trpg_runtime::scene_navigation::scene_navigator(db, llm.as_ref(), session_id, mid, &default_data_dir(), user_input, &full).await {
             emit_phase(stream_format, "scene_navigator_error", json!({"error": err.to_string()}))?;
         }
     }

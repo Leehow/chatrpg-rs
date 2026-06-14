@@ -3768,6 +3768,7 @@ dependencies = [
  "trpg-orchestrator",
  "trpg-params",
  "trpg-referee",
+ "trpg-rule-agent",
  "trpg-search",
  "trpg-semantics",
  "trpg-time",

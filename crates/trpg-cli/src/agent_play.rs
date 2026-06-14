@@ -5,7 +5,7 @@ use std::future::Future;
 use std::io::{self, Write};
 use std::pin::Pin;
 use std::sync::Arc;
-use trpg_api::extract_module_scenes;
+use trpg_runtime::scene_navigation::{extract_module_scenes, scene_navigator};
 use trpg_gm::{GmLoop, GmTurnInput, LoopConfig, SceneDeepExtractFn, ToolRegistry, TurnOutcome};
 use trpg_model::{ChatMessage, ContextRequest, RuntimeState, TokenBudget, VisibilityProfile};
 use trpg_runtime::RuntimeEngine;
@@ -94,7 +94,7 @@ pub async fn play_cli_agent(ruleset: &str, module: Option<&str>) -> Result<()> {
         // AwaitingPlayerRoll 跳过（GM 在等玩家掷骰，场景未结束）。fail-closed：失败仅 warn 不阻断。
         if do_scene_nav {
             if let Some(mid) = module {
-                if let Err(err) = trpg_api::scene_navigator(&db, llm.as_ref(), &session_id, mid, data_dir.as_path(), &player_input_for_nav, &streamed).await {
+                if let Err(err) = scene_navigator(&db, llm.as_ref(), &session_id, mid, data_dir.as_path(), &player_input_for_nav, &streamed).await {
                     tracing::warn!("agent scene_navigator: {err:#}");
                 }
             }

@@ -36,6 +36,11 @@ use scene_projection::{scene_node_to_blocks, resolve_turn_scene_id, map_check_pa
 mod context_blocks;
 use context_blocks::{agent_plan_block, learned_packet_block, memory_snapshot_block, retrieved_memory_block, actionable_situation_block, clue_board_block, world_time_block, world_events_since_block, engine_protocol_block, engine_protocol_block_agent_loop, world_state_block, dynamic_text_block};
 
+pub mod scene_navigation;
+pub use scene_navigation::{
+    extract_module_scenes, build_nav_prompt, scene_navigator, validate_transition, prefetch_frontier,
+};
+
 #[derive(Clone)]
 pub struct RuntimeEngine {
     pub db: Db,

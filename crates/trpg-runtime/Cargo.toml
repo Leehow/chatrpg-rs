@@ -35,6 +35,7 @@ trpg-material = { path = "../trpg-material" }
 trpg-referee = { path = "../trpg-referee" }
 
 trpg-mechanics = { path = "../trpg-mechanics" }
+trpg-rule-agent = { path = "../trpg-rule-agent" }
 
 [dev-dependencies]
 tokio.workspace = true
