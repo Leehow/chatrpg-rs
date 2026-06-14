@@ -38,3 +38,4 @@ trpg-mechanics = { path = "../trpg-mechanics" }
 
 [dev-dependencies]
 tokio.workspace = true
+sqlx.workspace = true
