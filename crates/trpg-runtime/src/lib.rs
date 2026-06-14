@@ -34,6 +34,8 @@ use scene_need_resolver::SceneNeedResolver;
 
 pub mod material_need_resolver;
 
+pub mod parameter_need_resolver;
+
 pub mod npc_synth;
 
 mod scene_projection;
@@ -300,9 +302,35 @@ impl RuntimeEngine {
             Ok(mut object_blocks) => blocks.append(&mut object_blocks),
             Err(err) => tracing::warn!(error = %err, "object graph projection failed; continuing without object blocks"),
         }
-        match self.actor_parameter_blocks_for_turn(request, current_input).await {
-            Ok(mut actor_blocks) => blocks.append(&mut actor_blocks),
-            Err(err) => tracing::warn!(error = %err, "actor parameter projection failed; continuing without actor parameter blocks"),
+        // R2 T5: default ON → ParameterNeedResolver; TRPG_NEED_BUS_PARAM=0 → legacy direct call.
+        if runtime_need_bus_param_enabled() {
+            use crate::parameter_need_resolver::ParameterNeedResolver;
+            use trpg_need::{Need, NeedResolver, NeedScopes, ParameterNeed};
+            let scopes = NeedScopes {
+                ruleset_id: request.ruleset_id.clone(),
+                module_id: request.module_id.clone(),
+                session_id: request.session_id.clone(),
+                turn_id: request.turn_id.clone(),
+                scene_id: state.scene_id.clone(),
+            };
+            let resolver = ParameterNeedResolver::new(self.db.clone());
+            let need = Need::Parameter(ParameterNeed {
+                scopes,
+                actor_id: request.viewer.actor_id.clone(),
+                current_input: current_input.map(str::to_string),
+            });
+            match resolver.resolve(&need).await {
+                Ok(outcome) => blocks.extend(outcome.blocks),
+                Err(err) => tracing::warn!(
+                    error = %err,
+                    "ParameterNeedResolver failed; continuing without actor parameter blocks"
+                ),
+            }
+        } else {
+            match self.actor_parameter_blocks_for_turn(request, current_input).await {
+                Ok(mut actor_blocks) => blocks.append(&mut actor_blocks),
+                Err(err) => tracing::warn!(error = %err, "actor parameter projection failed (fallback); continuing without actor parameter blocks"),
+            }
         }
         match self.ability_blocks_for_turn(request).await {
             Ok(mut ability_blocks) => blocks.append(&mut ability_blocks),
@@ -1960,6 +1988,15 @@ fn fail_on_missing_source_backed_parameters() -> bool {
         self.materialization_blocks_for_turn(request).await
     }
 
+    /// T5 测试用旧路径透出：等价验证 ParameterNeedResolver 时暴露旧直连路径。收口后删除。
+    pub async fn actor_parameter_blocks_for_turn_pub(
+        &self,
+        request: &ContextRequest,
+        current_input: Option<&str>,
+    ) -> Result<Vec<ContextBlock>> {
+        self.actor_parameter_blocks_for_turn(request, current_input).await
+    }
+
     async fn object_blocks_for_turn(&self, request: &ContextRequest) -> Result<Vec<ContextBlock>> {
         let world_tick = self.current_world_time(&request.session_id).await.map(|t| t.world_tick).unwrap_or_default();
         let block = ObjectService::new(self.db.clone()).object_context_block(&request.session_id, None, request.viewer.actor_id.as_deref().unwrap_or("pc.current"), world_tick).await?;
@@ -2489,6 +2526,13 @@ fn runtime_need_bus_scene_enabled() -> bool {
 /// `materialization_blocks_for_turn` direct call (kept until Task 7 removes it).
 fn runtime_need_bus_material_enabled() -> bool {
     !std::env::var("TRPG_NEED_BUS_MATERIAL").map(|v| v == "false" || v == "0").unwrap_or(false)
+}
+
+/// R2 T5: route turn's actor-parameter-block assembly through the Need bus (ParameterNeedResolver).
+/// Default ON; `TRPG_NEED_BUS_PARAM=0`/`=false` falls back to the legacy
+/// `actor_parameter_blocks_for_turn` direct call (kept until Task 7 removes it).
+fn runtime_need_bus_param_enabled() -> bool {
+    !std::env::var("TRPG_NEED_BUS_PARAM").map(|v| v == "false" || v == "0").unwrap_or(false)
 }
 
 /// Deterministically map a turn's request/state/input into a `RuleNeed` the bus
