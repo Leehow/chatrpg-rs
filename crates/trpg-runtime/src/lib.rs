@@ -32,6 +32,8 @@ mod need_resolvers;
 mod scene_need_resolver;
 use scene_need_resolver::SceneNeedResolver;
 
+pub mod material_need_resolver;
+
 pub mod npc_synth;
 
 mod scene_projection;
@@ -310,9 +312,31 @@ impl RuntimeEngine {
             Ok(mut binding_blocks) => blocks.append(&mut binding_blocks),
             Err(err) => tracing::warn!(error = %err, "rule binding projection failed; continuing without binding blocks"),
         }
-        match self.materialization_blocks_for_turn(request).await {
-            Ok(mut materialization_blocks) => blocks.append(&mut materialization_blocks),
-            Err(err) => tracing::warn!(error = %err, "materialization projection failed; continuing without materialization blocks"),
+        // R2 T4: default ON → MaterialNeedResolver; TRPG_NEED_BUS_MATERIAL=0 → legacy direct call.
+        if runtime_need_bus_material_enabled() {
+            use crate::material_need_resolver::MaterialNeedResolver;
+            use trpg_need::{MaterialNeed, Need, NeedResolver, NeedScopes};
+            let scopes = NeedScopes {
+                ruleset_id: request.ruleset_id.clone(),
+                module_id: request.module_id.clone(),
+                session_id: request.session_id.clone(),
+                turn_id: request.turn_id.clone(),
+                scene_id: state.scene_id.clone(),
+            };
+            let resolver = MaterialNeedResolver::new(self.db.clone());
+            let need = Need::Material(MaterialNeed { scopes, user_input: None });
+            match resolver.resolve(&need).await {
+                Ok(outcome) => blocks.extend(outcome.blocks),
+                Err(err) => tracing::warn!(
+                    error = %err,
+                    "MaterialNeedResolver failed; continuing without materialization blocks"
+                ),
+            }
+        } else {
+            match self.materialization_blocks_for_turn(request).await {
+                Ok(mut materialization_blocks) => blocks.append(&mut materialization_blocks),
+                Err(err) => tracing::warn!(error = %err, "materialization projection failed; continuing without materialization blocks"),
+            }
         }
         match self.player_value_referee_blocks_for_turn(request).await {
             Ok(mut referee_blocks) => blocks.append(&mut referee_blocks),
@@ -1928,6 +1952,14 @@ fn fail_on_missing_source_backed_parameters() -> bool {
         Ok(vec![block])
     }
 
+    /// 测试用旧路径透出（等价验证完成后删除）。
+    pub async fn materialization_blocks_for_turn_pub(
+        &self,
+        request: &ContextRequest,
+    ) -> Result<Vec<ContextBlock>> {
+        self.materialization_blocks_for_turn(request).await
+    }
+
     async fn object_blocks_for_turn(&self, request: &ContextRequest) -> Result<Vec<ContextBlock>> {
         let world_tick = self.current_world_time(&request.session_id).await.map(|t| t.world_tick).unwrap_or_default();
         let block = ObjectService::new(self.db.clone()).object_context_block(&request.session_id, None, request.viewer.actor_id.as_deref().unwrap_or("pc.current"), world_tick).await?;
@@ -2450,6 +2482,13 @@ fn runtime_need_bus_rule_enabled() -> bool {
 /// `module_scene_blocks_for_turn` direct call (kept until Task 7 removes it).
 fn runtime_need_bus_scene_enabled() -> bool {
     !std::env::var("TRPG_NEED_BUS_SCENE").map(|v| v == "false" || v == "0").unwrap_or(false)
+}
+
+/// R2 T4: route turn's materialization-block assembly through the Need bus (MaterialNeedResolver).
+/// Default ON; `TRPG_NEED_BUS_MATERIAL=0`/`=false` falls back to the legacy
+/// `materialization_blocks_for_turn` direct call (kept until Task 7 removes it).
+fn runtime_need_bus_material_enabled() -> bool {
+    !std::env::var("TRPG_NEED_BUS_MATERIAL").map(|v| v == "false" || v == "0").unwrap_or(false)
 }
 
 /// Deterministically map a turn's request/state/input into a `RuleNeed` the bus
