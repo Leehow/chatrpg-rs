@@ -27,6 +27,8 @@ use uuid::Uuid;
 mod chargen;
 pub use chargen::{generate_starter_character, materialize_actor_params, CreatedCharacter};
 
+mod need_resolvers;
+
 pub mod npc_synth;
 
 mod scene_projection;
@@ -233,9 +235,20 @@ impl RuntimeEngine {
         }
 
         if let Some(input) = current_input {
-            match self.auto_search_blocks_for_turn(request, state, input).await {
-                Ok(mut search_blocks) => blocks.append(&mut search_blocks),
-                Err(err) => tracing::warn!(error = %err, "auto rule/module search failed; continuing without search blocks"),
+            // R2: query-driven RULE retrieval routes through the Need bus by default
+            // (RuleNeedResolver → assist, which subsumes auto_search + learned-packet
+            // matching and adds source_refs grounding). `TRPG_NEED_BUS_RULE=0` falls
+            // back to the legacy direct auto_search path below.
+            if runtime_need_bus_rule_enabled() {
+                match self.rule_need_blocks_for_turn(request, state, input).await {
+                    Ok(mut rule_blocks) => blocks.append(&mut rule_blocks),
+                    Err(err) => tracing::warn!(error = %err, "rule need bus failed; continuing without rule blocks"),
+                }
+            } else {
+                match self.auto_search_blocks_for_turn(request, state, input).await {
+                    Ok(mut search_blocks) => blocks.append(&mut search_blocks),
+                    Err(err) => tracing::warn!(error = %err, "auto rule/module search failed; continuing without search blocks"),
+                }
             }
         }
 
@@ -287,10 +300,17 @@ impl RuntimeEngine {
             Ok(mut contest_blocks) => blocks.append(&mut contest_blocks),
             Err(err) => tracing::warn!(error = %err, "contest/opposition projection failed; continuing without contest blocks"),
         }
-        match self.learned_packet_blocks_for_turn(request, state).await {
-            Ok(mut learned_blocks) => blocks.append(&mut learned_blocks),
-            Err(err) => tracing::warn!(error = %err, "learned packet retrieval failed; continuing without learned packets"),
+        // R2: under the Need bus, learned-packet matching is performed inside the
+        // steward's `assist` (RuleNeedResolver), so the standalone learned-packet
+        // projection is only used on the legacy fallback path. Keep it for `=0`.
+        if !runtime_need_bus_rule_enabled() {
+            match self.learned_packet_blocks_for_turn(request, state).await {
+                Ok(mut learned_blocks) => blocks.append(&mut learned_blocks),
+                Err(err) => tracing::warn!(error = %err, "learned packet retrieval failed; continuing without learned packets"),
+            }
         }
+        // BP1 active kernel projection is NOT a query-driven retrieval (it's always
+        // present, non-query); R2 leaves it on both paths untouched.
         match self.rule_steward_prefix_blocks_for_turn(request).await {
             Ok(mut steward_blocks) => blocks.append(&mut steward_blocks),
             Err(err) => tracing::warn!(error = %err, "rule steward BP1 projection failed; continuing without active kernel blocks"),
@@ -1301,6 +1321,54 @@ fn fail_on_missing_source_backed_parameters() -> bool {
         Ok(result)
     }
 
+    /// R2: query-driven rule retrieval via the Need bus → RuleNeedResolver → the
+    /// rule steward's `assist`. This is the default replacement for the legacy
+    /// `auto_search_blocks_for_turn` + `learned_packet_blocks_for_turn` pair: `assist`
+    /// already does learned-packet matching + Tantivy search + locator/rg fallback,
+    /// and additionally grounds results with source_refs. Short-circuit semantics
+    /// mirror the legacy auto_search (no search service / empty input / not rule-
+    /// sensitive → no blocks), so flipping `TRPG_NEED_BUS_RULE` is a clean A/B.
+    async fn rule_need_blocks_for_turn(
+        &self,
+        request: &ContextRequest,
+        state: &RuntimeState,
+        input: &str,
+    ) -> Result<Vec<ContextBlock>> {
+        use crate::need_resolvers::{runtime_steward_data_dir, RuleNeedResolver};
+        use trpg_need::{Need, NeedBus};
+
+        let Some(search) = &self.search else { return Ok(vec![]); };
+        let trimmed = input.trim();
+        // Align with legacy auto_search short-circuits: empty / non-rule-sensitive
+        // input does not trigger retrieval.
+        if trimmed.is_empty() || !looks_rule_or_module_sensitive(trimmed) {
+            return Ok(vec![]);
+        }
+
+        let mut bus = NeedBus::new();
+        bus.register(Box::new(RuleNeedResolver::new(
+            self.db.clone(),
+            search.clone(),
+            runtime_steward_data_dir(),
+        )));
+        bus.emit(Need::Rule(build_rule_need_for_turn(
+            &request.ruleset_id,
+            request.module_id.as_deref().or(state.module_id.as_deref()),
+            &request.session_id,
+            &request.turn_id,
+            state.scene_id.as_deref(),
+            trimmed,
+        )));
+        let outcomes = bus.resolve_all().await;
+        let mut blocks = Vec::new();
+        for outcome in outcomes {
+            blocks.extend(outcome.blocks);
+        }
+        Ok(blocks)
+    }
+
+    // R2 fallback path: still reached when `TRPG_NEED_BUS_RULE=0`. Retained until
+    // Task 4 collapses to the bus path.
     async fn auto_search_blocks_for_turn(
         &self,
         request: &ContextRequest,
@@ -2344,6 +2412,42 @@ fn runtime_auto_search_enabled() -> bool {
     !std::env::var("TRPG_RUNTIME_AUTO_SEARCH").map(|v| v == "false" || v == "0").unwrap_or(false)
 }
 
+/// R2: route the turn's query-driven RULE retrieval through the Need bus
+/// (RuleNeedResolver → RuleStewardAgent::assist). Default ON; `=0`/`=false`
+/// falls back to the legacy `auto_search` + `learned_packet` direct path.
+fn runtime_need_bus_rule_enabled() -> bool {
+    !std::env::var("TRPG_NEED_BUS_RULE").map(|v| v == "false" || v == "0").unwrap_or(false)
+}
+
+/// Deterministically map a turn's request/state/input into a `RuleNeed` the bus
+/// can route. The turn pipeline (not the GM) builds this so AI cannot bypass the
+/// typed retrieval path. `query` and `player_action_summary` both carry the raw
+/// player input; the steward's `assist` derives its own query text from them.
+pub(crate) fn build_rule_need_for_turn(
+    ruleset_id: &str,
+    module_id: Option<&str>,
+    session_id: &str,
+    turn_id: &str,
+    scene_id: Option<&str>,
+    input: &str,
+) -> RuleNeed {
+    RuleNeed {
+        need_id: format!("turn_need_{}", uuid::Uuid::new_v4().simple()),
+        session_id: Some(session_id.to_string()),
+        turn_id: Some(turn_id.to_string()),
+        ruleset_id: ruleset_id.to_string(),
+        module_id: module_id.map(str::to_string),
+        scene_id: scene_id.map(str::to_string),
+        need_kind: RuleNeedKind::GeneralRuleQuery,
+        query: input.to_string(),
+        player_action_summary: input.to_string(),
+        visibility: Visibility::GmOnly,
+        urgency: RuleUrgency::ImmediateTurn,
+        allowed_outputs: vec![RuleAssistOutputKind::ContextBlock],
+        ..Default::default()
+    }
+}
+
 fn looks_rule_or_module_sensitive(input: &str) -> bool {
     let lowered = input.to_lowercase();
     let keywords = [
@@ -2731,4 +2835,40 @@ mod forced_tech_plan_tests {
 mod module_scene_proj_tests_REMOVED_SEE_SCENE_PROJECTION_PLACEHOLDER {
     // Tests moved to scene_projection.rs; this empty placeholder avoids a stale reference.
     // The real tests live in crate::scene_projection.
+}
+
+#[cfg(test)]
+mod build_rule_need_tests {
+    use super::*;
+
+    #[test]
+    fn build_rule_need_carries_scopes_and_input() {
+        let need = build_rule_need_for_turn(
+            "coc",
+            Some("blood_highway"),
+            "sess1",
+            "turn7",
+            Some("sc02"),
+            "I attack the cultist with my knife",
+        );
+        assert_eq!(need.ruleset_id, "coc");
+        assert_eq!(need.module_id.as_deref(), Some("blood_highway"));
+        assert_eq!(need.session_id.as_deref(), Some("sess1"));
+        assert_eq!(need.turn_id.as_deref(), Some("turn7"));
+        assert_eq!(need.scene_id.as_deref(), Some("sc02"));
+        assert_eq!(need.query, "I attack the cultist with my knife");
+        assert_eq!(need.player_action_summary, "I attack the cultist with my knife");
+        assert_eq!(need.need_kind, RuleNeedKind::GeneralRuleQuery);
+        assert!(matches!(need.urgency, RuleUrgency::ImmediateTurn));
+        assert!(matches!(need.visibility, Visibility::GmOnly));
+        assert_eq!(need.allowed_outputs, vec![RuleAssistOutputKind::ContextBlock]);
+        assert!(!need.need_id.is_empty(), "need_id must be generated, not empty");
+    }
+
+    #[test]
+    fn build_rule_need_optional_scopes_default_to_none() {
+        let need = build_rule_need_for_turn("orc", None, "s", "t", None, "look around");
+        assert!(need.module_id.is_none());
+        assert!(need.scene_id.is_none());
+    }
 }

@@ -36,6 +36,9 @@ trpg-referee = { path = "../trpg-referee" }
 
 trpg-mechanics = { path = "../trpg-mechanics" }
 trpg-rule-agent = { path = "../trpg-rule-agent" }
+trpg-need = { path = "../trpg-need" }
+async-trait.workspace = true
+futures-util.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

@@ -3757,7 +3757,9 @@ name = "trpg-runtime"
 version = "1.20.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
+ "futures-util",
  "rand 0.8.6",
  "regex",
  "serde",
@@ -3777,6 +3779,7 @@ dependencies = [
  "trpg-material",
  "trpg-mechanics",
  "trpg-model",
+ "trpg-need",
  "trpg-object",
  "trpg-orchestrator",
  "trpg-params",
