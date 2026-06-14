@@ -8,6 +8,7 @@ members = [
   "crates/trpg-llm",
   "crates/trpg-parser",
   "crates/trpg-rule-agent",
+  "crates/trpg-need",
   "crates/trpg-params",
   "crates/trpg-semantics",
   "crates/trpg-material",

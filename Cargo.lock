@@ -3634,6 +3634,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "trpg-need"
+version = "1.20.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "tokio",
+ "tracing",
+ "trpg-model",
+]
+
+[[package]]
 name = "trpg-object"
 version = "1.20.0"
 dependencies = [
