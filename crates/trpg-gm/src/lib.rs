@@ -10,7 +10,9 @@ pub mod scene_policy;
 pub mod stimulus;
 pub mod stream;
 pub mod tools;
+pub mod turn_event;
 pub mod turn_loop;
+pub mod turn_plan;
 
 pub use errata::{ErrataEntry, ErrataMemory};
 pub use ledger::TurnLedger;
@@ -31,4 +33,6 @@ pub use tools::{
     ToolError, ToolOutput, ToolRegistry, ToolSpec,
 };
 pub use gate::GateResolverFn;
+pub use turn_event::TurnEvent;
 pub use turn_loop::{CtxProviderFn, GmLoop, GmTurnInput, LoopConfig, TurnOutcome};
+pub use turn_plan::{PhaseId, PhaseKind, TurnPhasePlan, CANONICAL_TURN_PLAN};
