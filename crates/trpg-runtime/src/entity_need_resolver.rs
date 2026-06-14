@@ -16,9 +16,8 @@
 //! `Ok(None)` → empty outcome; synthesis `Err` → warn + empty outcome (turn never
 //! aborts).
 //!
-//! `TRPG_NEED_BUS_ENTITY=0` → the emit site (opposed prepass) skips the bus and
-//! falls back to the original direct `ensure_npc_parameter` calls (kept until Task 7
-//! removes them).
+//! R2 收口后这是 opposed-prepass NPC 现搓的唯一路径——旧 `=0` 直连 fallback 已删，
+//! emit site (opposed prepass) 恒经此 resolver（绑定 gate 由其后的幂等读回完成）。
 
 use std::sync::Arc;
 

@@ -1,12 +1,9 @@
-//! R2 SceneNeedResolver: wraps `module_scene_blocks_for_turn` behind the Need bus.
+//! R2 SceneNeedResolver: the current-scene deep projection behind the Need bus.
 //!
-//! Byte-equivalent wrapper — the resolver reproduces the exact logic of
-//! `module_scene_blocks_for_turn` (module_id validation → project membership check →
-//! DB load_module_graph → pick_scene_node → scene_node_to_blocks), so turning the
-//! env gate on/off yields identical blocks for identical inputs.
-//!
-//! `TRPG_NEED_BUS_SCENE=0` → prepare_turn_context skips the bus and falls back to
-//! the original direct call (kept in lib.rs until Task 7 removes it).
+//! The resolver reproduces the original scene-block logic (module_id validation →
+//! project membership check → DB load_module_graph → pick_scene_node →
+//! scene_node_to_blocks). R2 收口后这是唯一的当前场景投影路径——旧直连
+//! `module_scene_blocks_for_turn` 已删，prepare_turn_context 只经此 resolver。
 
 use async_trait::async_trait;
 use trpg_db::Db;

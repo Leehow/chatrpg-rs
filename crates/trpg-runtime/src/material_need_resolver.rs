@@ -1,12 +1,10 @@
-//! R2 MaterialNeedResolver: wraps `materialization_blocks_for_turn` behind the Need bus.
+//! R2 MaterialNeedResolver: the materialization projection behind the Need bus.
 //!
-//! Byte-equivalent wrapper — the resolver reproduces the exact logic of
-//! `materialization_blocks_for_turn` (WorldTimeService.current → world_tick →
-//! MaterializationService::materialization_context_block), so turning the env gate
-//! on/off yields identical blocks for identical inputs.
-//!
-//! `TRPG_NEED_BUS_MATERIAL=0` → prepare_turn_context skips the bus and falls back to
-//! the original direct call (kept in lib.rs until Task 7 removes it).
+//! The resolver reproduces the original materialization-block logic
+//! (WorldTimeService.current → world_tick →
+//! MaterializationService::materialization_context_block). R2 收口后这是唯一的
+//! materialization 投影路径——旧直连 `materialization_blocks_for_turn` 已删，
+//! prepare_turn_context 只经此 resolver。
 //!
 //! Note: `materialization_context_block` is a pure DB read (four SELECT queries) with
 //! zero search calls, so passing `search=None` to `MaterializationService::from_env`

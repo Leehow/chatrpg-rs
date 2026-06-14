@@ -19,37 +19,6 @@ pub(crate) fn agent_plan_block(plan: &AgentTurnPlan) -> ContextBlock {
     block
 }
 
-pub(crate) fn learned_packet_block(packet: LearnedPacket) -> ContextBlock {
-    let mut block = ContextBlock::new(
-        format!("learned_packet.{}", packet.packet_id),
-        BlockKind::LearnedPacket,
-        packet.title.clone(),
-        BlockContent::Json(json!({
-            "packet_type": packet.packet_type.clone(),
-            "packet_key": packet.packet_key.clone(),
-            "summary": packet.summary.clone(),
-            "packet": packet.packet_json.clone(),
-            "ruling_status": "learned",
-            "learning_stage": packet.learning_stage.as_str(),
-            "use_count": packet.use_count,
-        })),
-        packet.visibility,
-        Stability::SceneStable,
-        packet.cache_zone,
-        Scope::ruleset(&packet.ruleset_id),
-        match packet.learning_stage {
-            LearningStage::Memorized => 110,
-            LearningStage::Stable => 95,
-            LearningStage::UsedOnce => 80,
-            _ => 60,
-        },
-    );
-    block.tags = vec!["learned_packet".into(), packet.packet_type.clone(), packet.packet_key.clone(), packet.learning_stage.as_str().into()];
-    block.source_refs = packet.source_refs;
-    block.load_reason = Some("learned_packet_relevant_context".into());
-    block
-}
-
 pub(crate) fn memory_snapshot_block(snapshot: &MemorySnapshot) -> ContextBlock {
     let mut block = ContextBlock::new(
         format!("{}.v{}", snapshot.snapshot_id, snapshot.version),

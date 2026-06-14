@@ -1,9 +1,9 @@
-//! R2 Task 2 — live A/B equivalence e2e for the rule Need bus.
+//! R2 收口后 — live e2e for the rule Need bus (the ONLY rule-retrieval path).
 //!
-//! Asserts FUNCTIONAL coverage equivalence (NOT byte equivalence) between the new
-//! bus path (RuleNeedResolver → RuleStewardAgent::assist) and the legacy direct
-//! `auto_search` + `learned_packet` path, plus the grounding gain (source_refs).
-//! `assist` is the richer retrieval, so the bus path is a functional SUPERSET.
+//! 旧直连 `auto_search` + `learned_packet` 已删，A/B 比对不再可能。本测试断言 bus
+//! 路径（RuleNeedResolver → RuleStewardAgent::assist）的功能覆盖：① BP1 active-kernel
+//! 投影仍在；② 规则敏感输入产 >=1 检索块（覆盖旧 auto_search 信息）；③ source_refs
+//! 接地增益。`assist` 已含 learned-packet 匹配 + Tantivy 搜索 + locator 回退。
 //!
 //! Run (CoC on :54347; cyberpunk lives on :54346 — swap the port if needed):
 //!   TRPG_TEST_DATABASE_URL="postgres://chatrpg:chatrpg@127.0.0.1:54347/chatrpg" \
@@ -61,7 +61,7 @@ fn any_source_refs(ctx: &CompiledContext) -> bool {
 
 #[tokio::test]
 #[ignore]
-async fn rule_need_bus_covers_legacy_auto_search_and_grounds() {
+async fn rule_need_bus_covers_rule_retrieval_and_grounds() {
     let Some(url) = skip_no_db() else { return };
     let db = match Db::connect(&url).await {
         Ok(d) => d,
@@ -115,34 +115,20 @@ async fn rule_need_bus_covers_legacy_auto_search_and_grounds() {
     // Rule-sensitive input (contains 攻击 / 检定 → passes looks_rule_or_module_sensitive).
     let input = "我用小刀攻击邪教徒，要做什么检定？";
 
-    // A: new bus path (default ON).
-    std::env::remove_var("TRPG_NEED_BUS_RULE");
+    // 收口后唯一的获取路径：bus（NeedBus → RuleNeedResolver → assist），无 env 开关。
     let bus_ctx = engine
         .prepare_turn_context(&request, &state, Some(input), None)
         .await
         .expect("bus-path prepare_turn_context");
 
-    // B: legacy direct auto_search + learned path.
-    std::env::set_var("TRPG_NEED_BUS_RULE", "false");
-    let legacy_ctx = engine
-        .prepare_turn_context(&request, &state, Some(input), None)
-        .await
-        .expect("legacy-path prepare_turn_context");
-    std::env::remove_var("TRPG_NEED_BUS_RULE");
-
-    // Assertion 1: BP1 active kernel projection survives on BOTH paths (this task did
-    // not touch rule_steward_prefix_blocks_for_turn).
+    // Assertion 1: BP1 active kernel projection survives (Task 7 did not touch
+    // rule_steward_prefix_blocks_for_turn).
     assert!(has_kernel(&bus_ctx), "bus path must still carry BP1 active kernel projection");
-    assert!(has_kernel(&legacy_ctx), "legacy path carries BP1 active kernel projection");
 
     // Assertion 2: bus path produces >=1 rule retrieval block (covers the rule info
     // the legacy auto_search would have provided).
     let bus_rule_blocks = rule_retrieval_block_count(&bus_ctx);
-    eprintln!(
-        "rule retrieval blocks: bus={} legacy={}",
-        bus_rule_blocks,
-        rule_retrieval_block_count(&legacy_ctx)
-    );
+    eprintln!("rule retrieval blocks (bus): {bus_rule_blocks}");
     assert!(
         bus_rule_blocks >= 1,
         "bus rule resolver must produce >=1 retrieval block covering legacy auto_search info"
@@ -151,6 +137,6 @@ async fn rule_need_bus_covers_legacy_auto_search_and_grounds() {
     // Assertion 3: grounding gain — the bus path surfaces non-empty source_refs.
     assert!(
         any_source_refs(&bus_ctx),
-        "bus path must surface grounded source_refs (grounding gain over legacy)"
+        "bus path must surface grounded source_refs (grounding gain)"
     );
 }

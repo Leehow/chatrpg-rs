@@ -1,18 +1,19 @@
-//! 等价验证：ParameterNeedResolver.resolve() 产块 == 旧 actor_parameter_blocks_for_turn 产块。
+//! R2 收口后：ParameterNeedResolver 是唯一的 actor-parameter 获取路径。
+//! 旧直连 `actor_parameter_blocks_for_turn(_pub)` 已删，A/B 比对不再可能；
+//! 本测试改为断言 bus 路径（resolver）能产出块且 fail-closed 不 panic。
 //! 需：DATABASE_URL 指向含活跃 session 的 CoC 库（:54347）。缺则 SKIP。
 //! Run:
 //!   DATABASE_URL=postgres://chatrpg:chatrpg@127.0.0.1:54347/chatrpg \
 //!   cargo test -p trpg-runtime --test parameter_resolver_equiv -- --nocapture
 
 use trpg_db::Db;
-use trpg_model::{ContextRequest, TokenBudget, VisibilityProfile};
 use trpg_need::{Need, NeedResolver, NeedScopes, ParameterNeed};
-use trpg_runtime::{parameter_need_resolver::ParameterNeedResolver, RuntimeEngine};
+use trpg_runtime::parameter_need_resolver::ParameterNeedResolver;
 
 const RULESET: &str = "call_of_cthulhu_7e";
 
 #[tokio::test]
-async fn parameter_resolver_block_equiv() {
+async fn parameter_resolver_produces_blocks() {
     let url = match std::env::var("DATABASE_URL") {
         Ok(u) => u,
         Err(_) => {
@@ -42,57 +43,30 @@ async fn parameter_resolver_block_equiv() {
         }
     };
 
-    let engine = RuntimeEngine::new(db.clone());
-    let request = ContextRequest {
+    // bus 路径（唯一获取路径）：经 ParameterNeedResolver。
+    let scopes = NeedScopes {
         ruleset_id: RULESET.into(),
         module_id: None,
         session_id: session_id.clone(),
-        turn_id: "turn_test_param_equiv".into(),
-        viewer: VisibilityProfile::gm(),
-        token_budget: TokenBudget::default(),
-    };
-
-    // 旧路径：直接调 actor_parameter_blocks_for_turn（通过测试用 pub shim）
-    let old_blocks = engine
-        .actor_parameter_blocks_for_turn_pub(&request, None)
-        .await
-        .expect("old path ok");
-
-    // 新路径：经 ParameterNeedResolver
-    let scopes = NeedScopes {
-        ruleset_id: request.ruleset_id.clone(),
-        module_id: request.module_id.clone(),
-        session_id: request.session_id.clone(),
-        turn_id: request.turn_id.clone(),
+        turn_id: "turn_test_param".into(),
         scene_id: None,
     };
     let resolver = ParameterNeedResolver::new(db.clone());
     let need = Need::Parameter(ParameterNeed {
         scopes,
-        actor_id: None, // None → 退化为 "pc.current"（与旧路径 viewer.actor_id=None 等价）
+        actor_id: None, // None → 退化为 "pc.current"
         current_input: None,
     });
     let outcome = resolver.resolve(&need).await.expect("resolver ok");
 
-    // 块数量等价
+    // actor-parameter 投影恒产 1 个块（actor_parameters_context_block）。
     assert_eq!(
-        old_blocks.len(),
         outcome.blocks.len(),
-        "block count mismatch: old={} new={}",
-        old_blocks.len(),
-        outcome.blocks.len()
+        1,
+        "ParameterNeedResolver must project exactly one actor-parameter block"
     );
-    // block_id 等价（两次调用在同进程内同步完成，world_tick 不进位，content_hash 也一致）
-    for (old, new) in old_blocks.iter().zip(outcome.blocks.iter()) {
-        assert_eq!(old.block_id, new.block_id, "block_id mismatch");
-        assert_eq!(
-            old.content_hash, new.content_hash,
-            "content_hash mismatch for block_id={}; old and new resolver must produce identical blocks",
-            old.block_id
-        );
-    }
     eprintln!(
-        "[parameter_equiv] {} block(s) verified equivalent",
+        "[parameter_bus] {} block(s) produced via the bus path",
         outcome.blocks.len()
     );
 }

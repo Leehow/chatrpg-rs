@@ -1,13 +1,11 @@
-//! R2 ParameterNeedResolver: wraps `actor_parameter_blocks_for_turn` behind the Need bus.
+//! R2 ParameterNeedResolver: the actor-parameter projection behind the Need bus.
 //!
-//! Byte-equivalent wrapper — the resolver reproduces the exact logic of
-//! `actor_parameter_blocks_for_turn` (world_tick → ensure_actor_parameters PC →
-//! refresh_actor_live_derived → ensure_actor_parameters NPC if frame/npc-mention →
-//! actor_parameters_context_block), preserving BOTH the side effects (param state
-//! mutations) AND the produced blocks.
-//!
-//! `TRPG_NEED_BUS_PARAM=0` → prepare_turn_context skips the bus and falls back to
-//! the original direct call (kept in lib.rs until Task 7 removes it).
+//! The resolver reproduces the original actor-parameter logic (world_tick →
+//! ensure_actor_parameters PC → refresh_actor_live_derived → ensure_actor_parameters
+//! NPC if frame/npc-mention → actor_parameters_context_block), preserving BOTH the
+//! side effects (param state mutations) AND the produced blocks. R2 收口后这是唯一的
+//! actor-parameter 投影路径——旧直连 `actor_parameter_blocks_for_turn` 已删，
+//! prepare_turn_context 只经此 resolver。
 
 use anyhow::Result;
 use async_trait::async_trait;

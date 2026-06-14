@@ -43,10 +43,10 @@ pub mod npc_synth;
 
 mod scene_projection;
 pub use scene_projection::{module_entry_scene_id, contract_is_opposed, stamp_opposed_check};
-use scene_projection::{scene_node_to_blocks, resolve_turn_scene_id, map_check_param_need};
+use scene_projection::{resolve_turn_scene_id, map_check_param_need};
 
 mod context_blocks;
-use context_blocks::{agent_plan_block, learned_packet_block, memory_snapshot_block, retrieved_memory_block, actionable_situation_block, clue_board_block, world_time_block, world_events_since_block, engine_protocol_block, engine_protocol_block_agent_loop, world_state_block, dynamic_text_block};
+use context_blocks::{agent_plan_block, memory_snapshot_block, retrieved_memory_block, actionable_situation_block, clue_board_block, world_time_block, world_events_since_block, engine_protocol_block, engine_protocol_block_agent_loop, world_state_block, dynamic_text_block};
 
 pub mod scene_navigation;
 pub use scene_navigation::{
@@ -245,20 +245,12 @@ impl RuntimeEngine {
         }
 
         if let Some(input) = current_input {
-            // R2: query-driven RULE retrieval routes through the Need bus by default
+            // R2: query-driven RULE retrieval is acquired ONLY through the Need bus
             // (RuleNeedResolver → assist, which subsumes auto_search + learned-packet
-            // matching and adds source_refs grounding). `TRPG_NEED_BUS_RULE=0` falls
-            // back to the legacy direct auto_search path below.
-            if runtime_need_bus_rule_enabled() {
-                match self.rule_need_blocks_for_turn(request, state, input).await {
-                    Ok(mut rule_blocks) => blocks.append(&mut rule_blocks),
-                    Err(err) => tracing::warn!(error = %err, "rule need bus failed; continuing without rule blocks"),
-                }
-            } else {
-                match self.auto_search_blocks_for_turn(request, state, input).await {
-                    Ok(mut search_blocks) => blocks.append(&mut search_blocks),
-                    Err(err) => tracing::warn!(error = %err, "auto rule/module search failed; continuing without search blocks"),
-                }
+            // matching and adds source_refs grounding).
+            match self.rule_need_blocks_for_turn(request, state, input).await {
+                Ok(mut rule_blocks) => blocks.append(&mut rule_blocks),
+                Err(err) => tracing::warn!(error = %err, "rule need bus failed; continuing without rule blocks"),
             }
         }
 
@@ -270,8 +262,9 @@ impl RuntimeEngine {
             Ok(mut frame_blocks) => blocks.append(&mut frame_blocks),
             Err(err) => tracing::warn!(error = %err, "working state frame retrieval failed; continuing without frame blocks"),
         }
-        // TRPG_NEED_BUS_SCENE=0 → 回退旧直连（A/B 等价验证用）；默认走 NeedBus 路径。
-        if runtime_need_bus_scene_enabled() {
+        // R2: current-scene deep projection is acquired ONLY through the Need bus
+        // (SceneNeedResolver).
+        {
             let project_module_ids: Vec<String> =
                 project.modules.iter().map(|m| m.module_id.clone()).collect();
             let scene_need = trpg_need::Need::Scene(trpg_need::SceneNeed {
@@ -291,11 +284,6 @@ impl RuntimeEngine {
             for outcome in outcomes {
                 blocks.extend(outcome.blocks);
             }
-        } else {
-            match self.module_scene_blocks_for_turn(request, state, &project).await {
-                Ok(mut scene_blocks) => blocks.append(&mut scene_blocks),
-                Err(err) => tracing::warn!(error = %err, "module_scene_blocks_for_turn failed; continuing without current-scene projection"),
-            }
         }
         match self.world_time_blocks_for_turn(request).await {
             Ok(mut time_blocks) => blocks.append(&mut time_blocks),
@@ -305,8 +293,9 @@ impl RuntimeEngine {
             Ok(mut object_blocks) => blocks.append(&mut object_blocks),
             Err(err) => tracing::warn!(error = %err, "object graph projection failed; continuing without object blocks"),
         }
-        // R2 T5: default ON → ParameterNeedResolver; TRPG_NEED_BUS_PARAM=0 → legacy direct call.
-        if runtime_need_bus_param_enabled() {
+        // R2: actor-parameter blocks are acquired ONLY through the Need bus
+        // (ParameterNeedResolver).
+        {
             use crate::parameter_need_resolver::ParameterNeedResolver;
             use trpg_need::{Need, NeedResolver, NeedScopes, ParameterNeed};
             let scopes = NeedScopes {
@@ -329,11 +318,6 @@ impl RuntimeEngine {
                     "ParameterNeedResolver failed; continuing without actor parameter blocks"
                 ),
             }
-        } else {
-            match self.actor_parameter_blocks_for_turn(request, current_input).await {
-                Ok(mut actor_blocks) => blocks.append(&mut actor_blocks),
-                Err(err) => tracing::warn!(error = %err, "actor parameter projection failed (fallback); continuing without actor parameter blocks"),
-            }
         }
         match self.ability_blocks_for_turn(request).await {
             Ok(mut ability_blocks) => blocks.append(&mut ability_blocks),
@@ -343,8 +327,9 @@ impl RuntimeEngine {
             Ok(mut binding_blocks) => blocks.append(&mut binding_blocks),
             Err(err) => tracing::warn!(error = %err, "rule binding projection failed; continuing without binding blocks"),
         }
-        // R2 T4: default ON → MaterialNeedResolver; TRPG_NEED_BUS_MATERIAL=0 → legacy direct call.
-        if runtime_need_bus_material_enabled() {
+        // R2: materialization blocks are acquired ONLY through the Need bus
+        // (MaterialNeedResolver).
+        {
             use crate::material_need_resolver::MaterialNeedResolver;
             use trpg_need::{MaterialNeed, Need, NeedResolver, NeedScopes};
             let scopes = NeedScopes {
@@ -363,11 +348,6 @@ impl RuntimeEngine {
                     "MaterialNeedResolver failed; continuing without materialization blocks"
                 ),
             }
-        } else {
-            match self.materialization_blocks_for_turn(request).await {
-                Ok(mut materialization_blocks) => blocks.append(&mut materialization_blocks),
-                Err(err) => tracing::warn!(error = %err, "materialization projection failed; continuing without materialization blocks"),
-            }
         }
         match self.player_value_referee_blocks_for_turn(request).await {
             Ok(mut referee_blocks) => blocks.append(&mut referee_blocks),
@@ -381,17 +361,10 @@ impl RuntimeEngine {
             Ok(mut contest_blocks) => blocks.append(&mut contest_blocks),
             Err(err) => tracing::warn!(error = %err, "contest/opposition projection failed; continuing without contest blocks"),
         }
-        // R2: under the Need bus, learned-packet matching is performed inside the
-        // steward's `assist` (RuleNeedResolver), so the standalone learned-packet
-        // projection is only used on the legacy fallback path. Keep it for `=0`.
-        if !runtime_need_bus_rule_enabled() {
-            match self.learned_packet_blocks_for_turn(request, state).await {
-                Ok(mut learned_blocks) => blocks.append(&mut learned_blocks),
-                Err(err) => tracing::warn!(error = %err, "learned packet retrieval failed; continuing without learned packets"),
-            }
-        }
+        // R2: learned-packet matching is performed inside the steward's `assist`
+        // (RuleNeedResolver), so there is no standalone learned-packet projection.
         // BP1 active kernel projection is NOT a query-driven retrieval (it's always
-        // present, non-query); R2 leaves it on both paths untouched.
+        // present, non-query); R2 leaves it untouched.
         match self.rule_steward_prefix_blocks_for_turn(request).await {
             Ok(mut steward_blocks) => blocks.append(&mut steward_blocks),
             Err(err) => tracing::warn!(error = %err, "rule steward BP1 projection failed; continuing without active kernel blocks"),
@@ -1402,13 +1375,12 @@ fn fail_on_missing_source_backed_parameters() -> bool {
         Ok(result)
     }
 
-    /// R2: query-driven rule retrieval via the Need bus → RuleNeedResolver → the
-    /// rule steward's `assist`. This is the default replacement for the legacy
-    /// `auto_search_blocks_for_turn` + `learned_packet_blocks_for_turn` pair: `assist`
-    /// already does learned-packet matching + Tantivy search + locator/rg fallback,
-    /// and additionally grounds results with source_refs. Short-circuit semantics
-    /// mirror the legacy auto_search (no search service / empty input / not rule-
-    /// sensitive → no blocks), so flipping `TRPG_NEED_BUS_RULE` is a clean A/B.
+    /// R2: the ONLY query-driven rule-retrieval path — Need bus → RuleNeedResolver →
+    /// the rule steward's `assist`. Subsumes the (now-removed) legacy auto_search +
+    /// learned_packet pair: `assist` already does learned-packet matching + Tantivy
+    /// search + locator/rg fallback, and additionally grounds results with source_refs.
+    /// Short-circuit semantics: no search service / empty input / not rule-sensitive
+    /// → no blocks.
     async fn rule_need_blocks_for_turn(
         &self,
         request: &ContextRequest,
@@ -1448,90 +1420,6 @@ fn fail_on_missing_source_backed_parameters() -> bool {
         Ok(blocks)
     }
 
-    // R2 fallback path: still reached when `TRPG_NEED_BUS_RULE=0`. Retained until
-    // Task 4 collapses to the bus path.
-    async fn auto_search_blocks_for_turn(
-        &self,
-        request: &ContextRequest,
-        state: &RuntimeState,
-        current_input: &str,
-    ) -> Result<Vec<ContextBlock>> {
-        let Some(search) = &self.search else { return Ok(vec![]); };
-        if !runtime_auto_search_enabled() { return Ok(vec![]); }
-        let input = current_input.trim();
-        if input.is_empty() || !looks_rule_or_module_sensitive(input) { return Ok(vec![]); }
-
-        // Avoid hard-filtering by ruleset/module/session/scene here. Search sources are
-        // dynamic and may project scope differently (source Markdown, JSONL artifacts,
-        // DB rows, learned packets). Ranking/visibility happens in search; cache-zone
-        // decisions happen after hits are returned.
-        let scopes = BTreeMap::new();
-
-        let limit = std::env::var("TRPG_RUNTIME_AUTO_SEARCH_LIMIT").ok().and_then(|v| v.parse().ok()).unwrap_or(5);
-        let domains = std::env::var("TRPG_RUNTIME_AUTO_SEARCH_DOMAINS")
-            .ok()
-            .map(|v| v.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect::<Vec<_>>())
-            .filter(|v| !v.is_empty())
-            .unwrap_or_else(|| vec!["learned".into(), "rules".into(), "modules".into(), "rulings".into(), "source".into(), "parsed".into()]);
-
-        let search_request = SearchRequest {
-            query: input.to_string(),
-            mode: SearchMode::Auto,
-            domains,
-            kinds: vec![],
-            tags: vec![],
-            scopes,
-            filters: Default::default(),
-            rewrite_query: true,
-            intent: Some("runtime_auto_rule_module_lookup".into()),
-            limit,
-            explain: true,
-            viewer: request.viewer.clone(),
-        };
-
-        let response = search.search_async(&search_request).await?;
-        let status = if response.hits.is_empty() { "no_hits" } else { "source_backed" };
-        let lookup_event = LookupEvent {
-            event_id: format!("lookup_{}", Uuid::new_v4().simple()),
-            session_id: Some(request.session_id.clone()),
-            ruleset_id: Some(request.ruleset_id.clone()),
-            module_id: request.module_id.clone().or_else(|| state.module_id.clone()),
-            demand_id: Some(format!("auto_turn_{}", request.turn_id)),
-            query_text: input.to_string(),
-            search_terms: vec![input.to_string()],
-            source_hits: serde_json::to_value(&response.hits)?,
-            result_status: status.to_string(),
-            created_at: chrono::Utc::now(),
-        };
-        let _ = self.db.insert_lookup_event(&lookup_event).await;
-
-        let mut blocks = Vec::new();
-        let mut pinned_count = 0usize;
-        let max_scene_pins = std::env::var("TRPG_RUNTIME_AUTO_SEARCH_MAX_SCENE_PINS").ok().and_then(|v| v.parse().ok()).unwrap_or(1usize);
-        for hit in response.hits.into_iter().take(limit as usize) {
-            let should_pin = pinned_count < max_scene_pins && should_pin_search_hit_to_scene(&hit, state);
-            let load_req = SearchLoadRequest {
-                hit,
-                session_id: Some(request.session_id.clone()),
-                turn_id: Some(request.turn_id.clone()),
-                scene_id: state.scene_id.clone(),
-                ruleset_id: Some(request.ruleset_id.clone()),
-                module_id: request.module_id.clone().or_else(|| state.module_id.clone()),
-                demand_id: Some(format!("auto_turn_{}", request.turn_id)),
-                query_text: Some(input.to_string()),
-                cache_zone: if should_pin { CacheZone::PinnedMiddle } else { CacheZone::DynamicTail },
-                ttl: if should_pin { "scene".into() } else { "turn".into() },
-                load_reason: if should_pin { "auto_scene_rule_packet".into() } else { "auto_turn_lookup".into() },
-                persist: true,
-            };
-            let block = search.load_hit_to_context_block(&load_req).unwrap_or_else(|_| load_req.to_context_block());
-            let _ = self.db.upsert_runtime_context_block(&request.session_id, &block).await;
-            if should_pin { pinned_count += 1; }
-            blocks.push(block);
-        }
-        Ok(blocks)
-    }
-
     async fn memory_blocks_for_turn(
         &self,
         request: &ContextRequest,
@@ -1562,16 +1450,6 @@ fn fail_on_missing_source_backed_parameters() -> bool {
             blocks.push(retrieved_memory_block(&request.session_id, &request.turn_id, &retrieved));
         }
         Ok(blocks)
-    }
-
-    async fn learned_packet_blocks_for_turn(
-        &self,
-        request: &ContextRequest,
-        state: &RuntimeState,
-    ) -> Result<Vec<ContextBlock>> {
-        let limit = std::env::var("TRPG_LEARNED_PACKET_LIMIT").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
-        let packets = self.db.list_learned_packets(&request.ruleset_id, request.module_id.as_deref().or(state.module_id.as_deref()), limit).await?;
-        Ok(packets.into_iter().map(learned_packet_block).collect())
     }
 
     async fn rule_steward_prefix_blocks_for_turn(&self, request: &ContextRequest) -> Result<Vec<ContextBlock>> {
@@ -1666,66 +1544,6 @@ fn fail_on_missing_source_backed_parameters() -> bool {
         let limit = std::env::var("TRPG_STATE_FRAME_ACTIVE_LIMIT").ok().and_then(|v| v.parse().ok()).unwrap_or(4);
         let frames = self.db.list_active_state_frames(&request.session_id, limit).await?;
         Ok(frames.into_iter().map(|frame| frame.to_context_block(&request.turn_id)).collect())
-    }
-
-    /// §Phase4 当前场景 deep 内容投影：取该模组当前 ModuleGraph 的当前场景，调
-    /// `scene_node_to_blocks` 投影成 SceneStatic/DynamicTail 块。当前场景 = 显式
-    /// `state.scene_id` 优先，缺失/不匹配则回退模组入口场景（首个 DeepExtracted）——
-    /// 因引擎暂未用 scene_id 追踪模组场景导航，此回退让"进模组即见首场景"成立。
-    /// fail-closed：缺 module_id、模组不属本 project、取不到 graph、或无任何
-    /// DeepExtracted 场景 → 返回空 Vec(不 panic、不编造)。
-    async fn module_scene_blocks_for_turn(
-        &self,
-        request: &ContextRequest,
-        state: &RuntimeState,
-        project: &ProjectBundle,
-    ) -> Result<Vec<ContextBlock>> {
-        let Some(module_id) = request.module_id.as_deref().or(state.module_id.as_deref()) else {
-            return Ok(Vec::new());
-        };
-        // The project bundle carries a parse-time snapshot of module_graph that
-        // P5 continue-extraction never refreshes; reading scenes from it would
-        // make continued deep-extraction invisible at runtime. The single source
-        // of truth for scenes is the module bundle row (kept current by both
-        // parse_module and the P5 continue job). Confirm the module belongs to
-        // this project, then load the CURRENT graph from the module bundle. This
-        // costs one extra DB load per turn — accepted: correctness over the prior
-        // dup-load optimization (which only avoided reloading the same project
-        // bundle). fail-closed: unknown module / no graph -> empty Vec, no panic.
-        if !project.modules.iter().any(|m| m.module_id == module_id) {
-            return Ok(Vec::new());
-        }
-        let Some(graph) = self.db.load_module_graph(module_id).await? else {
-            return Ok(Vec::new());
-        };
-        // 当前场景：显式 state.scene_id 优先；缺失/不匹配 → 回退到模组入口场景（首个
-        // DeepExtracted，即 Pass B 深抽的入口）。引擎暂未用 scene_id 追踪模组场景导航
-        // （场景切换是后续工作），此回退让"进模组即看到首场景"成立。fail-closed：
-        // 无 DeepExtracted 场景 → 下面 find 返回 None → 空 Vec。
-        let node = state
-            .scene_id
-            .as_deref()
-            .and_then(|sid| graph.scenes.iter().find(|s| s.node_id == sid))
-            .or_else(|| {
-                graph
-                    .scenes
-                    .iter()
-                    .find(|s| s.extraction_status == SceneExtractionStatus::DeepExtracted)
-            });
-        let Some(node) = node else {
-            return Ok(Vec::new());
-        };
-        let blocks = scene_node_to_blocks(module_id, node, &graph.npcs, &graph.scenes);
-        if !blocks.is_empty() {
-            tracing::info!(
-                target: "module_scene",
-                module_id,
-                scene = %node.title,
-                explicit_scene = state.scene_id.is_some(),
-                "projected current module scene into turn context"
-            );
-        }
-        Ok(blocks)
     }
 
     /// §10.1 LIVE linkage: reload the actor's params, re-derive `recompute=live`
@@ -1923,23 +1741,6 @@ fn fail_on_missing_source_backed_parameters() -> bool {
         Ok(true)
     }
 
-    async fn actor_parameter_blocks_for_turn(&self, request: &ContextRequest, current_input: Option<&str>) -> Result<Vec<ContextBlock>> {
-        let world_tick = self.current_world_time(&request.session_id).await.map(|t| t.world_tick).unwrap_or_default();
-        let service = RuntimeParameterService::new(self.db.clone());
-        let actor_id = request.viewer.actor_id.as_deref().unwrap_or("pc.current");
-        let _ = service.ensure_actor_parameters(&request.session_id, &request.ruleset_id, actor_id, ActorKind::PlayerCharacter, world_tick).await;
-        // §10.1 LIVE linkage also runs here (context build for resolving turns);
-        // refresh_actor_live_derived() additionally runs at turn START so even
-        // early-returning (blocked) turns keep derived values current.
-        let _ = self.refresh_actor_live_derived(&request.session_id, actor_id).await;
-        let active_frame_exists = self.db.list_active_state_frames(&request.session_id, 1).await.map(|v| !v.is_empty()).unwrap_or(false);
-        if active_frame_exists || current_input.map(mentions_runtime_npc).unwrap_or(false) {
-            let _ = service.ensure_actor_parameters(&request.session_id, &request.ruleset_id, "npc.opposition", ActorKind::Npc, world_tick).await;
-        }
-        let block = service.actor_parameters_context_block(&request.session_id, world_tick).await?;
-        Ok(vec![block])
-    }
-
     async fn ability_blocks_for_turn(&self, request: &ContextRequest) -> Result<Vec<ContextBlock>> {
         let world_tick = self.current_world_time(&request.session_id).await.map(|t| t.world_tick).unwrap_or_default();
         let block = AbilityService::new(self.db.clone(), self.search.clone()).ability_context_block(&request.session_id, world_tick).await?;
@@ -1975,29 +1776,6 @@ fn fail_on_missing_source_backed_parameters() -> bool {
         block.expires_at_turn = Some(request.turn_id.clone());
         block.load_reason = Some("recent_player_value_verifications".into());
         Ok(vec![block])
-    }
-
-    async fn materialization_blocks_for_turn(&self, request: &ContextRequest) -> Result<Vec<ContextBlock>> {
-        let world_tick = self.current_world_time(&request.session_id).await.map(|t| t.world_tick).unwrap_or_default();
-        let block = MaterializationService::from_env(self.db.clone(), self.search.clone()).materialization_context_block(&request.session_id, world_tick).await?;
-        Ok(vec![block])
-    }
-
-    /// 测试用旧路径透出（等价验证完成后删除）。
-    pub async fn materialization_blocks_for_turn_pub(
-        &self,
-        request: &ContextRequest,
-    ) -> Result<Vec<ContextBlock>> {
-        self.materialization_blocks_for_turn(request).await
-    }
-
-    /// T5 测试用旧路径透出：等价验证 ParameterNeedResolver 时暴露旧直连路径。收口后删除。
-    pub async fn actor_parameter_blocks_for_turn_pub(
-        &self,
-        request: &ContextRequest,
-        current_input: Option<&str>,
-    ) -> Result<Vec<ContextBlock>> {
-        self.actor_parameter_blocks_for_turn(request, current_input).await
     }
 
     async fn object_blocks_for_turn(&self, request: &ContextRequest) -> Result<Vec<ContextBlock>> {
@@ -2135,8 +1913,6 @@ pub fn plan_blocks(blocks: Vec<ContextBlock>, state: &RuntimeState, request: &Co
     }
     PlannedContext { prefix_blocks: prefix, pinned_blocks: pinned, dynamic_blocks: dynamic }
 }
-
-fn mentions_runtime_npc(input: &str) -> bool { let lower = input.to_lowercase(); ["npc", "scav", "guard", "守卫", "敌", "无人机", "警察", "帮派", "对方", "他", "她", "drone", "enemy", "opposition"].iter().any(|t| lower.contains(t)) }
 
 fn scope_matches(scope: &Scope, state: &RuntimeState, request: &ContextRequest) -> bool {
     match scope.scope_type {
@@ -2506,47 +2282,6 @@ fn conflict_agent_v10_enabled() -> bool {
         .unwrap_or(true)
 }
 
-fn runtime_auto_search_enabled() -> bool {
-    !std::env::var("TRPG_RUNTIME_AUTO_SEARCH").map(|v| v == "false" || v == "0").unwrap_or(false)
-}
-
-/// R2: route the turn's query-driven RULE retrieval through the Need bus
-/// (RuleNeedResolver → RuleStewardAgent::assist). Default ON; `=0`/`=false`
-/// falls back to the legacy `auto_search` + `learned_packet` direct path.
-fn runtime_need_bus_rule_enabled() -> bool {
-    !std::env::var("TRPG_NEED_BUS_RULE").map(|v| v == "false" || v == "0").unwrap_or(false)
-}
-
-/// R2 T3: route turn's scene-block assembly through the Need bus (SceneNeedResolver).
-/// Default ON; `TRPG_NEED_BUS_SCENE=0`/`=false` falls back to the legacy
-/// `module_scene_blocks_for_turn` direct call (kept until Task 7 removes it).
-fn runtime_need_bus_scene_enabled() -> bool {
-    !std::env::var("TRPG_NEED_BUS_SCENE").map(|v| v == "false" || v == "0").unwrap_or(false)
-}
-
-/// R2 T4: route turn's materialization-block assembly through the Need bus (MaterialNeedResolver).
-/// Default ON; `TRPG_NEED_BUS_MATERIAL=0`/`=false` falls back to the legacy
-/// `materialization_blocks_for_turn` direct call (kept until Task 7 removes it).
-fn runtime_need_bus_material_enabled() -> bool {
-    !std::env::var("TRPG_NEED_BUS_MATERIAL").map(|v| v == "false" || v == "0").unwrap_or(false)
-}
-
-/// R2 T5: route turn's actor-parameter-block assembly through the Need bus (ParameterNeedResolver).
-/// Default ON; `TRPG_NEED_BUS_PARAM=0`/`=false` falls back to the legacy
-/// `actor_parameter_blocks_for_turn` direct call (kept until Task 7 removes it).
-fn runtime_need_bus_param_enabled() -> bool {
-    !std::env::var("TRPG_NEED_BUS_PARAM").map(|v| v == "false" || v == "0").unwrap_or(false)
-}
-
-/// R2 T6: route the turn's NPC on-demand synthesis (opposed-prepass `ensure_npc_parameter`)
-/// through the Need bus (EntityNeedResolver). Side-effect dominant: the resolver writes
-/// the NPC card; it produces no context blocks. Default ON; `TRPG_NEED_BUS_ENTITY=0`/`=false`
-/// falls back to the legacy direct `ensure_npc_parameter` calls in opposed_prepass (kept
-/// until Task 7 removes them). The gate is read at the emit site (trpg-gm opposed_prepass).
-pub fn runtime_need_bus_entity_enabled() -> bool {
-    !std::env::var("TRPG_NEED_BUS_ENTITY").map(|v| v == "false" || v == "0").unwrap_or(false)
-}
-
 /// Deterministically map a turn's request/state/input into a `RuleNeed` the bus
 /// can route. The turn pipeline (not the GM) builds this so AI cannot bypass the
 /// typed retrieval path. `query` and `player_action_summary` both carry the raw
@@ -2591,30 +2326,6 @@ fn looks_like_gate_help_or_question(input: &str) -> bool {
     let terms = ["怎么投", "投什么", "骰什么", "怎么算", "不会", "不懂", "?", "？", "how", "what do i roll", "what should i roll"];
     terms.iter().any(|term| lower.contains(term))
 }
-
-fn should_pin_search_hit_to_scene(hit: &SearchHit, state: &RuntimeState) -> bool {
-    if state.scene_id.is_none() { return false; }
-    if std::env::var("TRPG_RUNTIME_AUTOPIN_SCENE_RULES").map(|v| v == "false" || v == "0").unwrap_or(false) {
-        return false;
-    }
-    let domain = hit.domain.as_str();
-    let kind = hit.logical_kind.to_lowercase();
-    let stage = hit.metadata.get("learning_stage").and_then(|v| v.as_str()).unwrap_or_default();
-    let is_stable_learned = domain == "learned" && matches!(stage, "stable" | "memorized" | "used_once");
-    let current_scene_hit = state.scene_id.as_ref().map(|scene_id| {
-        hit.scopes.get("scene_id") == Some(scene_id) || hit.scopes.get("scope_id") == Some(scene_id)
-    }).unwrap_or(false);
-    is_stable_learned
-        || current_scene_hit
-        || domain == "modules"
-        || kind.contains("rule")
-        || kind.contains("procedure")
-        || kind.contains("combat")
-        || kind.contains("check")
-        || kind.contains("scene")
-        || kind.contains("encounter")
-}
-
 
 /// Pure builder for the forced technical-assessment plan (DB-less, unit-tested).
 /// `kernel_dice` is the ruleset's core die from the parsed kernel; None => no

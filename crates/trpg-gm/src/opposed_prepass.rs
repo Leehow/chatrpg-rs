@@ -21,7 +21,7 @@ use trpg_llm::LlmClient;
 use trpg_model::{ChatMessage, ContextRequest, RuntimeState};
 use trpg_need::{EntityNeed, Need, NeedBus, NeedScopes};
 use trpg_runtime::npc_synth::NpcPersona;
-use trpg_runtime::{encode_entity_hint, runtime_need_bus_entity_enabled, EntityNeedResolver, RuntimeEngine};
+use trpg_runtime::{encode_entity_hint, EntityNeedResolver, RuntimeEngine};
 
 /// 玩家输入尾段喂给判定的最大字符数（攻击意图通常在玩家声明动作处）。
 const PLAYER_INPUT_CHARS: usize = 800;
@@ -162,66 +162,42 @@ pub async fn prepare_binding(
     // ③ 防御键（meet_or_beat→stats.defense / roll_under→skills.dodge，数据驱动）。
     let (bucket, param) = engine.attack_defense_param(&request.ruleset_id).await?;
     // ④+⑤ 现搓防御值 + HP 预热（写 NPC 卡，供本回合对抗结算）：
-    // R2 T6 — TRPG_NEED_BUS_ENTITY 开（默认）时经 NeedBus 的 EntityNeedResolver 触发副作用，
-    // 关时走旧直连 ensure_npc_parameter（保留为 =0 fallback，Task 7 收口前不删）。
-    // 两路产生等价副作用（同一 ensure_npc_parameter，幂等 per-param 缓存）；④ 是绑定 gate
-    // （防御值现搓不成 → 不绑），⑤ HP 是 fire-and-forget（失败不影响绑定）。
+    // R2 收口 — NPC 现搓只经 NeedBus 的 EntityNeedResolver 触发副作用（无 env fallback）。
+    // ④ 是绑定 gate（防御值现搓不成 → 不绑），⑤ HP 是 fire-and-forget（失败不影响绑定）。
+    // 构造 scopes + 两个 EntityNeed（防御值 + HP），emit → resolve_all 触发现搓。
+    // resolver 内部 swallow Ok(None)/Err 并恒返回空 outcome（副作用为主），故 bus 本身
+    // 判不出防御值是否真落卡 → 用幂等的存在性 re-check 复刻 gate 语义。
     let hp_ctx = format!("opposed combat prepass: NPC HP seed for damage resolution ({})", target.actor_id);
-    if runtime_need_bus_entity_enabled() {
-        // 经 bus：构造 scopes + 两个 EntityNeed（防御值 + HP），emit → resolve_all 触发现搓。
-        // resolver 内部 swallow Ok(None)/Err 并恒返回空 outcome（副作用为主），故 bus 本身
-        // 判不出防御值是否真落卡 → 用幂等的存在性 re-check 复刻旧 gate 语义。
-        let scopes = NeedScopes {
-            ruleset_id: request.ruleset_id.clone(),
-            module_id: request.module_id.clone().or_else(|| state.module_id.clone()),
-            session_id: request.session_id.clone(),
-            turn_id: request.turn_id.clone(),
-            scene_id: state.scene_id.clone(),
-        };
-        let defense_hint = encode_entity_hint(&target.actor_id, &bucket, &param,
-            "opposed combat prepass: defending against player attack");
-        let hp_hint = encode_entity_hint(&target.actor_id, "resources", "hp", &hp_ctx);
+    let scopes = NeedScopes {
+        ruleset_id: request.ruleset_id.clone(),
+        module_id: request.module_id.clone().or_else(|| state.module_id.clone()),
+        session_id: request.session_id.clone(),
+        turn_id: request.turn_id.clone(),
+        scene_id: state.scene_id.clone(),
+    };
+    let defense_hint = encode_entity_hint(&target.actor_id, &bucket, &param,
+        "opposed combat prepass: defending against player attack");
+    let hp_hint = encode_entity_hint(&target.actor_id, "resources", "hp", &hp_ctx);
 
-        let resolver = EntityNeedResolver::new(Arc::new(engine.clone()));
-        let mut bus = NeedBus::new();
-        bus.register(Box::new(resolver));
-        bus.emit(Need::Entity(EntityNeed { scopes: scopes.clone(), entity_hint: Some(defense_hint) }));
-        bus.emit(Need::Entity(EntityNeed { scopes, entity_hint: Some(hp_hint) }));
-        let _ = bus.resolve_all().await; // 副作用写卡；outcomes 恒空 blocks 不用
+    let resolver = EntityNeedResolver::new(Arc::new(engine.clone()));
+    let mut bus = NeedBus::new();
+    bus.register(Box::new(resolver));
+    bus.emit(Need::Entity(EntityNeed { scopes: scopes.clone(), entity_hint: Some(defense_hint) }));
+    bus.emit(Need::Entity(EntityNeed { scopes, entity_hint: Some(hp_hint) }));
+    let _ = bus.resolve_all().await; // 副作用写卡；outcomes 恒空 blocks 不用
 
-        // ④ gate：现搓通路完成后，幂等 re-check 防御值是否已在卡上（缓存命中即 Ok(Some)）。
-        match engine.ensure_npc_parameter(&request.session_id, &request.ruleset_id, &target, &bucket, &param,
-            "opposed prepass: post-bus param existence check (idempotent read-back)").await {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                tracing::info!(target: "opposed_prepass", npc = %target.actor_id, "defense synth unavailable after bus (gate off / no LLM / no card) — no opposed binding");
-                return None;
-            }
-            Err(err) => {
-                tracing::warn!(target: "opposed_prepass", error = %err, npc = %target.actor_id, "defense post-check failed — no opposed binding (turn continues)");
-                return None;
-            }
+    // ④ gate：现搓通路完成后，幂等 re-check 防御值是否已在卡上（缓存命中即 Ok(Some)）。
+    // 这是廉价的缓存读回，保留 defense-gate 语义（防御值现搓不成则不绑）。
+    match engine.ensure_npc_parameter(&request.session_id, &request.ruleset_id, &target, &bucket, &param,
+        "opposed prepass: post-bus param existence check (idempotent read-back)").await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            tracing::info!(target: "opposed_prepass", npc = %target.actor_id, "defense synth unavailable after bus (gate off / no LLM / no card) — no opposed binding");
+            return None;
         }
-    } else {
-        // 旧路径（fallback，TRPG_NEED_BUS_ENTITY=0 时）：直连 ensure_npc_parameter。
-        // ④ 现搓防御方 NPC 防御值落卡（Phase1 通路；fail-closed：Ok(None)/Err → 不绑）。
-        match engine.ensure_npc_parameter(&request.session_id, &request.ruleset_id, &target, &bucket, &param, "opposed combat prepass: defending against player attack").await {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                tracing::info!(target: "opposed_prepass", npc = %target.actor_id, "defense synth unavailable (gate off / no LLM / no card) — no opposed binding");
-                return None;
-            }
-            Err(err) => {
-                tracing::warn!(target: "opposed_prepass", error = %err, npc = %target.actor_id, "defense synth failed — no opposed binding (turn continues)");
-                return None;
-            }
-        }
-        // ⑤ HP 预热：现搓 NPC 的 HP 并写入 sheet_json.resources.hp（供 match_seed 读取），
-        // 使伤害结算不被 missing_source_backed_hp 阻断。fail-closed：失败不影响对抗绑定。
-        match engine.ensure_npc_parameter(&request.session_id, &request.ruleset_id, &target, "resources", "hp", &hp_ctx).await {
-            Ok(Some(_)) => { tracing::info!(target: "opposed_prepass", npc = %target.actor_id, "hp synthesized — damage decrement enabled"); }
-            Ok(None) => { tracing::info!(target: "opposed_prepass", npc = %target.actor_id, "hp synth unavailable — damage may be blocked"); }
-            Err(err) => { tracing::warn!(target: "opposed_prepass", error = %err, npc = %target.actor_id, "hp synth failed — damage may be blocked (turn continues)"); }
+        Err(err) => {
+            tracing::warn!(target: "opposed_prepass", error = %err, npc = %target.actor_id, "defense post-check failed — no opposed binding (turn continues)");
+            return None;
         }
     }
     tracing::info!(target: "opposed_prepass", npc = %target.actor_id, bucket = %bucket, param = %param, "opposed binding prepared (GM-omitted opposed will be injected)");
