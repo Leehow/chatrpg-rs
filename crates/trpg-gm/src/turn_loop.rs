@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use trpg_interaction::InteractionLifecycleKernel;
 use trpg_llm::{LlmClient, StreamEvent, ToolChoice};
-use trpg_model::{ChatMessage, CompiledContext, ContextRequest, MemoryEvent, MemoryKind, RuntimeState, Visibility, WorldEventKind};
+use trpg_model::{ChatMessage, CompiledContext, ContextRequest, MechanicDue, MemoryEvent, MemoryKind, RuntimeState, StateFrame, Visibility, WorldEventKind};
 use trpg_runtime::RuntimeEngine;
 use uuid::Uuid;
 
@@ -27,131 +27,72 @@ impl Default for LoopConfig { fn default() -> Self { Self { max_tool_rounds: 8, 
 pub enum TurnOutcome { Narration(String), AwaitingPlayerRoll { check_id: String, prompt_public: String } }
 pub struct GmLoop { pub engine: RuntimeEngine, pub llm: Arc<dyn LlmClient>, pub tools: ToolRegistry, pub cfg: LoopConfig, pub data_dir: PathBuf, pub scene_extractor: Option<SceneDeepExtractFn>, pub ctx_provider: Option<CtxProviderFn>, pub gate_resolver: Option<GateResolverFn>, pub errata: ErrataMemory, pub obligations: ObligationLedger }
 pub struct GmTurnInput<'a> { pub request: &'a ContextRequest, pub state: &'a RuntimeState, pub user_input: &'a str, pub history: &'a [ChatMessage], pub recent_transcript: Option<&'a str> }
+
+/// 头部确定性 phase 的累积上下文（原 run_gm_turn 局部变量集中到此，供 phase
+/// handler 顺序填充；本任务私有、不导出）。`messages` 用 Option（TurnMessages
+/// 未实现 Default——assemble 一次性产出，context_assembly 之前为 None）。
+struct TurnContext {
+    ledger: TurnLedger,
+    resolved_gate_facts: Vec<String>,
+    active_frames: Vec<StateFrame>,
+    mode_id: Option<String>,
+    mode_manifest: Option<crate::mode::ModeManifest>,
+    obligations_block: Option<String>,
+    pending_dues: Vec<MechanicDue>,
+    opposed_binding: Option<crate::opposed_prepass::OpposedBinding>,
+    state_agent: RuntimeState,
+    compiled: CompiledContext,
+    gm_skill: String,
+    errata_blocks: Vec<String>,
+    mode_tools: Option<ToolRegistry>,
+    max_tool_rounds: u8,
+    effect_closure_per_cluster: bool,
+    messages: Option<TurnMessages>,
+}
+impl TurnContext {
+    fn new() -> Self {
+        Self {
+            ledger: TurnLedger::new(),
+            resolved_gate_facts: Vec::new(),
+            active_frames: Vec::new(),
+            mode_id: None,
+            mode_manifest: None,
+            obligations_block: None,
+            pending_dues: Vec::new(),
+            opposed_binding: None,
+            state_agent: RuntimeState::default(),
+            compiled: CompiledContext::default(),
+            gm_skill: String::new(),
+            errata_blocks: Vec::new(),
+            mode_tools: None,
+            max_tool_rounds: 0,
+            effect_closure_per_cluster: false,
+            messages: None,
+        }
+    }
+}
 impl GmLoop {
     pub fn new(engine: RuntimeEngine, llm: Arc<dyn LlmClient>, tools: ToolRegistry, cfg: LoopConfig, data_dir: PathBuf) -> Self { let errata = ErrataMemory::new(cfg.repeat_finding_threshold); Self { engine, llm, tools, cfg, data_dir, scene_extractor: None, ctx_provider: None, gate_resolver: None, errata, obligations: ObligationLedger::default() } }
     pub async fn run_gm_turn(&mut self, input: GmTurnInput<'_>, on_delta: &mut (dyn FnMut(&str) + Send)) -> Result<TurnOutcome> {
-        // —— 1. 确定性头部（spec §4 四项顺序：record → refresh → reconcile → gate 结算）——
-        let _ = self.engine.record_world_event(&input.request.session_id, Some(&input.request.turn_id), None, WorldEventKind::PlayerAction, json!({"input": input.user_input}), Visibility::GmOnly).await;
-        let _ = self.engine.refresh_actor_live_derived(&input.request.session_id, input.request.viewer.actor_id.as_deref().unwrap_or("pc.current")).await;
-        // prepare_turn_context 内部也会 reconcile，但那发生在 gate 结算之后，
-        // 不满足 spec 顺序——此处显式调用（幂等，与既有调用方同款 let _ =）。
-        let _ = InteractionLifecycleKernel::new(self.engine.db.clone()).reconcile_session(&input.request.session_id).await;
-        let mut ledger = TurnLedger::new();
-        let mut resolved_gate_facts = Vec::new();
-        // gate 结算（含裸 "roll" 兜底与 Err 折叠两个 e2e must-fix + C7 盖章契约的
-        // effect_policy 强制执行）收口在 gate.rs 单点。
-        crate::gate::resolve_pending_gate(&self.engine, self.gate_resolver.as_ref(), input.request, input.state.scene_id.as_deref(), input.user_input, &mut ledger, &mut resolved_gate_facts).await;
-        // B5 第三触发通路：TurnStart hook dues 在 prepare_turn_context 之前落库
-        // （B3 BP3 投影 / B6 债务装载同回合可见）。失败 unwrap_or_default()
-        // ——头部任何 watcher 故障不得阻断回合（与既有 `let _ =` 风格一致）。
-        let hook_dues = trpg_mechanics::RefereeCombatService::new(self.engine.db.clone())
-            .dues_for_hook(&input.request.session_id, &input.request.turn_id, &input.request.ruleset_id, &trpg_mechanics::watcher::HookEvent::TurnStart)
-            .await
-            .unwrap_or_default();
-        // —— 刺激驱动检定预 pass（J2 SAN 修复）：目录 when_to_use × 本回合虚构
-        //    内容（玩家输入+上回合叙事尾段）语义命中 → 阻塞债务候选，经 watcher
-        //    admit_dues（与 hook 通路同套抑制+落库）收编。fail-closed：门关/
-        //    无目录/LLM 失败 → 空，头部绝不因它阻断回合。
-        let stimulus_dues = if crate::stimulus::stimulus_pass_enabled() {
-            match self.engine.db.load_rule_kernel(&input.request.ruleset_id).await {
-                Ok(Some(kernel)) if !kernel.mechanics_catalog.is_empty() => {
-                    let recent = input.recent_transcript
-                        .or_else(|| input.history.iter().rev().find(|m| m.role == "assistant").map(|m| m.content.as_str()));
-                    let candidates = crate::stimulus::stimulus_due_candidates(&self.llm, &kernel.mechanics_catalog, &input.request.session_id, &input.request.turn_id, input.user_input, recent).await;
-                    trpg_mechanics::RefereeCombatService::new(self.engine.db.clone())
-                        .admit_dues(&input.request.session_id, candidates)
-                        .await
-                        .unwrap_or_default()
-                }
-                _ => Vec::new(),
-            }
-        } else { Vec::new() };
-        // —— 对抗语义预 pass（Phase3 §4.1 上游"双保险"上半段）：回合头部一次小 LLM
-        //    语义判定本回合是否攻击场景对手 → 现搓防御方 NPC 防御键落卡（ensure_npc_
-        //    parameter，Phase1 通路）+ 备好 OpposedBinding 供 roll_check 在 GM 漏填
-        //    opposed 时注入。fail-closed：门关 / 无模组 NPC / 无攻击意图 / 现搓不成
-        //    → None，绝不阻断回合、绝不乱绑值。防御键由 kernel.compare 数据驱动
-        //    （meet_or_beat→defense / roll_under→dodge），零 per-ruleset 硬编码。
-        let opposed_binding = crate::opposed_prepass::prepare_binding(&self.engine, &self.llm, input.request, input.state, input.user_input, input.recent_transcript, input.history).await;
-        // —— 三期姿态推导（spec §4.1）：active state_frame → mode；无 frame /
-        //    frame 种类无 mode 包 → None（默认叙事姿态，与二期字节级一致）。db
-        //    失败 unwrap_or_default（与头部 watcher 同款绝不阻断回合）；mode 包
-        //    存在但 manifest 损坏 → Err fail-closed（配置错误终止回合，与
-        //    gm_skill 装载同级）。
-        let active_frames = self.engine.db.list_active_state_frames(&input.request.session_id, 8).await.unwrap_or_default();
-        let mode_manifest = crate::mode::active_mode_manifest(&self.data_dir, &active_frames)?;
-        let mode_id = mode_manifest.as_ref().map(|m| m.mode_id.clone());
-        // —— B6 债务装载（spec §5.3）：turn-scope 豁免过期 → 跨回合遗留（持久
-        //    字段 + db open dues）与 TurnStart hook dues 统一进 ObligationLedger
-        //    （按 due_id 去重——watcher 产出即落库，两路可能是同一条）。db 失败
-        //    unwrap_or_default：债务装载绝不阻断回合，in-memory 清单仍兜底。
-        self.obligations.begin_turn(&input.request.turn_id);
-        // mode 退出结算义务（spec §4.4）：回合头部凭 manifest 幂等 re-seed（跨
-        // 进程重启不丢；只门 exit_mode，绝不门叙事轮——B6 blocking() 不含它）。
-        if let Some(m) = &mode_manifest {
-            self.obligations.ensure_mode_exit_obligations(&m.mode_id, &m.exit_obligations);
-        }
-        let leftover_dues = self.engine.db.list_open_mechanic_dues(&input.request.session_id).await.unwrap_or_default();
-        self.obligations.absorb_dues(leftover_dues);
-        self.obligations.absorb_dues(hook_dues);
-        self.obligations.absorb_dues(stimulus_dues);
-        // 上回合遗留债务 → 本回合 BP3 尾段（errata 之后、Player Input 之前）。
-        let obligations_block = self.obligations.carryover_block();
-        // —— 2. 上下文（agent_loop_protocol 强制置位 → BP1 出 agent-loop 版 engine protocol）——
-        let mut state_agent = input.state.clone();
-        state_agent.agent_loop_protocol = true;
-        let compiled = match &self.ctx_provider {
-            Some(provider) => provider(input.request, &state_agent),
-            None => self.engine.prepare_turn_context(input.request, &state_agent, Some(input.user_input), input.recent_transcript).await?,
-        };
-        // §6.1 第 4 条 fail-closed：prefix/pinned 超预算是配置错误，终止回合而非静默裁剪。
-        crate::prompts::validate_compiled_budget(&compiled, input.request)?;
-        // gm_skill 是 agent 路径硬依赖：fail-closed，Err 终止回合（契约第 7 节，
-        // 绝不 unwrap_or_default；data_dir 由装配方传 default_data_dir()）。
-        // 三期 §4.2：四级合并（mode=None 退化两级，字节不变——缓存稳定硬回归）。
-        let mut gm_skill = load_gm_skill_with_mode(&self.data_dir, &input.request.ruleset_id, mode_id.as_deref())?;
-        // —— 三期 §4.5 目录联动（终审返工）：mode 激活 → kernel mechanics_catalog
-        //    经 manifest.catalog_filter 过滤，渲染为紧凑节拼进 mode 提示层尾部
-        //    （与 mode 提示同生命周期、同有因失效；BP1 目录索引保持 mode 无感
-        //    不动——缓存设计 §4.2 RarelyChanged 不随 mode 失效）。无 kernel/
-        //    空过滤结果/db 失败 → 不注入（fail-closed 不阻断回合，warn 可观测）。
-        if let Some(manifest) = &mode_manifest {
-            match self.engine.db.load_rule_kernel(&input.request.ruleset_id).await {
-                Ok(Some(kernel)) => {
-                    if let Some(section) = crate::mode_catalog::mode_catalog_section(&manifest.mode_id, &manifest.catalog_filter, &kernel.mechanics_catalog) {
-                        gm_skill.push_str("\n\n---\n\n");
-                        gm_skill.push_str(&section);
-                    }
-                }
-                Ok(None) => tracing::warn!(ruleset_id = %input.request.ruleset_id, "mode catalog subset skipped: no active rule kernel"),
-                Err(err) => tracing::warn!(error = %err, "mode catalog subset skipped: rule kernel load failed"),
-            }
-        }
-        let mut errata_blocks = Vec::new();
-        if let Some(block) = self.errata.errata_block() { errata_blocks.push(block); }
-        if let Some(block) = self.errata.standing_reminder_block() { errata_blocks.push(block); }
-        // —— 三期 §5 novelty 复用（批2）：姿态激活时把 frame 状态里的已用战术
-        //    渲染为 BP3 尾段事实块（一期 novelty director 数据，零额外 LLM 调用）；
-        //    mode=None 绝不注入（二期行为字节级一致）。
-        if mode_id.is_some() {
-            if let Some(block) = crate::tools::frame::novelty_block(&active_frames) { errata_blocks.push(block); }
-        }
-        let tail = DynamicTailInput { user_input: input.user_input, resolved_gate_facts: &resolved_gate_facts, errata_blocks: &errata_blocks, obligations_block: obligations_block.as_deref() };
-        let mut messages = TurnMessages::assemble(&compiled, &gm_skill, input.history, &tail);
-        // —— 三期 §4.3 工具按 mode 组装：mode 激活 → for_mode（基础 14 +
-        //    manifest.extra_tools；schema 变化 = 前缀缓存有因失效豁免项）；
-        //    mode=None → 沿用装配方注入的 self.tools（二期行为字节级一致 +
-        //    单测替身不被覆盖）。未知工具名 fail-closed Err 终止回合。
-        let mode_tools = match mode_id.as_deref() {
-            Some(mode) => Some(ToolRegistry::for_mode(&self.data_dir, Some(mode))?),
-            None => None,
-        };
+        // —— 1+2. 确定性头部（spec §4）：9 个 phase handler 按序填充 TurnContext。
+        //    record → refresh → reconcile → gate → stimulus_pass → opposed_prepass
+        //    → mode_inference → debt_load → context_assembly。本任务纯重构：方法
+        //    体逐字搬自原头部，调用顺序与字节产物不变（T4 将由 plan 解释器调度）。
+        let mut ctx = TurnContext::new();
+        self.phase_record_player_action(&mut ctx, &input).await;
+        self.phase_refresh_live_derived(&mut ctx, &input).await;
+        self.phase_reconcile(&mut ctx, &input).await;
+        self.phase_gate(&mut ctx, &input).await;
+        self.phase_stimulus_pass(&mut ctx, &input).await;
+        self.phase_opposed_prepass(&mut ctx, &input).await;
+        self.phase_mode_inference(&mut ctx, &input).await?;
+        self.phase_debt_load(&mut ctx, &input).await;
+        self.phase_context_assembly(&mut ctx, &input).await?;
+        // 头部产物拆回局部（工具轮~尾部保持原作用域结构、字节不变；messages
+        // 由 context_assembly 必产出，take 出 Some 值——绝不为 None）。
+        let TurnContext { mut ledger, mode_id, opposed_binding, mode_tools, state_agent, compiled, max_tool_rounds, effect_closure_per_cluster, messages, .. } = ctx;
+        let mut messages = messages.expect("context_assembly assembles messages");
         let schemas = mode_tools.as_ref().unwrap_or(&self.tools).schemas();
-        // —— 三期 §4.6 节拍参数：tempo.max_tool_rounds per-mode 覆盖 LoopConfig
-        //    （None = 沿用默认）；effect_closure_per_cluster 收紧交锋簇节拍
-        //    （批2：轮前债务判定时按账本重算簇闭合状态）。
-        let max_tool_rounds = mode_manifest.as_ref().and_then(|m| m.tempo.max_tool_rounds).unwrap_or(self.cfg.max_tool_rounds);
-        let effect_closure_per_cluster = mode_manifest.as_ref().and_then(|m| m.tempo.effect_closure_per_cluster).unwrap_or(false);
         let mut visible_text = String::new();
         let mut awaiting: Option<AwaitingPlayerRoll> = None;
         let mut narrated = false;
@@ -312,6 +253,123 @@ impl GmLoop {
         // —— 6. 确定性收尾 ——
         self.finalize_turn(input.request, &compiled, input.user_input, &visible_text, "ready").await;
         Ok(TurnOutcome::Narration(visible_text))
+    }
+
+    /// PhaseId::RecordPlayerAction — world event PlayerAction（spec §4 头部第 1）。
+    async fn phase_record_player_action(&self, _ctx: &mut TurnContext, input: &GmTurnInput<'_>) {
+        let _ = self.engine.record_world_event(&input.request.session_id, Some(&input.request.turn_id), None, WorldEventKind::PlayerAction, json!({"input": input.user_input}), Visibility::GmOnly).await;
+    }
+
+    /// PhaseId::RefreshLiveDerived — refresh_actor_live_derived（spec §4 头部第 2）。
+    async fn phase_refresh_live_derived(&self, _ctx: &mut TurnContext, input: &GmTurnInput<'_>) {
+        let _ = self.engine.refresh_actor_live_derived(&input.request.session_id, input.request.viewer.actor_id.as_deref().unwrap_or("pc.current")).await;
+    }
+
+    /// PhaseId::Reconcile — 机制对账（spec §4 顺序：gate 结算之前显式调，幂等；
+    /// prepare_turn_context 内部也会 reconcile，但那发生在 gate 结算之后）。
+    async fn phase_reconcile(&self, _ctx: &mut TurnContext, input: &GmTurnInput<'_>) {
+        let _ = InteractionLifecycleKernel::new(self.engine.db.clone()).reconcile_session(&input.request.session_id).await;
+    }
+
+    /// PhaseId::Gate — request_player_roll 闸门结算（gate.rs 单点；含裸 "roll"
+    /// 兜底 + Err 折叠 + C7 effect_policy 强制；spec §4 头部第 4）。
+    async fn phase_gate(&self, ctx: &mut TurnContext, input: &GmTurnInput<'_>) {
+        crate::gate::resolve_pending_gate(&self.engine, self.gate_resolver.as_ref(), input.request, input.state.scene_id.as_deref(), input.user_input, &mut ctx.ledger, &mut ctx.resolved_gate_facts).await;
+    }
+
+    /// PhaseId::StimulusPass — TurnStart hook dues + 语义被动刺激预 pass（J2 SAN）。
+    /// hook 先、stimulus 后并入 ctx.pending_dues，供 debt_load 按序吸收。
+    /// fail-closed：门关/无目录/LLM 失败 → 空，绝不阻断回合（unwrap_or_default）。
+    async fn phase_stimulus_pass(&self, ctx: &mut TurnContext, input: &GmTurnInput<'_>) {
+        let hook_dues = trpg_mechanics::RefereeCombatService::new(self.engine.db.clone())
+            .dues_for_hook(&input.request.session_id, &input.request.turn_id, &input.request.ruleset_id, &trpg_mechanics::watcher::HookEvent::TurnStart)
+            .await
+            .unwrap_or_default();
+        ctx.pending_dues.extend(hook_dues);
+        let stimulus_dues = if crate::stimulus::stimulus_pass_enabled() {
+            match self.engine.db.load_rule_kernel(&input.request.ruleset_id).await {
+                Ok(Some(kernel)) if !kernel.mechanics_catalog.is_empty() => {
+                    let recent = input.recent_transcript
+                        .or_else(|| input.history.iter().rev().find(|m| m.role == "assistant").map(|m| m.content.as_str()));
+                    let candidates = crate::stimulus::stimulus_due_candidates(&self.llm, &kernel.mechanics_catalog, &input.request.session_id, &input.request.turn_id, input.user_input, recent).await;
+                    trpg_mechanics::RefereeCombatService::new(self.engine.db.clone())
+                        .admit_dues(&input.request.session_id, candidates)
+                        .await
+                        .unwrap_or_default()
+                }
+                _ => Vec::new(),
+            }
+        } else { Vec::new() };
+        ctx.pending_dues.extend(stimulus_dues);
+    }
+
+    /// PhaseId::OpposedPrepass — 回合头部对抗绑定（现搓防御方 NPC + 备 OpposedBinding
+    /// 供 roll_check 注入）。fail-closed：门关/无 NPC/无攻击意图 → None。
+    async fn phase_opposed_prepass(&self, ctx: &mut TurnContext, input: &GmTurnInput<'_>) {
+        ctx.opposed_binding = crate::opposed_prepass::prepare_binding(&self.engine, &self.llm, input.request, input.state, input.user_input, input.recent_transcript, input.history).await;
+    }
+
+    /// PhaseId::ModeInference — active state_frame → mode 推导（三期 §4.1）。manifest
+    /// 损坏 → Err fail-closed 终止回合；db 失败 unwrap_or_default 绝不阻断。
+    async fn phase_mode_inference(&self, ctx: &mut TurnContext, input: &GmTurnInput<'_>) -> Result<()> {
+        ctx.active_frames = self.engine.db.list_active_state_frames(&input.request.session_id, 8).await.unwrap_or_default();
+        ctx.mode_manifest = crate::mode::active_mode_manifest(&self.data_dir, &ctx.active_frames)?;
+        ctx.mode_id = ctx.mode_manifest.as_ref().map(|m| m.mode_id.clone());
+        Ok(())
+    }
+
+    /// PhaseId::DebtLoad — B6 债务装载（spec §5.3）：begin_turn + mode 退出义务
+    /// re-seed + leftover/hook/stimulus dues 吸收（按 due_id 去重）→ carryover block。
+    async fn phase_debt_load(&mut self, ctx: &mut TurnContext, input: &GmTurnInput<'_>) {
+        self.obligations.begin_turn(&input.request.turn_id);
+        if let Some(m) = &ctx.mode_manifest {
+            self.obligations.ensure_mode_exit_obligations(&m.mode_id, &m.exit_obligations);
+        }
+        let leftover_dues = self.engine.db.list_open_mechanic_dues(&input.request.session_id).await.unwrap_or_default();
+        self.obligations.absorb_dues(leftover_dues);
+        self.obligations.absorb_dues(std::mem::take(&mut ctx.pending_dues));
+        ctx.obligations_block = self.obligations.carryover_block();
+    }
+
+    /// PhaseId::ContextAssembly — prepare_turn_context + 四级 gm_skill 合并 + mode
+    /// 目录联动 + errata/novelty BP3 块 + TurnMessages 组装 + mode 工具/节拍参数。
+    /// fail-closed：budget 超限 / gm_skill 缺 / 未知工具名 → Err 终止回合。
+    async fn phase_context_assembly(&self, ctx: &mut TurnContext, input: &GmTurnInput<'_>) -> Result<()> {
+        ctx.state_agent = input.state.clone();
+        ctx.state_agent.agent_loop_protocol = true;
+        ctx.compiled = match &self.ctx_provider {
+            Some(provider) => provider(input.request, &ctx.state_agent),
+            None => self.engine.prepare_turn_context(input.request, &ctx.state_agent, Some(input.user_input), input.recent_transcript).await?,
+        };
+        crate::prompts::validate_compiled_budget(&ctx.compiled, input.request)?;
+        let mut gm_skill = load_gm_skill_with_mode(&self.data_dir, &input.request.ruleset_id, ctx.mode_id.as_deref())?;
+        if let Some(manifest) = &ctx.mode_manifest {
+            match self.engine.db.load_rule_kernel(&input.request.ruleset_id).await {
+                Ok(Some(kernel)) => {
+                    if let Some(section) = crate::mode_catalog::mode_catalog_section(&manifest.mode_id, &manifest.catalog_filter, &kernel.mechanics_catalog) {
+                        gm_skill.push_str("\n\n---\n\n");
+                        gm_skill.push_str(&section);
+                    }
+                }
+                Ok(None) => tracing::warn!(ruleset_id = %input.request.ruleset_id, "mode catalog subset skipped: no active rule kernel"),
+                Err(err) => tracing::warn!(error = %err, "mode catalog subset skipped: rule kernel load failed"),
+            }
+        }
+        ctx.gm_skill = gm_skill;
+        if let Some(block) = self.errata.errata_block() { ctx.errata_blocks.push(block); }
+        if let Some(block) = self.errata.standing_reminder_block() { ctx.errata_blocks.push(block); }
+        if ctx.mode_id.is_some() {
+            if let Some(block) = crate::tools::frame::novelty_block(&ctx.active_frames) { ctx.errata_blocks.push(block); }
+        }
+        let tail = DynamicTailInput { user_input: input.user_input, resolved_gate_facts: &ctx.resolved_gate_facts, errata_blocks: &ctx.errata_blocks, obligations_block: ctx.obligations_block.as_deref() };
+        ctx.messages = Some(TurnMessages::assemble(&ctx.compiled, &ctx.gm_skill, input.history, &tail));
+        ctx.mode_tools = match ctx.mode_id.as_deref() {
+            Some(mode) => Some(ToolRegistry::for_mode(&self.data_dir, Some(mode))?),
+            None => None,
+        };
+        ctx.max_tool_rounds = ctx.mode_manifest.as_ref().and_then(|m| m.tempo.max_tool_rounds).unwrap_or(self.cfg.max_tool_rounds);
+        ctx.effect_closure_per_cluster = ctx.mode_manifest.as_ref().and_then(|m| m.tempo.effect_closure_per_cluster).unwrap_or(false);
+        Ok(())
     }
 
     /// 流后校验（spec §4 第 5 步）：NarrationVerifier 对账已流出全文 → 勘误记忆

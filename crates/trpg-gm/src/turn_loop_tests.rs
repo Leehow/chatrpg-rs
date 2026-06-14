@@ -368,3 +368,42 @@
         assert!(error_content.contains("missing_kernel_dice"));
         assert!(error_content.contains("\"recoverable\":true"));
     }
+
+    #[tokio::test]
+    async fn phase_context_assembly_produces_nonempty_blocks() {
+        // 纯重构护栏：context_assembly handler 经 ctx_provider seam + gm_skill
+        // fixture 必产出非空 compiled + gm_skill + 组装好的 messages（mode=None
+        // 退化两级，字节与旧头部一致）。
+        let (mut gm, _llm, request, state) = loop_fixture(vec![], ToolRegistry::from_tools(vec![]), 1);
+        let input = GmTurnInput { request: &request, state: &state, user_input: "I open the door.", history: &[], recent_transcript: None };
+        let mut ctx = TurnContext::new();
+        // 头部前序 phase 是 context_assembly 的前置（debt_load 填 obligations_block、
+        // mode_inference 填 mode_id/manifest）——按序跑到 context_assembly。
+        gm.phase_record_player_action(&mut ctx, &input).await;
+        gm.phase_refresh_live_derived(&mut ctx, &input).await;
+        gm.phase_reconcile(&mut ctx, &input).await;
+        gm.phase_gate(&mut ctx, &input).await;
+        gm.phase_stimulus_pass(&mut ctx, &input).await;
+        gm.phase_opposed_prepass(&mut ctx, &input).await;
+        gm.phase_mode_inference(&mut ctx, &input).await.unwrap();
+        gm.phase_debt_load(&mut ctx, &input).await;
+        gm.phase_context_assembly(&mut ctx, &input).await.unwrap();
+        assert_eq!(ctx.compiled.prefix_text, "BP1");
+        assert!(!ctx.gm_skill.trim().is_empty(), "gm_skill must be loaded by context_assembly");
+        // messages 已组装：含 system/user 至少 2 条（assemble 不会空）。
+        let messages = ctx.messages.as_ref().expect("TurnMessages must be assembled");
+        assert!(messages.to_request_messages().len() >= 2, "TurnMessages must be assembled");
+        assert_eq!(ctx.mode_id, None, "no active frame ⇒ no mode (byte-identical to phase-2)");
+    }
+
+    #[tokio::test]
+    async fn phase_debt_load_initializes_obligations_no_panic() {
+        // 纯重构护栏：debt_load handler begin_turn + 装载 dues（lazy pool 下 db
+        // 调用 unwrap_or_default 兜底，绝不 panic），空账本 ⇒ obligations_block None。
+        let (mut gm, _llm, request, state) = loop_fixture(vec![], ToolRegistry::from_tools(vec![]), 1);
+        let input = GmTurnInput { request: &request, state: &state, user_input: "wait", history: &[], recent_transcript: None };
+        let mut ctx = TurnContext::new();
+        gm.phase_mode_inference(&mut ctx, &input).await.unwrap();
+        gm.phase_debt_load(&mut ctx, &input).await;
+        assert_eq!(ctx.obligations_block, None, "empty ledger ⇒ no carryover block");
+    }
