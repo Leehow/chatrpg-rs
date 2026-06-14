@@ -1,104 +1,179 @@
 // crates/trpg-cli/src/agent_play.rs
+//
+// CLI play 会话循环：drain 统一 execute_turn 的 TurnEvent 流，同步到底。
+// Delta → stdout 逐 token；AwaitingPlayerRoll / SceneTransition / Errata → 打印；
+// TurnComplete → 更新 history + recent。scene 导航 / errata / carryover 全由
+// execute_turn 内部的 postprocess phases 处理，CLI 不再手动调 scene_navigator。
 use anyhow::Result;
-use serde_json::json;
+use futures_util::StreamExt;
 use std::future::Future;
 use std::io::{self, Write};
 use std::pin::Pin;
 use std::sync::Arc;
-use trpg_runtime::scene_navigation::{extract_module_scenes, scene_navigator};
-use trpg_gm::{GmLoop, GmTurnInput, LoopConfig, SceneDeepExtractFn, ToolRegistry, TurnOutcome};
+use trpg_gm::{
+    execute_turn, GmLoop, LoopConfig, OwnedTurnRequest, SceneDeepExtractFn, ToolRegistry,
+    TurnEvent, TurnOutcome, CANONICAL_TURN_PLAN,
+};
+use trpg_llm::LlmClient;
 use trpg_model::{ChatMessage, ContextRequest, RuntimeState, TokenBudget, VisibilityProfile};
+use trpg_runtime::scene_navigation::extract_module_scenes;
 use trpg_runtime::RuntimeEngine;
 
 pub async fn smoke_agent_play_symbol_exists() -> Result<()> {
     Ok(())
 }
 
-/// --agent 会话循环。装配逐项对齐 play_cli：内部自建 db/llm/search/engine，
-/// 不从外部收 `&dyn LlmClient`（不存在 From<&dyn> for Arc<dyn>，引用变不了所有权）。
+/// CLI play 会话主循环（永走 execute_turn，无 `--agent` flag）。
+/// 内部自建 db/llm/search/engine，每回合重建 GmLoop 后 move 进 execute_turn。
 pub async fn play_cli_agent(ruleset: &str, module: Option<&str>) -> Result<()> {
     let db = crate::connect_db().await?;
     db.migrate().await?;
     // make_llm() 已返回 Arc<dyn LlmClient>：直接持有 Arc，绝不从 &dyn 造 Arc。
     let llm = crate::make_llm()?;
     let data_dir = crate::default_data_dir();
-    // with_search 接入后 retrieve_rules 工具才可用（否则恒 "retrieve unavailable: no search service"）。
-    let search = crate::make_search(&db, data_dir.clone())?;
-    let engine = RuntimeEngine::new(db.clone()).with_search(search);
     // 真 session bootstrap（绝不自造 session_id 字符串）：sessions 行落库 +
-    // 模组入口场景激活（entry_node_id → current_scene_id）。record_world_event /
-    // insert_pending_check / save_memory_event 的 FK、BP2 当前可玩单元投影、
-    // navigate_scene 的 current 比对全靠它。
+    // 模组入口场景激活（entry_node_id → current_scene_id）。
+    let engine = RuntimeEngine::new(db.clone()).with_search(crate::make_search(&db, data_dir.clone())?);
     let session_id = engine.start_session(ruleset, module).await?;
-    println!("agent session: {session_id}");
+    println!("session: {session_id}");
     println!("Type /quit to exit.");
-    // 一期固定 Text（StreamFormat 私有类型，同 crate 子模块可见）。
-    let format = crate::StreamFormat::Text;
-    let mut gm = GmLoop::new(engine, llm.clone(), ToolRegistry::standard(), LoopConfig::default(), data_dir.clone());
+
+    let mut history: Vec<ChatMessage> = Vec::new();
+    let mut recent: Option<String> = None;
+
+    loop {
+        print!("\n[chatrpg]> ");
+        io::stdout().flush().ok();
+        let mut line = String::new();
+        if io::stdin().read_line(&mut line)? == 0 {
+            break;
+        }
+        let input = line.trim().to_string();
+        if input.is_empty() { continue; }
+        if input == "/quit" { break; }
+
+        // execute_turn 消费 GmLoop（owned，spawn 进 tokio 任务需 'static）。GmLoop 含
+        // ToolRegistry(Box<dyn GmTool>)/ErrataMemory/ObligationLedger 等不可 Clone 字段，
+        // 故每回合重建（RuntimeEngine 持 Arc<Db> 克隆，成本极低）。errata/obligations 是
+        // per-turn 状态，TurnPipeline 内全程持有、TurnComplete 后随任务丢弃，不跨回合。
+        let engine = RuntimeEngine::new(db.clone()).with_search(crate::make_search(&db, data_dir.clone())?);
+        let mut gm = GmLoop::new(engine, llm.clone(), ToolRegistry::standard(), LoopConfig::default(), data_dir.clone());
+        // 装配到场深抽闭包（scene_navigate phase 切场景到达时深抽目标场景）。
+        wire_scene_extractor(&mut gm, &db, &llm, ruleset, module, &data_dir);
+
+        let turn_id = format!("turn_{}", uuid::Uuid::new_v4().simple());
+        let request = ContextRequest {
+            ruleset_id: ruleset.to_string(),
+            module_id: module.map(str::to_string),
+            session_id: session_id.clone(),
+            turn_id,
+            viewer: VisibilityProfile::gm(),
+            token_budget: TokenBudget::default(),
+        };
+        // 每回合把持久化的 current_scene_id 填进 RuntimeState（对齐 prepare_turn_context
+        // 单点约定；scene_navigate phase 切换后下一回合在此读到新场景）。
+        let scene_id = db.load_session_scene(&session_id).await.ok().flatten();
+        let state = RuntimeState {
+            ruleset_id: ruleset.to_string(),
+            module_id: module.map(str::to_string),
+            scene_id,
+            ..Default::default()
+        };
+
+        let req = OwnedTurnRequest {
+            request,
+            state,
+            user_input: input.clone(),
+            history: history.clone(),
+            recent_transcript: recent.clone(),
+            module_id: module.map(str::to_string),
+            data_dir: data_dir.clone(),
+        };
+
+        // execute_turn 返回 ReceiverStream<TurnEvent>；CLI 同步 drain 到底。
+        let mut stream = Box::pin(execute_turn(gm, req, CANONICAL_TURN_PLAN));
+        let mut streamed = String::new();
+
+        while let Some(event) = stream.next().await {
+            match event {
+                TurnEvent::Delta(delta) => {
+                    print!("{delta}");
+                    io::stdout().flush().ok();
+                    streamed.push_str(&delta);
+                }
+                TurnEvent::AwaitingPlayerRoll { check_id, prompt_public } => {
+                    // standalone 事件 = live 信号（terminal 记录由 TurnComplete 承载，避免双 emit）。
+                    println!("\n[awaiting_player_roll] check_id={check_id}");
+                    println!("{prompt_public}");
+                }
+                TurnEvent::SceneTransition { from, to, reason } => {
+                    println!("\n[scene] {from} → {to}  ({reason})");
+                }
+                TurnEvent::Errata(entry) => {
+                    println!("\n[errata] {}", entry.detail);
+                }
+                TurnEvent::PostprocessScheduled => {
+                    // CLI 同步 drain，PostprocessScheduled 仅作可观测标记，不需特殊处理。
+                }
+                TurnEvent::TurnComplete { outcome } => {
+                    println!();
+                    match outcome {
+                        TurnOutcome::Narration(text) => {
+                            history.push(ChatMessage { role: "user".to_string(), content: input.clone() });
+                            history.push(ChatMessage { role: "assistant".to_string(), content: text.clone() });
+                            let tail = format!("\nPlayer: {input}\nGM: {text}\n");
+                            let r = recent.get_or_insert_with(String::new);
+                            r.push_str(&tail);
+                            // 保持最近 12K 字符（与旧 play_cli take_tail_chars 对齐，按 char 边界裁剪）。
+                            *r = take_tail_chars(r, 12_000);
+                        }
+                        TurnOutcome::AwaitingPlayerRoll { prompt_public, .. } => {
+                            history.push(ChatMessage { role: "user".to_string(), content: input.clone() });
+                            history.push(ChatMessage {
+                                role: "assistant".to_string(),
+                                content: if streamed.trim().is_empty() { prompt_public } else { streamed.clone() },
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 装配到场深抽闭包（同 T4 execute_turn 内部约定，用于 scene_navigate phase）。
+fn wire_scene_extractor(
+    gm: &mut GmLoop,
+    db: &trpg_db::Db,
+    llm: &Arc<dyn LlmClient>,
+    ruleset: &str,
+    module: Option<&str>,
+    data_dir: &std::path::Path,
+) {
     if let Some(mid) = module.map(str::to_string) {
         let db2 = db.clone();
         let llm2 = llm.clone();
         let rs2 = ruleset.to_string();
-        let dir2 = data_dir.clone();
+        let dir2 = data_dir.to_path_buf();
         gm.scene_extractor = Some(Arc::new(move |node_id: String| {
             let db3 = db2.clone();
             let llm3 = llm2.clone();
             let mid3 = mid.clone();
             let rs3 = rs2.clone();
             let dir3 = dir2.clone();
-            Box::pin(async move { extract_module_scenes(&db3, llm3.as_ref(), &mid3, None, Some(&rs3), &dir3, 12, Some(&node_id)).await })
-                as Pin<Box<dyn Future<Output = Result<usize>> + Send>>
+            Box::pin(async move {
+                extract_module_scenes(&db3, llm3.as_ref(), &mid3, None, Some(&rs3), &dir3, 12, Some(&node_id)).await
+            }) as Pin<Box<dyn Future<Output = Result<usize>> + Send>>
         }) as SceneDeepExtractFn);
     }
-    let mut history: Vec<ChatMessage> = Vec::new();
-    loop {
-        print!("\n[chatrpg:agent]> ");
-        io::stdout().flush().ok();
-        let mut line = String::new();
-        if io::stdin().read_line(&mut line)? == 0 { break; }
-        let input = line.trim().to_string();
-        if input.is_empty() { continue; }
-        if input == "/quit" { break; }
-        let turn_id = format!("turn_{}", uuid::Uuid::new_v4().simple());
-        let request = ContextRequest { ruleset_id: ruleset.to_string(), module_id: module.map(str::to_string), session_id: session_id.clone(), turn_id, viewer: VisibilityProfile::gm(), token_budget: TokenBudget::default() };
-        // 每回合把持久化的 current_scene_id 填进 RuntimeState（对齐 prepare_turn_context
-        // 单点约定；scene_navigator 切换后下一回合在此读到新场景）。
-        let scene_id = db.load_session_scene(&session_id).await.ok().flatten();
-        let state = RuntimeState { ruleset_id: ruleset.to_string(), module_id: module.map(str::to_string), scene_id, ..Default::default() };
-        let mut streamed = String::new();
-        let outcome = gm.run_gm_turn(
-            GmTurnInput { request: &request, state: &state, user_input: &input, history: &history, recent_transcript: None },
-            &mut |delta| {
-                streamed.push_str(delta);
-                let _ = crate::emit_delta(format, delta);
-            },
-        ).await?;
-        println!();
-        let do_scene_nav = matches!(outcome, TurnOutcome::Narration(_));
-        // 在 input 被 move 进 history 前保存，供 scene_navigator player_input 参数使用。
-        let player_input_for_nav = input.clone();
-        match outcome {
-            TurnOutcome::Narration(text) => {
-                history.push(ChatMessage { role: "user".to_string(), content: input });
-                history.push(ChatMessage { role: "assistant".to_string(), content: text });
-            }
-            TurnOutcome::AwaitingPlayerRoll { prompt_public, .. } => {
-                // emit_phase 第三参按值收 Value（owned json!），Result 用 let _ 接住。
-                let _ = crate::emit_phase(format, "awaiting_player_roll", json!({"prompt_public": prompt_public.clone()}));
-                history.push(ChatMessage { role: "user".to_string(), content: input });
-                history.push(ChatMessage { role: "assistant".to_string(), content: if streamed.trim().is_empty() { prompt_public } else { streamed.clone() } });
-            }
-        }
-        // 模组场景导航：比照 main.rs play_cli 的回合末处理，语义判定本回合 player_input +
-        // GM 叙事后是否切场景，更新 current_scene_id + 到场深抽。仅 Narration 终态触发；
-        // AwaitingPlayerRoll 跳过（GM 在等玩家掷骰，场景未结束）。fail-closed：失败仅 warn 不阻断。
-        if do_scene_nav {
-            if let Some(mid) = module {
-                if let Err(err) = scene_navigator(&db, llm.as_ref(), &session_id, mid, data_dir.as_path(), &player_input_for_nav, &streamed).await {
-                    tracing::warn!("agent scene_navigator: {err:#}");
-                }
-            }
-        }
+}
+
+/// 按 char 边界保留尾部 max_chars（与 main.rs take_tail_chars 同语义；CLI 内联避免跨模块可见性）。
+fn take_tail_chars(input: &str, max_chars: usize) -> String {
+    let count = input.chars().count();
+    if count <= max_chars {
+        return input.to_string();
     }
-    Ok(())
+    input.chars().skip(count - max_chars).collect()
 }

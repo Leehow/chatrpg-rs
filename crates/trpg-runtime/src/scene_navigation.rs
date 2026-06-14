@@ -178,7 +178,8 @@ pub fn validate_transition(
 /// 全程 fail-closed：取不到图/空图/LLM 失败/校验不过 → warn + Ok(())（留原场景，不乱跳、
 /// 不编造 target）。source_id/ruleset_id 由 `extract_module_scenes` 从 module bundle 自行
 /// 推导，故本函数无需调用方提供（运行时只持有 module_id）。
-/// pub：供 trpg-cli 的 run_turn_once（CLI play 路径）调用，与 API turn_postprocess 共享同一语义导航。
+/// pub：供 trpg-gm execute_turn 的 scene_navigate phase（CLI/API 统一回合路径）调用，
+/// 与 API turn_postprocess 共享同一语义导航。
 pub async fn scene_navigator(
     db: &Db,
     llm: &dyn LlmClient,
