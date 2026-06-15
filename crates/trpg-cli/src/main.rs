@@ -26,6 +26,8 @@ use trpg_runtime::{roll_dice, validate_character_template_sheet, RuntimeEngine};
 use trpg_search::{load_search_source_configs, SearchConfig, SearchService};
 
 mod agent_play;
+mod transport_policy;
+use transport_policy::{cli_wait_mode, WaitMode};
 
 #[derive(Debug, Parser)]
 #[command(name = "trpg", version, about = "Rust TRPG rulebook/module parser and terminal runtime")]
@@ -894,12 +896,21 @@ async fn turn_cli(args: TurnArgs) -> Result<()> {
             TurnEvent::PostprocessScheduled => {
                 emit_phase(args.stream_format, "postprocess_scheduled", json!({}))?;
             }
+            TurnEvent::HeavyPostprocessDone => {
+                // turn 模式：通过 await_heavy_complete 轮询 DB 等 complete，此事件可选提前退出。
+                // 保守做法：不 break（轮询负责等 complete），此事件仅透出 heavy_done phase。
+                emit_phase(args.stream_format, "heavy_done", json!({}))?;
+            }
             TurnEvent::TurnComplete { outcome } => {
                 if let TurnOutcome::Narration(_) = outcome {
                     emit_phase(args.stream_format, "done", json!({}))?;
                 }
             }
         }
+    }
+    // R5 T3：一次性 turn 等 heavy 落账（确定性退出），轮询 pp_lifecycle=complete。
+    if cli_wait_mode(true) == WaitMode::WaitHeavy {
+        await_heavy_complete(&db, &session_id).await;
     }
     Ok(())
 }
@@ -1001,6 +1012,34 @@ fn emit_sse(event: &str, data: &str) {
     }
     println!();
     io::stdout().flush().ok();
+}
+
+/// R5 T3：等待 session 最近 turn 的 pp_lifecycle 到达 "complete"，上限 30s，间隔 500ms。
+/// fail-closed 超时放行（warn），绝不阻死进程。仅 `trpg turn` 一次性模式调用。
+async fn await_heavy_complete(db: &Db, session_id: &str) {
+    use std::time::{Duration, Instant};
+    const TIMEOUT: Duration = Duration::from_secs(30);
+    const INTERVAL: Duration = Duration::from_millis(500);
+    let start = Instant::now();
+    loop {
+        match db.load_last_turn_pp_lifecycle(session_id).await {
+            Ok(Some(ref s)) if s == trpg_model::PP_COMPLETE => return,
+            Ok(_) => {}
+            Err(err) => {
+                tracing::warn!(error = %err, "await_heavy_complete: db error; giving up");
+                return;
+            }
+        }
+        if start.elapsed() >= TIMEOUT {
+            tracing::warn!(
+                session_id,
+                "await_heavy_complete: timeout ({}s) waiting for pp_lifecycle=complete; proceeding",
+                TIMEOUT.as_secs()
+            );
+            return;
+        }
+        tokio::time::sleep(INTERVAL).await;
+    }
 }
 
 async fn time_command_cli(command: TimeCommand) -> Result<()> {

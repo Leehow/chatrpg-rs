@@ -115,6 +115,10 @@ pub async fn play_cli_agent(ruleset: &str, module: Option<&str>) -> Result<()> {
                 TurnEvent::PostprocessScheduled => {
                     // CLI 同步 drain，PostprocessScheduled 仅作可观测标记，不需特殊处理。
                 }
+                TurnEvent::HeavyPostprocessDone => {
+                    // play 模式：heavy 后台完成信号。已在 TurnComplete 处 break，
+                    // 此分支理论上不可达；若因竞态先到此，直接忽略继续 drain。
+                }
                 TurnEvent::TurnComplete { outcome } => {
                     println!();
                     match outcome {
@@ -135,6 +139,8 @@ pub async fn play_cli_agent(ruleset: &str, module: Option<&str>) -> Result<()> {
                             });
                         }
                     }
+                    // R5 T3：play 模式不等 heavy（下一轮高水位守卫兜正确性）。
+                    break;
                 }
             }
         }

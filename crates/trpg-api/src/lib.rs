@@ -1044,11 +1044,17 @@ async fn play_turn_sse(Path(session_id): Path<String>, State(state): State<AppSt
                     // 叙事已流完，尾部 phase 即将（在同一任务继续 drain）跑——对客户端=后台。
                     send_phase(&tx, "postprocess_scheduled", json!({})).await;
                 }
+                TurnEvent::HeavyPostprocessDone => {
+                    // API SSE：已在 TurnComplete 处 break，此分支不可达；
+                    // 保留以满足 exhaustive match（heavy 在 execute_turn 后台 spawn，不发 SSE 事件）。
+                }
                 TurnEvent::TurnComplete { outcome } => {
+                    // R5 T3：critical 已落账，发 done 关闭 SSE（heavy 自走与 SSE 生命周期解耦）。
                     // AwaitingPlayerRoll 终态的 done 已在上面发过；仅 Narration 终态发常规 done。
                     if let TurnOutcome::Narration(_) = outcome {
                         send_phase(&tx, "done", json!({})).await;
                     }
+                    break; // SSE 结束于 TurnComplete；heavy 在 execute_turn 的后台 spawn 继续。
                 }
             }
         }

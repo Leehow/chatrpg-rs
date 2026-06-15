@@ -17,6 +17,9 @@ pub enum TurnEvent {
     Errata(ErrataEntry),
     /// 叙事完成、尾部 phase 开始——transport 据此决定前台/后台执行尾部。
     PostprocessScheduled,
+    /// heavy 组后台任务完成信号（CLI turn 模式等此事件或轮询 pp_lifecycle=complete；
+    /// API SSE / play 模式已在 TurnComplete 处 break，不等此事件）。
+    HeavyPostprocessDone,
     /// 回合终态。
     TurnComplete { outcome: TurnOutcome },
 }
@@ -43,13 +46,14 @@ mod tests {
             TurnEvent::SceneTransition { from: "a".into(), to: "b".into(), reason: "moved".into() },
             TurnEvent::Errata(errata),
             TurnEvent::PostprocessScheduled,
+            TurnEvent::HeavyPostprocessDone,
             TurnEvent::TurnComplete { outcome: TurnOutcome::Narration("done".into()) },
         ];
         for e in &events {
             let cloned = e.clone();
             assert!(!format!("{cloned:?}").is_empty());
         }
-        assert_eq!(events.len(), 6);
+        assert_eq!(events.len(), 7);
     }
 
     #[test]
