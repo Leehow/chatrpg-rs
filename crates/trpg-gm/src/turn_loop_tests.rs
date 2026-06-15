@@ -407,3 +407,17 @@
         gm.phase_debt_load(&mut ctx, &input).await;
         assert_eq!(ctx.obligations_block, None, "empty ledger ⇒ no carryover block");
     }
+
+    // R5 Task1b 边界测试：编译级断言 save_turn-only 的 finalize 与 heavy memory 写
+    // 各有独立入口（finalize_save_turn = critical 只 save；heavy_finalize_memory =
+    // heavy turn 记忆 + audit；phase_finalize_heavy_memory = execute.rs heavy 段桥）。
+    // 方法路径引用强制编译期名解析——拆分被合回一体会断编译。不执行（lazy pool）。
+    #[test]
+    fn finalize_save_and_heavy_memory_are_separable() {
+        // 引用三个方法路径强制编译期名解析（async 方法返回 impl Future，无法名 fn
+        // 指针返回类型，故直接取方法值即可锁定签名稳定）。
+        let _save = GmLoop::finalize_save_turn;
+        let _heavy = GmLoop::heavy_finalize_memory;
+        let _bridge = GmLoop::phase_finalize_heavy_memory;
+        let _ = (_save, _heavy, _bridge);
+    }

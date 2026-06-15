@@ -561,36 +561,47 @@ impl GmLoop {
         self.obligations.absorb_retro_debts(debts);
     }
 
-    /// 确定性收尾（spec §4：save_turn / memory event / learning audit）：持久化
-    /// 本回合 + 回合摘要 + 学习审计。叙事已流出不可回收，收尾失败 tracing::warn
-    /// 不 panic（也让 MockLlm 单测在 lazy pool 下保持绿）；真实落库由 Task 11 的
-    /// turns 表 SQL 验证。
-    pub(crate) async fn finalize_turn(&self, request: &ContextRequest, state: &RuntimeState, compiled: &CompiledContext, user_input: &str, assistant_output: &str, status: &str) {
+    /// R5 critical：只持久化回合记录 + status（save_turn）。memory/audit 移到 heavy
+    /// （heavy_finalize_memory）。叙事已流出不可回收，save 失败 warn 不 panic（MockLlm
+    /// lazy pool 下保持绿）；真实落库由 turns 表 SQL 验证。
+    pub(crate) async fn finalize_save_turn(&self, request: &ContextRequest, compiled: &CompiledContext, user_input: &str, assistant_output: &str, status: &str) {
         let hashes = json!({"prefix": compiled.prefix_hash, "pinned": compiled.pinned_hash, "dynamic": compiled.dynamic_hash});
         if let Err(err) = self.engine.db.save_turn(&request.session_id, &request.turn_id, user_input, assistant_output, hashes, status).await {
             tracing::warn!(error = %err, "agent path save_turn failed");
         }
-        if !assistant_output.trim().is_empty() {
-            let summary: String = assistant_output.chars().take(280).collect();
-            // 富版回合记忆（与退役 API turn_postprocess 对齐，spec §4.3）：importance 50、
-            // scene/location/actor 取自本回合 RuntimeState、含转录摘录，tags 用
-            // ["turn","session_memory"] 并保留 "gm_turn" 便于沿用旧检索。
-            let transcript_excerpt = Some(format!(
-                "Player: {}\nGM: {}",
-                user_input,
-                assistant_output.chars().take(2000).collect::<String>()
-            ));
-            let event = MemoryEvent { event_id: format!("mem_turn_{}", Uuid::new_v4().simple()), session_id: request.session_id.clone(), turn_id: Some(request.turn_id.clone()), ruleset_id: request.ruleset_id.clone(), module_id: request.module_id.clone(), scene_id: state.scene_id.clone(), location_id: state.location_id.clone(), actor_ids: state.active_npc_ids.clone(), visibility: Visibility::GmOnly, event_kind: MemoryKind::Event, summary, transcript_excerpt, source: json!({"source":"gm_agent.turn_summary"}), tags: vec!["turn".to_string(), "session_memory".to_string(), "gm_turn".to_string()], importance: 50, occurred_at: Utc::now() };
-            if let Err(err) = self.engine.db.save_memory_event(&event).await {
-                tracing::warn!(error = %err, "agent path turn summary memory event failed");
-            }
-            // spec §4 收尾第三项：learning audit（保留）——沿用旧路径原语
-            // RuntimeEngine::audit_learning_for_turn（内部自带 learning_audit_enabled()
-            // 门控与自吞错，门关时为 no-op；与旧 run_turn_once L1481 行为对齐）。
-            if let Err(err) = self.engine.audit_learning_for_turn(&request.session_id, &request.ruleset_id, request.module_id.as_deref(), &request.turn_id, user_input, assistant_output).await {
-                tracing::warn!(error = %err, "agent path learning audit failed");
-            }
+    }
+
+    /// R5 heavy：富版回合记忆 + learning audit（下一回合不强依赖；后台跑）。逐字搬自
+    /// 旧 finalize_turn 的 memory/audit 半边。失败只 warn，绝不影响已 save 的 turn（D2）。
+    pub(crate) async fn heavy_finalize_memory(&self, request: &ContextRequest, state: &RuntimeState, user_input: &str, assistant_output: &str) {
+        if assistant_output.trim().is_empty() { return; }
+        let summary: String = assistant_output.chars().take(280).collect();
+        // 富版回合记忆（与退役 API turn_postprocess 对齐，spec §4.3）：importance 50、
+        // scene/location/actor 取自本回合 RuntimeState、含转录摘录，tags 用
+        // ["turn","session_memory"] 并保留 "gm_turn" 便于沿用旧检索。
+        let transcript_excerpt = Some(format!(
+            "Player: {}\nGM: {}",
+            user_input,
+            assistant_output.chars().take(2000).collect::<String>()
+        ));
+        let event = MemoryEvent { event_id: format!("mem_turn_{}", Uuid::new_v4().simple()), session_id: request.session_id.clone(), turn_id: Some(request.turn_id.clone()), ruleset_id: request.ruleset_id.clone(), module_id: request.module_id.clone(), scene_id: state.scene_id.clone(), location_id: state.location_id.clone(), actor_ids: state.active_npc_ids.clone(), visibility: Visibility::GmOnly, event_kind: MemoryKind::Event, summary, transcript_excerpt, source: json!({"source":"gm_agent.turn_summary"}), tags: vec!["turn".to_string(), "session_memory".to_string(), "gm_turn".to_string()], importance: 50, occurred_at: Utc::now() };
+        if let Err(err) = self.engine.db.save_memory_event(&event).await {
+            tracing::warn!(error = %err, "agent path turn summary memory event failed");
         }
+        // spec §4 收尾第三项：learning audit（保留）——沿用旧路径原语
+        // RuntimeEngine::audit_learning_for_turn（内部自带 learning_audit_enabled()
+        // 门控与自吞错，门关时为 no-op；与旧 run_turn_once L1481 行为对齐）。
+        if let Err(err) = self.engine.audit_learning_for_turn(&request.session_id, &request.ruleset_id, request.module_id.as_deref(), &request.turn_id, user_input, assistant_output).await {
+            tracing::warn!(error = %err, "agent path learning audit failed");
+        }
+    }
+
+    /// 确定性收尾（spec §4：save_turn / memory event / learning audit）。R5 拆分后保留
+    /// 为薄 wrapper（save→memory 串行），供 run_gm_turn（R1 未退役）复用；新执行器
+    /// （execute.rs）走拆分路径（critical save、heavy memory/audit 后台）。
+    pub(crate) async fn finalize_turn(&self, request: &ContextRequest, state: &RuntimeState, compiled: &CompiledContext, user_input: &str, assistant_output: &str, status: &str) {
+        self.finalize_save_turn(request, compiled, user_input, assistant_output, status).await;
+        self.heavy_finalize_memory(request, state, user_input, assistant_output).await;
     }
 
     // ====================== T4 解释器尾部 phase wrappers ======================
@@ -606,30 +617,50 @@ impl GmLoop {
         ctx.visible_text = visible;
     }
 
-    /// PhaseId::Finalize — 确定性收尾（save_turn + memory + audit_learning 都在
-    /// finalize_turn 内部，故 AuditLearning phase 是 no-op）。awaiting 终态用 gate
-    /// prompt_public 兜底空 visible_text（与 run_gm_turn assistant_output 选择一致）。
+    /// PhaseId::Finalize（R5 critical）— 只持久化回合记录 + status（save_turn）。
+    /// memory/audit 由 phase_finalize_heavy_memory 在 heavy 段后台跑。awaiting 终态用
+    /// gate prompt_public 兜底空 visible_text（与 run_gm_turn assistant_output 选择一致）。
     pub(crate) async fn phase_finalize(&mut self, ctx: &mut TurnContext, input: &GmTurnInput<'_>, status: &str) {
         let assistant_output = match &ctx.awaiting_gate {
             Some(gate) if ctx.visible_text.trim().is_empty() => gate.prompt_public.clone(),
             _ => ctx.visible_text.clone(),
         };
-        self.finalize_turn(input.request, input.state, &ctx.compiled, input.user_input, &assistant_output, status).await;
+        self.finalize_save_turn(input.request, &ctx.compiled, input.user_input, &assistant_output, status).await;
     }
 
-    /// PhaseId::SceneNavigate — 语义场景导航（吸收原 CLI agent_play 回合末逻辑）。
-    /// fail-closed：无 module / scene_navigator Err → None（仅 warn）。scene_navigator
-    /// 现签名返回 `anyhow::Result<()>`（不回传切换详情），故只跑副作用、不发
-    /// SceneTransition 事件——见 §报告「scene_navigator 处理」。
-    pub(crate) async fn phase_scene_navigate(&mut self, ctx: &mut TurnContext, input: &GmTurnInput<'_>) -> Option<SceneTransitionInfo> {
+    /// R5 heavy：phase_finalize 的 memory/audit 半边（execute.rs heavy 段调）。从 ctx
+    /// 读 awaiting_gate/visible_text 兜底 assistant_output（与 critical 同口径），从
+    /// input 读 state 投 RuntimeState 给富版回合记忆。失败只 warn，绝不影响已 save 的 turn。
+    pub(crate) async fn phase_finalize_heavy_memory(&self, ctx: &TurnContext, input: &GmTurnInput<'_>) {
+        let assistant_output = match &ctx.awaiting_gate {
+            Some(gate) if ctx.visible_text.trim().is_empty() => gate.prompt_public.clone(),
+            _ => ctx.visible_text.clone(),
+        };
+        self.heavy_finalize_memory(input.request, input.state, input.user_input, &assistant_output).await;
+    }
+
+    /// PhaseId::SceneNavigate（R5 critical）— 切场景决策 + set_session_scene +
+    /// SceneChanged world event。返回切换详情供 execute.rs 发 SceneTransition 事件
+    /// （R1 旧实现恒 None，本期修复）。**不**深抽/前探（那是 heavy）。
+    /// fail-closed：无 module / scene_navigate_critical Err / 未切换 → None（仅 warn）。
+    pub(crate) async fn phase_scene_navigate_critical(&mut self, ctx: &TurnContext, input: &GmTurnInput<'_>) -> Option<SceneTransitionInfo> {
         let module_id = input.request.module_id.as_deref()?;
-        if let Err(err) = trpg_runtime::scene_navigation::scene_navigator(
+        match trpg_runtime::scene_navigation::scene_navigate_critical(
             &self.engine.db, self.llm.as_ref(), &input.request.session_id, module_id,
             self.data_dir.as_path(), input.user_input, &ctx.visible_text,
         ).await {
-            tracing::warn!(error = %err, "agent path scene_navigator failed");
+            Ok(Some(c)) => Some(SceneTransitionInfo { from: c.from, to: c.to, reason: c.reason }),
+            Ok(None) => None,
+            Err(err) => { tracing::warn!(error = %err, "agent path scene_navigate_critical failed"); None }
         }
-        None
+    }
+
+    /// PhaseId::SceneNavigate（R5 heavy）— 到场深抽 + frontier 前探（后台，best-effort）。
+    /// target 来自 critical 的 SceneTransitionInfo.to；module_id 由调用方校验非空后传入。
+    pub(crate) async fn phase_scene_navigate_heavy(&self, target: &str, module_id: &str) {
+        trpg_runtime::scene_navigation::scene_navigate_heavy(
+            &self.engine.db, self.llm.as_ref(), module_id, target, self.data_dir.as_path(),
+        ).await;
     }
 
     /// PhaseId::CarryoverDebt — 轮耗尽带债的债务跨回合落账（吸收原 run_gm_turn
@@ -667,9 +698,9 @@ async fn drain_redactor_tx(redactor: &mut RedactingBuffer, blocked: bool, tx: &t
     visible_text.push_str(&rest);
 }
 
-/// scene_navigate 切换详情（execute.rs 折成 TurnEvent::SceneTransition）。
-/// scene_navigator 现返回 `()` 不回传切换详情，故 phase_scene_navigate 暂恒
-/// 返 None；保留此类型供后续 scene_navigator 返回类型升级（Task 5/6）对接。
+/// scene_navigate 切换详情（execute.rs 折成 TurnEvent::SceneTransition + 排 heavy 深抽）。
+/// R5：phase_scene_navigate_critical 在真切场景时返回 Some（来自 scene_navigate_critical
+/// 的 SceneNavCommit），修复 R1 恒 None 的 TODO。
 #[derive(Debug, Clone)]
 pub(crate) struct SceneTransitionInfo {
     pub from: String,

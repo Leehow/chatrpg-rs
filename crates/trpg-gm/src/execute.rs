@@ -185,8 +185,12 @@ async fn dispatch_postprocess(
         // 列为独立 phase 是为表达管线完整性；实现上由 Finalize 覆盖）。
         PhaseId::AuditLearning => {}
         PhaseId::SceneNavigate => {
-            if let Some(t) = gm.phase_scene_navigate(ctx, input).await {
+            if let Some(t) = gm.phase_scene_navigate_critical(ctx, input).await {
+                let to = t.to.clone();
                 let _ = tx.send(TurnEvent::SceneTransition { from: t.from, to: t.to, reason: t.reason }).await;
+                if let Some(module_id) = input.request.module_id.as_deref() {
+                    gm.phase_scene_navigate_heavy(&to, module_id).await;
+                }
             }
         }
         PhaseId::CarryoverDebt => gm.phase_carryover_debt(ctx, input).await,
