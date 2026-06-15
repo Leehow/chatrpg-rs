@@ -160,6 +160,11 @@ async fn run_pipeline(
         // —— 4. TurnComplete（critical 已落账，可继续下一回合）——
         let outcome = gm.take_outcome(&mut ctx);
         let _ = tx.send(TurnEvent::TurnComplete { outcome }).await;
+        // R5 高水位锚点：critical 组已落账（save_turn + 切场景），标 pp_lifecycle=critical_done，
+        // 让下一回合入口守卫可放行（heavy 仍后台跑、不阻塞）。失败仅 log，绝不影响已发的 TurnComplete。
+        if let Err(e) = gm.engine.db.set_turn_pp_lifecycle(&req.request.turn_id, trpg_model::PP_CRITICAL_DONE).await {
+            tracing::warn!(error = %e, turn_id = %req.request.turn_id, "set pp_lifecycle=critical_done failed (non-fatal)");
+        }
         // input 在此块结束时释放对 req 的借用，下面 move req 进 heavy spawn。
     }
 
@@ -199,10 +204,15 @@ fn spawn_heavy(
         // carryover 债务记忆（select_phases 已据 has_pending 决定是否在 selected 里）。
         if selected.iter().any(|p| p.id == PhaseId::CarryoverDebt && p.kind == PhaseKind::Postprocess) {
             gm.phase_carryover_debt(&mut ctx, &input).await;
-            // T2 锚点：在此（heavy 末）写 pp_lifecycle=complete（本任务暂不写）。
         }
         // errata 记忆已在 critical 的 phase_verify_after_stream 内落账（save_memory_event）——
         // R1 行为：verify 在 finalize 前、属 critical。heavy 不重复 errata 写。
+        // R5 高水位锚点：heavy 组（memory/audit + 到场深抽/frontier + carryover）全跑完，
+        // 标 pp_lifecycle=complete（无论 carryover 是否触发，都是 heavy 末态）。失败仅 log——
+        // heavy 在独立 spawn、TurnComplete 早已发，此写失败不回退、不 panic（D2 失败隔离）。
+        if let Err(e) = gm.engine.db.set_turn_pp_lifecycle(&req.request.turn_id, trpg_model::PP_COMPLETE).await {
+            tracing::warn!(error = %e, turn_id = %req.request.turn_id, "set pp_lifecycle=complete failed (non-fatal)");
+        }
     });
 }
 

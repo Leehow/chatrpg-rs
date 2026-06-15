@@ -39,7 +39,7 @@ trpg-rule-agent = { path = "../trpg-rule-agent" }
 trpg-need = { path = "../trpg-need" }
 async-trait.workspace = true
 futures-util.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
-tokio.workspace = true
 sqlx.workspace = true

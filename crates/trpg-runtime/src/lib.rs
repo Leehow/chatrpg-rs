@@ -66,6 +66,38 @@ pub struct AutoRollExecution {
     pub roll_policy: String,
 }
 
+/// R5 turn 高水位守卫：回合入口处等上一回合的 critical 组落账（pp_lifecycle >= critical_done）。
+/// fail-closed——从不硬拒玩家：无上一回合 / 已达 critical / heavy 未完（critical_done 非 complete）
+/// 均立即放行；仅当上一回合仍 < critical_done 时 bounded 轮询，超时 warn 放行。
+pub async fn await_prev_turn_critical(db: &Db, session_id: &str, timeout_ms: u64, interval_ms: u64) {
+    let reached = |phase: &Option<String>| -> bool {
+        match phase {
+            None => true, // 无上一回合 → 放行
+            Some(p) => pp_lifecycle_rank(p) >= pp_lifecycle_rank(PP_CRITICAL_DONE),
+        }
+    };
+    // 首查：常见路径（critical 已落账 / 无上一回合）零等待。
+    match db.load_last_turn_pp_lifecycle(session_id).await {
+        Ok(ref phase) if reached(phase) => return,
+        Err(err) => { tracing::warn!(error = %err, session_id, "high-water guard load failed; proceeding (fail-closed)"); return; }
+        _ => {}
+    }
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let step = std::time::Duration::from_millis(interval_ms);
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            tracing::warn!(session_id, timeout_ms, "high-water guard timed out waiting for prev-turn critical; proceeding (fail-closed, possibly slightly stale)");
+            return;
+        }
+        tokio::time::sleep(step).await;
+        match db.load_last_turn_pp_lifecycle(session_id).await {
+            Ok(ref phase) if reached(phase) => return,
+            Err(err) => { tracing::warn!(error = %err, session_id, "high-water guard re-poll failed; proceeding (fail-closed)"); return; }
+            _ => {}
+        }
+    }
+}
+
 impl RuntimeEngine {
     pub fn new(db: Db) -> Self {
         warn_if_core_mechanics_disabled();
@@ -191,6 +223,9 @@ impl RuntimeEngine {
         current_input: Option<&str>,
         recent_transcript: Option<&str>,
     ) -> Result<CompiledContext> {
+        // R5 turn 高水位守卫：等上一回合 critical 组落账，消除连发回合读到陈旧
+        // current_scene_id/记忆的竞态。fail-closed——超时/无上一回合/已达均放行，不卡玩家。
+        await_prev_turn_critical(&self.db, &request.session_id, 2000, 100).await;
         // 每回合单点把持久化的 current_scene_id 载入运行态（P4 投影）：state 缺场景且有模组时填入。
         let mut state_owned = state.clone();
         if resolve_turn_scene_id(state_owned.scene_id.as_deref(), state_owned.module_id.as_deref(), None).is_none()
