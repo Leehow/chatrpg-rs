@@ -25,8 +25,38 @@ pub struct LoopConfig { pub max_tool_rounds: u8, pub repeat_finding_threshold: u
 impl Default for LoopConfig { fn default() -> Self { Self { max_tool_rounds: 8, repeat_finding_threshold: 3 } } }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TurnOutcome { Narration(String), AwaitingPlayerRoll { check_id: String, prompt_public: String } }
+/// 生产 GmLoop。R5 Task1c 测试构建额外带一个 heavy-only 探针字段（见 `#[cfg(test)]`
+/// 变体）；生产构建无此字段、零开销。
+#[cfg(not(test))]
 pub struct GmLoop { pub engine: RuntimeEngine, pub llm: Arc<dyn LlmClient>, pub tools: ToolRegistry, pub cfg: LoopConfig, pub data_dir: PathBuf, pub scene_extractor: Option<SceneDeepExtractFn>, pub ctx_provider: Option<CtxProviderFn>, pub gate_resolver: Option<GateResolverFn>, pub errata: ErrataMemory, pub obligations: ObligationLedger }
+/// 测试 GmLoop：多一个 `heavy_probe` seam——execute.rs spawn_heavy 入口调
+/// `heavy_probe_enter()`，注入时序记录 / 慢 / panic 以验证 heavy 在 TurnComplete
+/// 之后、且失败隔离。
+#[cfg(test)]
+pub struct GmLoop { pub engine: RuntimeEngine, pub llm: Arc<dyn LlmClient>, pub tools: ToolRegistry, pub cfg: LoopConfig, pub data_dir: PathBuf, pub scene_extractor: Option<SceneDeepExtractFn>, pub ctx_provider: Option<CtxProviderFn>, pub gate_resolver: Option<GateResolverFn>, pub errata: ErrataMemory, pub obligations: ObligationLedger, pub(crate) heavy_probe: Option<HeavyProbe> }
 pub struct GmTurnInput<'a> { pub request: &'a ContextRequest, pub state: &'a RuntimeState, pub user_input: &'a str, pub history: &'a [ChatMessage], pub recent_transcript: Option<&'a str> }
+
+/// R5 Task1c heavy-only 测试探针：spawn_heavy 入口经 `heavy_probe_enter` 调 `enter()`。
+/// `order` 记录 heavy 进入时序（与 TurnComplete 到达时序对照）；`sleep_ms` 让 heavy
+/// 入口慢（验 TurnComplete 不被挂住）；`panic` 让 heavy 入口炸（验失败隔离）。
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct HeavyProbe {
+    pub order: Option<std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>>,
+    pub sleep_ms: u64,
+    pub panic: bool,
+}
+#[cfg(test)]
+impl HeavyProbe {
+    async fn enter(&self) {
+        // 先 sleep 再记录"heavy_enter"：即便 runtime 先调度 heavy 任务，sleep 处的 yield
+        // 也让主测试 drain 循环有机会先消费 TurnComplete → 时序断言确定（heavy 工作慢于
+        // 已发的 TurnComplete，不挂住流）。
+        if self.sleep_ms > 0 { tokio::time::sleep(std::time::Duration::from_millis(self.sleep_ms)).await; }
+        if let Some(order) = &self.order { order.lock().unwrap_or_else(|p| p.into_inner()).push("heavy_enter"); }
+        if self.panic { panic!("heavy probe induced panic (isolation test)"); }
+    }
+}
 
 /// 头部确定性 phase 的累积上下文（原 run_gm_turn 局部变量集中到此，供 phase
 /// handler 顺序填充）。`messages` 用 Option（TurnMessages 未实现 Default——
@@ -78,7 +108,20 @@ impl TurnContext {
     }
 }
 impl GmLoop {
+    #[cfg(not(test))]
     pub fn new(engine: RuntimeEngine, llm: Arc<dyn LlmClient>, tools: ToolRegistry, cfg: LoopConfig, data_dir: PathBuf) -> Self { let errata = ErrataMemory::new(cfg.repeat_finding_threshold); Self { engine, llm, tools, cfg, data_dir, scene_extractor: None, ctx_provider: None, gate_resolver: None, errata, obligations: ObligationLedger::default() } }
+    #[cfg(test)]
+    pub fn new(engine: RuntimeEngine, llm: Arc<dyn LlmClient>, tools: ToolRegistry, cfg: LoopConfig, data_dir: PathBuf) -> Self { let errata = ErrataMemory::new(cfg.repeat_finding_threshold); Self { engine, llm, tools, cfg, data_dir, scene_extractor: None, ctx_provider: None, gate_resolver: None, errata, obligations: ObligationLedger::default(), heavy_probe: None } }
+
+    /// R5 Task1c heavy-only 测试 seam：execute.rs spawn_heavy 入口无条件调此方法。
+    /// 生产为零开销 no-op（`#[cfg(not(test))]`）；测试构建据 `heavy_probe` 注入
+    /// 时序记录 / 慢 / panic（仅 heavy 段触发，critical 不经此路径）。
+    #[cfg(not(test))]
+    pub(crate) async fn heavy_probe_enter(&self) {}
+    #[cfg(test)]
+    pub(crate) async fn heavy_probe_enter(&self) {
+        if let Some(probe) = &self.heavy_probe { probe.enter().await; }
+    }
     pub async fn run_gm_turn(&mut self, input: GmTurnInput<'_>, on_delta: &mut (dyn FnMut(&str) + Send)) -> Result<TurnOutcome> {
         // —— 1+2. 确定性头部（spec §4）：9 个 phase handler 按序填充 TurnContext。
         //    record → refresh → reconcile → gate → stimulus_pass → opposed_prepass

@@ -65,7 +65,7 @@ pub(crate) fn select_phases(
 /// 出 → 返回 ReceiverStream<TurnEvent>。transport 决定尾部前台(CLI 同步
 /// drain)/后台(API spawn drain)。GmLoop 按 owned req 'static 跨 spawn。
 pub fn execute_turn(
-    mut gm: GmLoop,
+    gm: GmLoop,
     req: OwnedTurnRequest,
     plan: &'static [TurnPhasePlan],
 ) -> ReceiverStream<TurnEvent> {
@@ -73,7 +73,9 @@ pub fn execute_turn(
     // 满了背压而非丢，保证真流式不缓冲不丢失。
     let (tx, rx) = tokio::sync::mpsc::channel::<TurnEvent>(128);
     tokio::spawn(async move {
-        run_pipeline(&mut gm, req, plan, &tx).await;
+        // gm 整体 move 进 pipeline（by value）：critical 用 &mut gm，heavy 把 gm/ctx/req
+        // 整体 move 进另起的后台 spawn（需 'static / owned）。
+        run_pipeline(gm, req, plan, &tx).await;
     });
     ReceiverStream::new(rx)
 }
@@ -81,49 +83,127 @@ pub fn execute_turn(
 /// 解释器主体：按 plan 顺序解释。Deterministic 头部逐 phase 调 gm.phase_*（经
 /// 本地 TurnContext 累积）；AgentLoop 调 run_agent_loop（产 Delta /
 /// AwaitingPlayerRoll 经 tx 实时发）；据 agent 终态 select_phases 选尾部 phase。
+///
+/// R5 尾段拆 critical/heavy：critical（VerifyAfterStream + Finalize 的 save_turn +
+/// SceneNavigate 的切场景决策/set_session_scene/SceneChanged）同步在 TurnComplete 前
+/// await；发 TurnComplete 后把 owned gm/ctx/req move 进**另起**的 `tokio::spawn` 跑
+/// heavy（memory/audit + 到场深抽/frontier + carryover），后台、失败隔离（D2）。
 /// 任何尾部 phase 失败由 gm.phase_* 内部 warn 吞错（D2 错误后置勘误不中断）。
 async fn run_pipeline(
-    gm: &mut GmLoop,
+    mut gm: GmLoop,
     req: OwnedTurnRequest,
     plan: &'static [TurnPhasePlan],
     tx: &tokio::sync::mpsc::Sender<TurnEvent>,
 ) {
-    let input = GmTurnInput {
-        request: &req.request,
-        state: &req.state,
-        user_input: &req.user_input,
-        history: &req.history,
-        recent_transcript: req.recent_transcript.as_deref(),
-    };
     let mut ctx = TurnContext::new();
+    let signal;
+    let selected;
+    let mut scene_commit: Option<crate::turn_loop::SceneTransitionInfo> = None;
+    // input 借用 req；heavy 需 own req，故 head/critical 全放进块内，块末 drop(input)
+    // 再 move req 进 heavy spawn。
+    {
+        let input = GmTurnInput {
+            request: &req.request,
+            state: &req.state,
+            user_input: &req.user_input,
+            history: &req.history,
+            recent_transcript: req.recent_transcript.as_deref(),
+        };
 
-    // —— 1. 确定性头部：按 plan 顺序跑所有 Deterministic phase ——
-    // mode_inference / context_assembly fail-closed 返 Err 终止回合（与
-    // run_gm_turn 一致）：直接收尾发 TurnComplete（Narration 空文本）后早返。
-    for phase in plan.iter().filter(|p| p.kind == PhaseKind::Deterministic) {
-        if !dispatch_deterministic(gm, &mut ctx, &input, phase.id).await {
-            let _ = tx.send(TurnEvent::TurnComplete { outcome: gm.take_outcome(&mut ctx) }).await;
-            return;
+        // —— 1. 确定性头部：按 plan 顺序跑所有 Deterministic phase ——
+        // mode_inference / context_assembly fail-closed 返 Err 终止回合（与
+        // run_gm_turn 一致）：直接收尾发 TurnComplete（Narration 空文本）后早返。
+        for phase in plan.iter().filter(|p| p.kind == PhaseKind::Deterministic) {
+            if !dispatch_deterministic(&mut gm, &mut ctx, &input, phase.id).await {
+                let _ = tx.send(TurnEvent::TurnComplete { outcome: gm.take_outcome(&mut ctx) }).await;
+                return;
+            }
         }
+
+        // —— 2. AgentLoop body：产 Delta / AwaitingPlayerRoll 经 tx，返回终态信号 ——
+        signal = gm.run_agent_loop(&mut ctx, &input, tx).await;
+
+        // —— 3a. CRITICAL 尾段（同步，TurnComplete 前 await）——
+        // 与 R1 同 phase 集合（select_phases），但只跑 critical 半边：VerifyAfterStream
+        // （勘误判定要在 finalize 前注入 ledger 真相）→ Finalize 的 save_turn →
+        // SceneNavigate 的切场景决策 + set_session_scene + SceneChanged 事件。
+        // AuditLearning（finalize 的 memory/audit 半边）/ 深抽 / carryover → heavy。
+        let module_present = req.module_id.is_some();
+        let has_pending = gm.has_pending_obligations();
+        selected = select_phases(plan, signal, module_present, has_pending);
+        for phase in &selected {
+            if phase.kind != PhaseKind::Postprocess { continue; }
+            match phase.id {
+                PhaseId::VerifyAfterStream => {
+                    let _ = tx.send(TurnEvent::PostprocessScheduled).await;
+                    gm.phase_verify_after_stream(&mut ctx, &input).await;
+                }
+                PhaseId::Finalize => {
+                    // awaiting 终态 finalize 状态 = "awaiting_player_roll"，正常 = "ready"。
+                    let status = match signal {
+                        AgentSignal::AwaitingPlayerRoll => "awaiting_player_roll",
+                        AgentSignal::Narration => "ready",
+                    };
+                    gm.phase_finalize(&mut ctx, &input, status).await; // R5：只 save_turn
+                }
+                PhaseId::SceneNavigate => {
+                    if let Some(t) = gm.phase_scene_navigate_critical(&ctx, &input).await {
+                        let _ = tx.send(TurnEvent::SceneTransition { from: t.from.clone(), to: t.to.clone(), reason: t.reason.clone() }).await;
+                        scene_commit = Some(t);
+                    }
+                }
+                // AuditLearning / CarryoverDebt → heavy（spawn_heavy 内跑）。
+                _ => {}
+            }
+        }
+
+        // —— 4. TurnComplete（critical 已落账，可继续下一回合）——
+        let outcome = gm.take_outcome(&mut ctx);
+        let _ = tx.send(TurnEvent::TurnComplete { outcome }).await;
+        // input 在此块结束时释放对 req 的借用，下面 move req 进 heavy spawn。
     }
 
-    // —— 2. AgentLoop body：产 Delta / AwaitingPlayerRoll 经 tx，返回终态信号 ——
-    let signal = gm.run_agent_loop(&mut ctx, &input, tx).await;
+    // —— 3b. HEAVY 尾段（TurnComplete 后另起 spawn，gm/ctx/req 整体 move）——
+    spawn_heavy(gm, ctx, req, selected, scene_commit);
+}
 
-    // —— 3. 尾部：据 agent 终态 + 运行期条件位选 phase ——
-    let module_present = req.module_id.is_some();
-    let has_pending = gm.has_pending_obligations();
-    for phase in select_phases(plan, signal, module_present, has_pending) {
-        if phase.kind != PhaseKind::Postprocess { continue; }
-        if phase.id == PhaseId::VerifyAfterStream {
-            let _ = tx.send(TurnEvent::PostprocessScheduled).await;
+/// HEAVY 尾段：TurnComplete 后台跑——audit/memory 写、到场深抽+frontier、carryover。
+/// owned gm/ctx/req（spec：heavy 需 owned 句柄，沿用 R1 spawn 模式；errata/obligations
+/// 随 gm 自带、跨回合连续性不破）。失败隔离：整个任务包在独立 `tokio::spawn` 里，
+/// panic/Err 只杀该任务，绝不影响已发的 TurnComplete（D2）；外层不 unwrap/不 panic。
+fn spawn_heavy(
+    gm: GmLoop,
+    ctx: TurnContext,
+    req: OwnedTurnRequest,
+    selected: Vec<TurnPhasePlan>,
+    scene_commit: Option<crate::turn_loop::SceneTransitionInfo>,
+) {
+    tokio::spawn(async move {
+        // 测试探针（heavy-only seam）：记录 heavy 进入时序 / 注入慢或 panic。
+        gm.heavy_probe_enter().await;
+        let mut gm = gm;
+        let mut ctx = ctx;
+        let input = GmTurnInput {
+            request: &req.request,
+            state: &req.state,
+            user_input: &req.user_input,
+            history: &req.history,
+            recent_transcript: req.recent_transcript.as_deref(),
+        };
+        // turn 摘要 memory + learning audit（原 finalize_turn 的 memory/audit 半边）。
+        gm.phase_finalize_heavy_memory(&ctx, &input).await;
+        // 到场深抽 + frontier（仅 critical 真切了场景时）。
+        if let (Some(commit), Some(module_id)) = (&scene_commit, req.module_id.as_deref()) {
+            gm.phase_scene_navigate_heavy(&commit.to, module_id).await;
         }
-        dispatch_postprocess(gm, &mut ctx, &input, phase.id, signal, tx).await;
-    }
-
-    // —— 4. 收尾事件：把 agent 终态折成 TurnComplete ——
-    let outcome = gm.take_outcome(&mut ctx);
-    let _ = tx.send(TurnEvent::TurnComplete { outcome }).await;
+        // carryover 债务记忆（select_phases 已据 has_pending 决定是否在 selected 里）。
+        if selected.iter().any(|p| p.id == PhaseId::CarryoverDebt && p.kind == PhaseKind::Postprocess) {
+            gm.phase_carryover_debt(&mut ctx, &input).await;
+            // T2 锚点：在此（heavy 末）写 pp_lifecycle=complete（本任务暂不写）。
+        }
+        // errata 记忆已在 critical 的 phase_verify_after_stream 内落账（save_memory_event）——
+        // R1 行为：verify 在 finalize 前、属 critical。heavy 不重复 errata 写。
+    });
 }
 
 /// 确定性头部 phase 分发。返回 false ⇒ fail-closed 终止（mode/context Err）。
@@ -159,44 +239,9 @@ async fn dispatch_deterministic(
     true
 }
 
-/// 后置尾部 phase 分发。AuditLearning 是 no-op（learning audit 已在 finalize_turn
-/// 内跑，避免双跑审计）；SceneNavigate 发 SceneTransition（scene_navigator 现
-/// 返 () 不回传切换详情，恒 None ⇒ 暂不发该事件）。
-async fn dispatch_postprocess(
-    gm: &mut GmLoop,
-    ctx: &mut TurnContext,
-    input: &GmTurnInput<'_>,
-    id: PhaseId,
-    signal: AgentSignal,
-    tx: &tokio::sync::mpsc::Sender<TurnEvent>,
-) {
-    match id {
-        PhaseId::VerifyAfterStream => gm.phase_verify_after_stream(ctx, input).await,
-        PhaseId::Finalize => {
-            // awaiting 终态 finalize 状态 = "awaiting_player_roll"，正常 = "ready"。
-            let status = match signal {
-                AgentSignal::AwaitingPlayerRoll => "awaiting_player_roll",
-                AgentSignal::Narration => "ready",
-            };
-            gm.phase_finalize(ctx, input, status).await;
-        }
-        // AuditLearning：no-op——finalize_turn 内部已跑 audit_learning_for_turn
-        // （含门控与自吞错）。此处不重跑，避免双 audit（CANONICAL_TURN_PLAN 把它
-        // 列为独立 phase 是为表达管线完整性；实现上由 Finalize 覆盖）。
-        PhaseId::AuditLearning => {}
-        PhaseId::SceneNavigate => {
-            if let Some(t) = gm.phase_scene_navigate_critical(ctx, input).await {
-                let to = t.to.clone();
-                let _ = tx.send(TurnEvent::SceneTransition { from: t.from, to: t.to, reason: t.reason }).await;
-                if let Some(module_id) = input.request.module_id.as_deref() {
-                    gm.phase_scene_navigate_heavy(&to, module_id).await;
-                }
-            }
-        }
-        PhaseId::CarryoverDebt => gm.phase_carryover_debt(ctx, input).await,
-        _ => {}
-    }
-}
+// R5 Task1c：旧 dispatch_postprocess 已收编进 run_pipeline 的 critical 循环
+// （VerifyAfterStream/Finalize/SceneNavigate）+ spawn_heavy（AuditLearning 折成
+// heavy memory/audit、CarryoverDebt）。不再有单一 postprocess 分发器。
 
 #[cfg(test)]
 #[path = "execute_tests.rs"]
