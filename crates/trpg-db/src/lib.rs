@@ -49,6 +49,7 @@ impl Db {
             include_str!("../../../migrations/0025_rule_steward_character_onboarding_v116.sql"),
             include_str!("../../../migrations/0026_session_current_scene_v120.sql"),
             include_str!("../../../migrations/0027_mechanic_dues_v120.sql"),
+            include_str!("../../../migrations/0028_turn_pp_lifecycle_v120.sql"),
         ];
         for sql in migrations {
             for statement in split_sql_statements(sql) {
@@ -1007,6 +1008,28 @@ impl Db {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// R5：流转某回合的 postprocess 生命周期阶段（critical 末写 critical_done、heavy 末写 complete）。
+    /// 只触 pp_lifecycle 列，绝不动 postprocess_status（两列正交）。
+    pub async fn set_turn_pp_lifecycle(&self, turn_id: &str, phase: &str) -> Result<()> {
+        sqlx::query("update turns set pp_lifecycle = $2, updated_at = now() where turn_id = $1")
+            .bind(turn_id)
+            .bind(phase)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// R5：取该会话最近一回合（created_at desc）的 pp_lifecycle；无回合返 None（守卫据此立即放行）。
+    pub async fn load_last_turn_pp_lifecycle(&self, session_id: &str) -> Result<Option<String>> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "select pp_lifecycle from turns where session_id = $1 order by created_at desc limit 1",
+        )
+        .bind(session_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| r.0))
     }
 
     pub async fn record_load_event(&self, session_id: Option<&str>, turn_id: Option<&str>, block: &ContextBlock, reason: &str) -> Result<()> {
