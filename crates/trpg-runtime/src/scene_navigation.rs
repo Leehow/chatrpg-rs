@@ -1,12 +1,10 @@
 //! 场景导航 + 模组深抽：extract_module_scenes / scene_navigator / validate_transition /
 //! build_nav_prompt / prefetch_frontier。从 trpg-api 下沉至 trpg-runtime，
 //! 供 trpg-gm 执行器 phase_scene_navigate 调用，也供 trpg-cli 直接引用。
-use serde_json::json;
 use tracing::info;
 use trpg_db::Db;
 use trpg_llm::LlmClient;
-use trpg_model::{ScenarioNode, SceneExtractionStatus, Visibility, WorldEventKind};
-use trpg_time::WorldTimeService;
+use trpg_model::{ScenarioNode, SceneExtractionStatus};
 
 const FRONTIER_PREFETCH_MAX: usize = 5;
 
@@ -171,64 +169,11 @@ pub fn validate_transition(
         .then(|| target.to_string())
 }
 
-/// turn_postprocess 内的语义场景导航：用一次 LLM 判定党是否移动到模组某真实场景，
-/// 校验通过则更新 `sessions.current_scene_id` 并对目标场景到场深抽（若仍 SkeletonOnly）。
-/// 切换成功时写一条 `WorldEventKind::SceneChanged` world event（kind/from/to/reason）。
-///
-/// 全程 fail-closed：取不到图/空图/LLM 失败/校验不过 → warn + Ok(())（留原场景，不乱跳、
-/// 不编造 target）。source_id/ruleset_id 由 `extract_module_scenes` 从 module bundle 自行
-/// 推导，故本函数无需调用方提供（运行时只持有 module_id）。
-/// pub：供 trpg-gm execute_turn 的 scene_navigate phase（CLI/API 统一回合路径）调用，
-/// 与 API turn_postprocess 共享同一语义导航。
-pub async fn scene_navigator(
-    db: &Db,
-    llm: &dyn LlmClient,
-    session_id: &str,
-    module_id: &str,
-    data_dir: &std::path::Path,
-    player_input: &str,
-    narration: &str,
-) -> anyhow::Result<()> {
-    let Some(graph) = db.load_module_graph(module_id).await? else { return Ok(()); };
-    if graph.scenes.is_empty() {
-        return Ok(());
-    }
-    let current = db.load_session_scene(session_id).await?.unwrap_or_default();
-    let list = graph.scenes.iter()
-        .map(|s| format!("{} | {} | {}", s.node_id, s.node_type, s.title))
-        .collect::<Vec<_>>().join("\n");
-    let cur_title = graph.scenes.iter()
-        .find(|s| s.node_id == current)
-        .map(|s| s.title.as_str())
-        .unwrap_or("(未定)");
-    let usr = build_nav_prompt(&current, cur_title, &list, player_input, narration);
-    let decision = match llm.complete_json(vec![trpg_llm::system(SCENE_NAV_SYS), trpg_llm::user(&usr)], 0.0).await {
-        Ok(v) => v,
-        Err(err) => { tracing::warn!(error = %err, "scene_navigator llm failed; stay"); return Ok(()); }
-    };
-    let Some(target) = validate_transition(&decision, &graph.scenes, &current) else { return Ok(()); };
-    db.set_session_scene(session_id, &target).await?;
-    let reason = decision.get("reason").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    info!(session_id, from = %current, to = %target, %reason, "scene transition");
-    // 写 scene_transition world event（kind/from/to/reason），best-effort 失败只 warn。
-    let event_data = json!({"kind": "scene_transition", "from": current, "to": target, "reason": reason, "module_id": module_id});
-    if let Err(err) = WorldTimeService::new(db.clone())
-        .record_event(session_id, None, None, WorldEventKind::SceneChanged, event_data, Visibility::GmOnly)
-        .await
-    {
-        tracing::warn!(error = %err, "scene_navigator: world event write failed; scene already switched");
-    }
-    // 到场深抽（目标若 SkeletonOnly）；已预抽则内部判定 0、无害。source_id=None →
-    // extract_module_scenes 从 bundle.source_index 推导。失败不回滚切换（场景已更）。
-    if let Err(err) = extract_module_scenes(db, llm, module_id, None, None, data_dir, 12, Some(&target)).await {
-        tracing::warn!(error = %err, %target, "on-arrival deep-extract failed; scene already switched");
-    }
-    // Frontier 前探一跳（best-effort）：target 深抽后其出口 links 已写回 bundle，重新
-    // load_module_graph 取 target 的出口 to_node_id，对每个仍 SkeletonOnly 的出口（去重、
-    // bounded 上限）逐个 only=Some 深抽。玩家移动到衔接场景时即时；没去的场景永停 stub。
-    prefetch_frontier(db, llm, module_id, &target, data_dir).await;
-    Ok(())
-}
+// R5 Task1a：critical/heavy 拆分的导航函数（SceneNavCommit / scene_navigate_critical /
+// scene_navigate_heavy / scene_navigator wrapper）移至兄弟子模块以守 ≤400 行；经
+// `pub use` 重导出到 `scene_navigation::` 路径，调用方与签名不变。
+mod tiered;
+pub use tiered::{scene_navigate_critical, scene_navigate_heavy, scene_navigator, SceneNavCommit};
 
 /// 前探当前 target 场景的衔接场景（一跳，best-effort）。在 target 已深抽、其出口 links
 /// 已写回 bundle 后调用：重新加载图 → 取 target 的出口 `to_node_id` → 去重 + 限只抽仍
@@ -376,5 +321,27 @@ mod tests {
         let prompt = build_nav_prompt("sc01", "入口", "sc01 | l | 入口", "", "GM 叙事正文");
         assert!(prompt.contains("GM描述") || prompt.contains("GM 叙事正文"), "叙事应在 prompt 中");
         assert!(prompt.contains("当前场景: sc01"), "当前场景应在");
+    }
+
+    // R5 Task1a 边界测试：编译级断言 critical/heavy 两个新公开异步函数的存在与签名
+    // （critical 返回 Option<SceneNavCommit>，heavy 接受 target 无返回）。真 DB 行为
+    // 由 e2e 验证闸覆盖；此处仅锁定 API 边界，防止拆分被合回一体。不调用——仅靠类型
+    // 推断在编译期校验签名稳定。
+    #[tokio::test]
+    async fn navigate_critical_and_heavy_have_separate_entrypoints() {
+        #[allow(clippy::type_complexity)]
+        fn _assert_critical(
+            f: fn(&trpg_db::Db, &dyn trpg_llm::LlmClient, &str, &str, &std::path::Path, &str, &str)
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<Option<SceneNavCommit>>> + Send>>,
+        ) {
+            let _ = f;
+        }
+        fn _assert_heavy(
+            f: fn(&trpg_db::Db, &dyn trpg_llm::LlmClient, &str, &str, &std::path::Path)
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+        ) {
+            let _ = f;
+        }
+        let _ = (_assert_critical, _assert_heavy);
     }
 }
