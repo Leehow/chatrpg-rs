@@ -20,6 +20,23 @@ pub const GM_ONBOARDING_SCHEMA_VERSION: &str = "chatrpg.gm_onboarding_bundle.v1"
 pub const RULE_STEWARD_SCHEMA_VERSION: &str = "chatrpg.rule_steward.v1";
 pub const CHARACTER_ONBOARDING_SCHEMA_VERSION: &str = "chatrpg.character_onboarding_pack.v1";
 
+// R5 postprocess 生命周期状态机（turns.pp_lifecycle 列的取值，集中常量）：
+// streaming → critical_done → complete。与 turns.postprocess_status（ready/awaiting）
+// 正交：后者是 finalize 终态，前者是回合后处理的临界/重活落账进度（高水位守卫据此）。
+pub const PP_STREAMING: &str = "streaming";
+pub const PP_CRITICAL_DONE: &str = "critical_done";
+pub const PP_COMPLETE: &str = "complete";
+
+/// 生命周期阶段的有序秩（守卫用：>= critical_done 即可继续，未知值排最低 fail-closed）。
+pub fn pp_lifecycle_rank(phase: &str) -> u8 {
+    match phase {
+        PP_STREAMING => 1,
+        PP_CRITICAL_DONE => 2,
+        PP_COMPLETE => 3,
+        _ => 0, // 未知/旧值/空 → 最低，守卫视作未达 critical（fail-closed 多等不误读）
+    }
+}
+
 pub fn sha256_hex(input: impl AsRef<[u8]>) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input.as_ref());
@@ -6737,5 +6754,33 @@ mod derived_value_tier_tests {
         assert_eq!(json_val["tier"], json!("provisional_seed"));
         let back: DerivedValue = serde_json::from_value(json_val).unwrap();
         assert_eq!(back.tier.as_deref(), Some("provisional_seed"));
+    }
+}
+
+#[cfg(test)]
+mod pp_lifecycle_tests {
+    use super::{pp_lifecycle_rank, PP_STREAMING, PP_CRITICAL_DONE, PP_COMPLETE};
+
+    #[test]
+    fn lifecycle_ranks_are_strictly_monotonic() {
+        // streaming < critical_done < complete —— 守卫据此判断「是否已达 critical」。
+        assert!(pp_lifecycle_rank(PP_STREAMING) < pp_lifecycle_rank(PP_CRITICAL_DONE));
+        assert!(pp_lifecycle_rank(PP_CRITICAL_DONE) < pp_lifecycle_rank(PP_COMPLETE));
+    }
+
+    #[test]
+    fn unknown_lifecycle_ranks_lowest_fail_closed() {
+        // 未知/旧值（如历史 'ready' 或脏数据）排最低 = 守卫视作「未达 critical」→
+        // 触发短等而非误判已落账（fail-closed：宁可多等也不读陈旧）。
+        assert!(pp_lifecycle_rank("ready") < pp_lifecycle_rank(PP_STREAMING));
+        assert!(pp_lifecycle_rank("") < pp_lifecycle_rank(PP_STREAMING));
+        assert!(pp_lifecycle_rank("garbage") < pp_lifecycle_rank(PP_STREAMING));
+    }
+
+    #[test]
+    fn const_values_are_the_canonical_strings() {
+        assert_eq!(PP_STREAMING, "streaming");
+        assert_eq!(PP_CRITICAL_DONE, "critical_done");
+        assert_eq!(PP_COMPLETE, "complete");
     }
 }
