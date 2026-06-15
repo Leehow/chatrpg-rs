@@ -2,7 +2,6 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::fs;
 use std::path::Path;
 use trpg_model::*;
@@ -303,25 +302,6 @@ pub fn make_pending_check(contract: &CheckContract) -> PendingCheck {
         closed_at_tick: None,
         created_at: Utc::now(),
     }
-}
-
-pub fn contract_block(plan: &AgentTurnPlan) -> Option<ContextBlock> {
-    let check = plan.check.as_ref()?;
-    let mut block = ContextBlock::new(
-        format!("agent.check_contract.{}", check.check_id),
-        BlockKind::CheckContract,
-        format!("Check Contract: {}", check.check_label),
-        BlockContent::Json(json!(check)),
-        Visibility::GmOnly,
-        Stability::TurnDynamic,
-        CacheZone::DynamicTail,
-        Scope { scope_type: ScopeType::Turn, scope_id: check.turn_id.clone() },
-        130,
-    );
-    block.tags = vec!["agent".into(), "check_contract".into(), check.roll_visibility.as_str().into()];
-    block.expires_at_turn = Some(check.turn_id.clone());
-    block.load_reason = Some("agent_turn_plan_check_contract".into());
-    Some(block)
 }
 
 fn default_true() -> bool { true }

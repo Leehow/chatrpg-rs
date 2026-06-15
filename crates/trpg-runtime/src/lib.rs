@@ -4,7 +4,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{BTreeMap, HashSet};
-use trpg_agent::{contract_block, looks_like_new_action_or_abandon, make_pending_check, parse_roll_text, ParsedRollText};
+use trpg_agent::{looks_like_new_action_or_abandon, parse_roll_text, ParsedRollText};
 use trpg_ability::{AbilityService, AbilityTurnInput, AbilityTurnResult};
 use trpg_semantics::SemanticRuleBindingService;
 use trpg_combat::{CombatAgent, ConflictTurnInput, ConflictTurnResult};
@@ -46,7 +46,7 @@ pub use scene_projection::{module_entry_scene_id, contract_is_opposed, stamp_opp
 use scene_projection::{resolve_turn_scene_id, map_check_param_need};
 
 mod context_blocks;
-use context_blocks::{agent_plan_block, memory_snapshot_block, retrieved_memory_block, actionable_situation_block, clue_board_block, world_time_block, world_events_since_block, engine_protocol_block, engine_protocol_block_agent_loop, world_state_block, dynamic_text_block};
+use context_blocks::{memory_snapshot_block, retrieved_memory_block, actionable_situation_block, clue_board_block, world_time_block, world_events_since_block, engine_protocol_block, engine_protocol_block_agent_loop, world_state_block, dynamic_text_block};
 
 pub mod scene_navigation;
 pub use scene_navigation::{
@@ -448,32 +448,6 @@ impl RuntimeEngine {
         Ok(compiled)
     }
 
-
-
-    pub async fn persist_agent_plan(&self, plan: &AgentTurnPlan) -> Result<()> {
-        self.db.insert_agent_turn(plan, "planned").await?;
-        let _ = self.db.upsert_runtime_context_block(&plan.session_id, &agent_plan_block(plan)).await;
-        if let Some(check) = &plan.check {
-            self.db.insert_check_contract(check, "created").await?;
-            if matches!(plan.kind, TurnPlanKind::AskPlayerRoll) {
-                self.db.cancel_open_pending_checks_for_session(&plan.session_id, PendingCheckStatus::Superseded).await.ok();
-                let pending = make_pending_check(check);
-                self.db.insert_pending_check(&pending).await?;
-                let gate = InteractionGate::from_pending_check(&pending);
-                self.db.insert_interaction_gate(&gate).await?;
-                if let Some(frame_id) = pending.owner_frame_id.as_deref() {
-                    let kernel = InteractionLifecycleKernel::new(self.db.clone());
-                    kernel.attach_gate_to_active_frame(&plan.session_id, &gate.gate_id, Some(frame_id)).await.ok();
-                    kernel.attach_pending_check_to_frame(&plan.session_id, &pending.check_id, frame_id, Some(&gate.gate_id)).await.ok();
-                }
-            }
-            if let Some(block) = contract_block(plan) {
-                let _ = self.db.upsert_runtime_context_block(&plan.session_id, &block).await;
-            }
-        }
-        Ok(())
-    }
-
     /// Single post-resolution funnel for EVERY check-resolution path. Runs the
     /// universal referee combat hook (resource tracks, HP, effect/damage
     /// follow-ups) AND generic object rule effects (e.g. a firearm spending a
@@ -647,39 +621,6 @@ impl RuntimeEngine {
             module_id: request.module_id.as_deref(),
             user_input,
         }).await
-    }
-
-
-    pub async fn forced_technical_assessment_plan(&self, request: &ContextRequest, user_input: &str) -> AgentTurnPlan {
-        // Thin wrapper: load the ruleset's core die from the parsed kernel, then
-        // delegate to the pure (DB-less, unit-tested) builder. No hardcoded die.
-        let kernel = self.db.load_rule_kernel(&request.ruleset_id).await.ok().flatten();
-        let dice = kernel.as_ref().and_then(|k| {
-            k.dice_core.get("dice").and_then(|v| v.as_str())
-                .or_else(|| k.check_model.get("dice").and_then(|v| v.as_str()))
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-        });
-        build_forced_tech_plan(request, user_input, dice.as_deref())
-    }
-
-    /// Plan for the standalone-check route. When the semantic layer named a
-    /// specific check parameter (`named_label`), build an explicit named check
-    /// bound to it; otherwise fall back to the generic forced technical
-    /// assessment. Same thin-wrapper shape as `forced_technical_assessment_plan`:
-    /// load the ruleset's core die, then delegate to a pure, unit-tested builder.
-    pub async fn named_or_forced_assessment_plan(&self, request: &ContextRequest, user_input: &str, named_label: Option<&str>) -> AgentTurnPlan {
-        let kernel = self.db.load_rule_kernel(&request.ruleset_id).await.ok().flatten();
-        let dice = kernel.as_ref().and_then(|k| {
-            k.dice_core.get("dice").and_then(|v| v.as_str())
-                .or_else(|| k.check_model.get("dice").and_then(|v| v.as_str()))
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-        });
-        match named_label.map(str::trim).filter(|s| !s.is_empty()) {
-            Some(label) => build_named_check_plan(request, user_input, label, dice.as_deref()),
-            None => build_forced_tech_plan(request, user_input, dice.as_deref()),
-        }
     }
 
     pub async fn try_handle_ability_turn(
@@ -2368,159 +2309,6 @@ fn looks_like_gate_help_or_question(input: &str) -> bool {
     terms.iter().any(|term| lower.contains(term))
 }
 
-/// Pure builder for the forced technical-assessment plan (DB-less, unit-tested).
-/// `kernel_dice` is the ruleset's core die from the parsed kernel; None => no
-/// forced check (narration-only), never a hardcoded fallback die. Target stays
-/// UnknownUntilLookup + NoMechanicalOpposition so the Contest/Opposition Kernel
-/// resolves it per-ruleset (CoC 1d100 roll-under vs the actor's real skill;
-/// Cyberpunk its real DV) — never a fabricated 1d10 / DV14 / TECH check.
-fn build_forced_tech_plan(request: &ContextRequest, user_input: &str, kernel_dice: Option<&str>) -> AgentTurnPlan {
-    let mut plan = AgentTurnPlan::new(&request.session_id, &request.turn_id, &request.ruleset_id, request.module_id.clone());
-    let auto_roll = system_rolls_visible_policy();
-    plan.kind = if auto_roll { TurnPlanKind::GmRollThenNarrate } else { TurnPlanKind::AskPlayerRoll };
-    plan.input_summary = user_input.chars().take(320).collect();
-    plan.reasoning_summary = if auto_roll {
-        "v1.10.1 deterministic route invariant: technical/object risk assessment requires a mechanical check before narration; product mode owns the dice and auto-resolves it.".into()
-    } else {
-        "v1.10.1 deterministic route invariant: technical/object risk assessment requires a player-triggered check before narration; do not accept player-reported totals.".into()
-    };
-    plan.policy_layers_used = vec!["semantic_route_stability.v1_10_1".into(), "dice_visibility.v1".into()];
-    plan.advice_refs = vec!["forced_technical_risk_assessment.v1_10_1".into()];
-    let dice = match kernel_dice.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(d) => d.to_string(),
-        None => return plan,
-    };
-    let actor_id = request.viewer.actor_id.clone().unwrap_or_else(|| "pc.current".into());
-    let check = CheckContract {
-        check_id: format!("check_{}", Uuid::new_v4().simple()),
-        session_id: request.session_id.clone(),
-        turn_id: request.turn_id.clone(),
-        ruleset_id: request.ruleset_id.clone(),
-        module_id: request.module_id.clone(),
-        initiator: ActorRef { actor_id, actor_kind: ActorKind::PlayerCharacter, display_name: Some("current PC".into()) },
-        target_actor: None,
-        opposition: OppositionModel::NoMechanicalOpposition,
-        action_summary: user_input.chars().take(500).collect(),
-        intent_kind: "technical_analysis_or_intervention".into(),
-        check_label: "technical analysis or intervention check".into(),
-        dice_expression: dice,
-        modifiers: vec![],
-        target: CheckTargetModel::UnknownUntilLookup,
-        tested_parameter: None,
-        opponent_tested_parameter: None,
-        actor_snapshot_ids: vec![],
-        source_refs: vec![],
-        learned_packet_ids: vec![],
-        roll_visibility: if auto_roll { RollVisibility::PublicGmRoll } else { RollVisibility::PlayerRollRequired },
-        roll_authority: if auto_roll { RollAuthority::System } else { RollAuthority::Player },
-        disclosure: RollDisclosurePolicy::for_visibility(if auto_roll { RollVisibility::PublicGmRoll } else { RollVisibility::PlayerRollRequired }),
-        stakes: CheckStakes {
-            before_roll_public: "This is more than surface observation: success can reveal whether the object can be handled safely; failure may cost time, expose you, or trigger a complication.".into(),
-            success_public: "You identify a safe technical approach or a concrete exploit path.".into(),
-            failure_public: "You cannot confirm a safe path before pressure increases, or you misread a hidden risk.".into(),
-            critical_public: None,
-            fumble_public: None,
-            success_patches_allowed: vec![],
-            failure_patches_allowed: vec![],
-            irreversible: false,
-        },
-        confidence: RulingConfidence::Medium,
-        ruling_status: RulingStatus::Provisional,
-        advice_refs: vec!["forced_technical_risk_assessment.v1_10_1".into()],
-        expires_at_turn: Some(request.turn_id.clone()),
-    };
-    plan.check = Some(check);
-    plan
-}
-
-/// Pick the named-check parameter from materialization target (kind, label)
-/// pairs: prefer the ActorProfile demand (the tested value, e.g. "Sanity") over
-/// the CheckTarget demand (e.g. "Sanity roll"). The label is used verbatim — the
-/// LLM already named the parameter; the resolver canonicalizes it against the
-/// kernel by meaning, so no hardcoded suffix list. Pure, unit-tested directly.
-fn pick_named_parameter(items: &[(MaterialTargetKind, &str)]) -> Option<String> {
-    let pick = |k: MaterialTargetKind| items.iter()
-        .find(|(tk, _)| *tk == k)
-        .map(|(_, l)| l.trim().to_string())
-        .filter(|s| !s.is_empty());
-    pick(MaterialTargetKind::ActorProfile).or_else(|| pick(MaterialTargetKind::CheckTarget))
-}
-
-/// Robustness fallback for the named-check route: the orchestrator's classifier
-/// is one of several independent (non-deterministic) `classify_turn` calls and
-/// occasionally fails to name the tested parameter. The materialization pass —
-/// computed earlier in the same turn — usually still does, via an ActorProfile /
-/// CheckTarget demand. Reading it makes the route fire reliably without a 5th
-/// classifier call. Returns None when no parameter/check was materialized.
-pub fn materialization_named_parameter(result: &MaterializationTurnResult) -> Option<String> {
-    let items: Vec<(MaterialTargetKind, &str)> = result.demands.iter()
-        .map(|d| (d.target_kind, d.target_label.as_str())).collect();
-    pick_named_parameter(&items)
-}
-
-/// Pure builder for an EXPLICIT named check (e.g. "make a Sanity roll", "roll
-/// Spot Hidden"). `named_label` is the parameter the semantic layer named; it is
-/// carried as the contract's `tested_parameter` so the Contest/Opposition Kernel
-/// reads the actor's REAL value for that parameter (canonicalized at resolve
-/// time against the kernel's resource_tracks + the actor's stat/skill keys) — and
-/// so the matching resource track's on_outcome fires deliberately. `kernel_dice`
-/// is the ruleset's core die; None => narration-only (never a fabricated die).
-fn build_named_check_plan(request: &ContextRequest, user_input: &str, named_label: &str, kernel_dice: Option<&str>) -> AgentTurnPlan {
-    let mut plan = AgentTurnPlan::new(&request.session_id, &request.turn_id, &request.ruleset_id, request.module_id.clone());
-    let auto_roll = system_rolls_visible_policy();
-    plan.kind = if auto_roll { TurnPlanKind::GmRollThenNarrate } else { TurnPlanKind::AskPlayerRoll };
-    plan.input_summary = user_input.chars().take(320).collect();
-    plan.reasoning_summary = format!("player explicitly invoked a named rules check ({named_label}); bind it to that parameter and resolve against the actor's real value before narration.");
-    plan.policy_layers_used = vec!["explicit_named_check.v1".into(), "dice_visibility.v1".into()];
-    plan.advice_refs = vec!["explicit_named_check.v1".into()];
-    let dice = match kernel_dice.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(d) => d.to_string(),
-        None => return plan,
-    };
-    let actor_id = request.viewer.actor_id.clone().unwrap_or_else(|| "pc.current".into());
-    let check = CheckContract {
-        check_id: format!("check_{}", Uuid::new_v4().simple()),
-        session_id: request.session_id.clone(),
-        turn_id: request.turn_id.clone(),
-        ruleset_id: request.ruleset_id.clone(),
-        module_id: request.module_id.clone(),
-        initiator: ActorRef { actor_id, actor_kind: ActorKind::PlayerCharacter, display_name: Some("current PC".into()) },
-        target_actor: None,
-        opposition: OppositionModel::NoMechanicalOpposition,
-        action_summary: user_input.chars().take(500).collect(),
-        intent_kind: "named_parameter_check".into(),
-        check_label: format!("{named_label} check"),
-        dice_expression: dice,
-        modifiers: vec![],
-        target: CheckTargetModel::UnknownUntilLookup,
-        // The named parameter IS the tested parameter; the resolver canonicalizes
-        // `key` to the kernel track / actor skill / stat and reads the real value.
-        tested_parameter: Some(TestedParameter { domain: None, key: named_label.to_string(), label: named_label.to_string() }),
-        opponent_tested_parameter: None,
-        actor_snapshot_ids: vec![],
-        source_refs: vec![],
-        learned_packet_ids: vec![],
-        roll_visibility: if auto_roll { RollVisibility::PublicGmRoll } else { RollVisibility::PlayerRollRequired },
-        roll_authority: if auto_roll { RollAuthority::System } else { RollAuthority::Player },
-        disclosure: RollDisclosurePolicy::for_visibility(if auto_roll { RollVisibility::PublicGmRoll } else { RollVisibility::PlayerRollRequired }),
-        stakes: CheckStakes {
-            before_roll_public: format!("A {named_label} check is called for; its outcome carries the consequences the rules attach to this check."),
-            success_public: format!("You hold steady: the {named_label} check succeeds."),
-            failure_public: format!("The {named_label} check fails, and its rules-defined consequence follows."),
-            critical_public: None,
-            fumble_public: None,
-            success_patches_allowed: vec![],
-            failure_patches_allowed: vec![],
-            irreversible: false,
-        },
-        confidence: RulingConfidence::Medium,
-        ruling_status: RulingStatus::Provisional,
-        advice_refs: vec!["explicit_named_check.v1".into()],
-        expires_at_turn: Some(request.turn_id.clone()),
-    };
-    plan.check = Some(check);
-    plan
-}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiceRoll {
     pub expression: String,
@@ -2673,41 +2461,6 @@ fn warn_if_core_mechanics_disabled() {
 }
 
 fn real_materialization_enabled() -> bool { std::env::var("TRPG_REAL_MATERIALIZATION_ENABLE_V110").ok().map(|v| matches!(v.to_ascii_lowercase().as_str(), "1"|"true"|"yes"|"on")).unwrap_or(true) }
-
-#[cfg(test)]
-mod forced_tech_plan_tests {
-    use super::*;
-
-    fn req() -> ContextRequest {
-        ContextRequest {
-            ruleset_id: "call_of_cthulhu_7e".into(),
-            module_id: None,
-            session_id: "s".into(),
-            turn_id: "t".into(),
-            viewer: VisibilityProfile::player("p", "pc.current"),
-            token_budget: TokenBudget::default(),
-        }
-    }
-
-    #[test]
-    fn forced_tech_uses_kernel_dice_generic_target_no_hardcode() {
-        for d in ["1d100", "1d10", "2d6"] {
-            let plan = build_forced_tech_plan(&req(), "I examine the strange device", Some(d));
-            let check = plan.check.expect("check built when kernel has dice");
-            assert_eq!(check.dice_expression, d, "dice must come from the kernel, not a hardcoded 1d10");
-            assert!(matches!(check.target, CheckTargetModel::UnknownUntilLookup), "target must stay generic (contest kernel resolves), never StaticNumber(14)");
-            assert!(matches!(check.opposition, OppositionModel::NoMechanicalOpposition), "opposition must be generic, never StaticDc(14)");
-            let label = check.check_label.to_lowercase();
-            assert!(!label.contains("hacking") && !label.contains("repair") && !label.contains("dv"), "no leftover Cyberpunk TECH/hacking/DV label: {}", check.check_label);
-        }
-    }
-
-    #[test]
-    fn forced_tech_no_kernel_dice_is_narration_only() {
-        let plan = build_forced_tech_plan(&req(), "I examine the device", None);
-        assert!(plan.check.is_none(), "no kernel dice => no fabricated check (narration-only fail-closed)");
-    }
-}
 
 // NOTE: module_scene_proj_tests moved to scene_projection.rs
 

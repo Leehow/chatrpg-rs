@@ -1771,31 +1771,6 @@ impl Db {
         Ok(())
     }
 
-
-    pub async fn insert_agent_turn(&self, plan: &AgentTurnPlan, status: &str) -> Result<()> {
-        sqlx::query(
-            r#"
-            insert into agent_turns
-              (id, session_id, turn_id, ruleset_id, module_id, plan_json, status, created_at)
-            values ($1,$2,$3,$4,$5,$6,$7,$8)
-            on conflict (session_id, turn_id) do update set
-              plan_json = excluded.plan_json,
-              status = excluded.status
-            "#,
-        )
-        .bind(Uuid::new_v4())
-        .bind(&plan.session_id)
-        .bind(&plan.turn_id)
-        .bind(&plan.ruleset_id)
-        .bind(&plan.module_id)
-        .bind(serde_json::to_value(plan)?)
-        .bind(status)
-        .bind(plan.created_at)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
     pub async fn insert_agent_tool_call(&self, call: &AgentToolCallRecord) -> Result<()> {
         sqlx::query(
             r#"

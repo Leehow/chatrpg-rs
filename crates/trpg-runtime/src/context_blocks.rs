@@ -1,24 +1,6 @@
 use serde_json::json;
 use trpg_model::*;
 
-pub(crate) fn agent_plan_block(plan: &AgentTurnPlan) -> ContextBlock {
-    let mut block = ContextBlock::new(
-        format!("agent.turn_plan.{}", plan.plan_id),
-        BlockKind::AgentPlan,
-        "Rust GM Agent Turn Plan",
-        BlockContent::Json(json!(plan)),
-        Visibility::GmOnly,
-        Stability::TurnDynamic,
-        CacheZone::DynamicTail,
-        Scope { scope_type: ScopeType::Turn, scope_id: plan.turn_id.clone() },
-        135,
-    );
-    block.tags = vec!["agent".into(), "turn_plan".into(), format!("plan_kind:{:?}", plan.kind)];
-    block.expires_at_turn = Some(plan.turn_id.clone());
-    block.load_reason = Some("agent_turn_plan".into());
-    block
-}
-
 pub(crate) fn memory_snapshot_block(snapshot: &MemorySnapshot) -> ContextBlock {
     let mut block = ContextBlock::new(
         format!("{}.v{}", snapshot.snapshot_id, snapshot.version),
