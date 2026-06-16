@@ -61,6 +61,14 @@ pub(crate) fn select_phases(
         .collect()
 }
 
+/// #B（GPT Pro P0-1）carryover 决策纯函数：仅在 Narration 终态 + （verify 后）有未决义务时跑。
+/// AwaitingPlayerRoll 不 carryover（GM 在等掷骰，回合未结，同 R1）。调用方在 heavy（verify 之后）
+/// 传 `has_pending = gm.has_pending_obligations()` 的**实时**值——绝不能用 verify 前算的旧值，
+/// 否则本回合 verify 新生的 retro debt 会漏掉 carryover。phase_carryover_debt 再自门控 carryover_block。
+pub(crate) fn should_run_carryover(signal: AgentSignal, has_pending: bool) -> bool {
+    matches!(signal, AgentSignal::Narration) && has_pending
+}
+
 /// 统一回合执行器：建 mpsc channel → spawn 任务跑 pipeline → event 经 tx
 /// 出 → 返回 ReceiverStream<TurnEvent>。transport 决定尾部前台(CLI 同步
 /// drain)/后台(API spawn drain)。GmLoop 按 owned req 'static 跨 spawn。
@@ -177,7 +185,7 @@ async fn run_pipeline(
     }
 
     // —— 3b. HEAVY 尾段（TurnComplete 后另起 spawn，gm/ctx/req 整体 move）——
-    spawn_heavy(gm, ctx, req, selected, scene_commit, heavy_assistant_output);
+    spawn_heavy(gm, ctx, req, signal, scene_commit, heavy_assistant_output);
 }
 
 /// HEAVY 尾段：TurnComplete 后台跑——audit/memory 写、到场深抽+frontier、carryover。
@@ -188,7 +196,7 @@ fn spawn_heavy(
     gm: GmLoop,
     ctx: TurnContext,
     req: OwnedTurnRequest,
-    selected: Vec<TurnPhasePlan>,
+    signal: AgentSignal,
     scene_commit: Option<crate::turn_loop::SceneTransitionInfo>,
     heavy_assistant_output: String,
 ) {
@@ -212,8 +220,13 @@ fn spawn_heavy(
         if let (Some(commit), Some(module_id)) = (&scene_commit, req.module_id.as_deref()) {
             gm.phase_scene_navigate_heavy(&commit.to, module_id).await;
         }
-        // carryover 债务记忆（select_phases 已据 has_pending 决定是否在 selected 里）。
-        if selected.iter().any(|p| p.id == PhaseId::CarryoverDebt && p.kind == PhaseKind::Postprocess) {
+        // carryover 债务记忆。#B 修复（GPT Pro P0-1）：carryover 决策必须用 **verify 后** 的
+        // 义务状态——verify_after_stream（critical，已在 TurnComplete 前跑）经 absorb_retro_debts
+        // 可能新生本回合 retro debt；旧版用 run_pipeline 内 verify **前** 算的 has_pending 选
+        // phase（selected），导致"本回合无旧债但 verify 新生 debt"时 carryover 被跳、债务不落账。
+        // 此处在 heavy（verify 之后）按 signal + 实时 has_pending 重判；phase_carryover_debt
+        // 再自门控 carryover_block（无块即 no-op）。AwaitingPlayerRoll 不 carryover（同 R1）。
+        if should_run_carryover(signal, gm.has_pending_obligations()) {
             gm.phase_carryover_debt(&mut ctx, &input).await;
         }
         // errata 记忆已在 critical 的 phase_verify_after_stream 内落账（save_memory_event）——

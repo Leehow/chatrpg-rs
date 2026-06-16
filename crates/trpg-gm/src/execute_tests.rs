@@ -47,6 +47,17 @@ fn conditional_phases_skip_when_condition_unmet() {
     assert!(!ids2.contains(&PhaseId::CarryoverDebt), "carryover skipped without pending obligations");
 }
 
+// #B（GPT Pro P0-1）heavy carryover gate：用 verify 后实时 has_pending 重判，非 verify 前的旧值。
+// 这是修复"本回合无旧债但 verify 新生 retro debt 时 carryover 被跳"的关键——spawn_heavy 在 verify
+// 之后跑、传 gm.has_pending_obligations() 的实时值给本纯函数。AwaitingPlayerRoll 恒不 carryover。
+#[test]
+fn should_run_carryover_uses_signal_and_live_pending() {
+    assert!(should_run_carryover(AgentSignal::Narration, true), "Narration + (verify 后)有债 → 跑 carryover");
+    assert!(!should_run_carryover(AgentSignal::Narration, false), "Narration + 无债 → 不跑（phase 内也会自门控）");
+    assert!(!should_run_carryover(AgentSignal::AwaitingPlayerRoll, true), "AwaitingPlayerRoll → 恒不 carryover（同 R1）");
+    assert!(!should_run_carryover(AgentSignal::AwaitingPlayerRoll, false), "AwaitingPlayerRoll + 无债 → 不跑");
+}
+
 // AgentLoop 永远在序列里且恰好一次（它是 body，非可选）。
 #[test]
 fn agent_loop_present_exactly_once() {
