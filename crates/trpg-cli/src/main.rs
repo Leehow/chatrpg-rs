@@ -79,6 +79,13 @@ enum Commands {
     /// Run exactly one GM turn without opening the interactive play shell.
     /// Useful for pipes, regression tests, scripts, and LLM-driven debugging.
     Turn(TurnArgs),
+    /// Dump a turn's Flight-Recorder trace (phases, Need source refs, BP hashes, failure/warnings).
+    Explain {
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        turn: String,
+    },
     /// Unified Tantivy search. Short alias inspired by ripgrep.
     Rg(SearchArgs),
     /// Grep the duotext `.layout.md` table sidecars for exact aligned rows (e.g. weapon params).
@@ -535,6 +542,7 @@ async fn main() -> Result<()> {
             agent_play::play_cli_agent(&ruleset, module.as_deref()).await
         }
         Commands::Turn(args) => turn_cli(args).await,
+        Commands::Explain { session, turn } => explain_cli(&session, &turn).await,
         Commands::Rg(args) => search_query_cli(args).await,
         Commands::GrepTable { query, limit, data_dir } => {
             let dir = data_dir.unwrap_or_else(default_data_dir);
@@ -932,6 +940,88 @@ async fn turn_cli(args: TurnArgs) -> Result<()> {
         anyhow::bail!("turn failed at phase {phase}: {message}");
     }
     Ok(())
+}
+
+/// obs T6（Flight Recorder 初版）：dump 单回合 TurnTrace 的人读飞行记录。
+/// `session` 仅用于展示/范围标注；查找键是 `turn`（turn_traces 主键）。
+/// 隐私：TurnTrace 只存 hash + Need 来源元数据，绝不含 prompt/念白正文；
+/// source_refs 是 GM 侧来源出处，本调试命令打印无妨。
+async fn explain_cli(session: &str, turn: &str) -> Result<()> {
+    let db = connect_db().await?;
+    match db.load_turn_trace(turn).await? {
+        None => {
+            println!("(no trace for turn {turn} in session {session})");
+        }
+        Some(t) => {
+            println!("{}", format_turn_trace(&t));
+        }
+    }
+    Ok(())
+}
+
+/// hash 短显：取前 12 字符，None → "-"（DB-free 可测）。
+fn short_hash(h: &Option<String>) -> String {
+    match h {
+        Some(s) if !s.is_empty() => s.chars().take(12).collect(),
+        _ => "-".to_string(),
+    }
+}
+
+/// 单条 SourceRef 的紧凑人读形式：`source_id:page`（无 page 则 `source_id:-`）。
+fn format_source_ref(r: &SourceRef) -> String {
+    let page = r.page.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string());
+    format!("{}:{}", r.source_id, page)
+}
+
+/// 纯函数飞行记录格式化器（DB-free 可测）：header / 失败行 / BP hash /
+/// phases / narration / warnings / need_trace（含 source_refs 出处）。
+fn format_turn_trace(t: &TurnTrace) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "turn {} | session {} | signal={} | pp_lifecycle={}\n",
+        t.turn_id, t.session_id, t.signal, t.pp_lifecycle
+    ));
+    if let Some(f) = &t.failure {
+        out.push_str(&format!(
+            "FAILED: {} [{}] {}\n",
+            f.phase, f.failure_kind, f.message
+        ));
+    }
+    out.push_str(&format!(
+        "BP hashes: bp1={} bp2={} bp3={}\n",
+        short_hash(&t.bp1_hash),
+        short_hash(&t.bp2_hash),
+        short_hash(&t.bp3_hash)
+    ));
+    let phases = if t.phases_run.is_empty() {
+        "(none)".to_string()
+    } else {
+        t.phases_run.join(" -> ")
+    };
+    out.push_str(&format!("phases_run: {phases}\n"));
+    out.push_str(&format!("narration_hash: {}\n", short_hash(&t.narration_hash)));
+    out.push_str("warnings:\n");
+    if t.warnings.is_empty() {
+        out.push_str("  (none)\n");
+    } else {
+        for w in &t.warnings {
+            out.push_str(&format!("  - {w}\n"));
+        }
+    }
+    out.push_str(&format!("need_trace: {} entr(y/ies)\n", t.need_trace.len()));
+    for n in &t.need_trace {
+        out.push_str(&format!(
+            "  - {} (blocks={}) reason={}\n",
+            n.need_kind, n.block_count, n.reason
+        ));
+        if n.source_refs.is_empty() {
+            out.push_str("    source_refs: (none)\n");
+        } else {
+            let refs: Vec<String> = n.source_refs.iter().map(format_source_ref).collect();
+            out.push_str(&format!("    source_refs: {}\n", refs.join(", ")));
+        }
+    }
+    out
 }
 
 async fn resolve_text_input(
@@ -1467,4 +1557,69 @@ fn extract_fenced_cli(text: &str, lang: &str) -> Option<String> {
     let rest = &text[start..];
     let end = rest.find("```")?;
     Some(rest[..end].trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_turn_trace_renders_failure_and_need_refs() {
+        let source_ref = SourceRef {
+            source_id: "coc_rulebook".to_string(),
+            page: Some(42),
+            anchor_id: Some("anchor-7".to_string()),
+            section_path: vec!["Chapter 3".to_string(), "Sanity".to_string()],
+            char_start: None,
+            char_end: None,
+            text_hash: None,
+            note: None,
+        };
+        let need = NeedResolutionTrace {
+            need_kind: "rule".to_string(),
+            source_refs: vec![source_ref],
+            reason: "Sanity roll 触发规则取数".to_string(),
+            block_count: 2,
+        };
+        let mut trace = TurnTrace::new("turn-1", "session-9");
+        trace.phases_run = vec!["context_assembly".to_string(), "finalize".to_string()];
+        trace.need_trace = vec![need];
+        trace.bp1_hash = Some("sha256:bp1aaaaaaaaaaaaaaa".to_string());
+        trace.bp2_hash = Some("sha256:bp2".to_string());
+        trace.bp3_hash = None;
+        trace.signal = "turn_failed".to_string();
+        trace.warnings = vec!["audit lag".to_string()];
+        trace.pp_lifecycle = "critical_done".to_string();
+        trace.failure = Some(TurnFailureRecord {
+            phase: "finalize".to_string(),
+            message: "save_turn timeout".to_string(),
+            failure_kind: "failed_finalize".to_string(),
+        });
+
+        let out = format_turn_trace(&trace);
+
+        // 失败行：阶段 + failure_kind + "FAILED" 标记。
+        assert!(out.contains("FAILED"), "missing FAILED marker:\n{out}");
+        assert!(out.contains("finalize"), "missing failure phase:\n{out}");
+        assert!(out.contains("failed_finalize"), "missing failure_kind:\n{out}");
+        // need_trace：need_kind + 来源出处。
+        assert!(out.contains("rule"), "missing need_kind:\n{out}");
+        assert!(out.contains("coc_rulebook:42"), "missing source_ref:\n{out}");
+        // BP hash 短显（前 12 字符）+ None → "-"。
+        assert!(out.contains("sha256:bp1aa"), "missing short bp1 hash:\n{out}");
+        assert!(out.contains("bp3=-"), "missing dash for None bp3:\n{out}");
+        // warnings 渲染。
+        assert!(out.contains("audit lag"), "missing warning:\n{out}");
+    }
+
+    #[test]
+    fn format_turn_trace_handles_empty_success_trace() {
+        let mut trace = TurnTrace::new("turn-ok", "session-1");
+        trace.signal = "turn_complete".to_string();
+        trace.pp_lifecycle = "complete".to_string();
+        let out = format_turn_trace(&trace);
+        assert!(!out.contains("FAILED"), "success trace should not show FAILED:\n{out}");
+        assert!(out.contains("warnings:"), "warnings header missing:\n{out}");
+        assert!(out.contains("(none)"), "empty warnings/phases should print (none):\n{out}");
+    }
 }
