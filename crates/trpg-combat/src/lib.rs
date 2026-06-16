@@ -15,6 +15,13 @@ use uuid::Uuid;
 mod formula;
 use formula::{compile_formula, resolve_attack_dv};
 
+mod policy;
+use policy::{
+    actor_for_combat_input, check_label_for, combat_mode_from_policy,
+    investigate_opens_frame_relation, low_confidence_frame_start_ok, overlay_combat_profile,
+    qualify_bare_dice, tech_dv_from_config,
+};
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RulesetCombatProfile {
     pub profile_id: String,
@@ -51,6 +58,16 @@ pub struct RulesetCombatProfile {
     pub search_recipes: Vec<Value>,
     #[serde(default)]
     pub source_refs: Vec<SourceRef>,
+    /// P0-2: when true, a Low-confidence intent may still start a frame
+    /// (replaces `should_start_frame`'s `ruleset_id.contains("triangle")` gate).
+    /// Default false == every non-triangle ruleset's old behavior.
+    #[serde(default)]
+    pub low_confidence_frame_start: bool,
+    /// P0-2: when true, an `investigate` declaration (score ≥ 0.42) opens a
+    /// frame (replaces `classify_situation_intent`'s triangle branch). Default
+    /// false == old non-triangle behavior.
+    #[serde(default)]
+    pub investigate_opens_frame: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -133,22 +150,38 @@ impl CombatAgent {
     }
 
     pub async fn handle_turn(&self, input: ConflictTurnInput<'_>) -> Result<ConflictTurnResult> {
+        // P0-2: resolve the ruleset's frame-gate flags from data (no ruleset
+        // branch). A mode-agnostic profile lookup gives investigate_opens_frame /
+        // low_confidence_frame_start; the mode-specific profile is resolved once
+        // the mode is known. The kernel (data policy for combat mode) is loaded
+        // once and threaded to the classifier/frame gate.
+        let base_profile = self.profiles.resolve(input.ruleset_id, None);
+        let kernel = self.db.load_rule_kernel(input.ruleset_id).await.ok().flatten();
         if let Some(frame) = self.active_situation_frame(input.session_id).await? {
             let intent = input.semantic_hint.clone()
                 .map(|hint| normalize_semantic_hint_for_frame(hint.clone(), true))
-                .unwrap_or_else(|| classify_situation_intent(input, Some(&frame)));
+                .unwrap_or_else(|| classify_situation_intent(input, Some(&frame), base_profile.investigate_opens_frame));
             return self.handle_active_frame(input, frame, intent).await;
         }
 
         let intent = input.semantic_hint.clone()
             .map(|hint| normalize_semantic_hint_for_frame(hint.clone(), false))
-            .unwrap_or_else(|| classify_situation_intent(input, None));
-        if !should_start_frame(input.ruleset_id, &intent) {
+            .unwrap_or_else(|| classify_situation_intent(input, None, base_profile.investigate_opens_frame));
+        if !should_start_frame(base_profile.low_confidence_frame_start, &intent) {
             return Ok(ConflictTurnResult::not_handled());
         }
 
-        let mode = infer_combat_mode_from_intent(input.ruleset_id, &intent);
-        let profile = self.profiles.resolve(input.ruleset_id, Some(mode));
+        let mode = combat_mode_from_policy(kernel.as_ref().and_then(|k| k.combat_mode_policy.as_ref()), &intent);
+        let mut profile = self.profiles.resolve(input.ruleset_id, Some(mode));
+        // P0-2: when no per-ruleset advice profile matched (resolve fell back to
+        // "generic") but the kernel carries a combat_profile, overlay it. This is
+        // additive — it only fires where there was previously no ruleset profile,
+        // so curated advice files (the live path) are untouched.
+        if profile.ruleset_id == "generic" {
+            if let Some(kp) = kernel.as_ref().and_then(|k| k.combat_profile.as_ref()) {
+                profile = overlay_combat_profile(profile, Some(kp));
+            }
+        }
         let mut frame = self.create_frame(input, &profile, mode, Some(intent.clone())).await?;
         let event = self.write_frame_event(&frame, input.turn_id, "combat_frame_created", json!({
             "profile_id": profile.profile_id.clone(),
@@ -230,14 +263,28 @@ impl CombatAgent {
     }
 
     async fn make_combat_check_contract(&self, input: ConflictTurnInput<'_>, frame: &StateFrame, intent: &ConflictIntent) -> CheckContract {
-        let mut check = make_combat_check_contract(input, frame, intent);
+        // P0-2: load the kernel once (its check_label_policy + dice_qualification
+        // are data homes for the old contains("cyberpunk") branches) and the
+        // module config once (npc bindings + tech-DV table).
+        let kernel = self.db.load_rule_kernel(input.ruleset_id).await.ok().flatten();
+        let module_cfg = match input.module_id {
+            Some(mid) => self.db.load_module_config(mid).await,
+            None => None,
+        };
+        let mut check = make_combat_check_contract(
+            input,
+            frame,
+            intent,
+            kernel.as_ref().and_then(|k| k.check_label_policy.as_ref()),
+            module_cfg.as_ref(),
+        );
         // Data-driven from the parsed kernel: core dice + source citation (the
         // target is already UnknownUntilLookup, so the contest kernel reads the
         // typed success model). The formula compiler may still override the dice
         // and bind a source-backed DV afterward.
         let attack_override = matches!(intent.action_kind, SituationActionKind::Attack | SituationActionKind::Counterattack)
             && std::env::var("TRPG_COMBAT_DEFAULT_ATTACK_EXPR").map(|e| !e.trim().is_empty()).unwrap_or(false);
-        if let Some(kernel) = self.db.load_rule_kernel(input.ruleset_id).await.ok().flatten() {
+        if let Some(kernel) = kernel.as_ref() {
             if !attack_override {
                 if let Some(dice) = kernel.dice_core.get("dice").and_then(|v| v.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
                     check.dice_expression = dice;
@@ -250,11 +297,11 @@ impl CombatAgent {
         } else if !attack_override {
             check.dice_expression = "1d20".into();
         }
-        self.hydrate_combat_check_contract_from_rule_steward(input, intent, &mut check).await;
+        self.hydrate_combat_check_contract_from_rule_steward(input, intent, &mut check, kernel.as_ref(), module_cfg.as_ref()).await;
         check
     }
 
-    async fn hydrate_combat_check_contract_from_rule_steward(&self, input: ConflictTurnInput<'_>, intent: &ConflictIntent, check: &mut CheckContract) {
+    async fn hydrate_combat_check_contract_from_rule_steward(&self, input: ConflictTurnInput<'_>, intent: &ConflictIntent, check: &mut CheckContract, kernel: Option<&RuleKernel>, module_cfg: Option<&ModuleConfig>) {
         let pack = match self.db.load_character_onboarding_pack(input.ruleset_id).await {
             Ok(Some(pack)) => pack,
             _ => return,
@@ -350,21 +397,26 @@ impl CombatAgent {
                     }
                 }
             }
+            // P0-2: bare-dice degrade is now data-driven. The old branch was
+            // cyberpunk-only + "1d10"-only; equivalence is preserved by gating on
+            // the kernel actually carrying a dice_qualification (only the
+            // cyberpunk override sets it → other rulesets never reach here), with
+            // the template ("{dice}+0") supplying the +0 instead of a literal.
             if compiled_expr.is_none()
-                && input.ruleset_id.contains("cyberpunk")
                 && is_attack
                 && check.dice_expression.trim() == "1d10"
             {
-                // Degrade (unchanged behavior) when no formula matched or the
-                // actor's stats are unresolved: keep missing modifiers explicit
-                // as +0 rather than fabricating REF/Skill/weapon numbers.
-                check.dice_expression = "1d10+0".into();
+                if let Some(dq) = kernel.and_then(|k| k.dice_qualification.as_ref()) {
+                    if let Some(q) = qualify_bare_dice(Some(dq), check.dice_expression.trim()) {
+                        check.dice_expression = q;
+                    }
+                }
             }
             check.ruling_status = if !check.source_refs.is_empty() { RulingStatus::SourceBacked } else { RulingStatus::Provisional };
             if matches!(check.target, CheckTargetModel::UnknownUntilLookup) && is_tech {
-                if let Some(dv) = inferred_homecoming_tech_dv(input.user_input) {
-                    check.target = CheckTargetModel::StaticNumber { value: dv, label: "source-backed Homecoming technical option DV".into() };
-                    check.opposition = OppositionModel::StaticDc { dc: dv, label: "source-backed Homecoming technical option DV".into() };
+                if let Some(dv) = tech_dv_from_config(module_cfg, input.user_input) {
+                    check.target = CheckTargetModel::StaticNumber { value: dv, label: "source-backed module technical option DV".into() };
+                    check.opposition = OppositionModel::StaticDc { dc: dv, label: "source-backed module technical option DV".into() };
                 }
             }
         }
@@ -820,7 +872,7 @@ fn normalize_semantic_hint_for_frame(mut hint: ConflictIntent, active: bool) -> 
     hint
 }
 
-fn classify_situation_intent(input: ConflictTurnInput<'_>, active_frame: Option<&StateFrame>) -> ConflictIntent {
+fn classify_situation_intent(input: ConflictTurnInput<'_>, active_frame: Option<&StateFrame>, investigate_opens_frame: bool) -> ConflictIntent {
     let text = input.user_input.trim();
     let active = active_frame.is_some();
     let attack = semantic_cluster_score(text, ATTACK_EXAMPLES);
@@ -870,7 +922,7 @@ fn classify_situation_intent(input: ConflictTurnInput<'_>, active_frame: Option<
         else if attack >= 0.42 || defend >= 0.45 || hack >= 0.48 || investigate >= 0.50 || anomaly >= 0.50 { FrameRelation::InsideFrameAction }
         else { FrameRelation::InvalidOrAmbiguous }
     } else {
-        if attack >= 0.42 || under_attack >= 0.40 || scene_conflict >= 0.40 || hack >= 0.56 || anomaly >= 0.50 || (input.ruleset_id.contains("triangle") && investigate >= 0.42) { FrameRelation::InsideFrameAction }
+        if attack >= 0.42 || under_attack >= 0.40 || scene_conflict >= 0.40 || hack >= 0.56 || anomaly >= 0.50 || investigate_opens_frame_relation(investigate_opens_frame, investigate) { FrameRelation::InsideFrameAction }
         else { FrameRelation::OutsideFrameAction }
     };
 
@@ -902,7 +954,7 @@ fn classify_situation_intent(input: ConflictTurnInput<'_>, active_frame: Option<
     }
 }
 
-fn should_start_frame(ruleset_id: &str, intent: &ConflictIntent) -> bool {
+fn should_start_frame(low_confidence_frame_start: bool, intent: &ConflictIntent) -> bool {
     matches!(intent.relation_to_active_frame, FrameRelation::InsideFrameAction | FrameRelation::GateResponse)
         && matches!(intent.action_kind,
             SituationActionKind::Attack
@@ -915,7 +967,7 @@ fn should_start_frame(ruleset_id: &str, intent: &ConflictIntent) -> bool {
                 | SituationActionKind::DisableDevice
                 | SituationActionKind::InvestigateDuringConflict
         )
-        && (intent.confidence != RulingConfidence::Low || ruleset_id.contains("triangle"))
+        && low_confidence_frame_start_ok(low_confidence_frame_start, intent.confidence)
 }
 
 fn should_open_reaction_gate(intent: &ConflictIntent) -> bool {
@@ -1026,64 +1078,23 @@ fn combat_roll_visibility_from_policy() -> (RollVisibility, RollAuthority) {
 
 
 
-fn inferred_homecoming_tech_dv(input: &str) -> Option<i32> {
-    let lower = input.to_ascii_lowercase();
-    if lower.contains("basic tech") || lower.contains("cut off") || lower.contains("power") || lower.contains("cable") || lower.contains("线缆") || lower.contains("切断") || lower.contains("供电") {
-        Some(14)
-    } else if lower.contains("hack") || lower.contains("interface") || lower.contains("net") || lower.contains("server") || lower.contains("athena") || lower.contains("黑入") || lower.contains("服务器") || lower.contains("无人机") {
-        Some(12)
-    } else {
-        None
-    }
-}
+// P0-2: `inferred_homecoming_tech_dv` (14/12) and `target_actor_for_combat_input`
+// (npc.scav_boss/npc.athena_drone literals) are gone — both now read module data
+// via `tech_dv_from_config` / `actor_for_combat_input` in policy.rs, sourced from
+// `ModuleConfig` (data/modules/{id}.module_config.json).
 
-
-fn target_actor_for_combat_input(input: &str, intent: &ConflictIntent) -> Option<ActorRef> {
-    if !matches!(intent.action_kind,
-        SituationActionKind::Attack
-        | SituationActionKind::Counterattack
-        | SituationActionKind::UnderAttack
-        | SituationActionKind::EnemyInitiatedConflict
-        | SituationActionKind::SceneEntersConflict
-    ) {
-        return None;
-    }
-    let lower = input.to_ascii_lowercase();
-    let (actor_id, display_name) = if lower.contains("scav_boss")
-        || lower.contains("boss")
-        || lower.contains("shotgun")
-        || lower.contains("霰弹")
-        || lower.contains("头目")
-        || lower.contains("首领")
-        || lower.contains("scav") && (lower.contains("老大") || lower.contains("leader"))
-    {
-        ("npc.scav_boss", "shotgun boss")
-    } else if lower.contains("drone")
-        || lower.contains("无人机")
-        || lower.contains("athena")
-        || lower.contains("雅典娜")
-    {
-        ("npc.athena_drone", "rogue drone")
-    } else {
-        ("npc.opposition", "opposition")
-    };
-    Some(ActorRef { actor_id: actor_id.into(), actor_kind: ActorKind::Npc, display_name: Some(display_name.into()) })
-}
-
-fn make_combat_check_contract(input: ConflictTurnInput<'_>, frame: &StateFrame, intent: &ConflictIntent) -> CheckContract {
+fn make_combat_check_contract(
+    input: ConflictTurnInput<'_>,
+    frame: &StateFrame,
+    intent: &ConflictIntent,
+    label_policy: Option<&CheckLabelPolicy>,
+    module_cfg: Option<&ModuleConfig>,
+) -> CheckContract {
     let check_id = format!("check_{}", Uuid::new_v4().simple());
     let (roll_visibility, roll_authority) = combat_roll_visibility_from_policy();
-    let target_actor = target_actor_for_combat_input(input.user_input, intent);
+    let target_actor = actor_for_combat_input(module_cfg, input.user_input, intent);
     let defender_actor = target_actor.clone().unwrap_or_else(|| ActorRef { actor_id: "npc.opposition".into(), actor_kind: ActorKind::Npc, display_name: Some("opposition".into()) });
-    let label = match intent.action_kind {
-        SituationActionKind::Hack | SituationActionKind::DisableDevice => if input.ruleset_id.contains("cyberpunk") { "appropriate TECH / Interface / Basic Tech check" } else { "appropriate technical conflict check" },
-        SituationActionKind::Attack => "appropriate attack/conflict check",
-        SituationActionKind::UnderAttack | SituationActionKind::EnemyInitiatedConflict | SituationActionKind::SceneEntersConflict => "appropriate defense/reaction check",
-        SituationActionKind::Defend | SituationActionKind::Dodge => "appropriate defense/evasion check",
-        SituationActionKind::InvestigateDuringConflict => "appropriate perception/investigation-under-pressure check",
-        SituationActionKind::Intimidate => "appropriate intimidation/social pressure check",
-        _ => "appropriate situation check",
-    };
+    let label = check_label_for(label_policy, intent.action_kind);
     CheckContract {
         check_id,
         session_id: input.session_id.to_string(),
@@ -1116,65 +1127,11 @@ fn make_combat_check_contract(input: ConflictTurnInput<'_>, frame: &StateFrame, 
 }
 
 
-fn apply_source_backed_formula_pack_to_check(check: &mut CheckContract, pack: &CharacterOnboardingPack, input: ConflictTurnInput<'_>, intent: &ConflictIntent) {
-    if pack.derived_formula_pack.formulas.is_empty() {
-        return;
-    }
-    let mut refs = pack.derived_formula_pack.source_refs.clone();
-    if refs.is_empty() { refs = pack.source_refs.clone(); }
-    if refs.is_empty() { return; }
-    merge_source_refs(&mut check.source_refs, refs);
-    if !check.advice_refs.iter().any(|r| r == "character_onboarding.derived_formula_pack") {
-        check.advice_refs.push("character_onboarding.derived_formula_pack".into());
-    }
-    // N1 tier guard: if every formula in the pack is a provisional seed, mark
-    // the check as Provisional (not SourceBacked) to prevent downstream code
-    // from treating seeded placeholders as exact executable formulas.
-    let all_provisional = pack.derived_formula_pack.formulas.iter().all(|f| f.is_provisional_seed());
-    if all_provisional {
-        check.ruling_status = RulingStatus::Provisional;
-        check.advice_refs.push("formula.pack_all_provisional_seeds:exact_source_required".into());
-    } else {
-        check.ruling_status = RulingStatus::SourceBacked;
-    }
-
-    let formulas_text = pack.derived_formula_pack.formulas.iter()
-        .map(|f| format!("{} {} {}", f.field_id, f.formula, f.notes.clone().unwrap_or_default()))
-        .collect::<Vec<_>>()
-        .join("\n")
-        .to_ascii_lowercase();
-
-    let bare = ["1d10", "d20", "1d20", "2d6", "d100", "1d100", "6d4"].contains(&check.dice_expression.trim());
-    if bare {
-        let ruleset = input.ruleset_id.to_ascii_lowercase();
-        if ruleset.contains("cyberpunk") && (formulas_text.contains("1d10") || formulas_text.contains("skill")) {
-            check.dice_expression = "1d10+0".into();
-        } else if ruleset.contains("dnd") && formulas_text.contains("d20") {
-            check.dice_expression = "1d20+0".into();
-        } else if ruleset.contains("sword_world") && formulas_text.contains("2d6") {
-            check.dice_expression = "2d6+0".into();
-        } else if (ruleset.contains("coc") || ruleset.contains("brp")) && (formulas_text.contains("d100") || formulas_text.contains("percentile")) {
-            check.dice_expression = "1d100".into();
-        } else if ruleset.contains("triangle") && formulas_text.contains("6d4") {
-            check.dice_expression = "6d4".into();
-        }
-    }
-
-    if matches!(intent.action_kind, SituationActionKind::Attack | SituationActionKind::Counterattack) {
-        check.stakes.before_roll_public = "The action is mechanically grounded by the ruleset formula pack, but target-specific DV/defense and actor bonuses may still require materialization. If those facets are unresolved, narration must say the mechanical result is pending source-backed binding rather than inventing a hit, damage, HP, SP, or armor value.".into();
-        if !check.advice_refs.iter().any(|r| r == "attack_needs_target_specific_binding") {
-            check.advice_refs.push("attack_needs_target_specific_binding".into());
-        }
-    }
-}
-
-fn merge_source_refs(dest: &mut Vec<SourceRef>, incoming: Vec<SourceRef>) {
-    let mut seen = dest.iter().map(|r| format!("{}:{:?}:{:?}:{:?}", r.source_id, r.page, r.anchor_id, r.text_hash)).collect::<BTreeSet<_>>();
-    for source_ref in incoming {
-        let key = format!("{}:{:?}:{:?}:{:?}", source_ref.source_id, source_ref.page, source_ref.anchor_id, source_ref.text_hash);
-        if seen.insert(key) { dest.push(source_ref); }
-    }
-}
+// P0-2: `apply_source_backed_formula_pack_to_check` (and its only helper
+// `merge_source_refs`) were removed. The function was dead code (no caller) and
+// carried five ruleset-name bare-dice branches (cyberpunk/dnd/sword_world/coc/
+// brp/triangle); the live degrade path is `qualify_bare_dice` (kernel.
+// dice_qualification) in `hydrate_combat_check_contract_from_rule_steward`.
 
 fn combat_target_for_intent(action_kind: &SituationActionKind) -> CheckTargetModel {
     if matches!(action_kind, SituationActionKind::Attack | SituationActionKind::Counterattack) {
@@ -1576,15 +1533,9 @@ fn infer_mode_from_frame(frame: &StateFrame) -> Option<CombatMode> {
     serde_json::from_value::<CombatWorkingState>(frame.working_state.clone()).ok().map(|w| w.combat_mode)
 }
 
-fn infer_combat_mode_from_intent(ruleset_id: &str, intent: &ConflictIntent) -> CombatMode {
-    if ruleset_id.contains("triangle") || matches!(intent.action_kind, SituationActionKind::DisableDevice) && intent.evidence_terms.iter().any(|e| e.contains("anomaly")) { return CombatMode::AnomalyEncounter; }
-    if ruleset_id.contains("coc") || ruleset_id.contains("brp") { return CombatMode::HorrorEncounter; }
-    if ruleset_id.contains("cyberpunk") && matches!(intent.action_kind, SituationActionKind::Hack | SituationActionKind::DisableDevice) { return CombatMode::Netrun; }
-    if ruleset_id.contains("cyberpunk") { return CombatMode::Firefight; }
-    if ruleset_id.contains("dnd") { return CombatMode::TacticalCombat; }
-    CombatMode::TheaterOfMind
-}
-
+// P0-2: `infer_combat_mode_from_intent`(ruleset_id.contains branches) is gone —
+// the intent→CombatMode mapping now lives in data via `combat_mode_from_policy`
+// (kernel.combat_mode_policy) in policy.rs.
 
 fn lexical_any(input: &str, terms: &[&str]) -> bool { let lower=input.to_lowercase(); terms.iter().any(|t| lower.contains(&t.to_lowercase())) }
 
@@ -1677,21 +1628,20 @@ const ANOMALY_EXAMPLES: &[&str] = &[
     "异常", "收容异常", "捕获异常", "异常能力", "anomaly", "capture the anomaly", "containment", "chaos effect", "アノマリー",
 ];
 
+// P0-2: the Rust fallback carries ONLY the neutral generic profile. The five
+// per-ruleset profiles (cyberpunk/dnd/coc/triangle/sword_world) were duplicates
+// of the curated `data/ruleset_advice/*.json` profiles (which already win at
+// runtime via CombatProfilePack::load_dir → resolve); they are no longer
+// hardcoded in Rust. When the advice dir is absent, an unmatched ruleset now
+// resolves to `generic` instead of a hardcoded ruleset profile.
 fn default_profiles() -> CombatProfilePack {
-    CombatProfilePack { profiles: vec![
-        cyberpunk_profile(), dnd_profile(), coc_profile(), triangle_profile(), sword_world_profile(), default_generic_profile()
-    ] }
+    CombatProfilePack { profiles: vec![default_generic_profile()] }
 }
 
 fn default_generic_profile() -> RulesetCombatProfile {
     RulesetCombatProfile { profile_id: "generic.situation.v1_3".into(), ruleset_id: "generic".into(), applies_to_modes: vec!["theater_of_mind".into(), "tactical_combat".into(), "social_conflict".into()], default_mode: "theater_of_mind".into(), action_economy: json!({"policy":"fiction_first"}), initiative: json!({"policy":"fiction_first"}), reaction_windows: vec![generic_required_defense()], frame_exit_policy: json!({"state_exits":["objective_completed","side_escaped","negotiated_truce","surrender_accepted"],"stalemate_after_non_decisive_turns":3}), stalemate_policy: json!({"max_repeated_action_count":2,"open_direction_gate":true}), npc_drive_policy: json!({"default_patience":40,"default_morale":55,"max_repeat_same_tactic":2}), frame_retention_policy: RetentionPolicy { keep_event_log: true, compact_on_completion: true, keep_last_events: 12, promote_facts_with_importance_at_least: 70 }, frame_compaction_policy: CompactionPolicy { summary_target: "preserve consequences, costs, relationships, clues, open hooks; discard turn-by-turn minutiae".into(), preserve_world_patches: true, preserve_npc_impacts: true, preserve_player_costs: true, preserve_open_hooks: true }, ..Default::default() }
 }
 
-fn cyberpunk_profile() -> RulesetCombatProfile { RulesetCombatProfile { profile_id: "cyberpunk_red.firefight.v1_3".into(), ruleset_id: "cyberpunk_red".into(), applies_to_modes: vec!["firefight".into(), "netrun".into(), "chase".into()], default_mode: "firefight".into(), action_economy: json!({"turn_slots":[{"slot_id":"move_action","count":1},{"slot_id":"action","count":1}],"notes":"Combat Time uses 1 Move Action + 1 Action; exact rules should be loaded as packets."}), initiative: json!({"kind":"formula","expression":"REF + 1d10"}), reaction_windows: vec![generic_required_defense()], frame_exit_policy: json!({"allow_disengage":true,"allow_deescalation":true,"objective_driven":true,"stalemate_after_non_decisive_turns":3}), npc_drive_policy: json!({"mook_morale":45,"self_interest":70,"break_actions":["flee","surrender","call_backup","negotiate"]}), frame_retention_policy: default_generic_profile().frame_retention_policy, frame_compaction_policy: default_generic_profile().frame_compaction_policy, search_recipes: vec![json!({"query":"Friday Night Firefight Actions Ranged Combat Melee Combat Before You Take Damage Mooks and Grunts Encounters"})], ..Default::default() } }
-fn dnd_profile() -> RulesetCombatProfile { RulesetCombatProfile { profile_id: "dnd5e.tactical_combat.v1_3".into(), ruleset_id: "dnd5e".into(), applies_to_modes: vec!["tactical_combat".into(), "theater_of_mind".into()], default_mode: "tactical_combat".into(), action_economy: json!({"turn_slots":[{"slot_id":"movement","count":1},{"slot_id":"action","count":1},{"slot_id":"bonus_action","count":1,"requires_feature":true}],"reaction_slots":[{"slot_id":"reaction","count":1,"refresh":"start_of_turn"}]}), initiative: json!({"kind":"dexterity_check","group_identical_monsters":true}), reaction_windows: vec![ReactionAdvice { advice_id: "dnd5e.opportunity_attack.v1_3".into(), gate_kind: GateKind::OptionalReactionWindow, required: false, prompt_public: "敌人离开你的触及范围。你可以使用 reaction 做一次机会攻击，也可以放过。".into(), options: vec![ActionOption { option_id: "use_reaction_attack".into(), label: "使用 reaction 机会攻击".into(), meaning: "消耗 reaction 进行一次攻击。".into(), is_default: false, consequences: json!({}) }, ActionOption { option_id: "decline".into(), label: "不使用 reaction".into(), meaning: "保留 reaction，敌人离开。".into(), is_default: true, consequences: json!({}) }], default_if_unanswered: Some("decline".into()), on_unparseable: GateFallbackPolicy::Reprompt, on_new_action: GateFallbackPolicy::ResolveAsNoReaction, trigger_keywords: vec![] }], search_recipes: vec![json!({"query":"The Order of Combat Actions in Combat Making an Attack"})], frame_exit_policy: default_generic_profile().frame_exit_policy, stalemate_policy: default_generic_profile().stalemate_policy, npc_drive_policy: default_generic_profile().npc_drive_policy, frame_retention_policy: default_generic_profile().frame_retention_policy, frame_compaction_policy: default_generic_profile().frame_compaction_policy, ..Default::default() } }
-fn coc_profile() -> RulesetCombatProfile { RulesetCombatProfile { profile_id: "coc7e.conflict.v1_3".into(), ruleset_id: "coc7e".into(), applies_to_modes: vec!["horror_encounter".into(), "chase".into(), "theater_of_mind".into()], default_mode: "horror_encounter".into(), action_economy: json!({"turn_slots":[{"slot_id":"action","count":1}],"initiative":"dex_order"}), initiative: json!({"kind":"dex_order"}), reaction_windows: vec![ReactionAdvice { advice_id: "coc7e.fight_back_or_dodge.v1_3".into(), gate_kind: GateKind::RequiredReactionChoice, required: true, prompt_public: "对方扑向你。选择反应：反击、闪避/躲开，或承受。".into(), options: vec![ActionOption { option_id: "fight_back".into(), label: "反击".into(), meaning: "用 Fighting 对抗。结算路径与闪避不同。".into(), is_default: false, consequences: json!({}) }, ActionOption { option_id: "dodge".into(), label: "闪避".into(), meaning: "用 Dodge 尝试避开攻击。".into(), is_default: false, consequences: json!({}) }, ActionOption { option_id: "take_hit".into(), label: "承受".into(), meaning: "不进行防御，直接进入伤害/后果。".into(), is_default: false, consequences: json!({}) }], default_if_unanswered: None, on_unparseable: GateFallbackPolicy::Reprompt, on_new_action: GateFallbackPolicy::RequireExplicitChoice, trigger_keywords: vec![] }], search_recipes: vec![json!({"query":"Fighting Dodge Maneuver Firearms Sanity combat"})], frame_exit_policy: default_generic_profile().frame_exit_policy, stalemate_policy: default_generic_profile().stalemate_policy, npc_drive_policy: json!({"human_patience":35,"panic_can_force_flee":true,"keeper_hidden_info":true}), frame_retention_policy: default_generic_profile().frame_retention_policy, frame_compaction_policy: default_generic_profile().frame_compaction_policy, ..Default::default() } }
-fn triangle_profile() -> RulesetCombatProfile { RulesetCombatProfile { profile_id: "triangle_agency.anomaly_encounter.v1_3".into(), ruleset_id: "triangle_agency".into(), applies_to_modes: vec!["anomaly_encounter".into(), "social_conflict".into()], default_mode: "anomaly_encounter".into(), action_economy: json!({"turn_slots":[{"slot_id":"agent_action","count":1,"flexible":true}],"core_roll":{"expression":"6d4","success":"any die equals 3","chaos_gain":"count non-3 dice"}}), initiative: json!({"kind":"fiction_first_or_gm_directed"}), reaction_windows: vec![], search_recipes: vec![json!({"query":"Using Four-sided Dice Chaos Harm Conflict Resolution Anomaly Encounter"})], frame_exit_policy: json!({"objective_driven":true,"close_on_capture_escape_aftermath":true,"stalemate_after_non_decisive_turns":3}), stalemate_policy: default_generic_profile().stalemate_policy, npc_drive_policy: json!({"anomaly_impulse_can_shift_tactic":true,"chaos_can_force_change":true}), frame_retention_policy: RetentionPolicy { keep_event_log: true, compact_on_completion: true, keep_last_events: 8, promote_facts_with_importance_at_least: 65 }, frame_compaction_policy: CompactionPolicy { summary_target: "preserve mission outcome, Harm, Chaos/Loose Ends, anomaly capture/escape, requisitions, NPC/Agency consequences".into(), preserve_world_patches: true, preserve_npc_impacts: true, preserve_player_costs: true, preserve_open_hooks: true }, ..Default::default() } }
-fn sword_world_profile() -> RulesetCombatProfile { RulesetCombatProfile { profile_id: "sword_world_2_5.combat.v1_3".into(), ruleset_id: "sword_world_2_5".into(), applies_to_modes: vec!["tactical_combat".into(), "theater_of_mind".into()], default_mode: "tactical_combat".into(), action_economy: json!({"turn_slots":[{"slot_id":"major_action","count":1},{"slot_id":"minor_action","count":"many within reason"}],"notes":"supports simplified/standard combat profiles via rule packets"}), initiative: json!({"kind":"ruleset_packet_lookup"}), reaction_windows: vec![generic_required_defense()], search_recipes: vec![json!({"query":"Combat Flow Character's Turn Major and Minor Action Damage Standard Combat"})], frame_exit_policy: default_generic_profile().frame_exit_policy, stalemate_policy: default_generic_profile().stalemate_policy, npc_drive_policy: default_generic_profile().npc_drive_policy, frame_retention_policy: default_generic_profile().frame_retention_policy, frame_compaction_policy: default_generic_profile().frame_compaction_policy, ..Default::default() } }
 
 fn generic_required_defense() -> ReactionAdvice {
     ReactionAdvice { advice_id: "generic.required_defense_choice.v1_3".into(), gate_kind: GateKind::RequiredReactionChoice, required: true, prompt_public: "你正受到可见攻击。选择反应：闪避/防御、反击，或承受。".into(), options: vec![ActionOption { option_id: "defend_or_dodge".into(), label: "闪避 / 防御".into(), meaning: "尝试避免或降低攻击影响。".into(), is_default: false, consequences: json!({}) }, ActionOption { option_id: "counter_or_fight_back".into(), label: "反击".into(), meaning: "用攻击或对抗动作回应，可能改变结算。".into(), is_default: false, consequences: json!({}) }, ActionOption { option_id: "take_the_hit".into(), label: "站着挨打".into(), meaning: "不消耗反应或不防御，直接进入伤害/后果。".into(), is_default: false, consequences: json!({}) }], default_if_unanswered: None, on_unparseable: GateFallbackPolicy::Reprompt, on_new_action: GateFallbackPolicy::RequireExplicitChoice, trigger_keywords: vec![] }
