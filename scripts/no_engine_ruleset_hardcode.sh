@@ -63,6 +63,11 @@ def strip_test_modules(lines):
             depth, started, j = 0, False, i
             while j < n:
                 clean = _sanitize_for_braces(lines[j])
+                # 无花括号声明 (如 `#[cfg(test)] mod foo;`): 进 block 前先遇 ; 即只跳该声明,
+                # 不再 brace-scan 到 EOF 吞掉后续生产代码 (修潜在假阴)。
+                if not started and '{' not in clean and ';' in clean:
+                    j += 1
+                    break
                 depth += clean.count('{') - clean.count('}')
                 if '{' in clean:
                     started = True
