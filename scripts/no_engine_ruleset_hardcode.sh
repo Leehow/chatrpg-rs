@@ -26,8 +26,10 @@ ENGINE_CRATES=(
 # cyberpunk/cthulhu/sword_world 子串覆盖。
 BANNED='call_of_cthulhu|cyberpunk|cthulhu|sword_world|剑世界|homecoming|nyarlathotep|scav_boss|athena_drone|dnd5e|brp_orc|triangle_agency|the_vault|"coc"|"brp"|"dnd"|"d&d"|"5e"|"triangle"|"fate"|"masks"|"vault"'
 
-# 行级白名单: 命中行若含下列子串则豁免 (override 加载键 / env-var 引用)。
-ALLOWLIST='read_kernel_override_file|load_dir|TRPG_RULESET_ADVICE_DIR|TRPG_DATA_DIR'
+# 行级白名单: 命中行若含下列子串则豁免 (override 加载键 / env-var 引用 /
+# binary-embedded config 加载: include_str! 的 embedded_config/* 路径及其 match
+# 臂 — 合法的"override 数据加载键"类; JSON 文件本身非 .rs 不被扫描)。
+ALLOWLIST='read_kernel_override_file|load_dir|TRPG_RULESET_ADVICE_DIR|TRPG_DATA_DIR|embedded_config|include_str'
 
 REPORT="$(
 python3 - "$REPO" "$BANNED" "$ALLOWLIST" "${ENGINE_CRATES[@]}" <<'PY'

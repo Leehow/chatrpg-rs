@@ -1,0 +1,64 @@
+{
+  "_note": "P0-2 engine-dehardcode: combat_mode_policy migrates trpg-combat's legacy infer_combat_mode_from_intent for dnd5e (was: ruleset_id.contains(\"dnd\") -> tactical_combat). The first rule preserves the legacy cross-ruleset (disable_device + 'anomaly' evidence) -> anomaly_encounter clause, which was checked before any ruleset branch; otherwise fallback tactical_combat. Pure data, no per-ruleset Rust.",
+  "combat_mode_policy": {
+    "rules": [
+      {
+        "mode": "anomaly_encounter",
+        "when_action_kinds": [
+          "disable_device"
+        ],
+        "when_evidence_contains": [
+          "anomaly"
+        ]
+      }
+    ],
+    "fallback_mode": "tactical_combat"
+  },
+  "_note_p0_2_referee_bands": "P0-2 T3: referee_value_bands replicates legacy contains('dnd') branches. dnd5e matches contains(\"dnd\"): damage_plausible_range (1,20), DC (1,40).",
+  "referee_value_bands": {
+    "damage_family": "dnd_damage_dice",
+    "damage_band": "roughly 1d4..2d12 for common low-level weapon/spell chunks; exact entry required",
+    "damage_plausible_range": [
+      1,
+      20
+    ],
+    "difficulty_band": {
+      "common_dc_band": "5..30",
+      "note": "DC should come from task difficulty, AC, save DC, or rules text"
+    },
+    "difficulty_plausible_range": [
+      1,
+      40
+    ]
+  },
+  "_note_p0_2_search_profile": "P0-2 T5: search_profile replicates ruleset_aliases_for contains('dnd')||contains('5e') logic. Legacy set preferred_sections to the same list for ALL skills; here broken into per-skill subsets. field_aliases replicate the two legacy overrides: defense->AC and save->saving throw.",
+  "search_profile": {
+    "preferred_sections_by_skill": {
+      "*": [
+        "Equipment",
+        "Armor and Shields",
+        "Weapons",
+        "Using Ability Scores",
+        "Saving Throws",
+        "Combat",
+        "Making an Attack",
+        "Damage and Healing",
+        "Spellcasting",
+        "Spell Descriptions",
+        "Creature Statistics"
+      ]
+    },
+    "field_aliases_by_skill": {
+      "*": {
+        "defense": [
+          "AC",
+          "Armor Class"
+        ],
+        "save": [
+          "saving throw",
+          "spell save DC"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,122 @@
+{
+  "profile_id": "coc7e.conflict.v1_3",
+  "ruleset_id": "coc7e",
+  "applies_to_modes": [
+    "horror_encounter",
+    "chase",
+    "theater_of_mind"
+  ],
+  "default_mode": "horror_encounter",
+  "initiative": {
+    "kind": "dex_order",
+    "notes": "Use exact CoC/BRP chase and firearms packets when needed."
+  },
+  "action_economy": {
+    "turn_slots": [
+      {
+        "slot_id": "action",
+        "count": 1
+      }
+    ],
+    "notes": "CoC should not roll for ordinary actions; roll under tension/conflict only."
+  },
+  "reaction_windows": [
+    {
+      "advice_id": "coc7e.fight_back_or_dodge.v1",
+      "trigger_keywords": [
+        "attacks",
+        "lunges",
+        "扑",
+        "被攻击"
+      ],
+      "gate_kind": "required_reaction_choice",
+      "required": true,
+      "prompt_public": "对方扑向你。选择反应：反击、闪避，或承受。",
+      "options": [
+        {
+          "option_id": "fight_back",
+          "label": "反击",
+          "meaning": "用 Fighting 对抗，结算路径与闪避不同。"
+        },
+        {
+          "option_id": "dodge",
+          "label": "闪避",
+          "meaning": "用 Dodge 尝试避开攻击。"
+        },
+        {
+          "option_id": "take_hit",
+          "label": "承受",
+          "meaning": "不防御，直接进入伤害/后果。"
+        }
+      ],
+      "on_unparseable": "reprompt",
+      "on_new_action": "require_explicit_choice"
+    }
+  ],
+  "search_recipes": [
+    {
+      "query": "Regular Hard Extreme difficulty Fighting Dodge Firearms Sanity Major Wound Chase"
+    }
+  ],
+  "frame_retention_policy": {
+    "keep_event_log": true,
+    "compact_on_completion": true,
+    "keep_last_events": 10,
+    "promote_facts_with_importance_at_least": 65
+  },
+  "frame_compaction_policy": {
+    "summary_target": "Preserve HP/SAN loss, major wounds, madness/trauma, clue discovery, NPC survival, and Keeper-only consequences. Discard moment-by-moment chase/combat exchanges.",
+    "preserve_world_patches": true,
+    "preserve_npc_impacts": true,
+    "preserve_player_costs": true,
+    "preserve_open_hooks": true
+  },
+  "frame_exit_policy": {
+    "state_exits": [
+      "objective_completed",
+      "side_escaped",
+      "negotiated_truce",
+      "surrender_accepted",
+      "all_opponents_defeated"
+    ],
+    "allow_disengage": true,
+    "allow_deescalation": true,
+    "stalemate_after_non_decisive_turns": 3,
+    "semantic_router_required": true
+  },
+  "stalemate_policy": {
+    "max_repeated_action_count": 2,
+    "max_turns_without_decisive_change": 3,
+    "open_direction_gate": true,
+    "do_not_repeat_same_npc_tactic": true
+  },
+  "npc_drive_policy": {
+    "default_morale": 55,
+    "default_patience": 40,
+    "max_repeat_same_tactic": 2,
+    "break_actions": [
+      "flee",
+      "surrender",
+      "negotiate",
+      "change_tactic",
+      "call_backup"
+    ],
+    "panic_can_force_flee": true,
+    "keeper_hidden_info": true
+  },
+  "novelty_policy": {
+    "max_repeat_same_npc_tactic": 1,
+    "tactic_cooldown_after_use": 1,
+    "force_tactic_shift_on_repeated_player_action": true,
+    "fresh_change_required_each_turn": true,
+    "allowed_fresh_changes": [
+      "npc_tactic_shift",
+      "clock_tick",
+      "resource_cost",
+      "position_change",
+      "objective_progress",
+      "threat_revealed",
+      "new_pressure"
+    ]
+  }
+}

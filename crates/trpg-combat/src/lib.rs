@@ -99,10 +99,15 @@ pub struct CombatProfilePack {
 impl CombatProfilePack {
     pub fn load_dir(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
+        // P0-2: the binary-embedded advice profiles are the BASELINE (so a clean
+        // checkout with no advice dir reproduces the migrated values), and the
+        // advice DIR overrides them when present. On this machine the dir has all
+        // 5 → dir wins → behavior unchanged.
+        let embedded = embedded_profiles();
         if !path.exists() {
-            return Ok(default_profiles());
+            return Ok(Self::from_embedded_or_default(embedded));
         }
-        let mut profiles = Vec::new();
+        let mut dir_profiles = Vec::new();
         for entry in fs::read_dir(path).with_context(|| format!("failed to read ruleset advice dir {}", path.display()))? {
             let entry = entry?;
             let p = entry.path();
@@ -113,13 +118,29 @@ impl CombatProfilePack {
             }
             let text = fs::read_to_string(&p).with_context(|| format!("failed to read combat profile {}", p.display()))?;
             match serde_json::from_str::<RulesetCombatProfile>(&text) {
-                Ok(profile) if !profile.profile_id.is_empty() => profiles.push(profile),
+                Ok(profile) if !profile.profile_id.is_empty() => dir_profiles.push(profile),
                 Ok(_) => tracing::warn!(path = %p.display(), "combat profile missing profile_id; skipped"),
                 Err(err) => tracing::warn!(path = %p.display(), error = %err, "failed to parse combat profile; skipped"),
             }
         }
-        if profiles.is_empty() { return Ok(default_profiles()); }
+        if dir_profiles.is_empty() {
+            return Ok(Self::from_embedded_or_default(embedded));
+        }
+        // Merge: embedded baseline, dir wins by (ruleset_id, profile_id).
+        let mut profiles = embedded;
+        for d in dir_profiles {
+            match profiles.iter_mut().find(|e| e.ruleset_id == d.ruleset_id && e.profile_id == d.profile_id) {
+                Some(slot) => *slot = d,
+                None => profiles.push(d),
+            }
+        }
         Ok(Self { profiles })
+    }
+
+    /// Embedded baseline when no dir profile is available; falls through to the
+    /// Rust `default_profiles()` only if the embedded set is also empty.
+    fn from_embedded_or_default(embedded: Vec<RulesetCombatProfile>) -> Self {
+        if embedded.is_empty() { default_profiles() } else { Self { profiles: embedded } }
     }
 
     pub fn resolve(&self, ruleset_id: &str, mode_hint: Option<CombatMode>) -> RulesetCombatProfile {
@@ -1636,6 +1657,24 @@ const ANOMALY_EXAMPLES: &[&str] = &[
 // resolves to `generic` instead of a hardcoded ruleset profile.
 fn default_profiles() -> CombatProfilePack {
     CombatProfilePack { profiles: vec![default_generic_profile()] }
+}
+
+/// P0-2: the binary-embedded advice profiles (clean-checkout baseline). Parses
+/// the 5 git-tracked `embedded_config/ruleset_advice/` copies (byte-identical to
+/// data/); a profile that fails to parse or lacks a profile_id is skipped, just
+/// like `load_dir` does for on-disk files.
+fn embedded_profiles() -> Vec<RulesetCombatProfile> {
+    const EMBEDDED: &[&str] = &[
+        include_str!("../embedded_config/ruleset_advice/coc7e.conflict.v1.json"),
+        include_str!("../embedded_config/ruleset_advice/cyberpunk_red.combat.v1.json"),
+        include_str!("../embedded_config/ruleset_advice/dnd5e.combat.v1.json"),
+        include_str!("../embedded_config/ruleset_advice/sword_world_2_5.combat.v1.json"),
+        include_str!("../embedded_config/ruleset_advice/triangle_agency.conflict.v1.json"),
+    ];
+    EMBEDDED.iter()
+        .filter_map(|t| serde_json::from_str::<RulesetCombatProfile>(t).ok())
+        .filter(|p| !p.profile_id.is_empty())
+        .collect()
 }
 
 fn default_generic_profile() -> RulesetCombatProfile {

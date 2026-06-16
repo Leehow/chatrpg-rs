@@ -1,0 +1,15 @@
+{
+  "_note": "P0-2 T5: module_search_profile for The Vault (Triangle Agency mission module). Migrates module_preferences_for contains('vault')||contains('triangle') logic. The legacy code added the same sections for ALL skills; here broken into per-skill subsets. module_id: triangle_agency.the_vault. Pure data, no per-ruleset/module Rust.",
+  "module_search_profile": {
+    "preferred_sections_by_skill": {
+      "*": [
+        "Mission",
+        "Encounter",
+        "Aftermath",
+        "Anomaly",
+        "Playwalled",
+        "GM Toolkit"
+      ]
+    }
+  }
+}

@@ -1,0 +1,66 @@
+{
+  "_note": "P0-2 engine-dehardcode: combat_mode_policy migrates trpg-combat's legacy infer_combat_mode_from_intent for brp_orc (was: ruleset_id.contains(\"brp\") -> horror_encounter). The first rule preserves the legacy cross-ruleset (disable_device + 'anomaly' evidence) -> anomaly_encounter clause checked before any ruleset branch; otherwise fallback horror_encounter. Pure data, no per-ruleset Rust.",
+  "combat_mode_policy": {
+    "rules": [
+      {
+        "mode": "anomaly_encounter",
+        "when_action_kinds": [
+          "disable_device"
+        ],
+        "when_evidence_contains": [
+          "anomaly"
+        ]
+      }
+    ],
+    "fallback_mode": "horror_encounter"
+  },
+  "_note_p0_2_referee_bands": "P0-2 T3: referee_value_bands replicates legacy contains('brp') branches. brp_orc hits the 'contains(\"brp\")' branch in all five old functions.",
+  "referee_value_bands": {
+    "damage_family": "brp_percentile_weapon_damage",
+    "damage_band": "weapon-specific dice such as 1d3..2d10+db; exact weapon table required",
+    "damage_plausible_range": [
+      1,
+      30
+    ],
+    "difficulty_band": {
+      "common_target_band": "1..100",
+      "note": "usually roll-under ability value or hard/extreme derivation, not arbitrary DC"
+    },
+    "difficulty_plausible_range": [
+      1,
+      100
+    ]
+  },
+  "_note_p0_2_search_profile": "P0-2 T5: search_profile replicates ruleset_aliases_for for brp_orc. The id 'brp_orc' matches contains('brp') so it hit the same branch as CoC in the legacy code (brp||cthulhu||coc). Same sections and aliases as call_of_cthulhu_7e search_profile.",
+  "search_profile": {
+    "preferred_sections_by_skill": {
+      "*": [
+        "Ability",
+        "Skills",
+        "Combat",
+        "Weapons",
+        "Damage",
+        "Sanity",
+        "Spells",
+        "Tomes",
+        "Artifacts",
+        "Keeper Rulebook"
+      ]
+    },
+    "field_aliases_by_skill": {
+      "*": {
+        "resource": [
+          "HP",
+          "SAN",
+          "sanity",
+          "major wound"
+        ],
+        "threshold": [
+          "regular",
+          "hard",
+          "extreme"
+        ]
+      }
+    }
+  }
+}

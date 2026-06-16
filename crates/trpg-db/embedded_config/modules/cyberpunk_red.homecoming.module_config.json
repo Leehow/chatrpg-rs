@@ -1,0 +1,148 @@
+{
+  "_note": "P0-2 engine-dehardcode: module-level engine config for the Cyberpunk RED Homecoming one-shot. Migrates trpg-combat's hardcoded npc.scav_boss / npc.athena_drone literals (target_actor_for_combat_input) and the inferred_homecoming_tech_dv 14/12 table into data. trpg-db load_module_config reads this by module_id. matcher entries are case-insensitive substrings; the first binding/row that hits wins (same order as the legacy if/else-if chain). The legacy scav_boss compound condition (scav AND (老大|leader)) is approximated as the integral matchers 'scav 老大' / 'scav leader' (single-keyword table cannot express AND); the four independent scav_boss keywords are exact. The 'director' block (P0-2 T4) migrates trpg-director's deleted is_homecoming() hardcode (scene facts / pressure / affordances / risk / biased NPC advice / open question / no-location place summary), copied verbatim from the original Rust so the Homecoming run is byte-equivalent. module_search_profile (P0-2 T5) migrates module_preferences_for contains('homecoming') logic. DONE_WITH_CONCERNS: a future module-reader pass should auto-extract these from parsed scene ScenarioNode data and retire this override block. Pure data, no per-ruleset/module Rust.",
+  "npc_actor_bindings": [
+    {
+      "matcher": [
+        "scav_boss",
+        "boss",
+        "shotgun",
+        "霰弹",
+        "头目",
+        "首领",
+        "scav 老大",
+        "scav leader"
+      ],
+      "actor_id": "npc.scav_boss",
+      "display_name": "shotgun boss"
+    },
+    {
+      "matcher": [
+        "drone",
+        "无人机",
+        "athena",
+        "雅典娜"
+      ],
+      "actor_id": "npc.athena_drone",
+      "display_name": "rogue drone"
+    }
+  ],
+  "technical_option_table": [
+    {
+      "matcher": [
+        "basic tech",
+        "cut off",
+        "power",
+        "cable",
+        "线缆",
+        "切断",
+        "供电"
+      ],
+      "dv": 14
+    },
+    {
+      "matcher": [
+        "hack",
+        "interface",
+        "net",
+        "server",
+        "athena",
+        "黑入",
+        "服务器",
+        "无人机"
+      ],
+      "dv": 12
+    }
+  ],
+  "module_search_profile": {
+    "preferred_sections_by_skill": {
+      "*": [
+        "Redesigned NPC cards",
+        "Items NPCs tech",
+        "Athena's Behavior",
+        "Hacking Athena",
+        "Scavv's Warehouse",
+        "Resources",
+        "vehicle cards"
+      ]
+    }
+  },
+  "director": {
+    "scene_facts": [
+      {
+        "text": "无人机、警察、仓库入口、外露电缆和内部服务器噪音形成同一个局势面：威胁、救援、技术源头和情报价值同时存在。",
+        "source": "module_override.homecoming"
+      }
+    ],
+    "pressure_items": [
+      {
+        "text": "如果继续拖延，现场伤员、外部势力和设备过载都会推进局势。",
+        "clock_id": "clock.homecoming_scene_pressure",
+        "severity": 70,
+        "consequence_hint": "警察伤势恶化、敌对势力抵达、仓库内源头转移或过载"
+      }
+    ],
+    "affordance_items": [
+      {
+        "description": "外露电缆是可观察的交互抓手；它暗示供能、数据或控制关系。",
+        "implies_vectors": [
+          "technical",
+          "tactical",
+          "observe"
+        ]
+      },
+      {
+        "description": "受困警察和封锁街口是救援、社交和现场资源的抓手。",
+        "implies_vectors": [
+          "social",
+          "resource",
+          "tactical"
+        ]
+      },
+      {
+        "description": "仓库内部的噪音与外部威胁同步，说明源头可能不在无人机本体。",
+        "implies_vectors": [
+          "observe",
+          "technical",
+          "stealth"
+        ]
+      }
+    ],
+    "risk_items": [
+      {
+        "text": "直接摧毁威胁最简单，但可能损失情报、报酬或后续线索。",
+        "related_vectors": [
+          "tactical"
+        ],
+        "severity": 60
+      }
+    ],
+    "npc_advice": [
+      {
+        "npc_id": "injured_lawman",
+        "speaker_label": "受伤警察",
+        "advice_text": "别靠近它，把火力压住！",
+        "bias_or_goal": "想活下来，优先压制威胁，不关心情报价值。",
+        "not_official_solution": true
+      },
+      {
+        "npc_id": "fixer_contact",
+        "speaker_label": "你的联系人",
+        "advice_text": "别把值钱的情报打烂，查清它从哪来的。",
+        "bias_or_goal": "想要可出售的信息或技术，低估现场救援压力。",
+        "not_official_solution": true
+      }
+    ],
+    "known_facts": [
+      "现场至少不是单一战斗问题：它同时是救援、威胁控制、源头调查和资源取舍。"
+    ],
+    "open_question": "你们优先救人、控制威胁、追查源头、获取资源，还是撤离保命？",
+    "open_question_points_to": [
+      "rescue",
+      "control",
+      "source",
+      "loot",
+      "retreat"
+    ],
+    "place_summary_fallback": "当前地点：Cyberpunk RED Homecoming 开场附近；一个高压现场正在等待玩家选择目标。"
+  }
+}

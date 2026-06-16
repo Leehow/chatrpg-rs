@@ -1,0 +1,93 @@
+{
+  "profile_id": "triangle_agency.anomaly_encounter.v1_3",
+  "ruleset_id": "triangle_agency",
+  "applies_to_modes": [
+    "anomaly_encounter",
+    "social_conflict"
+  ],
+  "default_mode": "anomaly_encounter",
+  "low_confidence_frame_start": true,
+  "investigate_opens_frame": true,
+  "initiative": {
+    "kind": "fiction_first_or_gm_directed"
+  },
+  "action_economy": {
+    "turn_slots": [
+      {
+        "slot_id": "agent_action",
+        "count": 1,
+        "flexible": true
+      }
+    ],
+    "core_roll": {
+      "expression": "6d4",
+      "success_condition": "at_least_one_die_equals_3",
+      "chaos_gain": "count_non_3"
+    }
+  },
+  "reaction_windows": [],
+  "search_recipes": [
+    {
+      "query": "Using Four-sided Dice Chaos Harm Conflict Resolution Anomaly Retrieval Missions Encounter Aftermath"
+    }
+  ],
+  "frame_retention_policy": {
+    "keep_event_log": true,
+    "compact_on_completion": true,
+    "keep_last_events": 8,
+    "promote_facts_with_importance_at_least": 65
+  },
+  "frame_compaction_policy": {
+    "summary_target": "Preserve mission outcome, anomaly captured/escaped, Harm, Chaos/Loose Ends, requisitions, rewards, Agency/NPC consequences. Discard investigation minutiae after mission report.",
+    "preserve_world_patches": true,
+    "preserve_npc_impacts": true,
+    "preserve_player_costs": true,
+    "preserve_open_hooks": true
+  },
+  "frame_exit_policy": {
+    "state_exits": [
+      "anomaly_captured",
+      "anomaly_escaped",
+      "mission_aftermath",
+      "agent_retreat"
+    ],
+    "allow_disengage": true,
+    "allow_deescalation": true,
+    "stalemate_after_non_decisive_turns": 3,
+    "semantic_router_required": true
+  },
+  "stalemate_policy": {
+    "max_repeated_action_count": 2,
+    "max_turns_without_decisive_change": 3,
+    "open_direction_gate": true,
+    "do_not_repeat_same_npc_tactic": true
+  },
+  "npc_drive_policy": {
+    "default_morale": 55,
+    "default_patience": 40,
+    "max_repeat_same_tactic": 2,
+    "break_actions": [
+      "flee",
+      "surrender",
+      "negotiate",
+      "change_tactic",
+      "call_backup"
+    ],
+    "anomaly_impulse_can_shift_tactic": true
+  },
+  "novelty_policy": {
+    "max_repeat_same_npc_tactic": 1,
+    "tactic_cooldown_after_use": 1,
+    "force_tactic_shift_on_repeated_player_action": true,
+    "fresh_change_required_each_turn": true,
+    "allowed_fresh_changes": [
+      "npc_tactic_shift",
+      "clock_tick",
+      "resource_cost",
+      "position_change",
+      "objective_progress",
+      "threat_revealed",
+      "new_pressure"
+    ]
+  }
+}

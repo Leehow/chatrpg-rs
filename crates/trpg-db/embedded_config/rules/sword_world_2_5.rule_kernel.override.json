@@ -1,0 +1,68 @@
+{
+  "_note": "P0-2 engine-dehardcode: combat_mode_policy migrates trpg-combat's legacy infer_combat_mode_from_intent for sword_world_2_5 (was: no ruleset branch matched -> theater_of_mind). fallback theater_of_mind == the legacy default. The first rule preserves the legacy cross-ruleset (disable_device + 'anomaly' evidence) -> anomaly_encounter clause checked before any ruleset branch. Pure data, no per-ruleset Rust.",
+  "combat_mode_policy": {
+    "rules": [
+      {
+        "mode": "anomaly_encounter",
+        "when_action_kinds": [
+          "disable_device"
+        ],
+        "when_evidence_contains": [
+          "anomaly"
+        ]
+      }
+    ],
+    "fallback_mode": "theater_of_mind"
+  },
+  "_note_p0_2_referee_bands": "P0-2 T3: mixed latent behavior. sword_world_2_5 matched contains('sword_world') in damage_family and damage_band, but the damage_plausible, difficulty_band and difficulty_plausible functions had no sword_world branch -> generic else fallback. Replicated exactly.",
+  "referee_value_bands": {
+    "damage_family": "sword_world_weapon_spell_damage",
+    "damage_band": "damage is usually table/formula driven; exact weapon/spell data required",
+    "damage_plausible_range": [
+      1,
+      30
+    ],
+    "difficulty_band": {
+      "common_target_band": "ruleset-specific"
+    },
+    "difficulty_plausible_range": [
+      1,
+      100
+    ]
+  },
+  "_note_p0_2_search_profile": "P0-2 T5: search_profile replicates ruleset_aliases_for contains('sword')||contains('sw2') logic. Legacy set preferred_sections to the same list for ALL skills; here broken into per-skill subsets. field_aliases replicate the two legacy overrides: defense->evasion/resistance and damage->power table.",
+  "search_profile": {
+    "preferred_sections_by_skill": {
+      "*": [
+        "Skill Checks",
+        "Contested Checks",
+        "Combat Rules",
+        "Combat Flow",
+        "Weapon Attacks",
+        "Damage",
+        "Magic Rules",
+        "Spell Damage",
+        "Standard Combat",
+        "Item Data",
+        "Comprehensive List of Weapons",
+        "Comprehensive List of Armor",
+        "Combat Feats Data"
+      ]
+    },
+    "field_aliases_by_skill": {
+      "*": {
+        "defense": [
+          "evasion",
+          "resistance",
+          "defense",
+          "protection"
+        ],
+        "damage": [
+          "damage",
+          "power table",
+          "威力表"
+        ]
+      }
+    }
+  }
+}

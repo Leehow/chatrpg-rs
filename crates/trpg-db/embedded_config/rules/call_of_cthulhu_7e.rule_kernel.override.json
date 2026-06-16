@@ -1,0 +1,141 @@
+{
+  "_note_p0_2": "P0-2 engine-dehardcode: combat_mode_policy migrates trpg-combat's legacy infer_combat_mode_from_intent for call_of_cthulhu_7e. EQUIVALENCE NOTE: the legacy code matched ruleset_id.contains(\"coc\") — FALSE for the canonical id 'call_of_cthulhu_7e' — so CoC actually fell through to theater_of_mind (the coc7e->horror_encounter mapping only ever applied to the test/advice id 'coc7e'). This override replicates that exact behavior (fallback theater_of_mind). The first rule preserves the legacy cross-ruleset (disable_device + 'anomaly' evidence) -> anomaly_encounter clause. Pure data, no per-ruleset Rust.",
+  "combat_mode_policy": {
+    "rules": [
+      {
+        "mode": "anomaly_encounter",
+        "when_action_kinds": [
+          "disable_device"
+        ],
+        "when_evidence_contains": [
+          "anomaly"
+        ]
+      }
+    ],
+    "fallback_mode": "theater_of_mind"
+  },
+  "_note_p0_2_referee_bands": "P0-2 T3: referee_value_bands replicates LATENT behavior exactly. The legacy code used ruleset_id.contains('coc') — FALSE for the canonical id 'call_of_cthulhu_7e' — so CoC fell through to the generic/else branch in all five functions. These values are identical to GENERIC_REFEREE_BANDS. Equivalence iron law: do not 'fix' to BRP-percentile values here.",
+  "referee_value_bands": {
+    "damage_family": "generic_trpg_damage",
+    "damage_band": "system-specific; exact object/ability entry required",
+    "damage_plausible_range": [
+      1,
+      30
+    ],
+    "difficulty_band": {
+      "common_target_band": "ruleset-specific"
+    },
+    "difficulty_plausible_range": [
+      1,
+      100
+    ]
+  },
+  "_note_p0_2_search_profile": "P0-2 T5: search_profile replicates ruleset_aliases_for for call_of_cthulhu_7e. The canonical id 'call_of_cthulhu_7e' DOES contain 'cthulhu' so it matched the legacy contains('brp')||contains('cthulhu')||contains('coc') branch. The legacy set a single preferred_sections array for ALL skills; here broken into per-skill subsets. field_aliases replicate the two legacy overrides: resource->HP/SAN and threshold->regular/hard/extreme.",
+  "search_profile": {
+    "preferred_sections_by_skill": {
+      "*": [
+        "Ability",
+        "Skills",
+        "Combat",
+        "Weapons",
+        "Damage",
+        "Sanity",
+        "Spells",
+        "Tomes",
+        "Artifacts",
+        "Keeper Rulebook"
+      ]
+    },
+    "field_aliases_by_skill": {
+      "*": {
+        "resource": [
+          "HP",
+          "SAN",
+          "sanity",
+          "major wound"
+        ],
+        "threshold": [
+          "regular",
+          "hard",
+          "extreme"
+        ]
+      }
+    }
+  },
+  "_note": "Read-time kernel override applied by trpg-db load_rule_kernel (override wins). Heals the CoC 7e success_bands when the LLM reader under-extracts on a re-parse (missing `critical`/`failure` bands, malformed fumble guard). dice_core keys are shallow-merged; success_bands is replaced wholesale. Same canonical set as the DB fix _fix_coc_success_bands.sql and the unit test coc_tiers_skill75. Pure data, no per-ruleset Rust.",
+  "dice_core": {
+    "success_bands": [
+      {
+        "id": "critical",
+        "label": "Critical Success",
+        "rank": 5,
+        "test": {
+          "kind": "exact",
+          "value": 1
+        }
+      },
+      {
+        "id": "extreme",
+        "label": "Extreme Success",
+        "rank": 4,
+        "test": {
+          "kind": "roll_under_fraction",
+          "numerator": 1,
+          "denominator": 5
+        }
+      },
+      {
+        "id": "hard",
+        "label": "Hard Success",
+        "rank": 3,
+        "test": {
+          "kind": "roll_under_fraction",
+          "numerator": 1,
+          "denominator": 2
+        }
+      },
+      {
+        "id": "regular",
+        "label": "Success",
+        "rank": 2,
+        "test": {
+          "kind": "roll_under_or_equal"
+        }
+      },
+      {
+        "id": "fumble",
+        "label": "Fumble",
+        "rank": 0,
+        "test": {
+          "kind": "in_range",
+          "min": 96,
+          "max": 100,
+          "when": {
+            "target_lt": 50
+          }
+        }
+      },
+      {
+        "id": "fumble",
+        "label": "Fumble",
+        "rank": 0,
+        "test": {
+          "kind": "in_range",
+          "min": 100,
+          "max": 100,
+          "when": {
+            "target_gte": 50
+          }
+        }
+      },
+      {
+        "id": "failure",
+        "label": "Failure",
+        "rank": 1,
+        "test": {
+          "kind": "otherwise"
+        }
+      }
+    ]
+  }
+}

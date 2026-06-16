@@ -1,0 +1,16 @@
+{
+  "_note": "P0-2 T5: module_search_profile for Masks of Nyarlathotep (CoC campaign module). Migrates module_preferences_for contains('masks')||contains('nyarlathotep') logic. The legacy code added the same sections for ALL skills; here broken into per-skill subsets. module_id: call_of_cthulhu_7e.masks_of_nyarlathotep (placeholder — actual module_id must match what the session/parser assigns). Pure data, no per-ruleset/module Rust.",
+  "module_search_profile": {
+    "preferred_sections_by_skill": {
+      "*": [
+        "Key Non-Player Characters",
+        "Timeline",
+        "Spells",
+        "Tomes",
+        "Artifacts",
+        "Travel",
+        "Dramatis Personae"
+      ]
+    }
+  }
+}

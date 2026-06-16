@@ -1,0 +1,107 @@
+{
+  "_note_p0_2": "P0-2 engine-dehardcode: these strategy policy keys migrate trpg-combat's per-ruleset Rust branches into data (trpg-db load_rule_kernel layers them, override wins wholesale). combat_mode_policy replicates the legacy infer_combat_mode_from_intent for cyberpunk_red EXACTLY: the cross-ruleset (disable_device + 'anomaly' evidence)->anomaly_encounter clause is checked first, then hack/disable_device->netrun, else fallback firefight. check_label_policy replicates the legacy contains('cyberpunk') hack/disable_device TECH label and grab/disarm DEX+Brawling label (trpg-object). dice_qualification replicates the legacy cyberpunk-only bare '1d10'->'1d10+0' degrade ('{dice}+0' template). search_profile replicates ruleset_aliases_for contains('cyberpunk') preferred_sections and field_aliases per SearchSkillKind. No per-ruleset Rust remains.",
+  "combat_mode_policy": {
+    "rules": [
+      {
+        "mode": "anomaly_encounter",
+        "when_action_kinds": [
+          "disable_device"
+        ],
+        "when_evidence_contains": [
+          "anomaly"
+        ]
+      },
+      {
+        "mode": "netrun",
+        "when_action_kinds": [
+          "hack",
+          "disable_device"
+        ],
+        "when_evidence_contains": []
+      }
+    ],
+    "fallback_mode": "firefight"
+  },
+  "check_label_policy": {
+    "labels": {
+      "hack": "appropriate TECH / Interface / Basic Tech check",
+      "disable_device": "appropriate TECH / Interface / Basic Tech check",
+      "object.grab_disarm": "DEX + Brawling contested grab/disarm check"
+    }
+  },
+  "dice_qualification": {
+    "bare_dice_template": "{dice}+0"
+  },
+  "_note_p0_2_search_profile": "P0-2 T5: search_profile replicates ruleset_aliases_for contains('cyberpunk') logic. Legacy set preferred_sections to the same list for ALL skills; here broken into per-skill subsets (equivalence: every section in the legacy array appears under at least one skill key; skills not listed fall back to generic base). field_aliases replicate the two legacy overrides: target_number->DV and armor->SP.",
+  "search_profile": {
+    "preferred_sections_by_skill": {
+      "*": [
+        "Getting it Done",
+        "Resolving Actions with Skills",
+        "Weapons and Armor",
+        "Friday Night Firefight",
+        "Ranged Combat",
+        "Melee Combat",
+        "Before You Take Damage",
+        "When Armor Doesn't Cut It",
+        "Role Abilities"
+      ]
+    },
+    "field_aliases_by_skill": {
+      "*": {
+        "target_number": [
+          "DV",
+          "range DV",
+          "difficulty value"
+        ],
+        "armor": [
+          "SP",
+          "armor",
+          "ablation"
+        ]
+      }
+    }
+  },
+  "_note": "Read-time kernel override applied by trpg-db load_rule_kernel (merge by track id, new ids appended; override wins). Heals a pass-one reader under-extraction (same hazard as triangle_agency commendations/demerits): the reader captured hp/wound_state but omitted the two runtime pools the GM operates during play. luck (core p170-ish, 'Beat The Reaper'): the LUCK Pool holds points equal to the LUCK STAT and refills at the beginning of each game session; BEFORE rolling, the player spends any portion 1-for-1 to add +1 per point to a Skill/Stat Check; never on Believability Checks. Pool size is the per-character LUCK STAT, so 'initial'/'max' are OMITTED on purpose (fail-closed; seeds from sheet_json.resources.luck where chargen emits it, else GM set). humanity (p81/p229): starts at EMP x10; lost mainly through cyberware installation (per-item Humanity Loss rolls) and trauma (1D6 traumatic event, 2D6 long-term stress); EMP = current Humanity / 10 rounded down — every drop of the tens place lowers EMP; recovered only via therapy (standard 2D6, extreme 4D6); at EMP 0 cyberpsychosis, and with NEGATIVE Humanity extreme cyberpsychosis (character becomes an NPC under GM control until Humanity is positive again). Improvement Points and Reputation are intentionally NOT kernel tracks: IP is advancement bookkeeping in the character-growth track layer (sheet_json.tracks), REP is an accrue-only social level compared in Facedowns, never spent. NO on_outcome on either track on purpose: spends/losses are GM adjudication (cyberware items, therapy, session reset), not a check-outcome field — an invented '=field' ref would be a dead rule the finalize guard drops. Pure data, no per-ruleset Rust.",
+  "resource_tracks": [
+    {
+      "id": "luck",
+      "name": "Luck",
+      "kind": "points",
+      "owner_kind": "actor",
+      "notes": "Runtime spend pool. Holds LUCK Points equal to the character's LUCK Statistic; refills to full at the beginning of each game session. Before rolling a Check, spend any number of remaining points to add +1 per point to that roll. Can never be spent on a Believability Check."
+    },
+    {
+      "id": "humanity",
+      "name": "Humanity",
+      "kind": "points",
+      "owner_kind": "actor",
+      "zero_means": "cyberpsychosis; with negative Humanity the character becomes an NPC under GM control",
+      "thresholds": [
+        {
+          "at": 0,
+          "direction": "at_or_below",
+          "consequence": "EMP 0: cyberpsychosis; negative Humanity: extreme cyberpsychosis — character is handed to the GM as an NPC until Humanity is positive again"
+        }
+      ],
+      "notes": "Starts at EMP x10 (seeded from the character's derived sheet resources). Lost mainly through installing cyberware (per-item Humanity Loss) and through trauma (1D6 traumatic physical/mental incident, 2D6 long-term stress). Current EMP = Humanity / 10 rounded down: each drop of the tens place lowers EMP. Recovered only through therapy: standard 2D6 (DV15, 500eb), extreme 4D6 (DV17, 1000eb)."
+    }
+  ],
+  "_note_p0_2_referee_bands": "P0-2 T3: referee_value_bands replicates legacy contains('cyberpunk') branches exactly. damage_plausible_range (1,12) from old '(1..=12)'; difficulty_plausible_range (5,35) from old '(5..=35)'.",
+  "referee_value_bands": {
+    "damage_family": "cyberpunk_red_weapon_damage",
+    "damage_band": "roughly 2d6..8d6 depending weapon class; exact weapon table required",
+    "damage_plausible_range": [
+      1,
+      12
+    ],
+    "difficulty_band": {
+      "common_dv_band": "9..29",
+      "note": "DV should come from range/task table or GM adjudication"
+    },
+    "difficulty_plausible_range": [
+      5,
+      35
+    ]
+  }
+}

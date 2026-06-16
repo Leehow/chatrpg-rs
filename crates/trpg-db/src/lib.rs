@@ -4066,8 +4066,29 @@ fn read_kernel_override_file(ruleset_id: &str) -> Option<serde_json::Value> {
     let safe: String = ruleset_id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).collect();
     let dir = std::env::var("TRPG_DATA_DIR").unwrap_or_else(|_| "data".into());
     let p = std::path::Path::new(&dir).join("parsed").join("rules").join(format!("{safe}.rule_kernel.override.json"));
-    let text = std::fs::read_to_string(&p).ok()?;
-    serde_json::from_str(&text).ok()
+    // Local data/ file wins (unchanged path). When it is absent/unreadable, fall
+    // back to the binary-embedded copy so a clean checkout (no data/) reproduces
+    // the migrated values byte-for-byte.
+    if let Ok(text) = std::fs::read_to_string(&p) {
+        return serde_json::from_str(&text).ok();
+    }
+    let embedded = embedded_kernel_override(ruleset_id)?;
+    serde_json::from_str(embedded).ok()
+}
+
+/// P0-2: binary-embedded kernel overrides (clean-checkout fallback). The 6
+/// canonical rulesets are matched by exact id; every arm is an `include_str!`
+/// of the git-tracked `embedded_config/rules/` copy (byte-identical to data/).
+fn embedded_kernel_override(ruleset_id: &str) -> Option<&'static str> {
+    Some(match ruleset_id {
+        "brp_orc" => include_str!("../embedded_config/rules/brp_orc.rule_kernel.override.json"),
+        "call_of_cthulhu_7e" => include_str!("../embedded_config/rules/call_of_cthulhu_7e.rule_kernel.override.json"),
+        "cyberpunk_red" => include_str!("../embedded_config/rules/cyberpunk_red.rule_kernel.override.json"),
+        "dnd5e" => include_str!("../embedded_config/rules/dnd5e.rule_kernel.override.json"),
+        "sword_world_2_5" => include_str!("../embedded_config/rules/sword_world_2_5.rule_kernel.override.json"),
+        "triangle_agency" => include_str!("../embedded_config/rules/triangle_agency.rule_kernel.override.json"),
+        _ => return None,
+    })
 }
 
 /// P0-2: layer the typed strategy policy keys from a kernel override doc onto the
@@ -4102,8 +4123,24 @@ fn read_module_config_file(module_id: &str) -> Option<ModuleConfig> {
     let safe: String = module_id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' { c } else { '_' }).collect();
     let dir = std::env::var("TRPG_DATA_DIR").unwrap_or_else(|_| "data".into());
     let p = std::path::Path::new(&dir).join("modules").join(format!("{safe}.module_config.json"));
-    let text = std::fs::read_to_string(&p).ok()?;
-    serde_json::from_str(&text).ok()
+    // Local data/ file wins; else the binary-embedded copy (clean-checkout).
+    if let Ok(text) = std::fs::read_to_string(&p) {
+        return serde_json::from_str(&text).ok();
+    }
+    let embedded = embedded_module_config(module_id)?;
+    serde_json::from_str(embedded).ok()
+}
+
+/// P0-2: binary-embedded module configs (clean-checkout fallback). The 3
+/// shipped modules matched by exact id via `include_str!` of the git-tracked
+/// `embedded_config/modules/` copy (byte-identical to data/).
+fn embedded_module_config(module_id: &str) -> Option<&'static str> {
+    Some(match module_id {
+        "call_of_cthulhu_7e.masks_of_nyarlathotep" => include_str!("../embedded_config/modules/call_of_cthulhu_7e.masks_of_nyarlathotep.module_config.json"),
+        "cyberpunk_red.homecoming" => include_str!("../embedded_config/modules/cyberpunk_red.homecoming.module_config.json"),
+        "triangle_agency.the_vault" => include_str!("../embedded_config/modules/triangle_agency.the_vault.module_config.json"),
+        _ => return None,
+    })
 }
 
 /// Shallow-merge an override `dice_core` object onto the base (override keys win).
@@ -4205,6 +4242,10 @@ mod kernel_strategy_override_tests {
     use serde_json::json;
     use trpg_model::{CombatMode, RuleKernel};
 
+    /// Serializes the env-var (`TRPG_DATA_DIR`) mutating tests in this module so
+    /// the parallel test runner does not interleave their set_var/remove_var.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// P0-2: the new strategy policy keys layer onto the kernel; missing keys
     /// leave the field None (→ engine uses GENERIC_*).
     #[test]
@@ -4237,6 +4278,7 @@ mod kernel_strategy_override_tests {
     /// VALUES are well-formed for the equivalence gate).
     #[test]
     fn shipped_override_files_deserialize() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::var("TRPG_DATA_DIR").unwrap_or_else(|_| "../../data".to_string());
         if !std::path::Path::new(&dir).join("parsed/rules").exists() {
             eprintln!("SKIP: data dir absent");
@@ -4262,5 +4304,62 @@ mod kernel_strategy_override_tests {
         assert!(cfg.npc_actor_bindings.iter().any(|b| b.actor_id == "npc.athena_drone"));
         let dvs: Vec<i32> = cfg.technical_option_table.unwrap().iter().map(|t| t.dv).collect();
         assert_eq!(dvs, vec![14, 12]);
+    }
+
+    /// P0-2 clean-checkout equivalence: point TRPG_DATA_DIR at a FRESH EMPTY dir
+    /// (so no override/module files exist on disk) and prove the binary-embedded
+    /// copies reproduce the migrated values. read_*_file read the env at call
+    /// time, so a temp dir forces the embedded fallback branch.
+    #[test]
+    fn embedded_config_reproduces_values_without_data_dir() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("TRPG_DATA_DIR").ok();
+        let tmp = std::env::temp_dir().join(format!("trpg_embed_test_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).expect("mk empty temp data dir");
+        // restore-on-drop guard so a panic mid-test doesn't poison other tests.
+        struct Restore(Option<String>, std::path::PathBuf);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                // SAFETY (test): env restore under ENV_LOCK (single active test).
+                unsafe {
+                    match &self.0 {
+                        Some(v) => std::env::set_var("TRPG_DATA_DIR", v),
+                        None => std::env::remove_var("TRPG_DATA_DIR"),
+                    }
+                }
+                let _ = std::fs::remove_dir_all(&self.1);
+            }
+        }
+        let _restore = Restore(prev, tmp.clone());
+        // SAFETY (test): env set under ENV_LOCK.
+        unsafe { std::env::set_var("TRPG_DATA_DIR", &tmp); }
+
+        // sanity: the empty dir really has no override/module files.
+        assert!(!tmp.join("parsed/rules").exists(), "temp data dir must be empty");
+
+        // cyberpunk override comes from the embedded copy: search_profile +
+        // check_label_policy present, combat_mode_policy firefight fallback.
+        let mut k = RuleKernel::default();
+        let doc = super::read_kernel_override_file("cyberpunk_red")
+            .expect("cyberpunk override via embedded fallback");
+        assert!(doc.get("search_profile").is_some(), "embedded override carries search_profile");
+        assert!(doc.get("check_label_policy").is_some(), "embedded override carries check_label_policy");
+        apply_kernel_strategy_overrides(&mut k, &doc);
+        assert_eq!(k.combat_mode_policy.expect("combat_mode_policy").fallback_mode, CombatMode::Firefight);
+
+        // triangle override also resolves from embedded.
+        assert!(super::read_kernel_override_file("triangle_agency").is_some(),
+            "triangle override via embedded fallback");
+
+        // module config from embedded: director + scav_boss/athena_drone bindings.
+        let cfg = read_module_config_file("cyberpunk_red.homecoming")
+            .expect("homecoming module_config via embedded fallback");
+        assert!(cfg.npc_actor_bindings.iter().any(|b| b.actor_id == "npc.scav_boss"));
+        assert!(cfg.npc_actor_bindings.iter().any(|b| b.actor_id == "npc.athena_drone"));
+
+        // direct helper-fn check (no env / no Db needed).
+        assert!(super::embedded_module_config("cyberpunk_red.homecoming").is_some());
+        assert!(super::embedded_kernel_override("triangle_agency").is_some());
+        assert!(super::embedded_kernel_override("not_a_ruleset").is_none());
     }
 }

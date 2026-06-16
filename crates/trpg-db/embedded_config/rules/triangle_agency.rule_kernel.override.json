@@ -1,0 +1,62 @@
+{
+  "_note": "P0-2 engine-dehardcode: combat_mode_policy migrates trpg-combat's legacy infer_combat_mode_from_intent for triangle_agency (was: ruleset_id.contains(\"triangle\") -> anomaly_encounter, always). fallback anomaly_encounter covers the unconditional triangle branch; the explicit disable_device+anomaly rule is documentary (same result). Pure data, no per-ruleset Rust.",
+  "combat_mode_policy": {
+    "rules": [
+      {
+        "mode": "anomaly_encounter",
+        "when_action_kinds": [
+          "disable_device"
+        ],
+        "when_evidence_contains": [
+          "anomaly"
+        ]
+      }
+    ],
+    "fallback_mode": "anomaly_encounter"
+  },
+  "_note_p0_2_referee_bands": "P0-2 T3: legacy referee functions had no triangle branch -> all five fell to generic/else. Values == GENERIC_REFEREE_BANDS.",
+  "referee_value_bands": {
+    "damage_family": "generic_trpg_damage",
+    "damage_band": "system-specific; exact object/ability entry required",
+    "damage_plausible_range": [
+      1,
+      30
+    ],
+    "difficulty_band": {
+      "common_target_band": "ruleset-specific"
+    },
+    "difficulty_plausible_range": [
+      1,
+      100
+    ]
+  },
+  "_note_p0_2_search_profile": "P0-2 T5: search_profile replicates ruleset_aliases_for contains('triangle') logic. Legacy set a single preferred_sections array for ALL skills; here broken into per-skill subsets. field_aliases replicate the two legacy overrides: resource->Harm/Chaos/Stress and visibility->playwalled/Agency property.",
+  "search_profile": {
+    "preferred_sections_by_skill": {
+      "*": [
+        "Field Agent Manual",
+        "GM Toolkit",
+        "Playwalled Documents",
+        "Mission",
+        "Encounter",
+        "Aftermath",
+        "Anomaly"
+      ]
+    },
+    "field_aliases_by_skill": {
+      "*": {
+        "resource": [
+          "Harm",
+          "Chaos",
+          "Stress"
+        ],
+        "visibility": [
+          "playwalled",
+          "Agency property",
+          "numberless pages",
+          "permission"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,112 @@
+{
+  "profile_id": "sword_world_2_5.combat.v1_3",
+  "ruleset_id": "sword_world_2_5",
+  "applies_to_modes": [
+    "tactical_combat",
+    "theater_of_mind"
+  ],
+  "default_mode": "tactical_combat",
+  "initiative": {
+    "kind": "ruleset_packet_lookup",
+    "source_locator": "Combat Flow / Standard Combat Progression"
+  },
+  "action_economy": {
+    "turn_slots": [
+      {
+        "slot_id": "major_action",
+        "count": 1
+      },
+      {
+        "slot_id": "minor_action",
+        "count": "many within rules"
+      }
+    ],
+    "notes": "Supports simplified and standard combat through loaded rule packets."
+  },
+  "reaction_windows": [
+    {
+      "advice_id": "sword_world_2_5.visible_attack_defense.v1",
+      "gate_kind": "required_reaction_choice",
+      "required": true,
+      "prompt_public": "你正受到攻击。选择防御/回避路线，或承受后果。",
+      "options": [
+        {
+          "option_id": "defend_or_evade",
+          "label": "防御 / 回避",
+          "meaning": "按当前战斗规则尝试降低或避免命中。"
+        },
+        {
+          "option_id": "take_hit",
+          "label": "承受",
+          "meaning": "不进行防御选择，进入伤害结算。"
+        }
+      ],
+      "on_unparseable": "reprompt",
+      "on_new_action": "require_explicit_choice"
+    }
+  ],
+  "search_recipes": [
+    {
+      "query": "Combat Flow Character's Turn Major and Minor Action Damage Standard Combat"
+    }
+  ],
+  "frame_retention_policy": {
+    "keep_event_log": true,
+    "compact_on_completion": true,
+    "keep_last_events": 12,
+    "promote_facts_with_importance_at_least": 70
+  },
+  "frame_compaction_policy": {
+    "summary_target": "Preserve HP/MP/status, enemy fate, item/resource consumption, loot/clues. Discard expired turn order and temporary positioning.",
+    "preserve_world_patches": true,
+    "preserve_npc_impacts": true,
+    "preserve_player_costs": true,
+    "preserve_open_hooks": true
+  },
+  "frame_exit_policy": {
+    "state_exits": [
+      "objective_completed",
+      "side_escaped",
+      "negotiated_truce",
+      "surrender_accepted",
+      "all_opponents_defeated"
+    ],
+    "allow_disengage": true,
+    "allow_deescalation": true,
+    "stalemate_after_non_decisive_turns": 3,
+    "semantic_router_required": true
+  },
+  "stalemate_policy": {
+    "max_repeated_action_count": 2,
+    "max_turns_without_decisive_change": 3,
+    "open_direction_gate": true,
+    "do_not_repeat_same_npc_tactic": true
+  },
+  "npc_drive_policy": {
+    "default_morale": 55,
+    "default_patience": 40,
+    "max_repeat_same_tactic": 2,
+    "break_actions": [
+      "flee",
+      "surrender",
+      "negotiate",
+      "change_tactic",
+      "call_backup"
+    ]
+  },
+  "novelty_policy": {
+    "max_repeat_same_npc_tactic": 1,
+    "tactic_cooldown_after_use": 1,
+    "force_tactic_shift_on_repeated_player_action": true,
+    "fresh_change_required_each_turn": true,
+    "allowed_fresh_changes": [
+      "npc_tactic_shift",
+      "clock_tick",
+      "resource_cost",
+      "position_change",
+      "objective_progress",
+      "threat_revealed",
+      "new_pressure"
+    ]
+  }
+}

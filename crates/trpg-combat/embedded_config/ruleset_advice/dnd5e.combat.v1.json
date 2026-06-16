@@ -1,0 +1,131 @@
+{
+  "profile_id": "dnd5e.tactical_combat.v1_3",
+  "ruleset_id": "dnd5e",
+  "applies_to_modes": [
+    "tactical_combat",
+    "theater_of_mind"
+  ],
+  "default_mode": "tactical_combat",
+  "initiative": {
+    "kind": "dexterity_check",
+    "group_identical_monsters": true
+  },
+  "action_economy": {
+    "turn_slots": [
+      {
+        "slot_id": "movement",
+        "count": 1
+      },
+      {
+        "slot_id": "action",
+        "count": 1
+      },
+      {
+        "slot_id": "bonus_action",
+        "count": 1,
+        "requires_feature": true
+      }
+    ],
+    "reaction_slots": [
+      {
+        "slot_id": "reaction",
+        "count": 1,
+        "refresh": "start_of_turn"
+      }
+    ]
+  },
+  "reaction_windows": [
+    {
+      "advice_id": "dnd5e.opportunity_attack.v1",
+      "trigger_keywords": [
+        "leaves reach",
+        "moves away",
+        "opportunity",
+        "离开触及范围"
+      ],
+      "gate_kind": "optional_reaction_window",
+      "required": false,
+      "prompt_public": "敌人离开你的触及范围。你可以使用 reaction 做一次机会攻击，也可以不使用。",
+      "options": [
+        {
+          "option_id": "use_reaction_attack",
+          "label": "使用 reaction 机会攻击",
+          "meaning": "消耗 reaction 进行一次攻击。"
+        },
+        {
+          "option_id": "decline",
+          "label": "不使用 reaction",
+          "meaning": "保留 reaction，让敌人离开。",
+          "is_default": true
+        }
+      ],
+      "default_if_unanswered": "decline",
+      "on_unparseable": "reprompt",
+      "on_new_action": "resolve_as_no_reaction"
+    }
+  ],
+  "search_recipes": [
+    {
+      "query": "The Order of Combat Movement and Position Actions in Combat Making an Attack Damage and Healing"
+    }
+  ],
+  "frame_retention_policy": {
+    "keep_event_log": true,
+    "compact_on_completion": true,
+    "keep_last_events": 12,
+    "promote_facts_with_importance_at_least": 70
+  },
+  "frame_compaction_policy": {
+    "summary_target": "Preserve HP/death saves, conditions, resources, spell slots if tracked, monster deaths/escape, treasure/clues. Discard initiative order and temporary positioning after combat.",
+    "preserve_world_patches": true,
+    "preserve_npc_impacts": true,
+    "preserve_player_costs": true,
+    "preserve_open_hooks": true
+  },
+  "frame_exit_policy": {
+    "state_exits": [
+      "objective_completed",
+      "side_escaped",
+      "negotiated_truce",
+      "surrender_accepted",
+      "all_opponents_defeated"
+    ],
+    "allow_disengage": true,
+    "allow_deescalation": true,
+    "stalemate_after_non_decisive_turns": 3,
+    "semantic_router_required": true
+  },
+  "stalemate_policy": {
+    "max_repeated_action_count": 2,
+    "max_turns_without_decisive_change": 3,
+    "open_direction_gate": true,
+    "do_not_repeat_same_npc_tactic": true
+  },
+  "npc_drive_policy": {
+    "default_morale": 55,
+    "default_patience": 40,
+    "max_repeat_same_tactic": 2,
+    "break_actions": [
+      "flee",
+      "surrender",
+      "negotiate",
+      "change_tactic",
+      "call_backup"
+    ]
+  },
+  "novelty_policy": {
+    "max_repeat_same_npc_tactic": 1,
+    "tactic_cooldown_after_use": 1,
+    "force_tactic_shift_on_repeated_player_action": true,
+    "fresh_change_required_each_turn": true,
+    "allowed_fresh_changes": [
+      "npc_tactic_shift",
+      "clock_tick",
+      "resource_cost",
+      "position_change",
+      "objective_progress",
+      "threat_revealed",
+      "new_pressure"
+    ]
+  }
+}
