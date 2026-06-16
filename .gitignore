@@ -4,3 +4,7 @@
 /data/rulebooks/*
 !/data/rulebooks/.gitkeep
 /data/search/
+
+# macOS 元数据（P2-3 GPT Pro：防污染 review/grep/release 包）
+.DS_Store
+._*
