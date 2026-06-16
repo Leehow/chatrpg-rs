@@ -14,6 +14,8 @@ pub mod table_dice_policy;
 pub use table_dice_policy::*;
 pub mod observability;
 pub use observability::*;
+pub mod asset;
+pub use asset::*;
 
 pub const PROJECT_SCHEMA_VERSION: &str = "chatrpg.project_bundle.v1";
 pub const RULE_SCHEMA_VERSION: &str = "chatrpg.rule_bundle.v1";

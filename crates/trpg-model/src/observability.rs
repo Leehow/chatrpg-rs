@@ -9,6 +9,7 @@
 //!
 //! 全部字段 `#[serde(default)]`，新增/缺字段向后兼容（旧/残行可加载）。
 
+use crate::asset::BindingPlan;
 use crate::SourceRef;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -102,6 +103,10 @@ pub struct TurnTrace {
     /// 收尾算出的念白 hash。
     #[serde(default)]
     pub narration_hash: Option<String>,
+    /// 本回合**影子** BindingResolver 产出的绑定计划（advisory，不改实际结算）。
+    /// 附加 serde-default 字段：旧 JSON（无该字段）反序列化为空 Vec，向后兼容。
+    #[serde(default)]
+    pub binding_trace: Vec<BindingPlan>,
 }
 
 impl TurnTrace {
@@ -175,6 +180,18 @@ mod tests {
         assert_eq!(trace.failure, None);
         assert_eq!(trace.signal, "");
         assert_eq!(trace.pp_lifecycle, "");
+        assert!(trace.binding_trace.is_empty());
+    }
+
+    #[test]
+    fn turn_trace_binding_trace_back_compat() {
+        // 附加 serde-default 字段 binding_trace：旧 JSON（无该字段）应反序列化为空 Vec，
+        // 证明这是向后兼容的附加字段（不破坏 obs 切片的 TurnTrace JSON）。
+        let json = r#"{"turn_id":"t","session_id":"s"}"#;
+        let trace: TurnTrace = serde_json::from_str(json).expect("deserialize minimal TurnTrace");
+        assert_eq!(trace.turn_id, "t");
+        assert_eq!(trace.session_id, "s");
+        assert!(trace.binding_trace.is_empty());
     }
 
     #[test]
