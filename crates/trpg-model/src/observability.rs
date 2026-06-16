@@ -10,10 +10,11 @@
 //! 全部字段 `#[serde(default)]`，新增/缺字段向后兼容（旧/残行可加载）。
 
 use crate::SourceRef;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// 单条 Need 取数的来源 trace（P1-4：source_refs 不再丢弃）。
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default, PartialEq)]
 pub struct NeedResolutionTrace {
     /// Need 类型（规则 / 材料 / 场景 / 实体 / 参数 等）。
     #[serde(default)]
@@ -174,6 +175,23 @@ mod tests {
         assert_eq!(trace.failure, None);
         assert_eq!(trace.signal, "");
         assert_eq!(trace.pp_lifecycle, "");
+    }
+
+    #[test]
+    fn compiled_context_default_need_trace_empty() {
+        // 向后兼容（P1-4）：新增 need_trace 字段在 Default 下为空、旧 JSON（无该字段）
+        // 经 #[serde(default)] 仍可加载且 need_trace 为空。
+        let ctx = crate::CompiledContext::default();
+        assert!(ctx.need_trace.is_empty());
+
+        let json = r#"{"prefix_blocks":[],"pinned_blocks":[],"dynamic_blocks":[],
+            "prefix_text":"","pinned_text":"","dynamic_text":"",
+            "prefix_hash":"","pinned_hash":"","dynamic_hash":"",
+            "visibility_signature":"","cache_key":"","token_estimate":0,
+            "block_version_ids":[]}"#;
+        let back: crate::CompiledContext =
+            serde_json::from_str(json).expect("deserialize legacy CompiledContext");
+        assert!(back.need_trace.is_empty());
     }
 
     #[test]

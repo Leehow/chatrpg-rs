@@ -5310,6 +5310,10 @@ pub struct CompiledContext {
     pub cache_key: String,
     pub token_estimate: u32,
     pub block_version_ids: Vec<String>,
+    /// P1-4：本回合 Need 取数的来源 trace（source_refs 不再丢弃）。trace 随返回的
+    /// CompiledContext 一同传递，故 prepare_turn_context 签名与两处调用方均不变。
+    #[serde(default)]
+    pub need_trace: Vec<NeedResolutionTrace>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]

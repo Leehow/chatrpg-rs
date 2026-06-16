@@ -98,6 +98,26 @@ pub async fn await_prev_turn_critical(db: &Db, session_id: &str, timeout_ms: u64
     }
 }
 
+/// P1-4：合并一次 Need 取数结果——先把来源 trace（need_kind / source_refs /
+/// block_count / reason）记进 `trace`，再把 blocks 注入 `blocks`。source_refs 此前
+/// 在 `blocks.extend(outcome.blocks)` 处被默默丢弃；这里在 extend 消费 outcome 之前
+/// 先抓取 block_count，故 outcome 按值传入、顺序正确。行为与旧 extend 等价，仅多记 trace。
+fn merge_need_outcome(
+    blocks: &mut Vec<ContextBlock>,
+    trace: &mut Vec<NeedResolutionTrace>,
+    outcome: trpg_need::NeedOutcome,
+    need_kind: &str,
+    reason: &str,
+) {
+    trace.push(NeedResolutionTrace {
+        need_kind: need_kind.into(),
+        source_refs: outcome.source_refs,
+        reason: reason.into(),
+        block_count: outcome.blocks.len(),
+    });
+    blocks.extend(outcome.blocks);
+}
+
 impl RuntimeEngine {
     pub fn new(db: Db) -> Self {
         warn_if_core_mechanics_disabled();
@@ -260,6 +280,9 @@ impl RuntimeEngine {
         }
 
         let mut blocks = self.db.list_context_blocks_for_bundles(&bundle_ids).await?;
+        // P1-4：本回合 Need 取数的来源 trace（rule / scene / parameter / material），
+        // 随返回的 CompiledContext 一同传出（见 merge_need_outcome）。
+        let mut need_trace: Vec<NeedResolutionTrace> = Vec::new();
         let material_refs: Vec<String> = state.pending_material_refs.iter()
             .chain(state.active_material_refs.iter())
             .cloned()
@@ -283,7 +306,7 @@ impl RuntimeEngine {
             // R2: query-driven RULE retrieval is acquired ONLY through the Need bus
             // (RuleNeedResolver → assist, which subsumes auto_search + learned-packet
             // matching and adds source_refs grounding).
-            match self.rule_need_blocks_for_turn(request, state, input).await {
+            match self.rule_need_blocks_for_turn(request, state, input, &mut need_trace).await {
                 Ok(mut rule_blocks) => blocks.append(&mut rule_blocks),
                 Err(err) => tracing::warn!(error = %err, "rule need bus failed; continuing without rule blocks"),
             }
@@ -317,7 +340,7 @@ impl RuntimeEngine {
             scene_bus.emit(scene_need);
             let outcomes = scene_bus.resolve_all().await;
             for outcome in outcomes {
-                blocks.extend(outcome.blocks);
+                merge_need_outcome(&mut blocks, &mut need_trace, outcome, "scene", "turn context assembly");
             }
         }
         match self.world_time_blocks_for_turn(request).await {
@@ -347,7 +370,7 @@ impl RuntimeEngine {
                 current_input: current_input.map(str::to_string),
             });
             match resolver.resolve(&need).await {
-                Ok(outcome) => blocks.extend(outcome.blocks),
+                Ok(outcome) => merge_need_outcome(&mut blocks, &mut need_trace, outcome, "parameter", "turn context assembly"),
                 Err(err) => tracing::warn!(
                     error = %err,
                     "ParameterNeedResolver failed; continuing without actor parameter blocks"
@@ -377,7 +400,7 @@ impl RuntimeEngine {
             let resolver = MaterialNeedResolver::new(self.db.clone());
             let need = Need::Material(MaterialNeed { scopes, user_input: None });
             match resolver.resolve(&need).await {
-                Ok(outcome) => blocks.extend(outcome.blocks),
+                Ok(outcome) => merge_need_outcome(&mut blocks, &mut need_trace, outcome, "material", "turn context assembly"),
                 Err(err) => tracing::warn!(
                     error = %err,
                     "MaterialNeedResolver failed; continuing without materialization blocks"
@@ -431,7 +454,9 @@ impl RuntimeEngine {
             .filter_map(|b| project_visibility(b, &request.viewer))
             .collect();
         let planned = plan_blocks(visible, state, request);
-        let compiled = ContextBuilder::default().build(planned, request)?;
+        let mut compiled = ContextBuilder::default().build(planned, request)?;
+        // P1-4：把本回合 Need 取数 trace 挂到返回的 CompiledContext（source_refs 不再丢弃）。
+        compiled.need_trace = need_trace;
         for block in compiled.prefix_blocks.iter().chain(compiled.pinned_blocks.iter()).chain(compiled.dynamic_blocks.iter()) {
             let _ = self.db.record_load_event(Some(&request.session_id), Some(&request.turn_id), block, block.load_reason.as_deref().unwrap_or("planner")).await;
         }
@@ -1370,6 +1395,7 @@ fn fail_on_missing_source_backed_parameters() -> bool {
         request: &ContextRequest,
         state: &RuntimeState,
         input: &str,
+        need_trace: &mut Vec<NeedResolutionTrace>,
     ) -> Result<Vec<ContextBlock>> {
         use crate::need_resolvers::{runtime_steward_data_dir, RuleNeedResolver};
         use trpg_need::{Need, NeedBus};
@@ -1406,7 +1432,7 @@ fn fail_on_missing_source_backed_parameters() -> bool {
         let outcomes = bus.resolve_all().await;
         let mut blocks = Vec::new();
         for outcome in outcomes {
-            blocks.extend(outcome.blocks);
+            merge_need_outcome(&mut blocks, need_trace, outcome, "rule", "turn context assembly");
         }
         Ok(blocks)
     }
@@ -1869,7 +1895,8 @@ impl ContextBuilder {
         let cache_key = format!("{}:{}:{}", &visibility_signature[..20.min(visibility_signature.len())], &prefix_hash[..20.min(prefix_hash.len())], &pinned_hash[..20.min(pinned_hash.len())]);
         let token_estimate = prefix.iter().chain(pinned.iter()).chain(dynamic.iter()).map(|b| b.token_estimate.unwrap_or(0)).sum();
         let block_version_ids = prefix.iter().chain(pinned.iter()).chain(dynamic.iter()).map(|b| format!("{}@{}", b.block_id, b.version)).collect();
-        Ok(CompiledContext { prefix_blocks: prefix, pinned_blocks: pinned, dynamic_blocks: dynamic, prefix_text, pinned_text, dynamic_text, prefix_hash, pinned_hash, dynamic_hash, visibility_signature, cache_key, token_estimate, block_version_ids })
+        // need_trace 由 prepare_turn_context 在 build 之后填入（ContextBuilder 不做 Need 取数）。
+        Ok(CompiledContext { prefix_blocks: prefix, pinned_blocks: pinned, dynamic_blocks: dynamic, prefix_text, pinned_text, dynamic_text, prefix_hash, pinned_hash, dynamic_hash, visibility_signature, cache_key, token_estimate, block_version_ids, need_trace: Vec::new() })
     }
 }
 
@@ -2578,5 +2605,60 @@ mod runtime_auto_search_gate_tests {
     fn auto_search_enabled_for_other_values() {
         let _g = AutoSearchEnvGuard::set("1");
         assert!(runtime_auto_search_enabled(), "any value other than 0/false stays enabled (matches old semantics)");
+    }
+}
+
+#[cfg(test)]
+mod merge_need_outcome_tests {
+    use super::*;
+    use context_blocks::dynamic_text_block;
+
+    fn sample_source_ref(id: &str) -> SourceRef {
+        SourceRef {
+            source_id: id.to_string(),
+            page: Some(7),
+            anchor_id: Some(format!("{id}-anchor")),
+            section_path: vec!["Chapter".to_string()],
+            char_start: Some(0),
+            char_end: Some(10),
+            text_hash: Some("sha256:x".to_string()),
+            note: None,
+        }
+    }
+
+    /// P1-4：helper 必须 (a) 把 outcome.blocks 全部 extend 进 blocks，且 (b) 记一条
+    /// trace，携带 need_kind / outcome.source_refs / block_count（=注入块数）。
+    #[test]
+    fn merge_need_outcome_records_trace_and_extends_blocks() {
+        let mut blocks: Vec<ContextBlock> = vec![dynamic_text_block(
+            "pre.existing",
+            BlockKind::RuleEntityLocator,
+            "pre",
+            "already here",
+            vec!["pre"],
+        )];
+        let mut trace: Vec<NeedResolutionTrace> = Vec::new();
+
+        let outcome = trpg_need::NeedOutcome {
+            blocks: vec![
+                dynamic_text_block("nb.1", BlockKind::RuleEntityLocator, "b1", "one", vec!["t"]),
+                dynamic_text_block("nb.2", BlockKind::RuleEntityLocator, "b2", "two", vec!["t"]),
+            ],
+            source_refs: vec![sample_source_ref("r1"), sample_source_ref("r2")],
+        };
+
+        merge_need_outcome(&mut blocks, &mut trace, outcome, "rule", "turn context assembly");
+
+        // blocks extended by exactly 2 (pre-existing 1 → 3).
+        assert_eq!(blocks.len(), 3);
+        // exactly one trace entry with the expected shape.
+        assert_eq!(trace.len(), 1);
+        let entry = &trace[0];
+        assert_eq!(entry.need_kind, "rule");
+        assert_eq!(entry.reason, "turn context assembly");
+        assert_eq!(entry.block_count, 2);
+        assert_eq!(entry.source_refs.len(), 2);
+        assert_eq!(entry.source_refs[0].source_id, "r1");
+        assert_eq!(entry.source_refs[1].source_id, "r2");
     }
 }
