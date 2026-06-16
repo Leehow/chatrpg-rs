@@ -106,6 +106,25 @@ impl TurnContext {
             awaiting_gate: None,
         }
     }
+
+    /// 回合 assistant_output 的**单一事实源**派生（与 R1 旧 finalize_turn 逐字一致）：
+    /// awaiting 终态且 visible_text 为空 → gate.prompt_public 兜底；否则 → visible_text。
+    /// critical phase_finalize（save_turn）与 heavy phase_finalize_heavy_memory（记忆/审计）
+    /// 必须用同一值；后者在 `take_outcome` 清空 ctx 后才跑，故调用方须在清空前调此快照。
+    pub(crate) fn heavy_assistant_output(&self) -> String {
+        match &self.awaiting_gate {
+            Some(gate) if self.visible_text.trim().is_empty() => gate.prompt_public.clone(),
+            _ => self.visible_text.clone(),
+        }
+    }
+
+    /// 测试 seam：直接植入 agent_loop 产物（visible_text / awaiting_gate），让纯单测
+    /// 在不跑真 LLM stream 的情况下覆盖 heavy_assistant_output 的派生分支。
+    #[cfg(test)]
+    pub(crate) fn set_agent_products_for_test(&mut self, visible_text: String, awaiting_gate: Option<AwaitingPlayerRoll>) {
+        self.visible_text = visible_text;
+        self.awaiting_gate = awaiting_gate;
+    }
 }
 impl GmLoop {
     #[cfg(not(test))]
@@ -664,22 +683,18 @@ impl GmLoop {
     /// memory/audit 由 phase_finalize_heavy_memory 在 heavy 段后台跑。awaiting 终态用
     /// gate prompt_public 兜底空 visible_text（与 run_gm_turn assistant_output 选择一致）。
     pub(crate) async fn phase_finalize(&mut self, ctx: &mut TurnContext, input: &GmTurnInput<'_>, status: &str) {
-        let assistant_output = match &ctx.awaiting_gate {
-            Some(gate) if ctx.visible_text.trim().is_empty() => gate.prompt_public.clone(),
-            _ => ctx.visible_text.clone(),
-        };
+        let assistant_output = ctx.heavy_assistant_output();
         self.finalize_save_turn(input.request, &ctx.compiled, input.user_input, &assistant_output, status).await;
     }
 
-    /// R5 heavy：phase_finalize 的 memory/audit 半边（execute.rs heavy 段调）。从 ctx
-    /// 读 awaiting_gate/visible_text 兜底 assistant_output（与 critical 同口径），从
-    /// input 读 state 投 RuntimeState 给富版回合记忆。失败只 warn，绝不影响已 save 的 turn。
-    pub(crate) async fn phase_finalize_heavy_memory(&self, ctx: &TurnContext, input: &GmTurnInput<'_>) {
-        let assistant_output = match &ctx.awaiting_gate {
-            Some(gate) if ctx.visible_text.trim().is_empty() => gate.prompt_public.clone(),
-            _ => ctx.visible_text.clone(),
-        };
-        self.heavy_finalize_memory(input.request, input.state, input.user_input, &assistant_output).await;
+    /// R5 heavy：phase_finalize 的 memory/audit 半边（execute.rs heavy 段调）。
+    /// `assistant_output` 必须由调用方在 `take_outcome` 清空 ctx **之前**按 critical 同口径
+    /// 快照传入（awaiting+空 visible_text→gate.prompt_public，否则 visible_text）——heavy
+    /// 段先于自身被 spawn 时 ctx 已被 take_outcome 清空，绝不能再从 ctx 现读（否则记忆/审计
+    /// 拿到空串、heavy_finalize_memory 早返、富版回合记忆 + learning audit 每回合静默丢失）。
+    /// 从 input 读 state 投 RuntimeState 给富版回合记忆。失败只 warn，绝不影响已 save 的 turn。
+    pub(crate) async fn phase_finalize_heavy_memory(&self, assistant_output: &str, input: &GmTurnInput<'_>) {
+        self.heavy_finalize_memory(input.request, input.state, input.user_input, assistant_output).await;
     }
 
     /// PhaseId::SceneNavigate（R5 critical）— 切场景决策 + set_session_scene +

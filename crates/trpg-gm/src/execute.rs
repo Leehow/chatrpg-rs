@@ -99,6 +99,9 @@ async fn run_pipeline(
     let signal;
     let selected;
     let mut scene_commit: Option<crate::turn_loop::SceneTransitionInfo> = None;
+    // heavy 段所需的 assistant_output：必须在块内 take_outcome 清空 ctx **之前**快照，
+    // 但在块外（spawn_heavy 调用处）使用，故在此声明、块内赋值。
+    let heavy_assistant_output;
     // input 借用 req；heavy 需 own req，故 head/critical 全放进块内，块末 drop(input)
     // 再 move req 进 heavy spawn。
     {
@@ -158,6 +161,11 @@ async fn run_pipeline(
         }
 
         // —— 4. TurnComplete（critical 已落账，可继续下一回合）——
+        // heavy 段（spawn_heavy 内）跑富版回合记忆 + learning audit，需要本回合 assistant_output；
+        // 但 take_outcome 会 std::mem::take 清空 ctx.visible_text / awaiting_gate，而 heavy 在
+        // take_outcome 之后才 spawn。故此处（清空前）按 critical 同口径快照 assistant_output，
+        // owned 传进 spawn_heavy——否则 heavy 从已清空的 ctx 现读到空串、记忆/审计每回合静默丢失。
+        heavy_assistant_output = ctx.heavy_assistant_output();
         let outcome = gm.take_outcome(&mut ctx);
         let _ = tx.send(TurnEvent::TurnComplete { outcome }).await;
         // R5 高水位锚点：critical 组已落账（save_turn + 切场景），标 pp_lifecycle=critical_done，
@@ -169,7 +177,7 @@ async fn run_pipeline(
     }
 
     // —— 3b. HEAVY 尾段（TurnComplete 后另起 spawn，gm/ctx/req 整体 move）——
-    spawn_heavy(gm, ctx, req, selected, scene_commit);
+    spawn_heavy(gm, ctx, req, selected, scene_commit, heavy_assistant_output);
 }
 
 /// HEAVY 尾段：TurnComplete 后台跑——audit/memory 写、到场深抽+frontier、carryover。
@@ -182,6 +190,7 @@ fn spawn_heavy(
     req: OwnedTurnRequest,
     selected: Vec<TurnPhasePlan>,
     scene_commit: Option<crate::turn_loop::SceneTransitionInfo>,
+    heavy_assistant_output: String,
 ) {
     tokio::spawn(async move {
         // 测试探针（heavy-only seam）：记录 heavy 进入时序 / 注入慢或 panic。
@@ -196,7 +205,9 @@ fn spawn_heavy(
             recent_transcript: req.recent_transcript.as_deref(),
         };
         // turn 摘要 memory + learning audit（原 finalize_turn 的 memory/audit 半边）。
-        gm.phase_finalize_heavy_memory(&ctx, &input).await;
+        // assistant_output 用 take_outcome 清空 ctx **之前**于 run_pipeline 快照的 owned 值
+        // （非现读 ctx——此刻 ctx.visible_text/awaiting_gate 已被 take_outcome 清空）。
+        gm.phase_finalize_heavy_memory(&heavy_assistant_output, &input).await;
         // 到场深抽 + frontier（仅 critical 真切了场景时）。
         if let (Some(commit), Some(module_id)) = (&scene_commit, req.module_id.as_deref()) {
             gm.phase_scene_navigate_heavy(&commit.to, module_id).await;

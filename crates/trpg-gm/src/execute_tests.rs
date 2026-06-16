@@ -218,3 +218,90 @@ async fn event_order_deltas_then_turn_complete_last() {
     assert_eq!(kinds.iter().filter(|k| **k == "complete").count(), 1, "恰好一个 TurnComplete，kinds={kinds:?}");
     assert!(kinds[..c].iter().any(|k| *k == "delta"), "TurnComplete 前必须有 Delta，kinds={kinds:?}");
 }
+
+// ============================ R5 fix: heavy 记忆/审计读到叙事内容 ============================
+
+use crate::turn_loop::TurnContext;
+use crate::tools::AwaitingPlayerRoll;
+
+// 纯单测：heavy_assistant_output 的派生必须逐字复刻 R1 旧 finalize_turn 的 assistant_output
+// 选择——Narration→visible_text；awaiting+空 visible_text→gate.prompt_public；awaiting+非空
+// visible_text→visible_text。这是 critical save_turn 与 heavy memory/audit 共用的单一事实源。
+#[test]
+fn heavy_assistant_output_matches_r1_derivation() {
+    // Narration 终态：取 visible_text。
+    let mut ctx = TurnContext::new();
+    ctx.set_agent_products_for_test("叙事正文。".into(), None);
+    assert_eq!(ctx.heavy_assistant_output(), "叙事正文。", "Narration 终态必须取 visible_text");
+
+    // awaiting + 空 visible_text：兜底 gate.prompt_public。
+    let mut ctx = TurnContext::new();
+    ctx.set_agent_products_for_test(String::new(), Some(AwaitingPlayerRoll { check_id: "chk".into(), prompt_public: "请掷 Spot Hidden。".into() }));
+    assert_eq!(ctx.heavy_assistant_output(), "请掷 Spot Hidden。", "awaiting+空文本必须兜底 gate.prompt_public");
+
+    // awaiting + 非空 visible_text：仍取 visible_text（gate 不覆盖已流出的叙事）。
+    let mut ctx = TurnContext::new();
+    ctx.set_agent_products_for_test("掷骰前的叙事。".into(), Some(AwaitingPlayerRoll { check_id: "chk".into(), prompt_public: "请掷骰。".into() }));
+    assert_eq!(ctx.heavy_assistant_output(), "掷骰前的叙事。", "awaiting+非空 visible_text 必须取 visible_text");
+}
+
+// DB-gated 回归测试（本 bug 漏网的根因 = 缺这条）：跑完整一回合后，heavy 段必须真正
+// 持久化富版回合记忆 MemoryEvent（mem_turn_* / tag session_memory），且其 summary +
+// transcript_excerpt 必含本回合叙事内容（非空）。
+//
+// 修复前（buggy）：take_outcome 先清空 ctx，heavy 的 phase_finalize_heavy_memory 从空
+// ctx 现读 → assistant_output="" → heavy_finalize_memory 早返 → 该事件根本不写 → 本断言
+// 红（找不到含叙事的 mem_turn 事件）。修复后：assistant_output 在清空前快照传入 → 事件
+// 带叙事内容落库 → 绿。需 :54347（SKIP_DB_TESTS 跳过）。
+#[tokio::test]
+async fn heavy_memory_event_persists_with_narration_content() {
+    if std::env::var("SKIP_DB_TESTS").is_ok() { return; }
+    let narration = format!("R5回归叙事_{}", uuid::Uuid::new_v4().simple());
+    let session_id = format!("s_mem_{}", uuid::Uuid::new_v4().simple());
+    let turn_id = format!("t_mem_{}", uuid::Uuid::new_v4().simple());
+
+    let (gm, mut req) = exec_fixture(vec![vec![
+        StreamEvent::ContentDelta(narration.clone()),
+        StreamEvent::Done { finish_reason: Some("stop".into()) },
+    ]]);
+    req.request.session_id = session_id.clone();
+    req.request.turn_id = turn_id.clone();
+
+    // 独立 Db 句柄（gm 会被 move 进 execute_turn，事后不可用）查 memory_events。
+    let probe_db = Db { pool: PgPoolOptions::new().connect_lazy("postgres://chatrpg:chatrpg@localhost:54347/chatrpg").expect("lazy pool") };
+    // memory_events/turns 对 sessions(session_id) 有 FK：必须先建 session 行，否则
+    // critical 的 save_turn 与 heavy 的 save_memory_event 都会 FK 失败被 warn 吞 → 查不到事件
+    // （会与"修复前 bug"误判同形）。建 session 后，本测试才真正只考验 #A 的 assistant_output 快照。
+    probe_db.create_session(&session_id, &req.request.ruleset_id, req.request.module_id.as_deref()).await.expect("create session row (FK prereq)");
+
+    let mut stream = execute_turn(gm, req, CANONICAL_TURN_PLAN);
+    let mut completed = false;
+    while let Some(ev) = stream.next().await {
+        if let TurnEvent::TurnComplete { .. } = ev { completed = true; }
+    }
+    assert!(completed, "回合必须以 TurnComplete 收尾");
+
+    // heavy 在 TurnComplete 后另起 spawn 跑——轮询等它把 mem_turn 事件写进库（best-effort 后台）。
+    let mut found: Option<trpg_model::MemoryEvent> = None;
+    for _ in 0..40 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let events = probe_db.list_memory_events(&session_id, 50).await.expect("list_memory_events");
+        if let Some(e) = events.into_iter().find(|e| {
+            e.event_id.starts_with("mem_turn_")
+                && e.tags.iter().any(|t| t == "session_memory")
+                && e.summary.contains(&narration)
+        }) {
+            found = Some(e);
+            break;
+        }
+    }
+
+    let event = found.expect(
+        "heavy 段必须持久化含本回合叙事的 mem_turn_* / session_memory MemoryEvent；\
+         未找到 ⇒ take_outcome 清空 ctx 后 heavy 读到空 assistant_output 而早返（修复前的 bug）",
+    );
+    assert!(event.summary.contains(&narration), "记忆 summary 必含叙事内容: {}", event.summary);
+    let transcript = event.transcript_excerpt.unwrap_or_default();
+    assert!(transcript.contains(&narration), "记忆 transcript_excerpt 必含叙事内容: {transcript}");
+    assert_eq!(event.turn_id.as_deref(), Some(turn_id.as_str()), "记忆事件必须绑定本回合 turn_id");
+}
