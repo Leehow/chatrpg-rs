@@ -860,20 +860,22 @@ fn requires_check(kind: ObjectInteractionKind) -> bool { matches!(kind, ObjectIn
 
 fn make_object_check(input: ObjectTurnInput<'_>, actor_id: &str, target_actor_id: Option<&str>, object: &ObjectInstance, kind: ObjectInteractionKind, kernel_dice: Option<&str>, kernel_target: Option<CheckTargetModel>, kernel_source_refs: Vec<SourceRef>, kernel: Option<&RuleKernel>) -> CheckContract {
     let dice = kernel_dice.unwrap_or("1d20").to_string();
-    // Data-driven: check_label_policy from kernel override wins; fallback to generic per-kind.
-    let generic_label = match kind {
-        ObjectInteractionKind::GrabHeldObject | ObjectInteractionKind::Disarm => "appropriate opposed disarm / athletics check",
+    // Restore EXACT legacy make_object_check check_label match: ONLY
+    // GrabHeldObject|Disarm is ruleset-data-driven (read from a dedicated
+    // OBJECT-namespaced key so it never leaks the combat TECH label into Hack).
+    // Every other kind uses its FIXED legacy string — Hack lands in the `_`
+    // generic arm, NOT the combat "hack" label (object & combat share the map).
+    let check_label = match kind {
+        ObjectInteractionKind::GrabHeldObject | ObjectInteractionKind::Disarm => kernel
+            .and_then(|k| k.check_label_policy.as_ref())
+            .and_then(|p| p.labels.get("object.grab_disarm"))
+            .map(|s| s.as_str())
+            .unwrap_or("appropriate opposed disarm / athletics check"),
         ObjectInteractionKind::Unlock => "appropriate lockpicking / technical unlock check",
         ObjectInteractionKind::CutConnection | ObjectInteractionKind::TraceConnection => "appropriate technical analysis / cable handling check",
         ObjectInteractionKind::Steal | ObjectInteractionKind::Loot => "appropriate stealth / sleight / search check",
         _ => "appropriate object interaction check",
-    };
-    let check_label = kernel
-        .and_then(|k| k.check_label_policy.as_ref())
-        .and_then(|p| p.labels.get(kind.as_str()))
-        .map(|s| s.as_str())
-        .unwrap_or(generic_label)
-        .to_string();
+    }.to_string();
     let defender = target_actor_id.map(|id| ActorRef { actor_id: id.into(), actor_kind: ActorKind::Npc, display_name: Some("target".into()) });
     // Data-driven target: prefer the kernel's core mechanic; otherwise leave it
     // UnknownUntilLookup so the contest kernel resolves it (PercentileRollUnder /
@@ -1170,5 +1172,56 @@ mod check_label_policy_tests {
         let policy = k.check_label_policy.as_ref().unwrap();
         // "unlock" is not in the empty policy → engine would use generic
         assert!(policy.labels.get("unlock").is_none());
+    }
+
+    /// FIX 3: object & combat SHARE check_label_policy.labels. A cyberpunk kernel
+    /// carries a combat "hack" TECH label; the OLD object code read
+    /// labels[kind.as_str()] for ANY kind, so Hack leaked the combat TECH label.
+    /// Legacy: only GrabHeldObject|Disarm is ruleset-driven (object-namespaced
+    /// key); every other kind uses a FIXED string — Hack → generic.
+    fn cyberpunk_kernel() -> RuleKernel {
+        let mut k: RuleKernel = serde_json::from_str(
+            r#"{"kernel_id":"t","ruleset_id":"cyberpunk_red","version":"1"}"#
+        ).unwrap();
+        let mut labels = BTreeMap::new();
+        // combat TECH labels shared on the map (these must NOT leak into Hack):
+        labels.insert("hack".to_string(), "appropriate TECH / Interface / Basic Tech check".to_string());
+        labels.insert("disable_device".to_string(), "appropriate TECH / Interface / Basic Tech check".to_string());
+        // object-namespaced grab/disarm label:
+        labels.insert("object.grab_disarm".to_string(), "DEX + Brawling contested grab/disarm check".to_string());
+        k.check_label_policy = Some(CheckLabelPolicy { labels });
+        k
+    }
+
+    fn check_label_for_kind(kind: ObjectInteractionKind, kernel: Option<&RuleKernel>) -> String {
+        let input = ObjectTurnInput { session_id: "s", turn_id: "t", ruleset_id: "cyberpunk_red", module_id: None, actor_id: Some("pc"), frame_id: None, user_input: "x" };
+        let object = ObjectInstance { object_id: "o1".into(), display_name: "thing".into(), ..Default::default() };
+        make_object_check(input, "pc", None, &object, kind, None, None, vec![], kernel).check_label
+    }
+
+    #[test]
+    fn hack_does_not_leak_cyberpunk_tech_label() {
+        let k = cyberpunk_kernel();
+        // Hack lands in the legacy `_` generic arm — NOT the combat TECH label.
+        assert_eq!(
+            check_label_for_kind(ObjectInteractionKind::Hack, Some(&k)),
+            "appropriate object interaction check",
+            "Hack must use the generic object label, not the leaked combat TECH label"
+        );
+        // grab/disarm IS ruleset-driven via the object-namespaced key.
+        assert_eq!(
+            check_label_for_kind(ObjectInteractionKind::Disarm, Some(&k)),
+            "DEX + Brawling contested grab/disarm check"
+        );
+        assert_eq!(
+            check_label_for_kind(ObjectInteractionKind::GrabHeldObject, Some(&k)),
+            "DEX + Brawling contested grab/disarm check"
+        );
+        // Other fixed legacy strings unaffected by the shared map.
+        assert_eq!(check_label_for_kind(ObjectInteractionKind::Unlock, Some(&k)), "appropriate lockpicking / technical unlock check");
+        assert_eq!(check_label_for_kind(ObjectInteractionKind::CutConnection, Some(&k)), "appropriate technical analysis / cable handling check");
+        assert_eq!(check_label_for_kind(ObjectInteractionKind::Steal, Some(&k)), "appropriate stealth / sleight / search check");
+        // No kernel → grab/disarm uses the fixed default, not a panic.
+        assert_eq!(check_label_for_kind(ObjectInteractionKind::Disarm, None), "appropriate opposed disarm / athletics check");
     }
 }

@@ -839,15 +839,25 @@ fn ruleset_aliases_for(kernel: Option<&RuleKernel>, skill: SearchSkillKind) -> V
         SearchSkillKind::NpcStatblock => json!({"preferred_sections":["NPC","monster","creature statistics","stat block","cards"],"field_aliases":{"hp":["HP","hit points","health"],"defense":["AC","DV","defense","armor"],"attack":["attack","weapon","action"]}}),
         _ => json!({"preferred_sections":["rules","data","GM toolkit"],"field_aliases":{}}),
     };
-    // Apply per-skill overrides from kernel.search_profile (data-driven; no ruleset name branches).
+    // Apply overrides from kernel.search_profile (data-driven; no ruleset name
+    // branches). A `"*"` wildcard key applies to ALL skills — this reproduces
+    // legacy ruleset_aliases_for, which OVERWROTE preferred_sections and SET
+    // field_aliases for every skill. Per-skill keys win over the wildcard.
     if let Some(sp) = kernel.and_then(|k| k.search_profile.as_ref()) {
         let key = skill.skill_key();
-        if let Some(sections) = sp.preferred_sections_by_skill.get(key) {
+        // sections: per-skill wins, else wildcard, else base.
+        if let Some(sections) = sp.preferred_sections_by_skill.get(key)
+            .or_else(|| sp.preferred_sections_by_skill.get("*"))
+        {
             base["preferred_sections"] = serde_json::to_value(sections).unwrap_or(base["preferred_sections"].clone());
         }
-        if let Some(aliases_override) = sp.field_aliases_by_skill.get(key) {
-            if let (Some(base_obj), Some(over_obj)) = (base["field_aliases"].as_object_mut(), aliases_override.as_object()) {
-                for (k, v) in over_obj { base_obj.insert(k.clone(), v.clone()); }
+        // field_aliases: merge wildcard FIRST, then per-skill on top (per-skill
+        // overrides wildcard), both merged onto base.
+        if let Some(base_obj) = base["field_aliases"].as_object_mut() {
+            for src in [sp.field_aliases_by_skill.get("*"), sp.field_aliases_by_skill.get(key)] {
+                if let Some(over_obj) = src.and_then(|v| v.as_object()) {
+                    for (k, v) in over_obj { base_obj.insert(k.clone(), v.clone()); }
+                }
             }
         }
     }
@@ -862,10 +872,16 @@ fn module_preferences_for(module_config: Option<&ModuleConfig>, skill: SearchSki
         SearchSkillKind::CombatResolution => vec!["combat note", "encounter", "enemy behavior", "tactics"],
         _ => vec!["resources", "appendix", "data", "card"],
     }.into_iter().map(str::to_string).collect::<Vec<_>>();
-    // Apply per-skill extra sections from module_config.module_search_profile (data-driven; no module name branches).
+    // Apply extra sections from module_config.module_search_profile (data-driven;
+    // no module name branches). Legacy module_preferences_for APPENDED the
+    // module's section list to ALL skills — reproduce via a `"*"` wildcard key
+    // appended in addition to any per-skill key.
     if let Some(cfg) = module_config {
         if let Some(sp) = cfg.module_search_profile.as_ref() {
             if let Some(extra) = sp.preferred_sections_by_skill.get(skill.skill_key()) {
+                prefs.extend(extra.iter().cloned());
+            }
+            if let Some(extra) = sp.preferred_sections_by_skill.get("*") {
                 prefs.extend(extra.iter().cloned());
             }
         }
@@ -1207,6 +1223,67 @@ mod tests {
         let aliases = ruleset_aliases_for(None, SearchSkillKind::WeaponParameter);
         assert!(aliases.get("preferred_sections").and_then(|v| v.as_array()).is_some(),
             "none kernel must still return preferred_sections from generic base");
+    }
+
+    /// FIX 2: a kernel mirroring the live cyberpunk_red override — flat list +
+    /// field_aliases under the `"*"` wildcard (legacy applied them to ALL skills).
+    fn kernel_with_cyberpunk_wildcard_override() -> RuleKernel {
+        let mut k: RuleKernel = serde_json::from_str(
+            r#"{"kernel_id":"t","ruleset_id":"cyberpunk_red","version":"1"}"#
+        ).unwrap();
+        let mut by_skill = std::collections::HashMap::new();
+        by_skill.insert("*".to_string(), vec![
+            "Getting it Done".to_string(),
+            "Resolving Actions with Skills".to_string(),
+            "Weapons and Armor".to_string(),
+            "Friday Night Firefight".to_string(),
+            "Ranged Combat".to_string(),
+            "Melee Combat".to_string(),
+            "Before You Take Damage".to_string(),
+            "When Armor Doesn't Cut It".to_string(),
+            "Role Abilities".to_string(),
+        ]);
+        let mut fa = std::collections::HashMap::new();
+        fa.insert("*".to_string(), json!({
+            "target_number": ["DV","range DV","difficulty value"],
+            "armor": ["SP","armor","ablation"],
+        }));
+        k.search_profile = Some(RuleKernelSearchProfile {
+            preferred_sections_by_skill: by_skill,
+            field_aliases_by_skill: fa,
+        });
+        k
+    }
+
+    #[test]
+    fn wildcard_override_applies_to_uncovered_skills() {
+        // Legacy ruleset_aliases_for applied the flat list to ALL 9 skills. The
+        // old per-skill map never enumerated AbilityActivation / GenericMechanical
+        // for cyberpunk, so those were dropped. The "*" wildcard restores them.
+        let k = kernel_with_cyberpunk_wildcard_override();
+        let expected = json!([
+            "Getting it Done","Resolving Actions with Skills","Weapons and Armor",
+            "Friday Night Firefight","Ranged Combat","Melee Combat",
+            "Before You Take Damage","When Armor Doesn't Cut It","Role Abilities"
+        ]);
+        for skill in [SearchSkillKind::AbilityActivation, SearchSkillKind::GenericMechanical, SearchSkillKind::ConditionResource] {
+            let aliases = ruleset_aliases_for(Some(&k), skill);
+            assert_eq!(aliases["preferred_sections"], expected,
+                "uncovered skill {:?} must get the cyberpunk flat list via wildcard", skill);
+            // field_aliases set on ALL skills (legacy SET behavior).
+            assert_eq!(aliases["field_aliases"]["target_number"], json!(["DV","range DV","difficulty value"]),
+                "wildcard target_number must apply to {:?}", skill);
+            assert_eq!(aliases["field_aliases"]["armor"], json!(["SP","armor","ablation"]),
+                "wildcard armor must apply to {:?}", skill);
+        }
+        // Per-skill key still wins over wildcard when both present.
+        let mut k2 = kernel_with_cyberpunk_wildcard_override();
+        if let Some(sp) = k2.search_profile.as_mut() {
+            sp.preferred_sections_by_skill.insert("weapon_parameter".to_string(), vec!["Weapons and Armor".to_string()]);
+        }
+        let wp = ruleset_aliases_for(Some(&k2), SearchSkillKind::WeaponParameter);
+        assert_eq!(wp["preferred_sections"], json!(["Weapons and Armor"]),
+            "per-skill key must override the wildcard");
     }
 
     fn module_config_with_homecoming_prefs() -> ModuleConfig {
