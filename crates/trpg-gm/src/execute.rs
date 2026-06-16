@@ -134,24 +134,26 @@ async fn run_pipeline(
                 // 确定性头部失败的只有 mode_inference / context_assembly，按分级器均为 AbortTurn
                 // （fail-closed 中止）。policy 显式查询，避免硬编码"恒中止"的假设——后续若有
                 // WarnContinue 类确定性失败可在此扩展（当前确定性头无此类）。
-                let policy = phase_error_policy(f.phase);
-                let signal = format!("{policy:?}");
+                let _policy = phase_error_policy(f.phase); // 确定性头失败均 AbortTurn（policy 显式查询非硬编码）
                 let kind = failure_kind_for(f.phase);
                 let phase_label = format!("{:?}", f.phase);
-                // 失败事件代替空 TurnComplete——客户端能区分"失败"与"成功的空白回合"。
-                let _ = tx
-                    .send(TurnEvent::TurnFailed { phase: phase_label.clone(), message: f.message.clone(), recoverable: false })
-                    .await;
-                // turns.failure_kind 落库（fail-soft：写失败仅 warn，不影响已发的 TurnFailed）。
+                // 顺序关键：DB 写（failure_kind + 失败 TurnTrace）必须在 emit TurnFailed **之前**。
+                // 否则 CLI `turn` 收到 TurnFailed 即 bail! → 进程退出 → tokio runtime 关闭，
+                // 会在 emit 之后、upsert 之前杀掉本任务，失败 trace 永不落库（live e2e 实测）。
+                // 先落库再发终态事件，保证无论 transport 如何 bail，可观测记录都已持久化。
                 if let Err(e) = gm.engine.db.set_turn_failure_kind(&req.request.turn_id, kind).await {
                     tracing::warn!(error = %e, turn_id = %req.request.turn_id, "set_turn_failure_kind failed (non-fatal)");
                 }
                 // 失败 TurnTrace（pp_lifecycle="failed"、failure=Some、narration=None、phases=已尝试）。
-                let failure = TurnFailureRecord { phase: phase_label, message: f.message, failure_kind: kind.to_string() };
-                let trace = build_turn_trace(&req, &ctx, signal, phases_run.clone(), None, Some(failure), vec![], "failed");
+                let failure = TurnFailureRecord { phase: phase_label.clone(), message: f.message.clone(), failure_kind: kind.to_string() };
+                let trace = build_turn_trace(&req, &ctx, "aborted".to_string(), phases_run.clone(), None, Some(failure), vec![], "failed");
                 if let Err(e) = gm.engine.db.upsert_turn_trace(&trace).await {
                     tracing::warn!(error = %e, turn_id = %req.request.turn_id, "upsert_turn_trace (failure path) failed (non-fatal)");
                 }
+                // DB 已落账后再发失败事件代替空 TurnComplete——客户端能区分"失败"与"成功的空白回合"。
+                let _ = tx
+                    .send(TurnEvent::TurnFailed { phase: phase_label, message: f.message, recoverable: false })
+                    .await;
                 return;
             }
         }
