@@ -50,6 +50,7 @@ impl Db {
             include_str!("../../../migrations/0026_session_current_scene_v120.sql"),
             include_str!("../../../migrations/0027_mechanic_dues_v120.sql"),
             include_str!("../../../migrations/0028_turn_pp_lifecycle_v120.sql"),
+            include_str!("../../../migrations/0029_turn_trace_failure_v120.sql"),
         ];
         for sql in migrations {
             for statement in split_sql_statements(sql) {
@@ -1045,6 +1046,50 @@ impl Db {
         .fetch_optional(&self.pool)
         .await?;
         Ok(row.map(|r| r.0))
+    }
+
+    /// obs T4：失败语义落库——回合失败时把归类值写进 turns.failure_kind
+    /// （NULL=成功）。fail-closed：失败不再伪装成空 TurnComplete。只触 failure_kind
+    /// 列，与 pp_lifecycle / postprocess_status 正交（mirror set_turn_pp_lifecycle）。
+    pub async fn set_turn_failure_kind(&self, turn_id: &str, failure_kind: &str) -> Result<()> {
+        sqlx::query("update turns set failure_kind = $2, updated_at = now() where turn_id = $1")
+            .bind(turn_id)
+            .bind(failure_kind)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// obs T4：Flight Recorder 持久化——TurnTrace 序列化为 jsonb 落 turn_traces，
+    /// turn_id PK upsert（同回合重写覆盖 trace_json）。write-through、fail-soft：
+    /// 调用方写失败仅 warn，绝不影响回合主流程或已发事件。
+    pub async fn upsert_turn_trace(&self, trace: &trpg_model::TurnTrace) -> Result<()> {
+        let trace_json = serde_json::to_value(trace)?;
+        sqlx::query(
+            r#"insert into turn_traces (turn_id, session_id, trace_json)
+               values ($1, $2, $3)
+               on conflict (turn_id) do update set trace_json = excluded.trace_json"#,
+        )
+        .bind(&trace.turn_id)
+        .bind(&trace.session_id)
+        .bind(trace_json)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// obs T4：按 turn_id 取回飞行记录；无记录返 None。jsonb 反序列化回 TurnTrace
+    /// （字段全 #[serde(default)]，旧/残行向后兼容）。
+    pub async fn load_turn_trace(&self, turn_id: &str) -> Result<Option<trpg_model::TurnTrace>> {
+        let row: Option<(serde_json::Value,)> =
+            sqlx::query_as("select trace_json from turn_traces where turn_id = $1")
+                .bind(turn_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        match row {
+            Some((value,)) => Ok(Some(serde_json::from_value(value)?)),
+            None => Ok(None),
+        }
     }
 
     pub async fn record_load_event(&self, session_id: Option<&str>, turn_id: Option<&str>, block: &ContextBlock, reason: &str) -> Result<()> {
@@ -4165,6 +4210,36 @@ fn merge_resource_tracks(base: Vec<serde_json::Value>, overrides: Vec<serde_json
         if let Some(slot) = out.iter_mut().find(|b| idof(b) == oid) { *slot = o; } else { out.push(o); }
     }
     out
+}
+
+#[cfg(test)]
+mod turn_trace_serde_tests {
+    use trpg_model::{TurnFailureRecord, TurnTrace};
+
+    /// obs T4（DB-free）：`serde_json::to_value(&TurnTrace)` round-trips back to an
+    /// equal TurnTrace —— 证明 upsert_turn_trace / load_turn_trace 用的 jsonb
+    /// (反)序列化形态正确（无需 live DB 即可守护）。
+    #[test]
+    fn turn_trace_to_value_roundtrip() {
+        let mut trace = TurnTrace::new("turn-t4", "sess-t4");
+        trace.phases_run = vec!["context_assembly".into(), "finalize".into()];
+        trace.bp1_hash = Some("sha256:bp1".into());
+        trace.bp2_hash = Some("sha256:bp2".into());
+        trace.bp3_hash = Some("sha256:bp3".into());
+        trace.signal = "turn_complete".into();
+        trace.warnings = vec!["audit lag".into()];
+        trace.pp_lifecycle = "complete".into();
+        trace.narration_hash = Some("sha256:narr".into());
+        trace.failure = Some(TurnFailureRecord {
+            phase: "finalize".into(),
+            message: "save_turn timeout".into(),
+            failure_kind: "failed_finalize".into(),
+        });
+
+        let value = serde_json::to_value(&trace).expect("serialize TurnTrace to Value");
+        let back: TurnTrace = serde_json::from_value(value).expect("deserialize Value to TurnTrace");
+        assert_eq!(trace, back, "jsonb round-trip must preserve the full TurnTrace");
+    }
 }
 
 #[cfg(test)]
