@@ -1458,6 +1458,26 @@ pub struct RuleKernel {
     pub source_refs: Vec<SourceRef>,
     #[serde(default)]
     pub validation_report: ValidationReport,
+    /// P0-2: combat action-economy/initiative/reaction/search strategy — replaces
+    /// trpg-combat's {cyberpunk,dnd,coc,triangle,sword_world}_profile(). None →
+    /// engine uses GENERIC_COMBAT_PROFILE (no per-ruleset branch).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub combat_profile: Option<CombatProfile>,
+    /// P0-2: intent→CombatMode data mapping — replaces infer_combat_mode_from_intent's
+    /// ruleset_id.contains branches. None → GENERIC_COMBAT_MODE_POLICY.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub combat_mode_policy: Option<CombatModePolicy>,
+    /// P0-2: check-label templates — replaces combat/object contains("cyberpunk") labels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_label_policy: Option<CheckLabelPolicy>,
+    /// P0-2: damage/difficulty family + band + plausibility — replaces trpg-referee's
+    /// five ruleset_* functions. None → GENERIC_REFEREE_BANDS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub referee_value_bands: Option<RefereeValueBands>,
+    /// P0-2: bare-dice qualification (e.g. "1d10" → "1d10+0") — replaces combat's
+    /// hardcoded "1d10+0". None → GENERIC_DICE_QUALIFICATION.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dice_qualification: Option<DiceQualification>,
 }
 
 /// The id of the kernel resource_track that represents Hit Points, found
@@ -3561,6 +3581,218 @@ impl CombatMode {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// P0-2 engine-dehardcode: kernel-resident strategy fields + module config.
+// All Value-shaped to keep trpg-model dependency-free of engine crates; the
+// engine maps these into its typed structs (RulesetCombatProfile etc.).
+// ---------------------------------------------------------------------------
+
+/// Combat action-economy/initiative/reaction/search strategy, kernel-resident.
+/// Mirrors trpg-combat::RulesetCombatProfile's strategy sub-blocks as Value so
+/// the engine maps kernel→its typed profile without a model→combat dependency.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default, PartialEq)]
+pub struct CombatProfile {
+    #[serde(default)]
+    pub profile_id: String,
+    #[serde(default)]
+    pub default_mode: String,
+    #[serde(default)]
+    pub applies_to_modes: Vec<String>,
+    #[serde(default)]
+    pub action_economy: serde_json::Value,
+    #[serde(default)]
+    pub initiative: serde_json::Value,
+    /// Reaction-window advice entries (serialized ReactionAdvice shape).
+    #[serde(default)]
+    pub reaction_windows: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub frame_exit_policy: serde_json::Value,
+    #[serde(default)]
+    pub stalemate_policy: serde_json::Value,
+    #[serde(default)]
+    pub npc_drive_policy: serde_json::Value,
+    #[serde(default)]
+    pub search_recipes: Vec<serde_json::Value>,
+}
+
+/// One intent→CombatMode rule. `mode` is a CombatMode (snake_case via as_str).
+/// `when_action_kinds` (empty = any) AND `when_evidence_contains` (empty = any)
+/// gate the rule; first matching rule wins (engine evaluates in order).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default, PartialEq)]
+pub struct CombatModeRule {
+    pub mode: CombatMode,
+    #[serde(default)]
+    pub when_action_kinds: Vec<String>,
+    #[serde(default)]
+    pub when_evidence_contains: Vec<String>,
+}
+
+/// Ordered intent→CombatMode mapping. `fallback_mode` applies when no rule hits
+/// (replaces infer_combat_mode_from_intent's trailing TheaterOfMind).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default, PartialEq)]
+pub struct CombatModePolicy {
+    #[serde(default)]
+    pub rules: Vec<CombatModeRule>,
+    #[serde(default)]
+    pub fallback_mode: CombatMode,
+}
+
+/// Check-label templates keyed by action family (technical/attack/defense/…).
+/// Replaces combat/object contains("cyberpunk") label branches. Missing key →
+/// engine uses the generic label.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default, PartialEq)]
+pub struct CheckLabelPolicy {
+    /// action-family-id → label template, e.g. "technical" → "appropriate
+    /// TECH / Interface / Basic Tech check".
+    #[serde(default)]
+    pub labels: std::collections::BTreeMap<String, String>,
+}
+
+/// Damage/difficulty family + band text + plausibility ranges. Replaces
+/// trpg-referee's ruleset_damage_family/common_damage_band/
+/// damage_plausible_for_ruleset/common_difficulty_band_json/
+/// difficulty_plausible_for_ruleset. Ranges are inclusive (lo, hi).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default, PartialEq)]
+pub struct RefereeValueBands {
+    #[serde(default)]
+    pub damage_family: String,
+    #[serde(default)]
+    pub damage_band: String,
+    /// Plausible dice-count range for a damage expression (matches
+    /// damage_plausible_for_ruleset's parse_dice_count bounds).
+    #[serde(default)]
+    pub damage_plausible_range: (i64, i64),
+    /// difficulty band advisory (mirrors common_difficulty_band_json's Value).
+    #[serde(default)]
+    pub difficulty_band: serde_json::Value,
+    /// Plausible target-number range (matches difficulty_plausible_for_ruleset).
+    #[serde(default)]
+    pub difficulty_plausible_range: (i64, i64),
+}
+
+/// Bare-dice qualification template — `{dice}` is the bare expr (e.g. "1d10").
+/// Replaces combat's hardcoded "1d10+0".
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default, PartialEq)]
+pub struct DiceQualification {
+    /// e.g. "{dice}+0"; engine substitutes the bare dice expr for `{dice}`.
+    #[serde(default)]
+    pub bare_dice_template: String,
+}
+
+// ---------------------------------------------------------------------------
+// P0-2 module-level config (lives in the module bundle; #[serde(default)]).
+// Replaces target_actor_for_combat_input npc bindings, inferred_homecoming_
+// tech_dv, director scene facts, material module_preferences_for.
+// ---------------------------------------------------------------------------
+
+/// One keyword/semantic matcher → engine actor_id. Replaces combat's
+/// npc.scav_boss / npc.athena_drone literals.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default, PartialEq)]
+pub struct NpcActorBinding {
+    /// case-insensitive substrings; any hit binds. (Semantic matcher TBD by
+    /// the consuming engine; keyword form is the equivalence baseline.)
+    #[serde(default)]
+    pub matcher: Vec<String>,
+    pub actor_id: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+}
+
+/// One technical-option DV row. Replaces inferred_homecoming_tech_dv's 14/12.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default, PartialEq)]
+pub struct TechOption {
+    #[serde(default)]
+    pub matcher: Vec<String>,
+    pub dv: i32,
+}
+
+/// Scene entity alias (display label ↔ canonical id) for director scene facts.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default, PartialEq)]
+pub struct EntityAlias {
+    pub canonical_id: String,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+}
+
+/// Module search preferences — replaces material's module_preferences_for
+/// homecoming/masks/vault literal lists.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default, PartialEq)]
+pub struct SearchProfile {
+    #[serde(default)]
+    pub preferred_sections: Vec<String>,
+}
+
+/// Lightweight module-level engine config. Lives in the module bundle; every
+/// field #[serde(default)] so pre-P0-2 bundles deserialize unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default, PartialEq)]
+pub struct ModuleConfig {
+    #[serde(default)]
+    pub npc_actor_bindings: Vec<NpcActorBinding>,
+    #[serde(default)]
+    pub technical_option_table: Option<Vec<TechOption>>,
+    #[serde(default)]
+    pub scene_entity_aliases: Vec<EntityAlias>,
+    #[serde(default)]
+    pub module_search_profile: Option<SearchProfile>,
+}
+
+// ---------------------------------------------------------------------------
+// P0-2 GENERIC_* neutral defaults — exact equivalents of the engine's legacy
+// generic branches (trpg-combat::default_generic_profile, trpg-referee's
+// generic ruleset_* fallthrough). Used when kernel.<field> is None. These are
+// NEUTRAL (no ruleset/module name literals); CombatMode variant names are not
+// ruleset names (whitelisted).
+// ---------------------------------------------------------------------------
+
+/// Neutral combat profile (mirrors trpg-combat::default_generic_profile's
+/// fiction-first strategy). Used when kernel.combat_profile is None.
+pub static GENERIC_COMBAT_PROFILE: std::sync::LazyLock<CombatProfile> =
+    std::sync::LazyLock::new(|| CombatProfile {
+        profile_id: "generic.situation.v1_3".into(),
+        default_mode: "theater_of_mind".into(),
+        applies_to_modes: vec![
+            "theater_of_mind".into(),
+            "tactical_combat".into(),
+            "social_conflict".into(),
+        ],
+        action_economy: serde_json::json!({"policy":"fiction_first"}),
+        initiative: serde_json::json!({"policy":"fiction_first"}),
+        reaction_windows: vec![],
+        frame_exit_policy: serde_json::json!({"state_exits":["objective_completed","side_escaped","negotiated_truce","surrender_accepted"],"stalemate_after_non_decisive_turns":3}),
+        stalemate_policy: serde_json::json!({"max_repeated_action_count":2,"open_direction_gate":true}),
+        npc_drive_policy: serde_json::json!({"default_patience":40,"default_morale":55,"max_repeat_same_tactic":2}),
+        search_recipes: vec![],
+    });
+
+/// Neutral mode policy: no rules → always falls back to TheaterOfMind
+/// (mirrors infer_combat_mode_from_intent's trailing default).
+pub static GENERIC_COMBAT_MODE_POLICY: std::sync::LazyLock<CombatModePolicy> =
+    std::sync::LazyLock::new(|| CombatModePolicy {
+        rules: vec![],
+        fallback_mode: CombatMode::TheaterOfMind,
+    });
+
+/// Neutral referee bands (mirrors trpg-referee's generic branch verbatim:
+/// damage 1..=30 dice, target 1..=100).
+pub static GENERIC_REFEREE_BANDS: std::sync::LazyLock<RefereeValueBands> =
+    std::sync::LazyLock::new(|| RefereeValueBands {
+        damage_family: "generic_trpg_damage".into(),
+        damage_band: "system-specific; exact object/ability entry required".into(),
+        damage_plausible_range: (1, 30),
+        difficulty_band: serde_json::json!({"common_target_band":"ruleset-specific"}),
+        difficulty_plausible_range: (1, 100),
+    });
+
+/// Neutral dice qualification: bare "1d10" → "1d10+0" (mirrors the hardcode).
+pub static GENERIC_DICE_QUALIFICATION: std::sync::LazyLock<DiceQualification> =
+    std::sync::LazyLock::new(|| DiceQualification {
+        bare_dice_template: "{dice}+0".into(),
+    });
+
+/// Empty check-label policy → engine uses its generic per-family label.
+pub static GENERIC_CHECK_LABEL_POLICY: std::sync::LazyLock<CheckLabelPolicy> =
+    std::sync::LazyLock::new(CheckLabelPolicy::default);
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

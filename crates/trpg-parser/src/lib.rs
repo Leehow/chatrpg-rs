@@ -1851,6 +1851,7 @@ pub(crate) fn rule_kernel_from_run_kit(ruleset_id: &str, title: &str, rk: &reade
         }),
         source_refs: character_pack.derived_formula_pack.source_refs.clone(),
         validation_report: ValidationReport { status: "ok".into(), ..Default::default() },
+        ..Default::default()
     }
 }
 
@@ -2141,6 +2142,7 @@ fn rule_kernel_from_onboarding(ruleset_id: &str, title: &str, onboarding: &GmOnb
         visibility_policy: json!({"gm_secret":"never place module secrets in BP1", "player_visible":"only rules summaries and player-facing character choices", "runtime_only":"rolls/effects/status deltas"}),
         source_refs: onboarding.source_refs.clone(),
         validation_report: ValidationReport { status: "ok".into(), ..Default::default() },
+        ..Default::default()
     }
 }
 
