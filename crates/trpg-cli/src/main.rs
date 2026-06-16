@@ -1021,6 +1021,19 @@ fn format_turn_trace(t: &TurnTrace) -> String {
             out.push_str(&format!("    source_refs: {}\n", refs.join(", ")));
         }
     }
+    // binding_trace（影子绑定，advisory）：每条 BindingPlan 一行。
+    out.push_str("binding_trace:\n");
+    if t.binding_trace.is_empty() {
+        out.push_str("  (none)\n");
+    } else {
+        for b in &t.binding_trace {
+            let cap = b.capability.as_deref().unwrap_or("-");
+            out.push_str(&format!(
+                "  {} -> {:?} [{:?}] cap={} conf={}\n",
+                b.need_kind, b.verdict, b.execution_tier, cap, b.confidence
+            ));
+        }
+    }
     out
 }
 
@@ -1595,6 +1608,15 @@ mod tests {
             message: "save_turn timeout".to_string(),
             failure_kind: "failed_finalize".to_string(),
         });
+        trace.binding_trace = vec![BindingPlan {
+            binding_id: "bind:rule".to_string(),
+            need_kind: "rule".to_string(),
+            capability: Some("check.roll_under".to_string()),
+            execution_tier: ExecutionTier::ExactExecution,
+            verdict: BindingVerdict::Exact,
+            confidence: 0.9,
+            ..Default::default()
+        }];
 
         let out = format_turn_trace(&trace);
 
@@ -1610,6 +1632,10 @@ mod tests {
         assert!(out.contains("bp3=-"), "missing dash for None bp3:\n{out}");
         // warnings 渲染。
         assert!(out.contains("audit lag"), "missing warning:\n{out}");
+        // binding_trace：影子绑定行（need_kind + verdict + capability）。
+        assert!(out.contains("binding_trace:"), "missing binding_trace header:\n{out}");
+        assert!(out.contains("Exact"), "missing binding verdict Exact:\n{out}");
+        assert!(out.contains("check.roll_under"), "missing binding capability:\n{out}");
     }
 
     #[test]
@@ -1621,5 +1647,7 @@ mod tests {
         assert!(!out.contains("FAILED"), "success trace should not show FAILED:\n{out}");
         assert!(out.contains("warnings:"), "warnings header missing:\n{out}");
         assert!(out.contains("(none)"), "empty warnings/phases should print (none):\n{out}");
+        // 空 binding_trace → header + (none)。
+        assert!(out.contains("binding_trace:"), "binding_trace header missing:\n{out}");
     }
 }
