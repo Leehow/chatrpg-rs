@@ -27,10 +27,15 @@ impl PlayerValueRefereeService {
         let claims = detect_claims(session_id, turn_id, ruleset_id, module_id, user_input, world_tick);
         if claims.is_empty() { return Ok(PlayerValueRefereeResult::default()); }
 
+        // Load kernel for this ruleset (fail-soft: no kernel → Default = no bands → GENERIC).
+        let kernel = self.db.load_rule_kernel(ruleset_id).await
+            .ok().flatten()
+            .unwrap_or_default();
+
         let mut result = PlayerValueRefereeResult { handled: true, phases: vec!["player_value_referee".into()], ..Default::default() };
         let player_insists = looks_like_player_insists(user_input);
         for claim in claims {
-            let verification = verify_claim(&claim, ruleset_id, user_input, player_insists);
+            let verification = verify_claim(&claim, &kernel, user_input, player_insists);
             self.db.insert_player_value_claim(&claim).await.ok();
             self.db.insert_player_value_verification(&verification).await.ok();
             let override_agreement = if verification.status == PlayerValueVerificationStatus::AcceptedAsTablePreference {
@@ -137,7 +142,7 @@ fn dedupe_claims(mut claims: Vec<PlayerSuppliedValueClaim>) -> Vec<PlayerSupplie
     claims
 }
 
-fn verify_claim(claim: &PlayerSuppliedValueClaim, ruleset_id: &str, input: &str, player_insists: bool) -> PlayerValueVerification {
+fn verify_claim(claim: &PlayerSuppliedValueClaim, kernel: &trpg_model::RuleKernel, input: &str, player_insists: bool) -> PlayerValueVerification {
     let mut status = PlayerValueVerificationStatus::NeedsRuleLookup;
     let mut canonical = json!({});
     let mut acceptable = json!({});
@@ -172,10 +177,10 @@ fn verify_claim(claim: &PlayerSuppliedValueClaim, ruleset_id: &str, input: &str,
         }
         PlayerSuppliedValueKind::WeaponDamage | PlayerSuppliedValueKind::DamageExpression => {
             let expr = claim.supplied_value_json.get("damage_expression").and_then(|v| v.as_str()).unwrap_or_default();
-            let family = ruleset_damage_family(ruleset_id);
+            let family = damage_family_from_kernel(kernel);
             let dice = parse_dice_count(expr).unwrap_or_default();
-            acceptable = json!({"ruleset_family": family, "common_table_band": common_damage_band(ruleset_id)});
-            let plausible = damage_plausible_for_ruleset(ruleset_id, expr);
+            acceptable = json!({"ruleset_family": family, "common_table_band": common_damage_band_from_kernel(kernel)});
+            let plausible = damage_plausible_from_kernel(kernel, expr);
             comparison = json!({"supplied_expression": expr, "dice_count": dice, "plausible_for_ruleset_band": plausible});
             if plausible {
                 status = PlayerValueVerificationStatus::PlausibleProvisional;
@@ -184,20 +189,20 @@ fn verify_claim(claim: &PlayerSuppliedValueClaim, ruleset_id: &str, input: &str,
             } else if player_insists {
                 status = PlayerValueVerificationStatus::AcceptedAsTablePreference;
                 warning = Some(format!("你给的伤害 {} 明显偏离当前规则常见武器/能力区间。我可以按本桌爽局偏好暂用，但会标记为 table override，可能破坏遭遇平衡。", expr));
-                suggestion = Some(format!("建议先按规则表中同类武器/能力的常见区间处理：{}。", common_damage_band(ruleset_id)));
+                suggestion = Some(format!("建议先按规则表中同类武器/能力的常见区间处理：{}。", common_damage_band_from_kernel(kernel)));
                 balance_risk = Some("out_of_band_damage_expression".into());
                 canonical = json!({"table_override_damage_expression": expr});
             } else {
                 status = PlayerValueVerificationStatus::UnreasonableNeedsWarning;
                 warning = Some(format!("我不能直接采纳这个伤害 {}。它看起来不符合当前系统同类武器/能力的常见参数，应该先查具体武器/法术/能力表。", expr));
-                suggestion = Some(format!("建议用同类条目的参数范围作为临时值：{}；如果你坚持，我会记录为本桌特例。", common_damage_band(ruleset_id)));
+                suggestion = Some(format!("建议用同类条目的参数范围作为临时值：{}；如果你坚持，我会记录为本桌特例。", common_damage_band_from_kernel(kernel)));
                 balance_risk = Some("possible_balance_break".into());
             }
         }
         PlayerSuppliedValueKind::DifficultyValue | PlayerSuppliedValueKind::RangeDifficulty => {
             let value = claim.supplied_value_json.get("value").and_then(|v| v.as_i64()).unwrap_or_default();
-            acceptable = common_difficulty_band_json(ruleset_id);
-            let plausible = difficulty_plausible_for_ruleset(ruleset_id, value);
+            acceptable = difficulty_band_json_from_kernel(kernel);
+            let plausible = difficulty_plausible_from_kernel(kernel, value);
             comparison = json!({"supplied_value": value, "plausible_for_ruleset_band": plausible});
             if plausible {
                 status = PlayerValueVerificationStatus::PlausibleProvisional;
@@ -279,11 +284,33 @@ fn dice_total_bounds(expr: &str) -> Option<(i64, i64)> {
     Some((n - minus + plus, n * sides - minus + plus))
 }
 fn parse_dice_count(expr: &str) -> Option<i64> { Regex::new(r"(?i)(\d+)\s*d\s*(\d+)").ok()?.captures(expr).and_then(|c| c.get(1)?.as_str().parse().ok()) }
-fn ruleset_damage_family(ruleset_id: &str) -> &'static str { if ruleset_id.contains("cyberpunk") { "cyberpunk_red_weapon_damage" } else if ruleset_id.contains("dnd") { "dnd_damage_dice" } else if ruleset_id.contains("sword_world") { "sword_world_weapon_spell_damage" } else if ruleset_id.contains("coc") || ruleset_id.contains("brp") { "brp_percentile_weapon_damage" } else { "generic_trpg_damage" } }
-fn common_damage_band(ruleset_id: &str) -> &'static str { if ruleset_id.contains("cyberpunk") { "roughly 2d6..8d6 depending weapon class; exact weapon table required" } else if ruleset_id.contains("dnd") { "roughly 1d4..2d12 for common low-level weapon/spell chunks; exact entry required" } else if ruleset_id.contains("sword_world") { "damage is usually table/formula driven; exact weapon/spell data required" } else if ruleset_id.contains("coc") || ruleset_id.contains("brp") { "weapon-specific dice such as 1d3..2d10+db; exact weapon table required" } else { "system-specific; exact object/ability entry required" } }
-fn damage_plausible_for_ruleset(ruleset_id: &str, expr: &str) -> bool { let Some(n) = parse_dice_count(expr) else { return false; }; if ruleset_id.contains("cyberpunk") { (1..=12).contains(&n) } else if ruleset_id.contains("dnd") { (1..=20).contains(&n) } else { (1..=30).contains(&n) } }
-fn common_difficulty_band_json(ruleset_id: &str) -> Value { if ruleset_id.contains("cyberpunk") { json!({"common_dv_band":"9..29", "note":"DV should come from range/task table or GM adjudication"}) } else if ruleset_id.contains("dnd") { json!({"common_dc_band":"5..30", "note":"DC should come from task difficulty, AC, save DC, or rules text"}) } else if ruleset_id.contains("coc") || ruleset_id.contains("brp") { json!({"common_target_band":"1..100", "note":"usually roll-under ability value or hard/extreme derivation, not arbitrary DC"}) } else { json!({"common_target_band":"ruleset-specific"}) } }
-fn difficulty_plausible_for_ruleset(ruleset_id: &str, value: i64) -> bool { if ruleset_id.contains("cyberpunk") { (5..=35).contains(&value) } else if ruleset_id.contains("dnd") { (1..=40).contains(&value) } else if ruleset_id.contains("coc") || ruleset_id.contains("brp") { (1..=100).contains(&value) } else { (1..=100).contains(&value) } }
+
+fn bands_for(kernel: &trpg_model::RuleKernel) -> &trpg_model::RefereeValueBands {
+    kernel.referee_value_bands.as_ref().unwrap_or(&trpg_model::GENERIC_REFEREE_BANDS)
+}
+
+fn damage_family_from_kernel(kernel: &trpg_model::RuleKernel) -> &str {
+    &bands_for(kernel).damage_family
+}
+
+fn common_damage_band_from_kernel(kernel: &trpg_model::RuleKernel) -> &str {
+    &bands_for(kernel).damage_band
+}
+
+fn damage_plausible_from_kernel(kernel: &trpg_model::RuleKernel, expr: &str) -> bool {
+    let Some(n) = parse_dice_count(expr) else { return false; };
+    let (lo, hi) = bands_for(kernel).damage_plausible_range;
+    n >= lo && n <= hi
+}
+
+fn difficulty_band_json_from_kernel(kernel: &trpg_model::RuleKernel) -> Value {
+    bands_for(kernel).difficulty_band.clone()
+}
+
+fn difficulty_plausible_from_kernel(kernel: &trpg_model::RuleKernel, value: i64) -> bool {
+    let (lo, hi) = bands_for(kernel).difficulty_plausible_range;
+    value >= lo && value <= hi
+}
 fn generic_value_plausible(value: i64) -> bool { (0..=150).contains(&value) }
 
 fn render_referee_context(result: &PlayerValueRefereeResult) -> String {
@@ -292,4 +319,90 @@ fn render_referee_context(result: &PlayerValueRefereeResult) -> String {
         lines.push(format!("- claim={} status={} warning={:?} suggestion={:?}", v.claim_id, v.status.as_str(), v.warning_public, v.suggestion_public));
     }
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod referee_bands_tests {
+    use super::*;
+    use trpg_model::{RuleKernel, RefereeValueBands, GENERIC_REFEREE_BANDS};
+
+    fn kernel_with_bands(bands: RefereeValueBands) -> RuleKernel {
+        RuleKernel { referee_value_bands: Some(bands), ..Default::default() }
+    }
+    fn kernel_no_bands() -> RuleKernel {
+        RuleKernel { referee_value_bands: None, ..Default::default() }
+    }
+
+    #[test]
+    fn damage_family_reads_kernel_field() {
+        let k = kernel_with_bands(RefereeValueBands {
+            damage_family: "test_damage_family".into(),
+            ..Default::default()
+        });
+        assert_eq!(damage_family_from_kernel(&k), "test_damage_family");
+    }
+
+    #[test]
+    fn damage_family_falls_back_to_generic() {
+        let k = kernel_no_bands();
+        assert_eq!(damage_family_from_kernel(&k), GENERIC_REFEREE_BANDS.damage_family.as_str());
+    }
+
+    #[test]
+    fn damage_plausible_uses_kernel_range() {
+        let k = kernel_with_bands(RefereeValueBands {
+            damage_plausible_range: (1, 5),
+            ..Default::default()
+        });
+        assert!(damage_plausible_from_kernel(&k, "5d6"));
+        assert!(!damage_plausible_from_kernel(&k, "6d6"));
+    }
+
+    #[test]
+    fn damage_plausible_generic_fallback_30() {
+        let k = kernel_no_bands();
+        // GENERIC max=30 → 30d6 ok, 31d6 not
+        assert!(damage_plausible_from_kernel(&k, "30d6"));
+        assert!(!damage_plausible_from_kernel(&k, "31d6"));
+    }
+
+    #[test]
+    fn difficulty_plausible_uses_kernel_range() {
+        let k = kernel_with_bands(RefereeValueBands {
+            difficulty_plausible_range: (5, 35),
+            ..Default::default()
+        });
+        assert!(difficulty_plausible_from_kernel(&k, 5));
+        assert!(difficulty_plausible_from_kernel(&k, 35));
+        assert!(!difficulty_plausible_from_kernel(&k, 4));
+        assert!(!difficulty_plausible_from_kernel(&k, 36));
+    }
+
+    #[test]
+    fn difficulty_band_json_uses_kernel_field() {
+        let k = kernel_with_bands(RefereeValueBands {
+            difficulty_band: serde_json::json!({"common_band":"9..29","note":"test"}),
+            ..Default::default()
+        });
+        let v = difficulty_band_json_from_kernel(&k);
+        assert_eq!(v.get("common_band").and_then(|x| x.as_str()), Some("9..29"));
+    }
+
+    #[test]
+    fn no_ruleset_name_in_referee_src() {
+        // grep-level guard: the five old hardcoded ruleset_id-branching functions must be
+        // gone. We split the banned signatures so the test literal itself doesn't match.
+        let src = include_str!("lib.rs");
+        // "fn " + "ruleset_damage_family" = old fn that returned &'static str per ruleset
+        assert!(!src.contains(&["fn ", "ruleset_damage_family("].concat()),
+            "old hardcoded fn must be deleted: ruleset_damage_family");
+        assert!(!src.contains(&["fn ", "common_damage_band("].concat()),
+            "old hardcoded fn must be deleted: common_damage_band");
+        assert!(!src.contains(&["fn ", "damage_plausible_for_ruleset("].concat()),
+            "old hardcoded fn must be deleted: damage_plausible_for_ruleset");
+        assert!(!src.contains(&["fn ", "common_difficulty_band_json("].concat()),
+            "old hardcoded fn must be deleted: common_difficulty_band_json");
+        assert!(!src.contains(&["fn ", "difficulty_plausible_for_ruleset("].concat()),
+            "old hardcoded fn must be deleted: difficulty_plausible_for_ruleset");
+    }
 }

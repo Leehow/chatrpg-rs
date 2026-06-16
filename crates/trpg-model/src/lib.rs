@@ -7016,3 +7016,33 @@ mod pp_lifecycle_tests {
         assert_eq!(PP_COMPLETE, "complete");
     }
 }
+
+#[cfg(test)]
+mod referee_value_bands_tests {
+    use super::*;
+
+    #[test]
+    fn referee_value_bands_roundtrip() {
+        let k = RuleKernel {
+            referee_value_bands: Some(RefereeValueBands {
+                damage_family: "test_family".into(),
+                damage_band: "1d4..2d8".into(),
+                damage_plausible_range: (1, 10),
+                difficulty_band: serde_json::json!({"common_band":"5..20"}),
+                difficulty_plausible_range: (1, 40),
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&k).unwrap();
+        assert!(json.pointer("/referee_value_bands/damage_family").is_some());
+        let k2: RuleKernel = serde_json::from_value(json).unwrap();
+        assert_eq!(k2.referee_value_bands.unwrap().damage_family, "test_family");
+    }
+
+    #[test]
+    fn kernel_without_referee_value_bands_defaults_none() {
+        let json = serde_json::json!({"kernel_id":"x","ruleset_id":"y","version":"1"});
+        let k: RuleKernel = serde_json::from_value(json).unwrap();
+        assert!(k.referee_value_bands.is_none(), "old kernels must not fail on missing field");
+    }
+}
