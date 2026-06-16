@@ -119,6 +119,15 @@ pub async fn play_cli_agent(ruleset: &str, module: Option<&str>) -> Result<()> {
                     // play 模式：heavy 后台完成信号。已在 TurnComplete 处 break，
                     // 此分支理论上不可达；若因竞态先到此，直接忽略继续 drain。
                 }
+                TurnEvent::TurnFailed { phase, message, .. } => {
+                    // obs T2/T6（spec §4.5）：play 模式遇阶段失败 → 红字一行提示，**不崩 shell**
+                    // （fail-closed 不伪装成功，但交互式会话继续，玩家可重试）。失败终态，break。
+                    println!("\n\x1b[31m[turn failed] phase={phase}: {message}\x1b[0m");
+                    break;
+                }
+                TurnEvent::TurnWarning { phase, message } => {
+                    println!("\n\x1b[33m[turn warning] phase={phase}: {message}\x1b[0m");
+                }
                 TurnEvent::TurnComplete { outcome } => {
                     println!();
                     match outcome {

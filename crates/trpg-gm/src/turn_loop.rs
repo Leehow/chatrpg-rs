@@ -118,12 +118,26 @@ impl TurnContext {
         }
     }
 
+    /// T2 Flight Recorder：兄弟模块（turn_trace.rs / execute.rs）只读访问本回合
+    /// 已装配的 CompiledContext，用于从 need_trace / BP1·BP2·BP3 hash 组装 TurnTrace。
+    /// 字段私有（module-private to turn_loop）故经此 accessor 暴露——不开放可变写。
+    pub(crate) fn compiled(&self) -> &CompiledContext {
+        &self.compiled
+    }
+
     /// 测试 seam：直接植入 agent_loop 产物（visible_text / awaiting_gate），让纯单测
     /// 在不跑真 LLM stream 的情况下覆盖 heavy_assistant_output 的派生分支。
     #[cfg(test)]
     pub(crate) fn set_agent_products_for_test(&mut self, visible_text: String, awaiting_gate: Option<AwaitingPlayerRoll>) {
         self.visible_text = visible_text;
         self.awaiting_gate = awaiting_gate;
+    }
+
+    /// 测试 seam（T2 turn_trace 单测）：直接植入已装配的 CompiledContext，让纯单测在不跑
+    /// 真 context_assembly 的情况下覆盖 build_turn_trace 从 need_trace / BP hash 的组装。
+    #[cfg(test)]
+    pub(crate) fn set_compiled_for_test(&mut self, compiled: CompiledContext) {
+        self.compiled = compiled;
     }
 }
 impl GmLoop {

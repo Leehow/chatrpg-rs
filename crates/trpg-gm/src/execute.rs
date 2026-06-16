@@ -5,7 +5,9 @@
 use crate::turn_event::TurnEvent;
 use crate::turn_loop::{GmLoop, GmTurnInput, TurnContext};
 use crate::turn_plan::{PhaseId, PhaseKind, TurnPhasePlan};
+use crate::turn_trace::{build_turn_trace, failure_kind_for, phase_error_policy, PhaseFailure};
 use tokio_stream::wrappers::ReceiverStream;
+use trpg_model::TurnFailureRecord;
 
 /// owned 版回合请求（spawn 进 tokio 任务需 'static / owned —— 借用版
 /// GmTurnInput<'a> 无法跨 spawn 边界）。装配方从各 transport 的借用上下文
@@ -107,6 +109,8 @@ async fn run_pipeline(
     let signal;
     let selected;
     let mut scene_commit: Option<crate::turn_loop::SceneTransitionInfo> = None;
+    // T2 Flight Recorder：本回合实际跑过的 phase id（按解释顺序累积），收尾写进 TurnTrace。
+    let mut phases_run: Vec<String> = Vec::new();
     // heavy 段所需的 assistant_output：必须在块内 take_outcome 清空 ctx **之前**快照，
     // 但在块外（spawn_heavy 调用处）使用，故在此声明、块内赋值。
     let heavy_assistant_output;
@@ -122,16 +126,38 @@ async fn run_pipeline(
         };
 
         // —— 1. 确定性头部：按 plan 顺序跑所有 Deterministic phase ——
-        // mode_inference / context_assembly fail-closed 返 Err 终止回合（与
-        // run_gm_turn 一致）：直接收尾发 TurnComplete（Narration 空文本）后早返。
+        // mode_inference / context_assembly fail-closed 返 Err（P1-1）：发 TurnFailed
+        // （**不再**发空 TurnComplete 伪装成功）+ 落 turns.failure_kind + 写失败 TurnTrace 后早返。
         for phase in plan.iter().filter(|p| p.kind == PhaseKind::Deterministic) {
-            if !dispatch_deterministic(&mut gm, &mut ctx, &input, phase.id).await {
-                let _ = tx.send(TurnEvent::TurnComplete { outcome: gm.take_outcome(&mut ctx) }).await;
+            phases_run.push(format!("{:?}", phase.id));
+            if let Err(f) = dispatch_deterministic(&mut gm, &mut ctx, &input, phase.id).await {
+                // 确定性头部失败的只有 mode_inference / context_assembly，按分级器均为 AbortTurn
+                // （fail-closed 中止）。policy 显式查询，避免硬编码"恒中止"的假设——后续若有
+                // WarnContinue 类确定性失败可在此扩展（当前确定性头无此类）。
+                let policy = phase_error_policy(f.phase);
+                let signal = format!("{policy:?}");
+                let kind = failure_kind_for(f.phase);
+                let phase_label = format!("{:?}", f.phase);
+                // 失败事件代替空 TurnComplete——客户端能区分"失败"与"成功的空白回合"。
+                let _ = tx
+                    .send(TurnEvent::TurnFailed { phase: phase_label.clone(), message: f.message.clone(), recoverable: false })
+                    .await;
+                // turns.failure_kind 落库（fail-soft：写失败仅 warn，不影响已发的 TurnFailed）。
+                if let Err(e) = gm.engine.db.set_turn_failure_kind(&req.request.turn_id, kind).await {
+                    tracing::warn!(error = %e, turn_id = %req.request.turn_id, "set_turn_failure_kind failed (non-fatal)");
+                }
+                // 失败 TurnTrace（pp_lifecycle="failed"、failure=Some、narration=None、phases=已尝试）。
+                let failure = TurnFailureRecord { phase: phase_label, message: f.message, failure_kind: kind.to_string() };
+                let trace = build_turn_trace(&req, &ctx, signal, phases_run.clone(), None, Some(failure), vec![], "failed");
+                if let Err(e) = gm.engine.db.upsert_turn_trace(&trace).await {
+                    tracing::warn!(error = %e, turn_id = %req.request.turn_id, "upsert_turn_trace (failure path) failed (non-fatal)");
+                }
                 return;
             }
         }
 
         // —— 2. AgentLoop body：产 Delta / AwaitingPlayerRoll 经 tx，返回终态信号 ——
+        phases_run.push(format!("{:?}", PhaseId::AgentLoop));
         signal = gm.run_agent_loop(&mut ctx, &input, tx).await;
 
         // —— 3a. CRITICAL 尾段（同步，TurnComplete 前 await）——
@@ -146,10 +172,12 @@ async fn run_pipeline(
             if phase.kind != PhaseKind::Postprocess { continue; }
             match phase.id {
                 PhaseId::VerifyAfterStream => {
+                    phases_run.push(format!("{:?}", PhaseId::VerifyAfterStream));
                     let _ = tx.send(TurnEvent::PostprocessScheduled).await;
                     gm.phase_verify_after_stream(&mut ctx, &input).await;
                 }
                 PhaseId::Finalize => {
+                    phases_run.push(format!("{:?}", PhaseId::Finalize));
                     // awaiting 终态 finalize 状态 = "awaiting_player_roll"，正常 = "ready"。
                     let status = match signal {
                         AgentSignal::AwaitingPlayerRoll => "awaiting_player_roll",
@@ -158,6 +186,7 @@ async fn run_pipeline(
                     gm.phase_finalize(&mut ctx, &input, status).await; // R5：只 save_turn
                 }
                 PhaseId::SceneNavigate => {
+                    phases_run.push(format!("{:?}", PhaseId::SceneNavigate));
                     if let Some(t) = gm.phase_scene_navigate_critical(&ctx, &input).await {
                         let _ = tx.send(TurnEvent::SceneTransition { from: t.from.clone(), to: t.to.clone(), reason: t.reason.clone() }).await;
                         scene_commit = Some(t);
@@ -180,6 +209,23 @@ async fn run_pipeline(
         // 让下一回合入口守卫可放行（heavy 仍后台跑、不阻塞）。失败仅 log，绝不影响已发的 TurnComplete。
         if let Err(e) = gm.engine.db.set_turn_pp_lifecycle(&req.request.turn_id, trpg_model::PP_CRITICAL_DONE).await {
             tracing::warn!(error = %e, turn_id = %req.request.turn_id, "set pp_lifecycle=critical_done failed (non-fatal)");
+        }
+        // —— 5. 成功路径 TurnTrace（write-through，fail-soft）——
+        // 等价铁律：不改任何已发事件——TurnTrace 纯 DB 副作用，必须在此块内（ctx.compiled 仍
+        // 可读、take_outcome 已快照 heavy_assistant_output 为念白）组装并落库；写失败仅 warn，
+        // 绝不回退/影响已发的 Delta…TurnComplete 序列（D2 失败隔离）。
+        let trace = build_turn_trace(
+            &req,
+            &ctx,
+            format!("{signal:?}"),
+            phases_run.clone(),
+            Some(&heavy_assistant_output),
+            None,
+            vec![],
+            trpg_model::PP_CRITICAL_DONE,
+        );
+        if let Err(e) = gm.engine.db.upsert_turn_trace(&trace).await {
+            tracing::warn!(error = %e, turn_id = %req.request.turn_id, "upsert_turn_trace (success path) failed (non-fatal)");
         }
         // input 在此块结束时释放对 req 的借用，下面 move req 进 heavy spawn。
     }
@@ -240,13 +286,15 @@ fn spawn_heavy(
     });
 }
 
-/// 确定性头部 phase 分发。返回 false ⇒ fail-closed 终止（mode/context Err）。
+/// 确定性头部 phase 分发。`Ok(())` ⇒ 阶段成功；`Err(PhaseFailure)` ⇒ fail-closed
+/// 终止（mode/context Err，带触发 PhaseId + 人读信息，caller 据此发 TurnFailed +
+/// 落 turns.failure_kind，**不再**发空 TurnComplete 伪装成功）。
 async fn dispatch_deterministic(
     gm: &mut GmLoop,
     ctx: &mut TurnContext,
     input: &GmTurnInput<'_>,
     id: PhaseId,
-) -> bool {
+) -> Result<(), PhaseFailure> {
     match id {
         PhaseId::RecordPlayerAction => gm.phase_record_player_action(ctx, input).await,
         PhaseId::RefreshLiveDerived => gm.phase_refresh_live_derived(ctx, input).await,
@@ -257,20 +305,20 @@ async fn dispatch_deterministic(
         PhaseId::ModeInference => {
             if let Err(err) = gm.phase_mode_inference(ctx, input).await {
                 tracing::warn!(error = %err, "mode_inference failed; aborting turn");
-                return false;
+                return Err(PhaseFailure { phase: PhaseId::ModeInference, message: err.to_string() });
             }
         }
         PhaseId::DebtLoad => gm.phase_debt_load(ctx, input).await,
         PhaseId::ContextAssembly => {
             if let Err(err) = gm.phase_context_assembly(ctx, input).await {
                 tracing::warn!(error = %err, "context_assembly failed; aborting turn");
-                return false;
+                return Err(PhaseFailure { phase: PhaseId::ContextAssembly, message: err.to_string() });
             }
         }
         // AgentLoop / Postprocess 不经此路径（解释器分流）；fail-closed no-op。
         _ => {}
     }
-    true
+    Ok(())
 }
 
 // R5 Task1c：旧 dispatch_postprocess 已收编进 run_pipeline 的 critical 循环

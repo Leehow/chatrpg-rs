@@ -20,6 +20,13 @@ pub enum TurnEvent {
     /// heavy 组后台任务完成信号（CLI turn 模式等此事件或轮询 pp_lifecycle=complete；
     /// API SSE / play 模式已在 TurnComplete 处 break，不等此事件）。
     HeavyPostprocessDone,
+    /// 阶段失败（obs slice T2，P1-1）：fail-closed 阶段（mode_inference/context_assembly/
+    /// finalize）失败时发此事件**代替**空 TurnComplete，回合在此终止——失败不再伪装成空白成功。
+    /// `recoverable=false` ⇒ 无 TurnComplete；`recoverable=true` 预留 partial（当前未用）。
+    TurnFailed { phase: String, message: String, recoverable: bool },
+    /// 阶段警告（obs slice T2）：WarnContinue 阶段（verify/memory/audit）失败时发此事件
+    /// 并继续主流程。当前为类型 + transport 映射占位，verify/memory 全量接线见后续切片。
+    TurnWarning { phase: String, message: String },
     /// 回合终态。
     TurnComplete { outcome: TurnOutcome },
 }
@@ -47,13 +54,15 @@ mod tests {
             TurnEvent::Errata(errata),
             TurnEvent::PostprocessScheduled,
             TurnEvent::HeavyPostprocessDone,
+            TurnEvent::TurnFailed { phase: "context_assembly".into(), message: "over budget".into(), recoverable: false },
+            TurnEvent::TurnWarning { phase: "verify_after_stream".into(), message: "verifier lag".into() },
             TurnEvent::TurnComplete { outcome: TurnOutcome::Narration("done".into()) },
         ];
         for e in &events {
             let cloned = e.clone();
             assert!(!format!("{cloned:?}").is_empty());
         }
-        assert_eq!(events.len(), 7);
+        assert_eq!(events.len(), 9);
     }
 
     #[test]

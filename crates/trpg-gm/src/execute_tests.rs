@@ -136,6 +136,21 @@ fn exec_fixture_panicking_heavy(scripts: Vec<Vec<StreamEvent>>) -> (GmLoop, Owne
     exec_fixture_inner(scripts, Some(HeavyProbe { order: None, sleep_ms: 0, panic: true }))
 }
 
+/// T2 失败注入：ctx_provider 产一个 prefix_text 多词的 CompiledContext，配合极小
+/// token_budget.prefix_max → phase_context_assembly 的 validate_compiled_budget 返 Err
+/// → ContextAssembly fail-closed（AbortTurn）。验证回合发 TurnFailed 而非空 TurnComplete。
+fn exec_fixture_context_fail() -> (GmLoop, OwnedTurnRequest) {
+    let (mut gm, mut req) = exec_fixture_inner(vec![vec![]], None);
+    // 8 个词远超 prefix_max=2 → validate_compiled_budget Err（"prefix segment exceeds ..."）。
+    gm.ctx_provider = Some(Arc::new(|_r, _s| CompiledContext {
+        prefix_text: "one two three four five six seven eight".into(),
+        prefix_hash: "p".into(), pinned_hash: "m".into(), dynamic_hash: "d".into(),
+        ..Default::default()
+    }));
+    req.request.token_budget = TokenBudget { prefix_max: 2, pinned_max: 2, dynamic_max: 2, total_max: 8 };
+    (gm, req)
+}
+
 // 真流式直通：ContentDelta 逐块 → TurnEvent::Delta（不合并不缓冲），
 // 末尾恰好一个 TurnComplete。需要 :54347（lazy pool；finalize warn 不 panic）。
 #[tokio::test]
@@ -315,4 +330,57 @@ async fn heavy_memory_event_persists_with_narration_content() {
     let transcript = event.transcript_excerpt.unwrap_or_default();
     assert!(transcript.contains(&narration), "记忆 transcript_excerpt 必含叙事内容: {transcript}");
     assert_eq!(event.turn_id.as_deref(), Some(turn_id.as_str()), "记忆事件必须绑定本回合 turn_id");
+}
+
+// ============================ T2: 失败不再伪装成空白成功 ============================
+
+// headline fix（P1-1）：确定性头部阶段失败（context_assembly fail-closed）→ 事件流必须含
+// TurnFailed{phase:ContextAssembly} 且**绝不**含 TurnComplete（旧版会发空白 TurnComplete 伪装
+// 成功）。turns.failure_kind / turn_traces 落库走 :54347（已含 0029 schema），故 DB-gated。
+#[tokio::test]
+async fn context_assembly_failure_emits_turn_failed_not_complete() {
+    if std::env::var("SKIP_DB_TESTS").is_ok() { return; }
+    let session_id = format!("s_fail_{}", uuid::Uuid::new_v4().simple());
+    let turn_id = format!("t_fail_{}", uuid::Uuid::new_v4().simple());
+    let (gm, mut req) = exec_fixture_context_fail();
+    req.request.session_id = session_id.clone();
+    req.request.turn_id = turn_id.clone();
+
+    // 独立 Db 句柄查 turns.failure_kind / turn_traces（gm 被 move 进 execute_turn）。
+    let probe_db = Db { pool: PgPoolOptions::new().connect_lazy("postgres://chatrpg:chatrpg@localhost:54347/chatrpg").expect("lazy pool") };
+    // turns/turn_traces 对 sessions FK：先建 session 行，否则落库被 warn 吞、查不到。
+    probe_db.create_session(&session_id, &req.request.ruleset_id, req.request.module_id.as_deref()).await.expect("create session row (FK prereq)");
+
+    let mut stream = execute_turn(gm, req, CANONICAL_TURN_PLAN);
+    let mut failed_phase: Option<String> = None;
+    let mut saw_complete = false;
+    while let Some(ev) = stream.next().await {
+        match ev {
+            TurnEvent::TurnFailed { phase, recoverable, .. } => {
+                assert!(!recoverable, "fail-closed 阶段失败 recoverable 必须 false");
+                failed_phase = Some(phase);
+            }
+            TurnEvent::TurnComplete { .. } => saw_complete = true,
+            _ => {}
+        }
+    }
+    assert_eq!(failed_phase.as_deref(), Some("ContextAssembly"), "必须发 TurnFailed{{phase:ContextAssembly}}");
+    assert!(!saw_complete, "失败回合绝不能发 TurnComplete（伪装成功）—— headline fix");
+
+    // 失败 TurnTrace 落库（轮询：upsert 在早返前 await，但 fail-soft、轮询稳健）：
+    // failure 非 None、pp_lifecycle=failed、phases 含 ContextAssembly、failure_kind=failed_context。
+    // 注：context_assembly 在 Finalize/save_turn 之前中止 ⇒ 此刻无 turns 行，set_turn_failure_kind
+    // 的 UPDATE 命中 0 行（fail-soft，不报错）；失败归类的**权威落库**是 turn_traces.failure（PK upsert）。
+    let mut loaded = None;
+    for _ in 0..30 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if let Ok(Some(t)) = probe_db.load_turn_trace(&turn_id).await { loaded = Some(t); break; }
+    }
+    let trace = loaded.expect("失败 TurnTrace 必须落库");
+    assert_eq!(trace.pp_lifecycle, "failed");
+    let failure = trace.failure.expect("失败 trace 必须带 failure record");
+    assert_eq!(failure.failure_kind, "failed_context");
+    assert_eq!(failure.phase, "ContextAssembly");
+    assert!(trace.phases_run.iter().any(|p| p == "ContextAssembly"), "phases_run 必须含已尝试的 ContextAssembly: {:?}", trace.phases_run);
+    assert!(trace.narration_hash.is_none(), "失败回合 narration=None ⇒ narration_hash 必须 None");
 }

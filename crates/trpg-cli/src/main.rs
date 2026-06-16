@@ -879,6 +879,9 @@ async fn turn_cli(args: TurnArgs) -> Result<()> {
     };
 
     let mut stream = Box::pin(execute_turn(gm, owned, CANONICAL_TURN_PLAN));
+    // obs T2/T6（spec §4.5）：遇 TurnFailed → 记录，循环后非零退出（脚本/回归可判失败，
+    // 呼应"fail-closed 不伪装成功"）。
+    let mut turn_failure: Option<(String, String)> = None;
     while let Some(event) = stream.next().await {
         match event {
             TurnEvent::Delta(delta) => emit_delta(args.stream_format, &delta)?,
@@ -901,6 +904,17 @@ async fn turn_cli(args: TurnArgs) -> Result<()> {
                 // 保守做法：不 break（轮询负责等 complete），此事件仅透出 heavy_done phase。
                 emit_phase(args.stream_format, "heavy_done", json!({}))?;
             }
+            TurnEvent::TurnFailed { phase, message, .. } => {
+                // 失败终态：透出 error phase（结构化输出可解析）+ 记录，循环后非零退出。
+                emit_phase(args.stream_format, "error", json!({"phase": phase, "message": message}))?;
+                eprintln!("turn failed at phase {phase}: {message}");
+                turn_failure = Some((phase, message));
+                break;
+            }
+            TurnEvent::TurnWarning { phase, message } => {
+                emit_phase(args.stream_format, "warning", json!({"phase": phase, "message": message}))?;
+                eprintln!("turn warning at phase {phase}: {message}");
+            }
             TurnEvent::TurnComplete { outcome } => {
                 if let TurnOutcome::Narration(_) = outcome {
                     emit_phase(args.stream_format, "done", json!({}))?;
@@ -909,8 +923,13 @@ async fn turn_cli(args: TurnArgs) -> Result<()> {
         }
     }
     // R5 T3：一次性 turn 等 heavy 落账（确定性退出），轮询 pp_lifecycle=complete。
-    if cli_wait_mode(true) == WaitMode::WaitHeavy {
+    // 仅成功路径才等 heavy——失败回合无 heavy spawn。
+    if turn_failure.is_none() && cli_wait_mode(true) == WaitMode::WaitHeavy {
         await_heavy_complete(&db, &session_id).await;
+    }
+    if let Some((phase, message)) = turn_failure {
+        // 非零退出（anyhow::Error → main 返非零）——脚本/回归判失败，绝不伪装成功。
+        anyhow::bail!("turn failed at phase {phase}: {message}");
     }
     Ok(())
 }

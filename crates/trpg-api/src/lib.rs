@@ -1048,6 +1048,16 @@ async fn play_turn_sse(Path(session_id): Path<String>, State(state): State<AppSt
                     // API SSE：已在 TurnComplete 处 break，此分支不可达；
                     // 保留以满足 exhaustive match（heavy 在 execute_turn 后台 spawn，不发 SSE 事件）。
                 }
+                TurnEvent::TurnFailed { phase, message, recoverable } => {
+                    // obs T2/T5（spec §4.5）：fail-closed 阶段失败 → SSE `event: error`，回合在此终止
+                    // （**不**发 done、**无** TurnComplete）。客户端据此区分"失败"与"成功的空白回合"。
+                    send_event(&tx, "error", json!({"phase": phase, "message": message, "recoverable": recoverable})).await;
+                    break; // 失败终态，等价 TurnComplete 的 break；后续无事件。
+                }
+                TurnEvent::TurnWarning { phase, message } => {
+                    // obs T2/T5（spec §4.5）：WarnContinue 阶段失败 → SSE `event: warning`，回合继续。
+                    send_event(&tx, "warning", json!({"phase": phase, "message": message})).await;
+                }
                 TurnEvent::TurnComplete { outcome } => {
                     // R5 T3：critical 已落账，发 done 关闭 SSE（heavy 自走与 SSE 生命周期解耦）。
                     // AwaitingPlayerRoll 终态的 done 已在上面发过；仅 Narration 终态发常规 done。
