@@ -12,6 +12,8 @@ pub use mechanics_render::*;
 pub mod outcome_fields;
 pub mod table_dice_policy;
 pub use table_dice_policy::*;
+pub mod observability;
+pub use observability::*;
 
 pub const PROJECT_SCHEMA_VERSION: &str = "chatrpg.project_bundle.v1";
 pub const RULE_SCHEMA_VERSION: &str = "chatrpg.rule_bundle.v1";
@@ -160,7 +162,7 @@ pub struct SourceAnchor {
     pub text_hash: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default, PartialEq)]
 pub struct SourceRef {
     pub source_id: String,
     pub page: Option<u32>,
