@@ -83,8 +83,8 @@ pub async fn generate_starter_character(
          CREATION STEPS: {steps}\nOPTION CATALOGS: {catalogs}\n\
          DERIVED / RESOLUTION FORMULAS: {formulas}\n\n\
          If (and only if) this ruleset uses numeric attributes/skills, ALSO include `stats` and \
-         `skills` objects mapping canonical names to integers (e.g. cyberpunk REF/Handgun, CoC \
-         STR/Spot Hidden), so the engine can resolve dice. For purely narrative games, omit them.\n\n\
+         `skills` objects mapping this ruleset's canonical attribute and skill names to integers \
+         (drawn from the SHEET FIELDS above), so the engine can resolve dice. For purely narrative games, omit them.\n\n\
          Return STRICT JSON only — no markdown, no commentary — in exactly this shape:\n{schema}",
         rs = t.ruleset_id,
         title = t.title,

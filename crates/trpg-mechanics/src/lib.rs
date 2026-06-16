@@ -851,7 +851,14 @@ impl RefereeCombatService {
                 if is_plain_dice(dice) { return Some(dice.to_string()); }
             }
         }
-        if contract.ruleset_id.contains("cyberpunk") { return std::env::var("TRPG_COMBAT_DEFAULT_CYBERPUNK_DAMAGE").ok(); }
+        // Per-ruleset debug/override hook, derived from the ruleset id (no hardcoded
+        // ruleset name): e.g. ruleset "cyberpunk_red" -> TRPG_COMBAT_DEFAULT_CYBERPUNK_RED_DAMAGE.
+        // Falls back to the generic var. Both are unset in normal operation (-> None).
+        let key = format!(
+            "TRPG_COMBAT_DEFAULT_{}_DAMAGE",
+            contract.ruleset_id.to_ascii_uppercase().replace(|c: char| !c.is_ascii_alphanumeric(), "_")
+        );
+        if let Ok(v) = std::env::var(&key) { return Some(v); }
         std::env::var("TRPG_COMBAT_DEFAULT_DAMAGE_EXPR").ok()
     }
 
