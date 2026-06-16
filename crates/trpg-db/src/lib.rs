@@ -712,8 +712,23 @@ impl Db {
             if let Some(dc) = doc.get("dice_core").and_then(|d| d.as_object()) {
                 kernel.dice_core = merge_dice_core(kernel.dice_core, dc);
             }
+            // P0-2: layer the typed strategy policy keys (override wins wholesale).
+            // These migrate trpg-combat/trpg-referee's per-ruleset Rust branches
+            // into data; a malformed override value is ignored (fail-closed → the
+            // kernel field stays None → engine uses GENERIC_*).
+            apply_kernel_strategy_overrides(&mut kernel, &doc);
         }
         Ok(Some(kernel))
+    }
+
+    /// P0-2: load a module's lightweight engine config from the module bundle.
+    /// File: `{TRPG_DATA_DIR}/modules/{module_id}.module_config.json` (mirrors
+    /// the kernel-override convention). Returns None when absent/unreadable so
+    /// the engine falls back to its neutral (non-module) behavior. This is the
+    /// data home for combat's npc_actor_bindings + technical_option_table, so
+    /// scav_boss/athena_drone/DV14-12 live as data, not Rust.
+    pub async fn load_module_config(&self, module_id: &str) -> Option<ModuleConfig> {
+        read_module_config_file(module_id)
     }
 
     /// The ruleset's core dice expression from the parsed kernel
@@ -4055,6 +4070,39 @@ fn read_kernel_override_file(ruleset_id: &str) -> Option<serde_json::Value> {
     serde_json::from_str(&text).ok()
 }
 
+/// P0-2: layer the typed strategy policy keys from a kernel override doc onto the
+/// kernel (override wins wholesale). Each key is deserialized into its typed
+/// field; a missing or malformed key is skipped (fail-closed → field stays None
+/// → engine uses the GENERIC_* default). Covers combat_profile / combat_mode_policy
+/// / check_label_policy / dice_qualification / referee_value_bands.
+fn apply_kernel_strategy_overrides(kernel: &mut RuleKernel, doc: &serde_json::Value) {
+    if let Some(v) = doc.get("combat_profile") {
+        if let Ok(p) = serde_json::from_value::<trpg_model::CombatProfile>(v.clone()) { kernel.combat_profile = Some(p); }
+    }
+    if let Some(v) = doc.get("combat_mode_policy") {
+        if let Ok(p) = serde_json::from_value::<trpg_model::CombatModePolicy>(v.clone()) { kernel.combat_mode_policy = Some(p); }
+    }
+    if let Some(v) = doc.get("check_label_policy") {
+        if let Ok(p) = serde_json::from_value::<trpg_model::CheckLabelPolicy>(v.clone()) { kernel.check_label_policy = Some(p); }
+    }
+    if let Some(v) = doc.get("dice_qualification") {
+        if let Ok(p) = serde_json::from_value::<trpg_model::DiceQualification>(v.clone()) { kernel.dice_qualification = Some(p); }
+    }
+    if let Some(v) = doc.get("referee_value_bands") {
+        if let Ok(p) = serde_json::from_value::<trpg_model::RefereeValueBands>(v.clone()) { kernel.referee_value_bands = Some(p); }
+    }
+}
+
+/// P0-2: read a module config file `{TRPG_DATA_DIR}/modules/{id}.module_config.json`.
+/// Mirrors `read_kernel_override_file`. None when absent/unreadable/malformed.
+fn read_module_config_file(module_id: &str) -> Option<ModuleConfig> {
+    let safe: String = module_id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' { c } else { '_' }).collect();
+    let dir = std::env::var("TRPG_DATA_DIR").unwrap_or_else(|_| "data".into());
+    let p = std::path::Path::new(&dir).join("modules").join(format!("{safe}.module_config.json"));
+    let text = std::fs::read_to_string(&p).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
 /// Shallow-merge an override `dice_core` object onto the base (override keys win).
 /// Container values like `success_bands` (an array whose ids may repeat, e.g. two
 /// fumble bands) are REPLACED wholesale, not deep-merged — the override supplies the
@@ -4145,5 +4193,71 @@ mod dice_core_override_tests {
             "untouched track keeps the upgraded followup_procedure_id"
         );
         assert_eq!(merged[1].get("max").and_then(|v| v.as_i64()), Some(50), "overridden track replaced wholesale");
+    }
+}
+
+#[cfg(test)]
+mod kernel_strategy_override_tests {
+    use super::{apply_kernel_strategy_overrides, read_module_config_file};
+    use serde_json::json;
+    use trpg_model::{CombatMode, RuleKernel};
+
+    /// P0-2: the new strategy policy keys layer onto the kernel; missing keys
+    /// leave the field None (→ engine uses GENERIC_*).
+    #[test]
+    fn apply_strategy_overrides_layers_policy_keys() {
+        let mut kernel = RuleKernel::default();
+        let doc = json!({
+            "combat_mode_policy": {
+                "rules": [{"mode": "netrun", "when_action_kinds": ["hack"], "when_evidence_contains": []}],
+                "fallback_mode": "firefight"
+            },
+            "check_label_policy": {"labels": {"hack": "TECH check"}},
+            "dice_qualification": {"bare_dice_template": "{dice}+0"}
+        });
+        apply_kernel_strategy_overrides(&mut kernel, &doc);
+        let cmp = kernel.combat_mode_policy.expect("combat_mode_policy layered");
+        assert_eq!(cmp.fallback_mode, CombatMode::Firefight);
+        assert_eq!(cmp.rules[0].mode, CombatMode::Netrun);
+        assert_eq!(kernel.check_label_policy.unwrap().labels.get("hack").map(String::as_str), Some("TECH check"));
+        assert_eq!(kernel.dice_qualification.unwrap().bare_dice_template, "{dice}+0");
+        // a doc with none of the keys leaves the kernel fields None
+        let mut k2 = RuleKernel::default();
+        apply_kernel_strategy_overrides(&mut k2, &json!({"resource_tracks": []}));
+        assert!(k2.combat_mode_policy.is_none());
+        assert!(k2.check_label_policy.is_none());
+        assert!(k2.dice_qualification.is_none());
+    }
+
+    /// SKIP-gated: with the real data dir present, every shipped override /
+    /// module_config deserializes into the typed structs (proves the migrated
+    /// VALUES are well-formed for the equivalence gate).
+    #[test]
+    fn shipped_override_files_deserialize() {
+        let dir = std::env::var("TRPG_DATA_DIR").unwrap_or_else(|_| "../../data".to_string());
+        if !std::path::Path::new(&dir).join("parsed/rules").exists() {
+            eprintln!("SKIP: data dir absent");
+            return;
+        }
+        // SAFETY (test): single-threaded set of an env var for read_*_file.
+        unsafe { std::env::set_var("TRPG_DATA_DIR", &dir); }
+        // cyberpunk override: firefight fallback + hack/disable_device netrun rule.
+        let mut k = RuleKernel::default();
+        let doc = super::read_kernel_override_file("cyberpunk_red").expect("cyberpunk override present");
+        apply_kernel_strategy_overrides(&mut k, &doc);
+        let cmp = k.combat_mode_policy.expect("cyberpunk combat_mode_policy");
+        assert_eq!(cmp.fallback_mode, CombatMode::Firefight);
+        assert!(cmp.rules.iter().any(|r| r.mode == CombatMode::Netrun && r.when_action_kinds.iter().any(|a| a == "hack")));
+        assert_eq!(
+            k.check_label_policy.unwrap().labels.get("hack").map(String::as_str),
+            Some("appropriate TECH / Interface / Basic Tech check")
+        );
+        assert_eq!(k.dice_qualification.unwrap().bare_dice_template, "{dice}+0");
+        // module config: scav_boss / athena_drone bindings + DV 14/12 table.
+        let cfg = read_module_config_file("cyberpunk_red.homecoming").expect("homecoming module_config present");
+        assert!(cfg.npc_actor_bindings.iter().any(|b| b.actor_id == "npc.scav_boss"));
+        assert!(cfg.npc_actor_bindings.iter().any(|b| b.actor_id == "npc.athena_drone"));
+        let dvs: Vec<i32> = cfg.technical_option_table.unwrap().iter().map(|t| t.dv).collect();
+        assert_eq!(dvs, vec![14, 12]);
     }
 }
