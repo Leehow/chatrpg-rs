@@ -861,7 +861,15 @@ fn conflict_hint_from_orchestration(result: &TurnOrchestrationResult) -> Option<
         conflict: Option<&ConflictTurnResult>,
     ) -> Result<DirectorTurnResult> {
         let director = ActionableSituationDirector::from_env_or_default();
-        let result = director.prepare(DirectorInput { request, state, compiled, user_input, conflict });
+        // P0-2 T4: load the module's director facilitation overlay as data
+        // (replaces trpg-director's deleted is_homecoming hardcode). fail-soft:
+        // None → generic director path.
+        let module_cfg = if let Some(mid) = &request.module_id {
+            self.db.load_module_config(mid).await
+        } else {
+            None
+        };
+        let result = director.prepare(DirectorInput { request, state, compiled, user_input, conflict, module_config: module_cfg.as_ref() });
         if let Some(brief) = &result.brief {
             self.db.insert_actionable_situation_brief(brief).await.ok();
             let _ = self.db.upsert_runtime_context_block(&request.session_id, &actionable_situation_block(brief, &request.turn_id)).await;

@@ -3723,6 +3723,89 @@ pub struct SearchProfile {
     pub preferred_sections: Vec<String>,
 }
 
+/// One module-specific visible scene fact for the director brief
+/// (replaces trpg-director's is_homecoming visible_facts hardcode).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default, PartialEq)]
+pub struct DirectorSceneFact {
+    pub text: String,
+    #[serde(default)]
+    pub source: String,
+}
+
+/// One module-specific pressure item (replaces is_homecoming pressure hardcode).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default, PartialEq)]
+pub struct DirectorPressureItem {
+    pub text: String,
+    #[serde(default)]
+    pub clock_id: Option<String>,
+    #[serde(default)]
+    pub severity: i32,
+    #[serde(default)]
+    pub consequence_hint: Option<String>,
+}
+
+/// One module-specific affordance / interaction handle (replaces is_homecoming
+/// affordances hardcode). `implies_vectors` are ActionVector serde names; empty
+/// → engine applies a neutral default set (fail-soft).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default, PartialEq)]
+pub struct DirectorAffordanceItem {
+    pub description: String,
+    #[serde(default)]
+    pub implies_vectors: Vec<String>,
+}
+
+/// One module-specific risk item (replaces is_homecoming risk hardcode).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default, PartialEq)]
+pub struct DirectorRiskItem {
+    pub text: String,
+    #[serde(default)]
+    pub related_vectors: Vec<String>,
+    #[serde(default)]
+    pub severity: i32,
+}
+
+/// Module-level director facilitation config. Replaces trpg-director's
+/// `is_homecoming()` hardcode: scene facts / pressure / affordances / risks /
+/// biased NPC advice / open question / no-location place summary now come from
+/// this data, branched on DATA presence (not ruleset/module names).
+///
+/// TRANSITION (DONE_WITH_CONCERNS): module deep data is stored as scene-level
+/// `ScenarioNode` prose (read_aloud/gm_notes); there is no module-level
+/// container for cross-scene facilitation facts / biased-NPC-advice personas.
+/// So these values are injected via this data override file
+/// (`{id}.module_config.json`) for now; a future module-reader pass should
+/// auto-extract them from parsed scene data and retire the override.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default, PartialEq)]
+pub struct DirectorModuleConfig {
+    /// Module-specific visible scene facts → brief.visible_facts
+    #[serde(default)]
+    pub scene_facts: Vec<DirectorSceneFact>,
+    /// Module-specific pressure items → brief.pressure
+    #[serde(default)]
+    pub pressure_items: Vec<DirectorPressureItem>,
+    /// Module-specific interaction handles → brief.affordances
+    #[serde(default)]
+    pub affordance_items: Vec<DirectorAffordanceItem>,
+    /// Module-specific risks → brief.risks
+    #[serde(default)]
+    pub risk_items: Vec<DirectorRiskItem>,
+    /// Module-specific biased NPC advice → biased_npc_advice
+    #[serde(default)]
+    pub npc_advice: Vec<NpcBiasedAdvice>,
+    /// Module-specific known facts → brief.known_facts
+    #[serde(default)]
+    pub known_facts: Vec<String>,
+    /// Module-specific open question → brief.open_questions
+    #[serde(default)]
+    pub open_question: Option<String>,
+    /// Points-to tags for the open question (decision options).
+    #[serde(default)]
+    pub open_question_points_to: Vec<String>,
+    /// Fallback place summary when state has no location_id.
+    #[serde(default)]
+    pub place_summary_fallback: Option<String>,
+}
+
 /// Lightweight module-level engine config. Lives in the module bundle; every
 /// field #[serde(default)] so pre-P0-2 bundles deserialize unchanged.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default, PartialEq)]
@@ -3735,6 +3818,10 @@ pub struct ModuleConfig {
     pub scene_entity_aliases: Vec<EntityAlias>,
     #[serde(default)]
     pub module_search_profile: Option<SearchProfile>,
+    /// P0-2 T4: director facilitation overlay (scene facts / NPC advice /
+    /// place summary) that replaced trpg-director's is_homecoming hardcode.
+    #[serde(default)]
+    pub director: Option<DirectorModuleConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -4998,7 +5085,7 @@ pub struct GuidanceDecision {
     pub min_costed_examples: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default, PartialEq)]
 pub struct NpcBiasedAdvice {
     pub npc_id: String,
     pub speaker_label: String,

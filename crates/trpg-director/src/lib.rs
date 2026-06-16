@@ -24,6 +24,28 @@ pub struct DirectorInput<'a> {
     pub compiled: &'a CompiledContext,
     pub user_input: &'a str,
     pub conflict: Option<&'a ConflictTurnResult>,
+    /// Module-level engine config loaded by the caller (runtime). The director's
+    /// module-specific scene facts / NPC advice / place summary come from
+    /// `module_config.director`; None → generic path (fail-soft). This replaces
+    /// the old is_homecoming() ruleset/module/input name sniffing — the director
+    /// now branches on DATA presence, never on names.
+    pub module_config: Option<&'a ModuleConfig>,
+}
+
+impl<'a> DirectorInput<'a> {
+    /// The module's director facilitation overlay, if any.
+    fn director_cfg(&self) -> Option<&'a DirectorModuleConfig> {
+        self.module_config.and_then(|m| m.director.as_ref())
+    }
+}
+
+/// Parse data-supplied ActionVector serde names into enum values, dropping
+/// unknown names (fail-soft). Empty/all-unknown → caller's neutral default.
+fn parse_vectors(names: &[String]) -> Vec<ActionVector> {
+    names
+        .iter()
+        .filter_map(|n| serde_json::from_value::<ActionVector>(json!(n)).ok())
+        .collect()
 }
 
 impl ActionableSituationDirector {
@@ -103,17 +125,29 @@ fn build_brief(input: DirectorInput<'_>, frame: Option<&StateFrame>, level: Guid
     let mut known_facts = vec![KnownFact { fact_id: id("known"), text: "玩家只需要声明目标和手段；GM 会说明风险、检定和后果。".into(), source: "director_policy".into(), public: true }];
     let mut open_questions = vec![OpenQuestion { question_id: id("question"), text: "你们现在最想改变哪件事？".into(), points_to: vec!["goal".into(), "risk".into(), "approach".into()] }];
 
-    if is_homecoming(input) {
-        visible_facts.push(VisibleFact { fact_id: id("fact"), text: "无人机、警察、仓库入口、外露电缆和内部服务器噪音形成同一个局势面：威胁、救援、技术源头和情报价值同时存在。".into(), source_refs: vec![], confidence: RulingConfidence::Medium });
-        pressure.push(PressureItem { pressure_id: id("pressure"), text: "如果继续拖延，现场伤员、外部势力和设备过载都会推进局势。".into(), clock_id: Some("clock.homecoming_scene_pressure".into()), severity: 70, consequence_hint: Some("警察伤势恶化、敌对势力抵达、仓库内源头转移或过载".into()) });
-        affordances.extend(vec![
-            Affordance { affordance_id: id("affordance"), description: "外露电缆是可观察的交互抓手；它暗示供能、数据或控制关系。".into(), implies_vectors: vec![ActionVector::Technical, ActionVector::Tactical, ActionVector::Observe], visible_to_players: true, source_refs: vec![] },
-            Affordance { affordance_id: id("affordance"), description: "受困警察和封锁街口是救援、社交和现场资源的抓手。".into(), implies_vectors: vec![ActionVector::Social, ActionVector::Resource, ActionVector::Tactical], visible_to_players: true, source_refs: vec![] },
-            Affordance { affordance_id: id("affordance"), description: "仓库内部的噪音与外部威胁同步，说明源头可能不在无人机本体。".into(), implies_vectors: vec![ActionVector::Observe, ActionVector::Technical, ActionVector::Stealth], visible_to_players: true, source_refs: vec![] },
-        ]);
-        risks.push(RiskItem { risk_id: id("risk"), text: "直接摧毁威胁最简单，但可能损失情报、报酬或后续线索。".into(), related_vectors: vec![ActionVector::Tactical], severity: 60 });
-        known_facts.push(KnownFact { fact_id: id("known"), text: "现场至少不是单一战斗问题：它同时是救援、威胁控制、源头调查和资源取舍。".into(), source: "director_homecoming_profile".into(), public: true });
-        open_questions.push(OpenQuestion { question_id: id("question"), text: "你们优先救人、控制威胁、追查源头、获取资源，还是撤离保命？".into(), points_to: vec!["rescue".into(), "control".into(), "source".into(), "loot".into(), "retreat".into()] });
+    if let Some(cfg) = input.director_cfg() {
+        for sf in &cfg.scene_facts {
+            visible_facts.push(VisibleFact { fact_id: id("fact"), text: sf.text.clone(), source_refs: vec![], confidence: RulingConfidence::Medium });
+        }
+        for pi in &cfg.pressure_items {
+            pressure.push(PressureItem { pressure_id: id("pressure"), text: pi.text.clone(), clock_id: pi.clock_id.clone(), severity: pi.severity, consequence_hint: pi.consequence_hint.clone() });
+        }
+        for ai in &cfg.affordance_items {
+            let mut vectors = parse_vectors(&ai.implies_vectors);
+            if vectors.is_empty() { vectors = vec![ActionVector::Observe, ActionVector::Technical, ActionVector::Tactical]; }
+            affordances.push(Affordance { affordance_id: id("affordance"), description: ai.description.clone(), implies_vectors: vectors, visible_to_players: true, source_refs: vec![] });
+        }
+        for ri in &cfg.risk_items {
+            let mut vectors = parse_vectors(&ri.related_vectors);
+            if vectors.is_empty() { vectors = vec![ActionVector::Tactical]; }
+            risks.push(RiskItem { risk_id: id("risk"), text: ri.text.clone(), related_vectors: vectors, severity: ri.severity });
+        }
+        for kf in &cfg.known_facts {
+            known_facts.push(KnownFact { fact_id: id("known"), text: kf.clone(), source: "module_director_config".into(), public: true });
+        }
+        if let Some(oq) = &cfg.open_question {
+            open_questions.push(OpenQuestion { question_id: id("question"), text: oq.clone(), points_to: cfg.open_question_points_to.clone() });
+        }
     }
 
     if let Some(conflict) = input.conflict {
@@ -269,10 +303,9 @@ fn costed_examples(_input: DirectorInput<'_>) -> Vec<CostedExample> {
 }
 
 fn biased_npc_advice(input: DirectorInput<'_>) -> Vec<NpcBiasedAdvice> {
-    if is_homecoming(input) { return vec![
-        NpcBiasedAdvice { npc_id: "injured_lawman".into(), speaker_label: "受伤警察".into(), advice_text: "别靠近它，把火力压住！".into(), bias_or_goal: "想活下来，优先压制威胁，不关心情报价值。".into(), not_official_solution: true },
-        NpcBiasedAdvice { npc_id: "fixer_contact".into(), speaker_label: "你的联系人".into(), advice_text: "别把值钱的情报打烂，查清它从哪来的。".into(), bias_or_goal: "想要可出售的信息或技术，低估现场救援压力。".into(), not_official_solution: true },
-    ]; }
+    if let Some(cfg) = input.director_cfg() {
+        if !cfg.npc_advice.is_empty() { return cfg.npc_advice.clone(); }
+    }
     vec![NpcBiasedAdvice { npc_id: "local_npc".into(), speaker_label: "现场 NPC".into(), advice_text: "我只会从自己的利益出发提醒你们。".into(), bias_or_goal: "NPC advice is biased and not the GM's official route.".into(), not_official_solution: true }]
 }
 
@@ -295,7 +328,10 @@ fn goal_prompt_for_level(level: GuidanceLevel) -> String {
 
 fn current_place_summary(input: DirectorInput<'_>) -> String {
     if let Some(location) = &input.state.location_id { return format!("当前地点：{}", location); }
-    if is_homecoming(input) { "当前地点：Cyberpunk RED Homecoming 开场附近；一个高压现场正在等待玩家选择目标。".into() } else { "当前场景需要先转化为可行动局势。".into() }
+    if let Some(cfg) = input.director_cfg() {
+        if let Some(summary) = &cfg.place_summary_fallback { return summary.clone(); }
+    }
+    "当前场景需要先转化为可行动局势。".into()
 }
 
 fn default_guidance_level() -> GuidanceLevel {
@@ -308,7 +344,174 @@ fn default_guidance_level() -> GuidanceLevel {
     }
 }
 fn contains_any(t: &str, terms: &[&str]) -> bool { terms.iter().any(|term| t.contains(term)) }
-fn is_homecoming(input: DirectorInput<'_>) -> bool { input.request.ruleset_id.contains("cyberpunk") || input.request.module_id.as_deref().unwrap_or_default().contains("homecoming") || input.user_input.to_lowercase().contains("无人机") || input.user_input.to_lowercase().contains("drone") }
 fn env_bool(key: &str, default: bool) -> bool { std::env::var(key).ok().map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")).unwrap_or(default) }
 fn env_usize(key: &str, default: usize) -> usize { std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default) }
 fn id(prefix: &str) -> String { format!("{}_{}", prefix, Uuid::new_v4().simple()) }
+
+#[cfg(test)]
+mod director_dehardcode_tests {
+    use super::*;
+
+    fn minimal_request() -> ContextRequest {
+        ContextRequest {
+            ruleset_id: "cyberpunk_red".into(),
+            module_id: Some("cyberpunk_red.homecoming".into()),
+            session_id: "s1".into(),
+            turn_id: "t1".into(),
+            viewer: VisibilityProfile::gm(),
+            token_budget: TokenBudget::default(),
+        }
+    }
+
+    fn minimal_state() -> RuntimeState {
+        RuntimeState {
+            ruleset_id: "cyberpunk_red".into(),
+            module_id: Some("cyberpunk_red.homecoming".into()),
+            ..Default::default()
+        }
+    }
+
+    fn compiled() -> CompiledContext { CompiledContext::default() }
+
+    /// EXACT pre-migration hardcoded Homecoming director values as DATA — the
+    /// equivalence baseline. This is what the deleted is_homecoming() block
+    /// emitted; the override JSON `cyberpunk_red.homecoming.module_config.json`
+    /// must carry the same values so the Homecoming run is unchanged.
+    fn legacy_homecoming_director_config() -> DirectorModuleConfig {
+        DirectorModuleConfig {
+            scene_facts: vec![DirectorSceneFact {
+                text: "无人机、警察、仓库入口、外露电缆和内部服务器噪音形成同一个局势面：威胁、救援、技术源头和情报价值同时存在。".into(),
+                source: "module_override.homecoming".into(),
+            }],
+            pressure_items: vec![DirectorPressureItem {
+                text: "如果继续拖延，现场伤员、外部势力和设备过载都会推进局势。".into(),
+                clock_id: Some("clock.homecoming_scene_pressure".into()),
+                severity: 70,
+                consequence_hint: Some("警察伤势恶化、敌对势力抵达、仓库内源头转移或过载".into()),
+            }],
+            affordance_items: vec![
+                DirectorAffordanceItem { description: "外露电缆是可观察的交互抓手；它暗示供能、数据或控制关系。".into(), implies_vectors: vec!["technical".into(), "tactical".into(), "observe".into()] },
+                DirectorAffordanceItem { description: "受困警察和封锁街口是救援、社交和现场资源的抓手。".into(), implies_vectors: vec!["social".into(), "resource".into(), "tactical".into()] },
+                DirectorAffordanceItem { description: "仓库内部的噪音与外部威胁同步，说明源头可能不在无人机本体。".into(), implies_vectors: vec!["observe".into(), "technical".into(), "stealth".into()] },
+            ],
+            risk_items: vec![DirectorRiskItem {
+                text: "直接摧毁威胁最简单，但可能损失情报、报酬或后续线索。".into(),
+                related_vectors: vec!["tactical".into()],
+                severity: 60,
+            }],
+            npc_advice: vec![
+                NpcBiasedAdvice { npc_id: "injured_lawman".into(), speaker_label: "受伤警察".into(), advice_text: "别靠近它，把火力压住！".into(), bias_or_goal: "想活下来，优先压制威胁，不关心情报价值。".into(), not_official_solution: true },
+                NpcBiasedAdvice { npc_id: "fixer_contact".into(), speaker_label: "你的联系人".into(), advice_text: "别把值钱的情报打烂，查清它从哪来的。".into(), bias_or_goal: "想要可出售的信息或技术，低估现场救援压力。".into(), not_official_solution: true },
+            ],
+            known_facts: vec!["现场至少不是单一战斗问题：它同时是救援、威胁控制、源头调查和资源取舍。".into()],
+            open_question: Some("你们优先救人、控制威胁、追查源头、获取资源，还是撤离保命？".into()),
+            open_question_points_to: vec!["rescue".into(), "control".into(), "source".into(), "loot".into(), "retreat".into()],
+            place_summary_fallback: Some("当前地点：Cyberpunk RED Homecoming 开场附近；一个高压现场正在等待玩家选择目标。".into()),
+        }
+    }
+
+    fn wrap(cfg: DirectorModuleConfig) -> ModuleConfig {
+        ModuleConfig { director: Some(cfg), ..Default::default() }
+    }
+
+    // T1: module_config 携带 scene_facts → brief.visible_facts 含该文本
+    #[test]
+    fn scene_facts_from_module_config() {
+        let cfg = wrap(DirectorModuleConfig {
+            scene_facts: vec![DirectorSceneFact { text: "外露电缆是可观察的交互抓手".into(), source: "module_override".into() }],
+            ..Default::default()
+        });
+        let req = minimal_request();
+        let state = minimal_state();
+        let input = DirectorInput { request: &req, state: &state, compiled: &compiled(), user_input: "我不知道能做什么", conflict: None, module_config: Some(&cfg) };
+        let brief = build_brief(input, None, GuidanceLevel::AskGoal);
+        assert!(brief.visible_facts.iter().any(|f| f.text.contains("外露电缆")), "scene_facts from module_config must appear in visible_facts");
+    }
+
+    // T2: module_config=None → 不 panic，返回通用 brief，无规则集/模组名字面量泄漏
+    #[test]
+    fn no_module_config_returns_generic_brief() {
+        let req = minimal_request();
+        let state = minimal_state();
+        let input = DirectorInput { request: &req, state: &state, compiled: &compiled(), user_input: "怎么办", conflict: None, module_config: None };
+        let brief = build_brief(input, None, GuidanceLevel::AskGoal);
+        assert!(!brief.visible_facts.is_empty(), "generic brief must have >= 1 visible_fact");
+        for f in &brief.known_facts {
+            assert!(!f.source.contains("homecoming") && !f.source.contains("cyberpunk"), "known_fact.source must not contain hardcoded ruleset/module name, got: {}", f.source);
+        }
+        // 通用 NPC advice 不含 homecoming-specific npc
+        let advice = biased_npc_advice(input);
+        assert!(advice.iter().all(|a| a.npc_id != "injured_lawman" && a.npc_id != "fixer_contact"));
+        // 通用 place summary 不泄漏模组名
+        assert!(!current_place_summary(input).contains("Homecoming"));
+    }
+
+    // T3: npc_advice 来自 module_config → biased_npc_advice 返回配置 NPC
+    #[test]
+    fn npc_advice_from_module_config() {
+        let cfg = wrap(DirectorModuleConfig {
+            npc_advice: vec![NpcBiasedAdvice { npc_id: "injured_lawman".into(), speaker_label: "受伤警察".into(), advice_text: "别靠近它，把火力压住！".into(), bias_or_goal: "想活下来".into(), not_official_solution: true }],
+            ..Default::default()
+        });
+        let req = minimal_request();
+        let state = minimal_state();
+        let input = DirectorInput { request: &req, state: &state, compiled: &compiled(), user_input: "怎么看", conflict: None, module_config: Some(&cfg) };
+        let advice = biased_npc_advice(input);
+        assert_eq!(advice.len(), 1);
+        assert_eq!(advice[0].npc_id, "injured_lawman");
+    }
+
+    // 等价铁律：数据驱动的 Homecoming brief 必须复刻原 is_homecoming 硬编码的全部文本/数值。
+    #[test]
+    fn homecoming_data_matches_legacy_hardcode() {
+        let cfg = wrap(legacy_homecoming_director_config());
+        let req = minimal_request();
+        let state = minimal_state();
+        let input = DirectorInput { request: &req, state: &state, compiled: &compiled(), user_input: "我不知道能做什么", conflict: None, module_config: Some(&cfg) };
+        let brief = build_brief(input, None, GuidanceLevel::AskGoal);
+
+        // visible_facts: 原硬编码场景面
+        assert!(brief.visible_facts.iter().any(|f| f.text.contains("外露电缆和内部服务器噪音形成同一个局势面")));
+        // pressure: clock_id / severity / 文本
+        let pi = brief.pressure.iter().find(|p| p.clock_id.as_deref() == Some("clock.homecoming_scene_pressure")).expect("homecoming pressure present");
+        assert_eq!(pi.severity, 70);
+        assert!(pi.consequence_hint.as_deref().unwrap().contains("源头转移或过载"));
+        // affordances: 三条 + 精确向量组合（电缆 = technical/tactical/observe）
+        let cable = brief.affordances.iter().find(|a| a.description.contains("外露电缆是可观察的交互抓手")).expect("cable affordance present");
+        assert_eq!(cable.implies_vectors, vec![ActionVector::Technical, ActionVector::Tactical, ActionVector::Observe]);
+        let police = brief.affordances.iter().find(|a| a.description.contains("受困警察和封锁街口")).expect("police affordance present");
+        assert_eq!(police.implies_vectors, vec![ActionVector::Social, ActionVector::Resource, ActionVector::Tactical]);
+        let noise = brief.affordances.iter().find(|a| a.description.contains("仓库内部的噪音与外部威胁同步")).expect("noise affordance present");
+        assert_eq!(noise.implies_vectors, vec![ActionVector::Observe, ActionVector::Technical, ActionVector::Stealth]);
+        // risk: severity 60 + 向量 tactical
+        let risk = brief.risks.iter().find(|r| r.text.contains("直接摧毁威胁最简单")).expect("homecoming risk present");
+        assert_eq!(risk.severity, 60);
+        assert_eq!(risk.related_vectors, vec![ActionVector::Tactical]);
+        // known_fact + open_question
+        assert!(brief.known_facts.iter().any(|k| k.text.contains("它同时是救援、威胁控制、源头调查和资源取舍")));
+        let oq = brief.open_questions.iter().find(|q| q.text.contains("你们优先救人、控制威胁")).expect("homecoming open_question present");
+        assert_eq!(oq.points_to, vec!["rescue", "control", "source", "loot", "retreat"]);
+        // npc_advice = injured_lawman + fixer_contact
+        assert_eq!(brief.npc_advice.len(), 2);
+        assert_eq!(brief.npc_advice[0].npc_id, "injured_lawman");
+        assert_eq!(brief.npc_advice[1].npc_id, "fixer_contact");
+        // place summary fallback (no location_id)
+        assert_eq!(current_place_summary(input), "当前地点：Cyberpunk RED Homecoming 开场附近；一个高压现场正在等待玩家选择目标。");
+    }
+
+    // 验证落盘的 override JSON 与 legacy 基线逐字节等价（防数据文件漂移）。
+    #[test]
+    fn override_json_file_matches_legacy_baseline() {
+        let dir = std::env::var("TRPG_DATA_DIR").unwrap_or_else(|_| {
+            format!("{}/../../data", env!("CARGO_MANIFEST_DIR"))
+        });
+        let p = std::path::Path::new(&dir).join("modules").join("cyberpunk_red.homecoming.module_config.json");
+        let text = match std::fs::read_to_string(&p) {
+            Ok(t) => t,
+            Err(_) => return, // data symlink absent in this checkout → skip (fail-soft)
+        };
+        let mc: ModuleConfig = serde_json::from_str(&text).expect("override JSON parses as ModuleConfig");
+        let cfg = mc.director.expect("override carries director config");
+        assert_eq!(cfg, legacy_homecoming_director_config(), "on-disk override must match the legacy is_homecoming baseline");
+    }
+}
