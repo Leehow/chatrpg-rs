@@ -302,6 +302,7 @@ mod tests {
             ]),
             scene_entity_aliases: vec![],
             module_search_profile: None,
+            director: None,
         }
     }
 
