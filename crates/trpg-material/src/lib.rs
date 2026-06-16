@@ -262,14 +262,16 @@ impl MaterializationService {
     }
 
     async fn collect_evidence(&self, demand: &MaterializationDemand, req: &MaterializationRequest) -> Result<SourceEvidenceBundle> {
-        let plan = self.query_plan(demand);
+        let kernel = self.db.load_rule_kernel(&demand.ruleset_id).await.ok().flatten();
+        let module_config = if let Some(mid) = demand.module_id.as_deref() { self.db.load_module_config(mid).await } else { None };
+        let plan = self.query_plan(demand, kernel.as_ref(), module_config.as_ref());
         let mut candidates = Vec::new();
         if let Some(search) = &self.search {
             // Semantic retrieval, ITEM-FIRST: run exact-entity (item name) + field queries BEFORE
             // the generic ruleset-prefixed locator queries, so the named item (e.g. ".38 revolver")
             // actually reaches semantic search instead of being truncated by the cap. The extractor
             // LLM then maps the player's phrasing to the matching source row (semantic, not keyword).
-            let qp = mechanics_query_plan_for(demand);
+            let qp = mechanics_query_plan_for(demand, kernel.as_ref(), module_config.as_ref());
             let mut queries = queries_for_step(&qp, QueryPlanStepKind::ExactEntity);
             queries.extend(queries_for_step(&qp, QueryPlanStepKind::Field));
             queries.extend(queries_for_step(&qp, QueryPlanStepKind::Locator));
@@ -348,8 +350,8 @@ impl MaterializationService {
         Ok(bundle)
     }
 
-    fn query_plan(&self, demand: &MaterializationDemand) -> Value {
-        let plan = mechanics_query_plan_for(demand);
+    fn query_plan(&self, demand: &MaterializationDemand, kernel: Option<&RuleKernel>, module_config: Option<&ModuleConfig>) -> Value {
+        let plan = mechanics_query_plan_for(demand, kernel, module_config);
         let locator_queries = queries_for_step(&plan, QueryPlanStepKind::Locator);
         let exact_name_queries = queries_for_step(&plan, QueryPlanStepKind::ExactEntity);
         let field_queries = queries_for_step(&plan, QueryPlanStepKind::Field);
@@ -780,11 +782,11 @@ fn search_skill_for_demand(demand: &MaterializationDemand) -> SearchSkillKind {
     }
 }
 
-fn mechanics_query_plan_for(demand: &MaterializationDemand) -> MechanicsQueryPlan {
+fn mechanics_query_plan_for(demand: &MaterializationDemand, kernel: Option<&RuleKernel>, module_config: Option<&ModuleConfig>) -> MechanicsQueryPlan {
     let skill = search_skill_for_demand(demand);
     let fields = if demand.requested_fields.is_empty() { required_fields_for_target(demand.target_kind).into_iter().map(str::to_string).collect::<Vec<_>>() } else { demand.requested_fields.clone() };
-    let aliases = ruleset_aliases_for(&demand.ruleset_id, skill);
-    let module_prefs = module_preferences_for(demand.module_id.as_deref(), skill);
+    let aliases = ruleset_aliases_for(kernel, skill);
+    let module_prefs = module_preferences_for(module_config, skill);
     let mut steps = Vec::new();
     let label = demand.target_label.clone();
     // AI-chosen minimal distinguishing search key (e.g. ".38"); the ExactEntity step queries it FIRST
@@ -827,8 +829,7 @@ fn procedure_queries_for(skill: SearchSkillKind, ruleset: &str, label: &str, des
     }
 }
 
-fn ruleset_aliases_for(ruleset_id: &str, skill: SearchSkillKind) -> Value {
-    let r = ruleset_id.to_lowercase();
+fn ruleset_aliases_for(kernel: Option<&RuleKernel>, skill: SearchSkillKind) -> Value {
     let mut base = match skill {
         SearchSkillKind::CombatResolution => json!({"preferred_sections":["combat","attack","defense","opposed check","resolving actions"],"field_aliases":{"target_number":["DC","DV","AC","defense","evasion","resistance"],"opposition":["opposed","contest","save","resist"]}}),
         SearchSkillKind::WeaponParameter => json!({"preferred_sections":["weapons","equipment","item data","weapon table"],"field_aliases":{"damage":["damage","DMG","power","damage dice"],"range":["range","base range","distance"],"ammo":["ammo","magazine","uses"]}}),
@@ -838,32 +839,22 @@ fn ruleset_aliases_for(ruleset_id: &str, skill: SearchSkillKind) -> Value {
         SearchSkillKind::NpcStatblock => json!({"preferred_sections":["NPC","monster","creature statistics","stat block","cards"],"field_aliases":{"hp":["HP","hit points","health"],"defense":["AC","DV","defense","armor"],"attack":["attack","weapon","action"]}}),
         _ => json!({"preferred_sections":["rules","data","GM toolkit"],"field_aliases":{}}),
     };
-    if r.contains("cyberpunk") {
-        base["preferred_sections"] = json!(["Getting it Done","Resolving Actions with Skills","Weapons and Armor","Friday Night Firefight","Ranged Combat","Melee Combat","Before You Take Damage","When Armor Doesn't Cut It","Role Abilities"]);
-        base["field_aliases"]["target_number"] = json!(["DV","range DV","difficulty value"]);
-        base["field_aliases"]["armor"] = json!(["SP","armor","ablation"]);
-    } else if r.contains("dnd") || r.contains("5e") {
-        base["preferred_sections"] = json!(["Equipment","Armor and Shields","Weapons","Using Ability Scores","Saving Throws","Combat","Making an Attack","Damage and Healing","Spellcasting","Spell Descriptions","Creature Statistics"]);
-        base["field_aliases"]["defense"] = json!(["AC","Armor Class"]);
-        base["field_aliases"]["save"] = json!(["saving throw","spell save DC"]);
-    } else if r.contains("sword") || r.contains("sw2") {
-        base["preferred_sections"] = json!(["Skill Checks","Contested Checks","Combat Rules","Combat Flow","Weapon Attacks","Damage","Magic Rules","Spell Damage","Standard Combat","Item Data","Comprehensive List of Weapons","Comprehensive List of Armor","Combat Feats Data"]);
-        base["field_aliases"]["defense"] = json!(["evasion","resistance","defense","protection"]);
-        base["field_aliases"]["damage"] = json!(["damage","power table","威力表"]);
-    } else if r.contains("brp") || r.contains("cthulhu") || r.contains("coc") {
-        base["preferred_sections"] = json!(["Ability","Skills","Combat","Weapons","Damage","Sanity","Spells","Tomes","Artifacts","Keeper Rulebook"]);
-        base["field_aliases"]["resource"] = json!(["HP","SAN","sanity","major wound"]);
-        base["field_aliases"]["threshold"] = json!(["regular","hard","extreme"]);
-    } else if r.contains("triangle") {
-        base["preferred_sections"] = json!(["Field Agent Manual","GM Toolkit","Playwalled Documents","Mission","Encounter","Aftermath","Anomaly"]);
-        base["field_aliases"]["resource"] = json!(["Harm","Chaos","Stress"]);
-        base["field_aliases"]["visibility"] = json!(["playwalled","Agency property","numberless pages","permission"]);
+    // Apply per-skill overrides from kernel.search_profile (data-driven; no ruleset name branches).
+    if let Some(sp) = kernel.and_then(|k| k.search_profile.as_ref()) {
+        let key = skill.skill_key();
+        if let Some(sections) = sp.preferred_sections_by_skill.get(key) {
+            base["preferred_sections"] = serde_json::to_value(sections).unwrap_or(base["preferred_sections"].clone());
+        }
+        if let Some(aliases_override) = sp.field_aliases_by_skill.get(key) {
+            if let (Some(base_obj), Some(over_obj)) = (base["field_aliases"].as_object_mut(), aliases_override.as_object()) {
+                for (k, v) in over_obj { base_obj.insert(k.clone(), v.clone()); }
+            }
+        }
     }
     base
 }
 
-fn module_preferences_for(module_id: Option<&str>, skill: SearchSkillKind) -> Vec<String> {
-    let module = module_id.unwrap_or("").to_lowercase();
+fn module_preferences_for(module_config: Option<&ModuleConfig>, skill: SearchSkillKind) -> Vec<String> {
     let mut prefs = match skill {
         SearchSkillKind::NpcStatblock => vec!["npc card", "stat block", "enemy", "creature", "monster"],
         SearchSkillKind::ModuleCard => vec!["npc card", "vehicle card", "object card", "encounter", "resources"],
@@ -871,12 +862,13 @@ fn module_preferences_for(module_id: Option<&str>, skill: SearchSkillKind) -> Ve
         SearchSkillKind::CombatResolution => vec!["combat note", "encounter", "enemy behavior", "tactics"],
         _ => vec!["resources", "appendix", "data", "card"],
     }.into_iter().map(str::to_string).collect::<Vec<_>>();
-    if module.contains("homecoming") {
-        prefs.extend(["Redesigned NPC cards", "Items NPCs tech", "Athena's Behavior", "Hacking Athena", "Scavv's Warehouse", "Resources", "vehicle cards"].into_iter().map(str::to_string));
-    } else if module.contains("masks") || module.contains("nyarlathotep") {
-        prefs.extend(["Key Non-Player Characters", "Timeline", "Spells", "Tomes", "Artifacts", "Travel", "Dramatis Personae"].into_iter().map(str::to_string));
-    } else if module.contains("vault") || module.contains("triangle") {
-        prefs.extend(["Mission", "Encounter", "Aftermath", "Anomaly", "Playwalled", "GM Toolkit"].into_iter().map(str::to_string));
+    // Apply per-skill extra sections from module_config.module_search_profile (data-driven; no module name branches).
+    if let Some(cfg) = module_config {
+        if let Some(sp) = cfg.module_search_profile.as_ref() {
+            if let Some(extra) = sp.preferred_sections_by_skill.get(skill.skill_key()) {
+                prefs.extend(extra.iter().cloned());
+            }
+        }
     }
     prefs.sort(); prefs.dedup(); prefs
 }
@@ -1159,5 +1151,95 @@ mod tests {
         assert!(json_has_field(&filled, "damage"));
         // Numbers (incl. 0) count as meaningful.
         assert!(json_has_field(&json!({"mechanical_profile": {"ammo": 0}}), "mechanical_profile"));
+    }
+
+    // -------------------------------------------------------------------------
+    // P0-2 T5: equivalence tests — data-driven search_profile / module_search_profile
+    // -------------------------------------------------------------------------
+
+    fn kernel_with_cyberpunk_search_profile() -> RuleKernel {
+        let mut k: RuleKernel = serde_json::from_str(
+            r#"{"kernel_id":"t","ruleset_id":"cyberpunk_red","version":"1"}"#
+        ).unwrap();
+        let mut by_skill = std::collections::HashMap::new();
+        by_skill.insert("combat_resolution".to_string(), vec!["Friday Night Firefight".to_string(), "Getting it Done".to_string()]);
+        let mut fa = std::collections::HashMap::new();
+        fa.insert("combat_resolution".to_string(), json!({"target_number": ["DV","range DV"]}));
+        k.search_profile = Some(RuleKernelSearchProfile {
+            preferred_sections_by_skill: by_skill,
+            field_aliases_by_skill: fa,
+        });
+        k
+    }
+
+    #[test]
+    fn profile_sections_override_generic_base() {
+        let k = kernel_with_cyberpunk_search_profile();
+        let aliases = ruleset_aliases_for(Some(&k), SearchSkillKind::CombatResolution);
+        let sections = aliases["preferred_sections"].as_array().unwrap();
+        assert!(sections.iter().any(|v| v.as_str() == Some("Friday Night Firefight")),
+            "cyberpunk search_profile must supply FNF section; got {:?}", sections);
+    }
+
+    #[test]
+    fn profile_field_aliases_merged_onto_base() {
+        let k = kernel_with_cyberpunk_search_profile();
+        let aliases = ruleset_aliases_for(Some(&k), SearchSkillKind::CombatResolution);
+        let tn = aliases["field_aliases"]["target_number"].as_array().unwrap();
+        assert!(tn.iter().any(|v| v.as_str() == Some("DV")),
+            "field_aliases must include DV from search_profile override; got {:?}", tn);
+    }
+
+    #[test]
+    fn no_profile_falls_back_to_generic_base() {
+        let k: RuleKernel = serde_json::from_str(
+            r#"{"kernel_id":"t","ruleset_id":"generic_ruleset","version":"1"}"#
+        ).unwrap();
+        let aliases = ruleset_aliases_for(Some(&k), SearchSkillKind::CombatResolution);
+        let sections = aliases["preferred_sections"].as_array().unwrap();
+        let has_fnf = sections.iter().any(|v| v.as_str() == Some("Friday Night Firefight"));
+        assert!(!has_fnf, "generic kernel must NOT have cyberpunk-specific FNF section");
+        assert!(!sections.is_empty(), "generic base must still provide sections");
+    }
+
+    #[test]
+    fn none_kernel_uses_generic_base() {
+        let aliases = ruleset_aliases_for(None, SearchSkillKind::WeaponParameter);
+        assert!(aliases.get("preferred_sections").and_then(|v| v.as_array()).is_some(),
+            "none kernel must still return preferred_sections from generic base");
+    }
+
+    fn module_config_with_homecoming_prefs() -> ModuleConfig {
+        let mut cfg = ModuleConfig::default();
+        let mut by_skill = std::collections::HashMap::new();
+        by_skill.insert("npc_stat_block".to_string(), vec!["Redesigned NPC cards".to_string(), "vehicle cards".to_string()]);
+        cfg.module_search_profile = Some(SearchProfile { preferred_sections_by_skill: by_skill });
+        cfg
+    }
+
+    #[test]
+    fn module_config_prefs_extend_base_for_skill() {
+        let cfg = module_config_with_homecoming_prefs();
+        let prefs = module_preferences_for(Some(&cfg), SearchSkillKind::NpcStatblock);
+        assert!(prefs.contains(&"npc card".to_string()), "base 'npc card' must remain");
+        assert!(prefs.contains(&"Redesigned NPC cards".to_string()),
+            "homecoming-specific section must be present; got {:?}", prefs);
+    }
+
+    #[test]
+    fn no_module_config_gives_generic_base_only() {
+        let prefs = module_preferences_for(None, SearchSkillKind::NpcStatblock);
+        assert!(prefs.contains(&"npc card".to_string()), "generic base must include 'npc card'");
+        assert!(!prefs.iter().any(|s| s.contains("Redesigned NPC")),
+            "generic base must NOT include homecoming-specific sections; got {:?}", prefs);
+    }
+
+    #[test]
+    fn module_config_wrong_skill_key_gives_base_only() {
+        // Homecoming has npc_stat_block prefs but NOT combat_resolution prefs
+        let cfg = module_config_with_homecoming_prefs();
+        let prefs = module_preferences_for(Some(&cfg), SearchSkillKind::CombatResolution);
+        assert!(!prefs.iter().any(|s| s.contains("Redesigned NPC")),
+            "combat_resolution skill must not get npc sections from homecoming config; got {:?}", prefs);
     }
 }

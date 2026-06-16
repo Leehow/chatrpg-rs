@@ -207,7 +207,7 @@ impl ObjectService {
         let kernel_dice = kernel.as_ref().and_then(|k| k.dice_core.get("dice").and_then(|v| v.as_str()).map(|s| s.trim().to_string())).filter(|s| !s.is_empty());
         let kernel_target = kernel.as_ref().and_then(|k| target_model_from_dice_core(&k.dice_core));
         let kernel_refs = kernel.as_ref().map(|k| k.source_refs.clone()).unwrap_or_default();
-        let check = if requires_check { Some(make_object_check(input, actor_id, target_actor_id.as_deref(), object, kind, kernel_dice.as_deref(), kernel_target, kernel_refs)) } else { None };
+        let check = if requires_check { Some(make_object_check(input, actor_id, target_actor_id.as_deref(), object, kind, kernel_dice.as_deref(), kernel_target, kernel_refs, kernel.as_ref())) } else { None };
         let mut success_patches = success_patches_for(actor_id, target_actor_id.as_deref(), object, kind);
         // Source A loot (no-LLM): on a successful 搜身/search, transfer the
         // searched actor's OWN structured items (weapon+ammo, armor, ...) to the
@@ -858,15 +858,22 @@ fn reference_score(input_lower: &str, obj: &ObjectInstance) -> i32 {
 }
 fn requires_check(kind: ObjectInteractionKind) -> bool { matches!(kind, ObjectInteractionKind::GrabHeldObject | ObjectInteractionKind::Disarm | ObjectInteractionKind::Steal | ObjectInteractionKind::Hack | ObjectInteractionKind::Break | ObjectInteractionKind::Repair | ObjectInteractionKind::Unlock | ObjectInteractionKind::CutConnection | ObjectInteractionKind::TraceConnection | ObjectInteractionKind::Loot | ObjectInteractionKind::Search | ObjectInteractionKind::Use | ObjectInteractionKind::Reload) }
 
-fn make_object_check(input: ObjectTurnInput<'_>, actor_id: &str, target_actor_id: Option<&str>, object: &ObjectInstance, kind: ObjectInteractionKind, kernel_dice: Option<&str>, kernel_target: Option<CheckTargetModel>, kernel_source_refs: Vec<SourceRef>) -> CheckContract {
+fn make_object_check(input: ObjectTurnInput<'_>, actor_id: &str, target_actor_id: Option<&str>, object: &ObjectInstance, kind: ObjectInteractionKind, kernel_dice: Option<&str>, kernel_target: Option<CheckTargetModel>, kernel_source_refs: Vec<SourceRef>, kernel: Option<&RuleKernel>) -> CheckContract {
     let dice = kernel_dice.unwrap_or("1d20").to_string();
-    let check_label = match kind {
-        ObjectInteractionKind::GrabHeldObject | ObjectInteractionKind::Disarm => if input.ruleset_id.contains("cyberpunk") { "DEX + Brawling contested grab/disarm check" } else { "appropriate opposed disarm / athletics check" },
+    // Data-driven: check_label_policy from kernel override wins; fallback to generic per-kind.
+    let generic_label = match kind {
+        ObjectInteractionKind::GrabHeldObject | ObjectInteractionKind::Disarm => "appropriate opposed disarm / athletics check",
         ObjectInteractionKind::Unlock => "appropriate lockpicking / technical unlock check",
         ObjectInteractionKind::CutConnection | ObjectInteractionKind::TraceConnection => "appropriate technical analysis / cable handling check",
         ObjectInteractionKind::Steal | ObjectInteractionKind::Loot => "appropriate stealth / sleight / search check",
         _ => "appropriate object interaction check",
-    }.to_string();
+    };
+    let check_label = kernel
+        .and_then(|k| k.check_label_policy.as_ref())
+        .and_then(|p| p.labels.get(kind.as_str()))
+        .map(|s| s.as_str())
+        .unwrap_or(generic_label)
+        .to_string();
     let defender = target_actor_id.map(|id| ActorRef { actor_id: id.into(), actor_kind: ActorKind::Npc, display_name: Some("target".into()) });
     // Data-driven target: prefer the kernel's core mechanic; otherwise leave it
     // UnknownUntilLookup so the contest kernel resolves it (PercentileRollUnder /
@@ -1100,5 +1107,68 @@ mod loot_tests {
             assert!(profile.get(fabricated).is_none(), "must NOT fabricate {fabricated} for an unsourced item");
         }
         assert!(profile.get("referenced_as").and_then(|v| v.as_str()).unwrap_or("").contains("阿斯塔特"));
+    }
+}
+
+// -------------------------------------------------------------------------
+// P0-2 T5: check_label_policy equivalence tests
+// -------------------------------------------------------------------------
+#[cfg(test)]
+mod check_label_policy_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn kernel_with_disarm_label(label: &str) -> RuleKernel {
+        let mut k: RuleKernel = serde_json::from_str(
+            r#"{"kernel_id":"t","ruleset_id":"t","version":"1"}"#
+        ).unwrap();
+        let mut labels = BTreeMap::new();
+        labels.insert("disarm".to_string(), label.to_string());
+        labels.insert("grab_held_object".to_string(), label.to_string());
+        k.check_label_policy = Some(CheckLabelPolicy { labels });
+        k
+    }
+
+    /// Cyberpunk policy: check_label_policy["disarm"] = DEX+Brawling label.
+    #[test]
+    fn kernel_policy_supplies_cyberpunk_disarm_label() {
+        let k = kernel_with_disarm_label("DEX + Brawling contested grab/disarm check");
+        let policy = k.check_label_policy.as_ref().unwrap();
+        assert_eq!(
+            policy.labels.get("disarm").map(|s| s.as_str()),
+            Some("DEX + Brawling contested grab/disarm check"),
+            "disarm label from cyberpunk policy must match legacy hardcode"
+        );
+    }
+
+    /// No policy → generic label (no "cyberpunk" name in fallback).
+    #[test]
+    fn no_policy_gives_generic_disarm_label() {
+        let k: RuleKernel = serde_json::from_str(
+            r#"{"kernel_id":"t","ruleset_id":"call_of_cthulhu_7e","version":"1"}"#
+        ).unwrap();
+        assert!(k.check_label_policy.is_none(), "non-cyberpunk must have no check_label_policy");
+        // Generic fallback (from make_object_check):
+        let generic = match ObjectInteractionKind::GrabHeldObject {
+            ObjectInteractionKind::GrabHeldObject | ObjectInteractionKind::Disarm =>
+                "appropriate opposed disarm / athletics check",
+            _ => "appropriate object interaction check",
+        };
+        assert!(!generic.to_lowercase().contains("cyberpunk"),
+            "generic label must not mention cyberpunk; got {:?}", generic);
+        assert!(!generic.to_lowercase().contains("brawling"),
+            "generic label must not mention brawling; got {:?}", generic);
+    }
+
+    /// Policy present but key missing → generic fallback.
+    #[test]
+    fn policy_missing_key_falls_back_to_generic() {
+        let mut k: RuleKernel = serde_json::from_str(
+            r#"{"kernel_id":"t","ruleset_id":"t","version":"1"}"#
+        ).unwrap();
+        k.check_label_policy = Some(CheckLabelPolicy { labels: BTreeMap::new() });
+        let policy = k.check_label_policy.as_ref().unwrap();
+        // "unlock" is not in the empty policy → engine would use generic
+        assert!(policy.labels.get("unlock").is_none());
     }
 }

@@ -4091,6 +4091,9 @@ fn apply_kernel_strategy_overrides(kernel: &mut RuleKernel, doc: &serde_json::Va
     if let Some(v) = doc.get("referee_value_bands") {
         if let Ok(p) = serde_json::from_value::<trpg_model::RefereeValueBands>(v.clone()) { kernel.referee_value_bands = Some(p); }
     }
+    if let Some(v) = doc.get("search_profile") {
+        if let Ok(p) = serde_json::from_value::<trpg_model::RuleKernelSearchProfile>(v.clone()) { kernel.search_profile = Some(p); }
+    }
 }
 
 /// P0-2: read a module config file `{TRPG_DATA_DIR}/modules/{id}.module_config.json`.

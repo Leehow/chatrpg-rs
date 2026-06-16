@@ -1478,6 +1478,10 @@ pub struct RuleKernel {
     /// hardcoded "1d10+0". None → GENERIC_DICE_QUALIFICATION.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dice_qualification: Option<DiceQualification>,
+    /// P0-2 T5: per-skill section hints + field aliases — replaces trpg-material's
+    /// ruleset_aliases_for contains(ruleset_name) branches. None → generic base.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_profile: Option<RuleKernelSearchProfile>,
 }
 
 /// The id of the kernel resource_track that represents Hit Points, found
@@ -3638,6 +3642,37 @@ pub struct CombatModePolicy {
     pub fallback_mode: CombatMode,
 }
 
+/// Ruleset-specific search-section hints and field-alias overrides per SearchSkillKind.
+/// Keys are the SearchSkillKind skill_key() short form (e.g. "combat_resolution").
+/// Replaces trpg-material's ruleset_aliases_for contains(ruleset_name) branches.
+/// Missing key → engine uses its generic base for that skill. None → all generics.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default, PartialEq)]
+pub struct RuleKernelSearchProfile {
+    /// skill_key → preferred_sections array override. Missing kind → base generic.
+    #[serde(default)]
+    pub preferred_sections_by_skill: std::collections::HashMap<String, Vec<String>>,
+    /// skill_key → field_aliases object override (merged onto base).
+    #[serde(default)]
+    pub field_aliases_by_skill: std::collections::HashMap<String, serde_json::Value>,
+}
+
+impl SearchSkillKind {
+    /// Short key used in RuleKernelSearchProfile maps (no "_search" suffix).
+    pub fn skill_key(&self) -> &'static str {
+        match self {
+            Self::CombatResolution => "combat_resolution",
+            Self::WeaponParameter => "weapon_parameter",
+            Self::ArmorDefense => "armor_defense",
+            Self::AbilityActivation => "ability_activation",
+            Self::ConditionResource => "condition_resource",
+            Self::NpcStatblock => "npc_stat_block",
+            Self::ModuleCard => "module_card",
+            Self::SceneObject => "scene_object",
+            Self::GenericMechanical => "generic_mechanical",
+        }
+    }
+}
+
 /// Check-label templates keyed by action family (technical/attack/defense/…).
 /// Replaces combat/object contains("cyberpunk") label branches. Missing key →
 /// engine uses the generic label.
@@ -3715,12 +3750,14 @@ pub struct EntityAlias {
     pub aliases: Vec<String>,
 }
 
-/// Module search preferences — replaces material's module_preferences_for
-/// homecoming/masks/vault literal lists.
+/// Module search preferences per SearchSkillKind — replaces material's module_preferences_for
+/// homecoming/masks/vault literal lists. Keys are SearchSkillKind::skill_key() short form
+/// (e.g. "npc_stat_block"). Missing key → engine uses generic base for that skill.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default, PartialEq)]
 pub struct SearchProfile {
+    /// skill_key → extra preferred section strings (appended to generic base).
     #[serde(default)]
-    pub preferred_sections: Vec<String>,
+    pub preferred_sections_by_skill: std::collections::HashMap<String, Vec<String>>,
 }
 
 /// One module-specific visible scene fact for the director brief
@@ -3880,6 +3917,10 @@ pub static GENERIC_DICE_QUALIFICATION: std::sync::LazyLock<DiceQualification> =
 /// Empty check-label policy → engine uses its generic per-family label.
 pub static GENERIC_CHECK_LABEL_POLICY: std::sync::LazyLock<CheckLabelPolicy> =
     std::sync::LazyLock::new(CheckLabelPolicy::default);
+
+/// Empty search profile → engine uses generic base sections/aliases for every skill.
+pub static GENERIC_SEARCH_PROFILE: std::sync::LazyLock<RuleKernelSearchProfile> =
+    std::sync::LazyLock::new(RuleKernelSearchProfile::default);
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

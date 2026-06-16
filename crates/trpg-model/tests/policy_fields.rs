@@ -50,7 +50,7 @@ fn mode_policy_and_module_config_round_trip() {
         npc_actor_bindings: vec![NpcActorBinding { matcher: vec!["drone".into(), "无人机".into()], actor_id: "npc.athena_drone".into(), display_name: Some("rogue drone".into()) }],
         technical_option_table: Some(vec![TechOption { matcher: vec!["cable".into()], dv: 14 }]),
         scene_entity_aliases: vec![EntityAlias { canonical_id: "athena".into(), aliases: vec!["雅典娜".into()] }],
-        module_search_profile: Some(SearchProfile { preferred_sections: vec!["Redesigned NPC cards".into()] }),
+        module_search_profile: Some(SearchProfile { preferred_sections_by_skill: [("npc_stat_block".to_string(), vec!["Redesigned NPC cards".into()])].into() }),
         director: Some(DirectorModuleConfig {
             scene_facts: vec![DirectorSceneFact { text: "外露电缆是可观察的交互抓手".into(), source: "module_override".into() }],
             npc_advice: vec![NpcBiasedAdvice { npc_id: "injured_lawman".into(), speaker_label: "受伤警察".into(), advice_text: "把火力压住".into(), bias_or_goal: "想活下来".into(), not_official_solution: true }],
