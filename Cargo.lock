@@ -3597,6 +3597,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "tokio",
  "tracing",
  "trpg-db",
  "trpg-llm",

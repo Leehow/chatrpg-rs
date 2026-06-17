@@ -35,6 +35,12 @@ impl MaterializationService {
     /// its schema (one LLM pass over the ruleset's source) and upsert the filled
     /// category back into the kernel. Best-effort — never errors out the turn.
     pub(crate) async fn ensure_category_compiled(&self, demand: &MaterializationDemand) {
+        // Opt-in (TRPG_LAZY_OBJECT_SCHEMA). When OFF, Stage 2 eagerly compiled every
+        // category at parse time, so there are no stubs to fill — never issue a
+        // mid-turn extraction; behave exactly as before this hook existed.
+        if !trpg_model::lazy_object_schema_enabled() {
+            return;
+        }
         let Some(client) = self.llm.as_ref() else { return };
         let Some(mut kernel) = self.db.load_rule_kernel(&demand.ruleset_id).await.ok().flatten() else { return };
         if kernel.object_schemas.is_empty() {
@@ -42,13 +48,8 @@ impl MaterializationService {
         }
         let want_ability = demand_wants_ability(demand);
         // Which categories of this family are still bare stubs (no schema_slots)?
-        let pending: Vec<usize> = kernel
-            .object_schemas
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| category_in_family(s, want_ability) && is_stub(s))
-            .map(|(i, _)| i)
-            .collect();
+        // Empty => already compiled+cached: nothing to do (the cache hit).
+        let pending = pending_stub_indices(&kernel.object_schemas, want_ability);
         if pending.is_empty() {
             return; // already compiled (or no stub in this family) — nothing to do.
         }
@@ -110,6 +111,20 @@ pub(crate) fn is_stub(schema: &Value) -> bool {
         .map(|a| !a.is_empty())
         .unwrap_or(false);
     !compiled && !has_slots
+}
+
+/// Indices of `schemas` in the requested family that are still bare stubs and so
+/// need a one-time extraction. EMPTY means every category in that family is already
+/// compiled — the cache hit: `ensure_category_compiled` extracts nothing. Pure (no
+/// LLM/DB) so the "first reference compiles once / second reference is cached"
+/// contract is unit-testable on a fixture.
+pub(crate) fn pending_stub_indices(schemas: &[Value], want_ability: bool) -> Vec<usize> {
+    schemas
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| category_in_family(s, want_ability) && is_stub(s))
+        .map(|(i, _)| i)
+        .collect()
 }
 
 /// Upsert a freshly-extracted schema into the kernel's `object_schemas`, replacing
@@ -227,6 +242,96 @@ mod tests {
         assert!(!is_stub(fired), "the firearms entry is no longer a stub");
         // The untouched spell stub survives.
         assert_eq!(schemas.iter().find(|s| s["category_id"] == "spells").unwrap()["status"].as_str(), Some("discovered"));
+    }
+
+    // Acceptance (1): the FIRST reference to an un-compiled category selects exactly
+    // one extraction for its family; once that schema is compiled+cached, a SECOND
+    // reference selects nothing (no re-extraction). The other family's stub is never
+    // touched by an off-family reference (a weapon turn doesn't compile spells).
+    #[test]
+    fn first_reference_extracts_once_then_cache_hit() {
+        let mut schemas = vec![
+            json!({"category_id": "firearms", "kind": "weapon", "status": "discovered"}),
+            json!({"category_id": "spells", "kind": "spell", "status": "discovered"}),
+        ];
+        // FIRST reference from a weapon (object-family) demand: exactly the firearms
+        // stub is pending -> exactly ONE extraction; the spell stub is left alone.
+        assert_eq!(pending_stub_indices(&schemas, false), vec![0], "object demand compiles only its one object-family stub");
+        // ensure_category_compiled would now run extract_object_category once and
+        // upsert the filled schema (status compiled + schema_slots) back into kernel.
+        merge_compiled_schema(
+            &mut schemas,
+            json!({"category_id": "firearms", "kind": "weapon", "status": "compiled",
+                "schema_slots": [{"slot": "damage", "type": "dice"}]}),
+        );
+        // SECOND reference to the same family: cache hit -> nothing pending -> no re-extraction.
+        assert!(pending_stub_indices(&schemas, false).is_empty(), "a compiled category is cached; the second reference re-extracts nothing");
+        // The ability family is still a pending stub — filled only when an ability is
+        // first referenced (lazy per family, not the whole catalog at once).
+        assert_eq!(pending_stub_indices(&schemas, true), vec![1], "spell stub stays pending until the first ability reference");
+    }
+
+    // ── LIVE e2e (ignored by default; SKIPs without DATABASE_URL/TRPG_DATA_DIR/LLM).
+    // Proves the activation hook end-to-end against the REAL CoC kernel (:54347) + the
+    // relay LLM + the real rulebook units: a spell category downgraded to a discovered
+    // stub (what lazy Stage-2 produces) is compiled from the actual book on the FIRST
+    // reference, the SECOND reference reuses the cache (no re-extraction), and the other
+    // categories are left untouched. All DB mutations are restored BEFORE asserting, so
+    // a failed assert can never leave CoC's kernel downgraded. Run:
+    //   set -a; source .env; set +a
+    //   DATABASE_URL=postgres://chatrpg:chatrpg@127.0.0.1:54347/chatrpg \
+    //   TRPG_DATA_DIR=/Users/haoli/leehow/code/chatrpgv2/_rstest_coc \
+    //   cargo test -p trpg-material --lib live_lazy_fill -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn live_lazy_fill_compiles_stub_then_caches() {
+        let Ok(url) = std::env::var("DATABASE_URL") else { eprintln!("SKIP: DATABASE_URL unset"); return; };
+        if std::env::var("TRPG_DATA_DIR").is_err() { eprintln!("SKIP: TRPG_DATA_DIR unset"); return; }
+        std::env::set_var("TRPG_LAZY_OBJECT_SCHEMA", "1");
+        let db = trpg_db::Db::connect(&url).await.expect("connect db");
+        let svc = MaterializationService::from_env(db.clone(), None);
+        if svc.llm.is_none() { eprintln!("SKIP: no LLM env (TRPG_LLM_*)"); return; }
+        let ruleset = "call_of_cthulhu_7e";
+        const CAT: &str = "mythos_spells";
+        let id_of = |c: &Value| c.get("category_id").and_then(Value::as_str).map(str::to_string);
+
+        // Snapshot + downgrade the spell category to a discovered stub.
+        let mut kernel = db.load_rule_kernel(ruleset).await.expect("load").expect("coc kernel");
+        let idx = kernel.object_schemas.iter().position(|c| id_of(c).as_deref() == Some(CAT)).expect("mythos_spells present");
+        let snapshot = kernel.object_schemas[idx].clone();
+        assert!(!is_stub(&snapshot), "precondition: mythos_spells starts compiled");
+        let others_before: Vec<Value> = kernel.object_schemas.iter().filter(|c| id_of(c).as_deref() != Some(CAT)).cloned().collect();
+        kernel.object_schemas[idx] = json!({"category_id": CAT, "kind": "spell", "status": "discovered",
+            "source_pages": snapshot.get("source_pages").cloned().unwrap_or(Value::Null),
+            "couples_to": snapshot.get("couples_to").cloned().unwrap_or(Value::Null)});
+        db.upsert_rule_kernel(&kernel).await.expect("downgrade upsert");
+        eprintln!("[live] downgraded {CAT} -> discovered stub (slots stripped)");
+
+        let demand = MaterializationDemand { ruleset_id: ruleset.into(), target_kind: MaterialTargetKind::AbilityDefinition, ..Default::default() };
+
+        // CALL 1 (first reference) then CALL 2 (second reference) — capture state.
+        svc.ensure_category_compiled(&demand).await;
+        let k1 = db.load_rule_kernel(ruleset).await.unwrap().unwrap();
+        svc.ensure_category_compiled(&demand).await;
+        let k2 = db.load_rule_kernel(ruleset).await.unwrap().unwrap();
+
+        // RESTORE before any assert can panic.
+        let mut kr = db.load_rule_kernel(ruleset).await.unwrap().unwrap();
+        if let Some(slot) = kr.object_schemas.iter_mut().find(|c| id_of(c).as_deref() == Some(CAT)) { *slot = snapshot; }
+        db.upsert_rule_kernel(&kr).await.expect("restore upsert");
+        eprintln!("[live] restored {CAT} to its original compiled schema");
+
+        // ── Assertions on captured state ──
+        let s1 = k1.object_schemas.iter().find(|c| id_of(c).as_deref() == Some(CAT)).unwrap();
+        let slots1 = s1.get("schema_slots").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0);
+        eprintln!("[live] call#1: {CAT} status={:?} slots={slots1} examples={}", s1.get("status"), s1.get("examples").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0));
+        assert!(!is_stub(s1), "call#1 must compile the stub (fill schema_slots from CoC units)");
+        assert!(slots1 > 0, "compiled spell schema must carry slots");
+        assert!(pending_stub_indices(&k1.object_schemas, true).is_empty(), "no spell stub remains pending after compile (cache populated)");
+        let others_after: Vec<Value> = k1.object_schemas.iter().filter(|c| id_of(c).as_deref() != Some(CAT)).cloned().collect();
+        assert_eq!(others_before, others_after, "AC3: non-target categories must be unchanged");
+        assert_eq!(k1.object_schemas, k2.object_schemas, "AC1: second reference reuses the cache (no re-extraction)");
+        eprintln!("[live] call#2: object_schemas byte-identical -> cache hit, no re-extraction");
     }
 
     // merge appends when no stub matches the filled schema's category_id.

@@ -18,3 +18,6 @@ trpg-model = { path = "../trpg-model" }
 trpg-rule-agent = { path = "../trpg-rule-agent" }
 trpg-search = { path = "../trpg-search" }
 trpg-semantics = { path = "../trpg-semantics" }
+
+[dev-dependencies]
+tokio = { workspace = true }

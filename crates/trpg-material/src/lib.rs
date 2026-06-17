@@ -424,6 +424,13 @@ impl MaterializationService {
     /// flaky ".38 revolver -> damage null" tail. Returns None (free-form fallback)
     /// when no kernel / no schemas / no category in the demand's family.
     async fn object_schema_guidance(&self, demand: &MaterializationDemand) -> Option<String> {
+        // Optimization 2 activation hook: when the lazy path is on, fill any
+        // DISCOVERED stub of this demand's family BEFORE reading the kernel, so the
+        // schemas picked below carry typed slots. Self-gating + best-effort: a no-op
+        // when lazy is off, nothing is a stub (eager already compiled), or the
+        // extract fails (then guidance falls back to free-form). Caches into the
+        // kernel so a second reference re-extracts nothing. See staged_extract.rs.
+        self.ensure_category_compiled(demand).await;
         let kernel = self.db.load_rule_kernel(&demand.ruleset_id).await.ok().flatten()?;
         if kernel.object_schemas.is_empty() { return None; }
         // Family split by target kind: ability demands want spell/psychic-style

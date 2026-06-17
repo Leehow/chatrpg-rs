@@ -53,6 +53,20 @@ impl RuntimeParameterService {
         Ok(row.and_then(row_to_params))
     }
 
+    /// All player-character actor rows for a session, the de-facto roster source
+    /// (there is no session→PC table; this per-session actor surface IS the
+    /// roster). Used by the director's spotlight tracker. Deterministic order.
+    pub async fn list_player_actor_parameters(&self, session_id: &str) -> Result<Vec<RuntimeActorParameters>> {
+        let rows = sqlx::query(r#"
+            select actor_param_id, session_id, actor_id, actor_kind, ruleset_id, source_kind, template_id, display_name,
+                   sheet_json, mechanical_profile, status_json, visibility, created_at_tick, updated_at_tick
+            from runtime_actor_parameters
+            where session_id=$1 and actor_kind='player_character'
+            order by created_at asc, actor_id asc
+        "#).bind(session_id).fetch_all(&self.db.pool).await?;
+        Ok(rows.into_iter().filter_map(row_to_params).collect())
+    }
+
     pub async fn upsert_actor_parameters(&self, p: &RuntimeActorParameters) -> Result<()> {
         sqlx::query(r#"
             insert into runtime_actor_parameters

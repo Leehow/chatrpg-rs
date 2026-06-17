@@ -63,6 +63,8 @@ pub use relationship_extraction::{
 mod spoiler_guard;
 
 mod context_blocks;
+
+mod spotlight_roster;
 use context_blocks::{memory_snapshot_block, retrieved_memory_block, actionable_situation_block, clue_board_block, world_time_block, world_events_since_block, engine_protocol_block, engine_protocol_block_agent_loop, world_state_block, dynamic_text_block};
 
 pub mod scene_navigation;
@@ -1039,7 +1041,22 @@ fn conflict_hint_from_orchestration(result: &TurnOrchestrationResult) -> Option<
         } else {
             None
         };
-        let result = director.prepare(DirectorInput { request, state, compiled, user_input, conflict, module_config: module_cfg.as_ref() });
+        // Prior spotlight states are the persistence surface the tracker carries and
+        // increments across turns. fail-soft: empty on the first turn or a read error.
+        let prior_spotlights = self.db.load_spotlight_states(&request.session_id).await.unwrap_or_default();
+        // Real player roster: the session's player-character actor rows ARE the
+        // roster (no session→PC table; solo-focused product). The acting actor
+        // follows the runtime's pervasive viewer-or-`pc.current` convention so the
+        // PC who acted gets credited even when the turn viewer is the GM. fail-soft:
+        // empty roster (read error / before the first ensure) ≡ `&[]`, so the
+        // director's viewer-derived solo fallback still runs (zero regression).
+        let acting_actor_id = request.viewer.actor_id.as_deref().unwrap_or("pc.current");
+        let player_actors = RuntimeParameterService::new(self.db.clone())
+            .list_player_actor_parameters(&request.session_id)
+            .await
+            .unwrap_or_default();
+        let participants = spotlight_roster::build_spotlight_participants(&player_actors, acting_actor_id);
+        let result = director.prepare(DirectorInput { request, state, compiled, user_input, conflict, module_config: module_cfg.as_ref(), participants: &participants, prior_spotlights: &prior_spotlights });
         if let Some(brief) = &result.brief {
             self.db.insert_actionable_situation_brief(brief).await.ok();
             let _ = self.db.upsert_runtime_context_block(&request.session_id, &actionable_situation_block(brief, &request.turn_id)).await;

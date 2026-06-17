@@ -12,6 +12,8 @@ pub use mechanics_render::*;
 pub mod outcome_fields;
 pub mod table_dice_policy;
 pub use table_dice_policy::*;
+pub mod lazy_object_schema_policy;
+pub use lazy_object_schema_policy::*;
 pub mod observability;
 pub use observability::*;
 pub mod asset;

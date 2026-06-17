@@ -3250,6 +3250,20 @@ impl Db {
         Ok(())
     }
 
+    /// Prior spotlight states for a session — the persistence surface the director's
+    /// spotlight tracker reads before a turn to carry + increment per-player counts.
+    /// fail-soft: malformed `state_json` rows are skipped rather than failing the read.
+    pub async fn load_spotlight_states(&self, session_id: &str) -> Result<Vec<SpotlightState>> {
+        let rows = sqlx::query("select state_json from spotlight_states where session_id = $1")
+            .bind(session_id)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| serde_json::from_value(r.get::<serde_json::Value, _>("state_json")).ok())
+            .collect())
+    }
+
     pub async fn insert_effect_contract(&self, effect: &EffectContract, session_id: &str, turn_id: &str) -> Result<()> {
         sqlx::query(
             r#"
