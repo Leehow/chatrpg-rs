@@ -2849,6 +2849,31 @@ impl Db {
             .collect())
     }
 
+    /// 反剧透 TruthGraph：本会话**本回合是否首次 surface 了新实体**。
+    ///
+    /// `EntitySurfaced` 写入是 per-session 幂等（`de_surfaced_{session}_{entity}` +
+    /// `on conflict do nothing`）：实体首次 surface 时该行的 `turn_id` **冻结为当时回合**，
+    /// 后续回合再 surface 同实体是 no-op、不改 turn_id。故「某行 turn_id == 本回合」
+    /// 当且仅当该实体**本回合才头一回出现**——这是 append 时落定的事实，而非事件存在性。
+    /// 关系抽取据此只在实体集真变化的回合才跑（省掉每回合重抽同样三元组的 LLM 调用）。
+    pub async fn has_entity_surfaced_in_turn(&self, session_id: &str, turn_id: &str) -> Result<bool> {
+        let row = sqlx::query(
+            r#"
+            select exists(
+                select 1 from domain_events
+                where session_id = $1
+                  and turn_id = $2
+                  and kind = 'EntitySurfaced'
+            ) as found
+            "#,
+        )
+        .bind(session_id)
+        .bind(turn_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.get::<bool, _>("found"))
+    }
+
     pub async fn list_world_events_since(&self, session_id: &str, since_tick: i64, since_event_seq: i64, limit: i64) -> Result<Vec<WorldEvent>> {
         let rows = sqlx::query(
             r#"

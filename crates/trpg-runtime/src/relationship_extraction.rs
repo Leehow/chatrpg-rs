@@ -180,7 +180,9 @@ pub fn parse_relationship_triples(
 }
 
 /// 薄 async 编排：给定已解析实体 + 念白，经注入 LLM 取三元组并解析。无 DB。
-/// fail-closed：实体不足 2 / 念白空 / LLM 出错 → 空 Vec（绝不 panic、绝不乱写）。
+/// fail-closed：`surfaced_new_this_turn` 为 false（本回合没 surface 新实体）/ 实体不足 2 /
+/// 念白空 / LLM 出错 → 空 Vec（绝不 panic、绝不乱写、不调 LLM）。`surfaced_new_this_turn`
+/// 是成本闸：实体集没变化的回合不该重抽同样的三元组（详见 `RuntimeEngine::extract_relationship_facts`）。
 pub async fn relationship_facts_from_inputs(
     llm: &dyn LlmClient,
     session_id: &str,
@@ -188,8 +190,11 @@ pub async fn relationship_facts_from_inputs(
     entities: &[EntityRef],
     narration: &str,
     min_confidence: f32,
+    surfaced_new_this_turn: bool,
 ) -> Vec<MemoryFact> {
-    if entities.len() < 2 || narration.trim().is_empty() {
+    // 成本闸：本回合没 surface 新实体 → 已知实体集没变化，再调 LLM 只会重抽同样的三元组
+    // （稳定 fact_id upsert 幂等、无害但白烧一次 LLM）。直接 fail-closed 返回空、不调 LLM。
+    if !surfaced_new_this_turn || entities.len() < 2 || narration.trim().is_empty() {
         return Vec::new();
     }
     let messages = build_relationship_messages(narration, entities);

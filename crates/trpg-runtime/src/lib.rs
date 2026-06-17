@@ -532,7 +532,9 @@ impl RuntimeEngine {
     /// 抽取关系三元组（subject-predicate-object）并 upsert 进 `memory_facts`，供后续回合
     /// 经 `retrieve_memory` 召回。建在 [`crate::truthgraph`] 的 `EntitySurfaced` 之上（不
     /// 重扫原文找新实体），复用调用方既有 `llm` 句柄（不另 from_env）。任何缺失（特性关 /
-    /// 无模组 / 念白空 / 已 surface 实体不足 2 / 图谱缺 / LLM 出错）→ 跳过，绝不影响回合。
+    /// 无模组 / 念白空 / 已 surface 实体不足 2 / **本回合没 surface 新实体** / 图谱缺 /
+    /// LLM 出错）→ 跳过，绝不影响回合。成本闸：实体集没变化的回合直接跳过、不烧 LLM
+    /// （否则只会重得同样三元组，靠稳定 fact_id upsert 幂等但白花一次调用）。
     /// 返回成功写入的三元组条数（便于可观测 / 测试）。
     pub async fn extract_relationship_facts(
         &self,
@@ -549,6 +551,20 @@ impl RuntimeEngine {
         let surfaced = self.db.list_surfaced_entities(session_id).await.unwrap_or_default();
         if surfaced.len() < 2 {
             return 0; // 关系至少需要两个已知端点。
+        }
+        // 成本闸：只在**本回合首次 surface 了新实体**时才抽（否则已知实体集没变、再抽只会
+        // 重得同样的三元组、白烧一次 LLM）。「新实体」= EntitySurfaced 行 turn_id==本回合
+        // （append 时冻结、on-conflict 不改），是 append 时落定的事实。fail-open：判定查询
+        // 出错时退回旧行为（照抽），宁可偶尔多花一次也不漏抽关系。
+        let new_this_turn = match self.db.has_entity_surfaced_in_turn(session_id, turn_id).await {
+            Ok(b) => b,
+            Err(err) => {
+                tracing::warn!(error = %err, session_id, turn_id, "relationship: new-surface probe failed; proceeding (fail-open)");
+                true
+            }
+        };
+        if !new_this_turn {
+            return 0; // 本回合无新实体 → 跳过图谱加载与 LLM 调用。
         }
         let graph = match self.db.load_module_graph(module_id).await {
             Ok(Some(g)) => g,
@@ -569,6 +585,7 @@ impl RuntimeEngine {
             &entities,
             narration,
             relationship_extraction::relationship_min_confidence(),
+            new_this_turn, // 成本闸：本回合无新实体则函数内 fail-closed 返回空（与上面早退一致）。
         )
         .await;
         let mut written = 0usize;

@@ -5,6 +5,7 @@ use super::*;
 use async_trait::async_trait;
 use serde_json::json;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use trpg_llm::LlmClient;
 use trpg_model::{ChatMessage, ModuleGraph};
 
@@ -17,6 +18,38 @@ impl LlmClient for StubLlm {
     }
     async fn complete_json(&self, _m: Vec<ChatMessage>, _t: f32) -> anyhow::Result<Value> {
         Ok(self.0.clone())
+    }
+    async fn stream_chat(
+        &self,
+        _m: Vec<ChatMessage>,
+        _t: f32,
+    ) -> anyhow::Result<Pin<Box<dyn futures_util::Stream<Item = anyhow::Result<String>> + Send>>>
+    {
+        anyhow::bail!("stub: stream_chat unused")
+    }
+}
+
+/// 计数 stub LLM：每次 `complete_json` 自增计数器，用于断言「门关时 LLM 一次都不调」。
+struct CountingLlm {
+    reply: Value,
+    calls: AtomicUsize,
+}
+impl CountingLlm {
+    fn new(reply: Value) -> Self {
+        Self { reply, calls: AtomicUsize::new(0) }
+    }
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+#[async_trait]
+impl LlmClient for CountingLlm {
+    async fn complete_text(&self, _m: Vec<ChatMessage>, _t: f32) -> anyhow::Result<String> {
+        Ok(String::new())
+    }
+    async fn complete_json(&self, _m: Vec<ChatMessage>, _t: f32) -> anyhow::Result<Value> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(self.reply.clone())
     }
     async fn stream_chat(
         &self,
@@ -142,7 +175,7 @@ fn build_messages_include_narration_and_entities() {
 #[tokio::test]
 async fn core_extracts_fact_from_related_entities() {
     let llm = StubLlm(one_triple("raul", "owns", "letter", 0.9));
-    let facts = relationship_facts_from_inputs(&llm, "sess_a", "turn1", &ents(), "narration", 0.6).await;
+    let facts = relationship_facts_from_inputs(&llm, "sess_a", "turn1", &ents(), "narration", 0.6, true).await;
     assert_eq!(facts.len(), 1);
     assert_eq!(facts[0].subject, "raul");
 }
@@ -150,6 +183,31 @@ async fn core_extracts_fact_from_related_entities() {
 #[tokio::test]
 async fn core_fail_closed_when_no_relationship() {
     let llm = StubLlm(json!({"triples":[]}));
-    let facts = relationship_facts_from_inputs(&llm, "sess_a", "turn1", &ents(), "narration", 0.6).await;
+    let facts = relationship_facts_from_inputs(&llm, "sess_a", "turn1", &ents(), "narration", 0.6, true).await;
     assert!(facts.is_empty(), "no relationship → write nothing (fail-closed)");
+}
+
+#[tokio::test]
+async fn no_new_surface_this_turn_skips_llm_call() {
+    // 本回合**没 surface 新实体**（surfaced_new_this_turn=false）：即便已知实体 ≥2、念白非空
+    // （旧逻辑会照样调 LLM 重抽同样的三元组），新闸必须**完全不调 LLM**、返回空。
+    let llm = CountingLlm::new(one_triple("raul", "owns", "letter", 0.9));
+    let facts = relationship_facts_from_inputs(
+        &llm, "sess_a", "turn1", &ents(), "narration", 0.6, /* surfaced_new_this_turn = */ false,
+    )
+    .await;
+    assert!(facts.is_empty(), "no new entity this turn → no triples written");
+    assert_eq!(llm.calls(), 0, "no new entity surfaced → LLM must NOT be invoked (cost saved)");
+}
+
+#[tokio::test]
+async fn new_surface_this_turn_invokes_llm() {
+    // 本回合 surface 了新实体（surfaced_new_this_turn=true）：闸打开，LLM 照常调一次。
+    let llm = CountingLlm::new(one_triple("raul", "owns", "letter", 0.9));
+    let facts = relationship_facts_from_inputs(
+        &llm, "sess_a", "turn1", &ents(), "narration", 0.6, /* surfaced_new_this_turn = */ true,
+    )
+    .await;
+    assert_eq!(llm.calls(), 1, "new entity surfaced → LLM invoked exactly once");
+    assert_eq!(facts.len(), 1);
 }
