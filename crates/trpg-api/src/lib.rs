@@ -27,14 +27,17 @@ use trpg_rule_agent::RuleStewardAgent;
 use trpg_runtime::{validate_character_template_sheet, RuntimeEngine};
 use trpg_gm::{
     execute_turn, GmLoop, LoopConfig, OwnedTurnRequest, SceneDeepExtractFn, ToolRegistry,
-    TurnEvent, TurnOutcome, CANONICAL_TURN_PLAN,
+    CANONICAL_TURN_PLAN,
 };
+use tokio_util::sync::CancellationToken;
 use trpg_search::{load_search_source_configs, upsert_search_source_config, SearchService, SearchSourceConfig};
 use uuid::Uuid;
 
 pub use trpg_runtime::scene_navigation::{
     extract_module_scenes, build_nav_prompt, scene_navigator, validate_transition, prefetch_frontier,
 };
+
+pub mod turn_driver;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -981,6 +984,10 @@ pub struct PlayTurnRequest {
     /// 历史来源策略——缺省即 `ServerRecent`（服务端从 DB 载历史）。
     #[serde(default)]
     pub history_policy: HistoryPolicy,
+    /// 客户端中途断开时的处置策略（P1-3）。缺省 = 安全省 token 的
+    /// [`turn_driver::CancellationPolicy::CancelBeforeStateMutation`]。
+    #[serde(default)]
+    pub cancellation_policy: Option<turn_driver::CancellationPolicy>,
 }
 
 async fn play_turn_sse(Path(session_id): Path<String>, State(state): State<AppState>, Json(req): Json<PlayTurnRequest>) -> impl IntoResponse {
@@ -1061,6 +1068,10 @@ async fn play_turn_sse(Path(session_id): Path<String>, State(state): State<AppSt
             viewer: VisibilityProfile::gm(),
             token_budget: TokenBudget::default(),
         };
+        // P1-3 follow-up：建一个取消令牌，**同一**实例既经 OwnedTurnRequest.cancel 穿进
+        // execute_turn → run_agent_loop（断开前置取消时真正掐断在途 LLM、短路尾段不落半截回合），
+        // 又交给 drive_turn_stream（由它在状态变更前断开时 fire 这枚 token）。
+        let cancel = CancellationToken::new();
         let owned = OwnedTurnRequest {
             request: context_request,
             state: runtime_state,
@@ -1069,57 +1080,27 @@ async fn play_turn_sse(Path(session_id): Path<String>, State(state): State<AppSt
             recent_transcript,
             module_id: req.module_id.clone(),
             data_dir: data_dir.clone(),
+            cancel: Some(cancel.clone()),
         };
-        // execute_turn 内部已 tokio::spawn pipeline 并经自带 mpsc 推 TurnEvent。
-        // 本 handler 只做「TurnEvent→SSE Event」翻译：narration Delta 逐 token 直通，
-        // 尾部 phase（verify/finalize/save_turn/memory/audit/scene_nav/carryover）在
-        // execute_turn 的任务里继续跑——对客户端=后台，连接保持到 TurnComplete。
-        let mut stream = execute_turn(gm, owned, CANONICAL_TURN_PLAN);
-        while let Some(ev) = stream.next().await {
-            match ev {
-                TurnEvent::Delta(delta) => {
-                    // 真流式：逐 token 直通，不缓冲（一期硬性原则）。
-                    send_delta(&tx, &delta).await;
-                }
-                TurnEvent::AwaitingPlayerRoll { check_id, prompt_public } => {
-                    send_delta(&tx, &prompt_public).await;
-                    send_phase(&tx, "pending_check_created", json!({"check_id": check_id})).await;
-                    send_phase(&tx, "done", json!({"reason":"awaiting_player_roll"})).await;
-                }
-                TurnEvent::SceneTransition { from, to, reason } => {
-                    send_event(&tx, "scene_transition", json!({"from": from, "to": to, "reason": reason})).await;
-                }
-                TurnEvent::Errata(entry) => {
-                    send_phase(&tx, "errata", serde_json::to_value(&entry).unwrap_or_else(|_| json!({}))).await;
-                }
-                TurnEvent::PostprocessScheduled => {
-                    // 叙事已流完，尾部 phase 即将（在同一任务继续 drain）跑——对客户端=后台。
-                    send_phase(&tx, "postprocess_scheduled", json!({})).await;
-                }
-                TurnEvent::HeavyPostprocessDone => {
-                    // API SSE：已在 TurnComplete 处 break，此分支不可达；
-                    // 保留以满足 exhaustive match（heavy 在 execute_turn 后台 spawn，不发 SSE 事件）。
-                }
-                TurnEvent::TurnFailed { phase, message, recoverable } => {
-                    // obs T2/T5（spec §4.5）：fail-closed 阶段失败 → SSE `event: error`，回合在此终止
-                    // （**不**发 done、**无** TurnComplete）。客户端据此区分"失败"与"成功的空白回合"。
-                    send_event(&tx, "error", json!({"phase": phase, "message": message, "recoverable": recoverable})).await;
-                    break; // 失败终态，等价 TurnComplete 的 break；后续无事件。
-                }
-                TurnEvent::TurnWarning { phase, message } => {
-                    // obs T2/T5（spec §4.5）：WarnContinue 阶段失败 → SSE `event: warning`，回合继续。
-                    send_event(&tx, "warning", json!({"phase": phase, "message": message})).await;
-                }
-                TurnEvent::TurnComplete { outcome } => {
-                    // R5 T3：critical 已落账，发 done 关闭 SSE（heavy 自走与 SSE 生命周期解耦）。
-                    // AwaitingPlayerRoll 终态的 done 已在上面发过；仅 Narration 终态发常规 done。
-                    if let TurnOutcome::Narration(_) = outcome {
-                        send_phase(&tx, "done", json!({})).await;
-                    }
-                    break; // SSE 结束于 TurnComplete；heavy 在 execute_turn 的后台 spawn 继续。
-                }
-            }
-        }
+        // execute_turn 内部已 tokio::spawn pipeline 并经自带 mpsc 推 TurnEvent；本 handler
+        // 把事件流交给 turn_driver（P1-3）：逐 token 直通叙事 + 跟踪 state_mutated/first_delta_sent
+        // + 按 CancellationPolicy 处置客户端中途断开——断开发生在状态变更**前**则取消在途工作、
+        // 不落半截回合；变更**后**则续 critical finalize 保一致并记 client_disconnected。
+        // 尾部 phase（verify/finalize/save_turn/memory/audit/scene_nav/carryover）仍在 execute_turn
+        // 的任务里继续跑——对客户端=后台。SSE 翻译与原逐分支逐字节等价（见 turn_driver）。
+        let stream = execute_turn(gm, owned, CANONICAL_TURN_PLAN);
+        let policy = req.cancellation_policy.unwrap_or_default();
+        let marker = turn_driver::DbDisconnectMarker { db: db.clone(), session_id: session_id.clone() };
+        let sink = turn_driver::AxumSseSink::new(tx);
+        let _outcome = turn_driver::drive_turn_stream(
+            stream,
+            sink,
+            policy,
+            cancel,
+            &marker,
+            &turn_id,
+        )
+        .await;
     });
     Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default())
 }
@@ -1315,10 +1296,8 @@ async fn send_delta(tx: &mpsc::Sender<Result<Event, Infallible>>, delta: &str) {
     let _ = tx.send(Ok(Event::default().event("delta").data(delta.to_string()))).await;
 }
 
-
-async fn send_event(tx: &mpsc::Sender<Result<Event, Infallible>>, event: &str, data: Value) {
-    let _ = tx.send(Ok(Event::default().event(event).data(data.to_string()))).await;
-}
+// 注：原 `send_event`（scene_transition/error/warning 三种命名事件）已随回合 SSE 翻译
+// 收编进 turn_driver::send_event_translated（P1-3），此处不再保留重复 helper。
 
 async fn send_error(tx: &mpsc::Sender<Result<Event, Infallible>>, error: &str) {
     let _ = tx.send(Ok(Event::default().event("error").data(json!({"error": error}).to_string()))).await;

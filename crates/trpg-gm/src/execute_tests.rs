@@ -84,6 +84,7 @@ use trpg_db::Db;
 use trpg_llm::{LlmClient, StreamEvent, ToolChoice};
 use trpg_model::{ChatMessage, CompiledContext, ContextRequest, RuntimeState, TokenBudget, VisibilityProfile};
 use trpg_runtime::RuntimeEngine;
+use tokio_util::sync::CancellationToken;
 
 // 复刻 turn_loop_tests.rs MockLlm：恒空刺激命中、脚本化 stream。
 struct MockLlm { scripts: Mutex<Vec<Vec<StreamEvent>>> }
@@ -103,9 +104,13 @@ impl LlmClient for MockLlm {
 // 公共装配：脚本化 MockLlm + lazy pool + 临时 gm_skill 目录 + ctx_provider 绕真 DB。
 // `probe` = heavy-only 时序探针（None ⇒ 普通；Some ⇒ 慢/panic/记录 heavy 时序）。
 fn exec_fixture_inner(scripts: Vec<Vec<StreamEvent>>, probe: Option<HeavyProbe>) -> (GmLoop, OwnedTurnRequest) {
+    exec_fixture_with_llm(Arc::new(MockLlm { scripts: Mutex::new(scripts) }), probe)
+}
+
+// 同 exec_fixture_inner，但接受任意 LlmClient（mid-stream 取消测试用慢速流 mock）。
+fn exec_fixture_with_llm(llm: Arc<dyn LlmClient>, probe: Option<HeavyProbe>) -> (GmLoop, OwnedTurnRequest) {
     let pool = PgPoolOptions::new().connect_lazy("postgres://chatrpg:chatrpg@localhost:54347/chatrpg").expect("lazy pool");
     let engine = RuntimeEngine::new(Db { pool });
-    let llm = Arc::new(MockLlm { scripts: Mutex::new(scripts) });
     let data_dir = std::env::temp_dir().join(format!("exec_test_{}_{}", std::process::id(), uuid::Uuid::new_v4().simple()));
     std::fs::create_dir_all(data_dir.join("agent/gm_skill/global")).unwrap();
     std::fs::write(data_dir.join("agent/gm_skill/global/10_test.md"), "test gm skill").unwrap();
@@ -116,6 +121,7 @@ fn exec_fixture_inner(scripts: Vec<Vec<StreamEvent>>, probe: Option<HeavyProbe>)
         request: ContextRequest { ruleset_id: "rs".into(), module_id: None, session_id: "s".into(), turn_id: "t".into(), viewer: VisibilityProfile::gm(), token_budget: TokenBudget::default() },
         state: RuntimeState { ruleset_id: "rs".into(), ..Default::default() },
         user_input: "go".into(), history: vec![], recent_transcript: None, module_id: None, data_dir,
+        cancel: None,
     };
     (gm, req)
 }
@@ -173,6 +179,88 @@ async fn execute_turn_streams_deltas_and_completes() {
     }
     assert_eq!(deltas, vec!["第一块。".to_string(), "第二块。".to_string()], "delta 必须逐块直通不合并");
     assert!(completed, "stream must end with TurnComplete");
+}
+
+// ============================ P1-3 follow-up: 取消令牌掐断在途 LLM ============================
+
+// 取消令牌穿进 execute_turn 后真正有牙：预先 fire 令牌（模拟客户端在状态变更前断开、
+// driver 已 `cancel.cancel()`）→ run_agent_loop 在 LLM 流边界 break（不再续烧 token、不消费任何
+// delta）+ run_pipeline 短路尾段（不 finalize、不落半截回合）→ 整个事件流 drain 完**绝无**
+// TurnComplete、**零** Delta。对照组 `execute_turn_streams_deltas_and_completes`：同款脚本不取消时
+// 必有 2 个 Delta + TurnComplete。需 :54347（lazy pool；head phase fail-soft）。
+#[tokio::test]
+async fn cancelled_token_aborts_agent_loop_and_skips_finalize() {
+    if std::env::var("SKIP_DB_TESTS").is_ok() { return; }
+    let (gm, mut req) = exec_fixture(vec![vec![
+        StreamEvent::ContentDelta("不该被消费。".into()),
+        StreamEvent::ContentDelta("更不该被消费。".into()),
+        StreamEvent::Done { finish_reason: Some("stop".into()) },
+    ]]);
+    let token = CancellationToken::new();
+    token.cancel(); // 预先取消：state mutation 前断开 → driver fire 的就是这枚同一 token。
+    req.cancel = Some(token);
+
+    let mut stream = execute_turn(gm, req, CANONICAL_TURN_PLAN);
+    let mut deltas = 0usize;
+    let mut completed = false;
+    while let Some(ev) = stream.next().await {
+        match ev {
+            TurnEvent::Delta(_) => deltas += 1,
+            TurnEvent::TurnComplete { .. } => completed = true,
+            _ => {}
+        }
+    }
+    assert_eq!(deltas, 0, "取消令牌已 fire ⇒ run_agent_loop 必须在消费任何 delta 之前 break（不续烧 token）");
+    assert!(!completed, "取消令牌已 fire ⇒ run_pipeline 必须短路尾段、绝不发 TurnComplete（不落半截回合）");
+}
+
+// 慢速流 mock：吐第一块后 sleep 3s（模拟 LLM 仍在生成下一块），给 mid-stream 取消留出
+// select 竞速窗口。若取消未真正掐断在途流，第二块会在 3s 后流出 + TurnComplete（测试红）。
+struct SlowStreamLlm;
+#[async_trait]
+impl LlmClient for SlowStreamLlm {
+    async fn complete_text(&self, _: Vec<ChatMessage>, _: f32) -> anyhow::Result<String> { unimplemented!() }
+    async fn complete_json(&self, _: Vec<ChatMessage>, _: f32) -> anyhow::Result<Value> { Ok(json!({"hits": [], "moved": false})) }
+    async fn stream_chat(&self, _: Vec<ChatMessage>, _: f32) -> anyhow::Result<Pin<Box<dyn Stream<Item = anyhow::Result<String>> + Send>>> { unimplemented!() }
+    async fn complete_with_tools(&self, _: Vec<Value>, _: Vec<Value>) -> anyhow::Result<Value> { unimplemented!() }
+    async fn stream_chat_with_tools(&self, _: Vec<Value>, _: Vec<Value>, _: ToolChoice) -> anyhow::Result<Pin<Box<dyn Stream<Item = anyhow::Result<StreamEvent>> + Send>>> {
+        let s = try_stream! {
+            yield StreamEvent::ContentDelta("第一块。".into());
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            yield StreamEvent::ContentDelta("第二块不该流出。".into());
+            yield StreamEvent::Done { finish_reason: Some("stop".into()) };
+        };
+        Ok(Box::pin(s))
+    }
+}
+
+// mid-stream（select! 路径）取消：令牌在 LLM **正流式**时 fire——测试收到第一块后立即 cancel，
+// 此刻 run_agent_loop 正 park 在 `next_stream_event` 的 select（stream.next() 在 sleep）。fire 令牌
+// → 取消等待分支胜出 → 放弃在途流（第二块永不被消费）、break 'rounds → run_pipeline 短路。
+// 断言：恰好收到第一块、绝无第二块、绝无 TurnComplete。这是「真正掐断在飞 LLM」的核心证据，
+// 与 pre-cancelled 测试（走 top-of-round 同步检查路径）互补。需 :54347。
+#[tokio::test]
+async fn cancel_mid_stream_abandons_in_flight_generation() {
+    if std::env::var("SKIP_DB_TESTS").is_ok() { return; }
+    let (gm, mut req) = exec_fixture_with_llm(Arc::new(SlowStreamLlm), None);
+    let token = CancellationToken::new();
+    req.cancel = Some(token.clone());
+
+    let mut stream = execute_turn(gm, req, CANONICAL_TURN_PLAN);
+    let mut deltas: Vec<String> = vec![];
+    let mut completed = false;
+    while let Some(ev) = stream.next().await {
+        match ev {
+            TurnEvent::Delta(d) => {
+                deltas.push(d);
+                token.cancel(); // 收到第一块即取消：此刻 LLM 流正 park 在 select，fire 掐断在途生成。
+            }
+            TurnEvent::TurnComplete { .. } => completed = true,
+            _ => {}
+        }
+    }
+    assert_eq!(deltas, vec!["第一块。".to_string()], "mid-stream 取消后第二块绝不该再流出（在途生成被放弃）");
+    assert!(!completed, "mid-stream 取消后 run_pipeline 必须短路、绝不发 TurnComplete");
 }
 
 // ============================ R5 Task1c: critical/heavy 时序 + 隔离 ============================

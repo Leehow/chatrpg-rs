@@ -88,6 +88,7 @@ pub async fn play_cli_agent(ruleset: &str, module: Option<&str>) -> Result<()> {
             recent_transcript: recent.clone(),
             module_id: module.map(str::to_string),
             data_dir: data_dir.clone(),
+            cancel: None, // CLI 会话循环：同步 drain 到底，无断开取消语义。
         };
 
         // execute_turn 返回 ReceiverStream<TurnEvent>；CLI 同步 drain 到底。

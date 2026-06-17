@@ -126,6 +126,7 @@ mod tests {
             recent_transcript: None,
             module_id: None,
             data_dir: std::env::temp_dir(),
+            cancel: None,
         }
     }
 
