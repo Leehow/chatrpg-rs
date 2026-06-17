@@ -2790,55 +2790,6 @@ impl Default for InformationLevel {
     fn default() -> Self { Self::Surface }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
-pub struct FreeReadContract {
-    pub free_read_id: String,
-    pub action_summary: String,
-    pub reason: String,
-    pub information_level: InformationLevel,
-    pub source_refs: Vec<SourceRef>,
-    pub no_state_change: bool,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum TurnPlanKind {
-    NarrateOnly,
-    AskPlayerRoll,
-    GmRollThenNarrate,
-    SecretRollThenNarrate,
-    PassiveResolution,
-    StartOrContinueCombat,
-}
-
-impl Default for TurnPlanKind {
-    fn default() -> Self { Self::NarrateOnly }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct AgentTurnPlan {
-    pub plan_id: String,
-    pub session_id: String,
-    pub turn_id: String,
-    pub ruleset_id: String,
-    pub module_id: Option<String>,
-    pub kind: TurnPlanKind,
-    pub input_summary: String,
-    pub reasoning_summary: String,
-    pub policy_layers_used: Vec<String>,
-    pub advice_refs: Vec<String>,
-    pub check: Option<CheckContract>,
-    pub free_read: Option<FreeReadContract>,
-    pub combat_action: Option<serde_json::Value>,
-    pub created_at: DateTime<Utc>,
-}
-
-impl AgentTurnPlan {
-    pub fn new(session_id: impl Into<String>, turn_id: impl Into<String>, ruleset_id: impl Into<String>, module_id: Option<String>) -> Self {
-        Self { plan_id: format!("agent_plan_{}", Uuid::new_v4().simple()), session_id: session_id.into(), turn_id: turn_id.into(), ruleset_id: ruleset_id.into(), module_id, kind: TurnPlanKind::NarrateOnly, input_summary: String::new(), reasoning_summary: String::new(), policy_layers_used: vec![], advice_refs: vec![], check: None, free_read: None, combat_action: None, created_at: Utc::now() }
-    }
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PendingCheckStatus {
