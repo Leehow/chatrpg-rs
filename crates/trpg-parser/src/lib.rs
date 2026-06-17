@@ -2312,21 +2312,19 @@ fn normalize_character_onboarding_pack(pack: &mut CharacterOnboardingPack, rules
     pack.validation_report = validate_character_onboarding_pack(pack);
 }
 
-fn source_refs_for_first_play_mechanical_formulas(ruleset_id: &str, book: &PlainTextBook) -> Vec<SourceRef> {
-    let lower_ruleset = ruleset_id.to_ascii_lowercase();
-    let keywords: Vec<&str> = if lower_ruleset.contains("cyberpunk") {
-        vec!["resolving actions", "skills", "ranged combat", "damage", "armor", "dv", "friday night firefight"]
-    } else if lower_ruleset.contains("dnd") {
-        vec!["d20", "difficulty class", "armor class", "ability checks", "making an attack", "damage and healing"]
-    } else if lower_ruleset.contains("sword_world") {
-        vec!["skill check", "skill check method", "weapon attacks", "damage", "calculation of values"]
-    } else if lower_ruleset.contains("cthulhu") || lower_ruleset.contains("coc") || lower_ruleset.contains("brp") {
-        vec!["skill roll", "d100", "hit points", "damage", "sanity", "derived characteristics"]
-    } else if lower_ruleset.contains("triangle") {
-        vec!["four-sided dice", "conflict resolution", "chaos", "harm", "stability"]
-    } else {
-        vec!["skill check", "attack", "damage", "hit points", "derived", "character sheet"]
-    };
+// guard:no-ruleset-name-literals BEGIN — chargen/mechanics fallback seeds must stay
+// ruleset-neutral (no `ruleset.contains("<name>")` branches). Enforced by
+// scripts/no_parser_seed_hardcode.sh. Per-ruleset specifics come from the
+// LLM-compiled bundles (the single source of truth), never from these fallbacks.
+fn source_refs_for_first_play_mechanical_formulas(_ruleset_id: &str, book: &PlainTextBook) -> Vec<SourceRef> {
+    // Ruleset-neutral page locator: a union of generic core-mechanics vocabulary
+    // shared across systems. Anchors provisional first-play seeds to plausible
+    // source pages without branching on the ruleset id.
+    let keywords: Vec<&str> = vec![
+        "skill check", "skill roll", "ability checks", "attack", "ranged combat", "making an attack",
+        "damage", "armor", "hit points", "derived characteristics", "character sheet", "conflict resolution",
+        "difficulty class", "armor class", "d100", "d20", "dv",
+    ];
     let mut refs = Vec::new();
     for page in &book.pages {
         let hay = page.text.to_ascii_lowercase();
@@ -2349,7 +2347,6 @@ fn source_refs_for_first_play_mechanical_formulas(ruleset_id: &str, book: &Plain
 }
 
 fn source_backed_first_play_mechanical_formulas(ruleset_id: &str, book: &PlainTextBook) -> Vec<DerivedValue> {
-    let ruleset = ruleset_id.to_ascii_lowercase();
     let pages = source_refs_for_first_play_mechanical_formulas(ruleset_id, book)
         .iter()
         .filter_map(|r| r.page.map(|p| p.to_string()))
@@ -2368,39 +2365,10 @@ fn source_backed_first_play_mechanical_formulas(ruleset_id: &str, book: &PlainTe
         tier: Some("provisional_seed".into()),
         ..Default::default()
     };
-    if ruleset.contains("cyberpunk") {
-        return vec![
-            seed("mechanic.skill_check.total", "1d10 + STAT + Skill + modifiers vs Difficulty Value (DV)", vec!["stat","skill","modifiers","dv"], "contest_profile_static_dv_or_source_bound_dv", note("Cyberpunk RED core skill resolution")),
-            seed("mechanic.attack.ranged.total", "1d10 + REF + relevant weapon skill + modifiers vs source-bound range DV / target defense", vec!["ref","weapon_skill","range_dv","target_defense","modifiers"], "attack_vs_defense_or_dv", note("ranged attack requires actor, weapon, range, and target facets")),
-            seed("mechanic.damage.weapon_effect", "weapon damage expression from equipped weapon; apply armor/SP mitigation and write remaining damage to target HP or source-bound resource", vec!["weapon.damage","target.armor_sp","target.hp"], "effect_resolution_packet", note("damage is source-object/equipment driven; do not invent weapon damage")),
-        ];
-    }
-    if ruleset.contains("dnd") {
-        return vec![
-            seed("mechanic.d20_check.total", "1d20 + ability modifier + proficiency bonus + modifiers vs DC", vec!["ability_modifier","proficiency_bonus","dc"], "static_dc_contest", note("D&D d20 check")),
-            seed("mechanic.attack.total", "1d20 + ability modifier + proficiency bonus + modifiers vs AC", vec!["ability_modifier","proficiency_bonus","target.ac"], "attack_vs_ac", note("D&D attack roll")),
-            seed("mechanic.damage.weapon_or_spell", "damage dice from weapon/spell/ability source; apply resistance/immunity/vulnerability then write HP delta", vec!["source.damage","target.hp","mitigation"], "effect_resolution_packet", note("D&D source-bound damage")),
-        ];
-    }
-    if ruleset.contains("sword_world") {
-        return vec![
-            seed("mechanic.skill_check.total", "2d6 + skill package standard value vs target number", vec!["class_level","ability_modifier","target_number"], "static_target_or_opposed_2d6", note("Sword World skill check")),
-            seed("mechanic.damage.power_table", "source-bound Power Table result + additional damage, then apply mitigation/defense as specified by source", vec!["weapon_or_spell_power","additional_damage","target_defense"], "table_driven_effect_resolution", note("Sword World damage remains table-driven; exact table lookup required")),
-        ];
-    }
-    if ruleset.contains("cthulhu") || ruleset.contains("brp") {
-        return vec![
-            seed("mechanic.percentile_check", "d100 roll-under against skill/characteristic rating", vec!["skill_rating"], "percentile_roll_under", note("BRP/CoC percentile check")),
-            seed("mechanic.hit_points", "source-backed HP formula from CON/SIZ or ruleset-specific investigator sheet", vec!["con","siz"], "character_derived_value", note("HP formula must be confirmed per ruleset/version")),
-            seed("mechanic.sanity", "source-backed SAN resource; losses write to sanity track, not HP", vec!["sanity","san_loss"], "parameter_facet_executor", note("SAN is a separate parameter/resource")),
-        ];
-    }
-    if ruleset.contains("triangle") {
-        return vec![
-            seed("mechanic.conflict_roll", "roll 6d4 and evaluate 3s according to Triangle Agency conflict resolution", vec!["six_d4","threes","chaos"], "triangle_conflict_resolution", note("Triangle Agency 6d4 conflict core")),
-            seed("mechanic.harm_chaos", "source-bound Harm/Chaos/Stability effects write to their tracks instead of HP", vec!["harm","chaos","stability"], "parameter_facet_executor", note("Triangle resource tracks")),
-        ];
-    }
+    // Ruleset-neutral provisional seeds. The concrete dice/parameters for any
+    // specific system come from the LLM-compiled derived_formula_pack; this
+    // guarded fallback only fires when that pack is empty, and stays generic so
+    // executors treat it as a source-required placeholder (tier=provisional_seed).
     vec![
         seed("mechanic.core_check", "ruleset source-backed dice expression + actor facet + target/opposition facet", vec!["dice","actor_facet","target_facet"], "contest_profile", note("generic source-backed first-play check")),
         seed("mechanic.damage_or_effect", "source-bound effect expression writes to source-bound resource/condition/object state", vec!["effect_source","target_parameter"], "effect_resolution_packet", note("generic source-bound effect")),
@@ -2426,78 +2394,33 @@ fn character_schema_source_refs(book: &PlainTextBook) -> Vec<SourceRef> {
     source_refs_for_keywords(book, &keywords, 8)
 }
 
-fn default_character_fields_for_ruleset(ruleset_id: &str) -> Vec<CharacterField> {
-    let mut fields = vec![
-        field("character_name", "Character Name", "string", true),
-        field("concept", "Concept", "string", false),
-    ];
-    if ruleset_id.contains("cyberpunk") {
-        fields.extend([
-            field("role", "Role", "choice", true),
-            field("lifepath", "Lifepath", "object", false),
-            field("stats", "Statistics", "map:number", true),
-            field("skills", "Skills", "map:number", true),
-            field("weapons", "Weapons", "list", false),
-            field("armor", "Armor / SP", "object", false),
-            field("hp", "Hit Points", "resource", false),
-            field("humanity", "Humanity", "resource", false),
-            field("cyberware", "Cyberware", "list", false),
-            field("gear", "Gear", "list", false),
-        ]);
-    } else if ruleset_id.contains("dnd") {
-        fields.extend([
-            field("race", "Race", "choice", true),
-            field("class", "Class", "choice", true),
-            field("background", "Background", "choice", true),
-            field("ability_scores", "Ability Scores", "map:number", true),
-            field("proficiencies", "Proficiencies", "list", false),
-            field("skills", "Skills", "map:number", false),
-            field("armor_class", "Armor Class", "number", false),
-            field("hit_points", "Hit Points", "resource", false),
-            field("equipment", "Equipment", "list", false),
-            field("spells", "Spells", "list", false),
-        ]);
-    } else if ruleset_id.contains("sword_world") {
-        fields.extend([
-            field("race", "Race", "choice", true),
-            field("background", "Background", "choice", true),
-            field("ability_scores", "Ability Scores", "map:number", true),
-            field("classes", "Classes", "map:number", true),
-            field("skills", "Skill Packages", "map:number", false),
-            field("combat_feats", "Combat Feats", "list", false),
-            field("weapons", "Weapons", "list", false),
-            field("armor", "Armor", "object", false),
-            field("hp", "HP", "resource", false),
-            field("mp", "MP", "resource", false),
-            field("languages", "Languages", "list", false),
-        ]);
-    } else if ruleset_id.contains("coc") || ruleset_id.contains("cthulhu") || ruleset_id.contains("brp") {
-        fields.extend([
-            field("occupation", "Occupation / Profession", "choice", true),
-            field("characteristics", "Characteristics", "map:number", true),
-            field("skills", "Skills", "map:percent", true),
-            field("hit_points", "Hit Points", "resource", false),
-            field("magic_points", "Magic / Power Points", "resource", false),
-            field("sanity", "Sanity", "resource", false),
-            field("equipment", "Equipment", "list", false),
-        ]);
-    } else if ruleset_id.contains("triangle") {
-        fields.extend([
-            field("arc", "ARC", "choice", true),
-            field("competency", "Competency", "choice", true),
-            field("qualities", "Qualities", "list", false),
-            field("chaos", "Chaos", "resource", false),
-            field("harm", "Harm", "resource", false),
-            field("commendations", "Commendations", "resource", false),
-            field("demerits", "Demerits", "resource", false),
-            field("requisitions", "Requisitions", "list", false),
-        ]);
-    }
-    fields
+/// The ruleset-neutral character-sheet fallback: the universal character model
+/// (identity + attributes/skills/resources/equipment buckets). Single source of
+/// truth shared by `fallback_character_template` and the empty-template fields
+/// fallback below — concrete per-ruleset fields come from the LLM-compiled template,
+/// never from a per-ruleset Rust branch.
+fn neutral_character_fields() -> Vec<CharacterField> {
+    let f = |field_id: &str, title: &str, field_type: &str, required: bool, repeatable: bool, notes: Option<&str>| CharacterField {
+        field_id: field_id.into(), title: title.into(), field_type: field_type.into(),
+        required, repeatable, choices_material_id: None, default_value: None,
+        visibility: Some(Visibility::Public), notes: notes.map(str::to_string),
+    };
+    vec![
+        f("character_name", "Character Name", "string", true, false, None),
+        f("concept", "Concept", "text", true, false, None),
+        f("background", "Background", "text", false, false, None),
+        f("attributes", "Attributes", "object", true, false, Some("Ruleset-specific fields extracted from materials.")),
+        f("skills", "Skills", "object", false, false, None),
+        f("resources", "Resources / Tracks", "object", false, false, None),
+        f("equipment", "Equipment", "array", false, true, None),
+    ]
 }
 
-fn field(field_id: &str, title: &str, field_type: &str, required: bool) -> CharacterField {
-    CharacterField { field_id: field_id.into(), title: title.into(), field_type: field_type.into(), required, repeatable: false, choices_material_id: None, default_value: None, visibility: Some(Visibility::Public), notes: Some("source-backed schema fallback; exact legal values remain locator/on-demand until extracted".into()) }
+fn default_character_fields_for_ruleset(_ruleset_id: &str) -> Vec<CharacterField> {
+    // Ruleset-neutral fallback (no per-ruleset branch). Fires only when the
+    // LLM-compiled sheet template has zero fields; the universal model keeps the
+    // sheet usable while flagging that concrete fields must come from source.
+    neutral_character_fields()
 }
 
 fn default_character_sections_for_fields(ruleset_id: &str, fields: &[CharacterField]) -> Vec<CharacterSection> {
@@ -2512,6 +2435,7 @@ fn default_character_sections_for_fields(ruleset_id: &str, fields: &[CharacterFi
     }
     sections
 }
+// guard:no-ruleset-name-literals END
 
 fn source_backed_mechanical_formulas_from_book(ruleset_id: &str, book: &PlainTextBook) -> Vec<DerivedValue> {
     let mut formulas = Vec::new();
@@ -3565,15 +3489,7 @@ fn fallback_character_template(ruleset_id: &str, title: &str) -> CharacterTempla
             CharacterSection { section_id: "identity".to_string(), title: "Identity".to_string(), field_ids: vec!["character_name".into(), "concept".into(), "background".into()] },
             CharacterSection { section_id: "mechanics".to_string(), title: "Mechanics".to_string(), field_ids: vec!["attributes".into(), "skills".into(), "resources".into(), "equipment".into()] },
         ],
-        fields: vec![
-            CharacterField { field_id: "character_name".into(), title: "Character Name".into(), field_type: "string".into(), required: true, repeatable: false, choices_material_id: None, default_value: None, visibility: Some(Visibility::Public), notes: None },
-            CharacterField { field_id: "concept".into(), title: "Concept".into(), field_type: "text".into(), required: true, repeatable: false, choices_material_id: None, default_value: None, visibility: Some(Visibility::Public), notes: None },
-            CharacterField { field_id: "background".into(), title: "Background".into(), field_type: "text".into(), required: false, repeatable: false, choices_material_id: None, default_value: None, visibility: Some(Visibility::Public), notes: None },
-            CharacterField { field_id: "attributes".into(), title: "Attributes".into(), field_type: "object".into(), required: true, repeatable: false, choices_material_id: None, default_value: None, visibility: Some(Visibility::Public), notes: Some("Ruleset-specific fields extracted from materials.".into()) },
-            CharacterField { field_id: "skills".into(), title: "Skills".into(), field_type: "object".into(), required: false, repeatable: false, choices_material_id: None, default_value: None, visibility: Some(Visibility::Public), notes: None },
-            CharacterField { field_id: "resources".into(), title: "Resources / Tracks".into(), field_type: "object".into(), required: false, repeatable: false, choices_material_id: None, default_value: None, visibility: Some(Visibility::Public), notes: None },
-            CharacterField { field_id: "equipment".into(), title: "Equipment".into(), field_type: "array".into(), required: false, repeatable: true, choices_material_id: None, default_value: None, visibility: Some(Visibility::Public), notes: None },
-        ],
+        fields: neutral_character_fields(),
         derived_values: vec![],
         creation_flow: vec![
             CreationStep { step_id: "concept".into(), title: "Define concept and tone".into(), required: true, prompt: None, inputs: vec![], outputs: vec!["concept".into()], source_refs: vec![] },
@@ -4035,5 +3951,55 @@ mod onboarding_flow_tests {
         let pack = merge_starter_into_pack(base, &json!({}));
         assert!(pack.starter_character_pack.archetypes.is_empty(), "empty compiled pack -> no fabricated archetypes");
         assert!(pack.starter_character_pack.creation_shortcuts.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod dehardcode_seed_tests {
+    use super::*;
+
+    fn empty_book() -> PlainTextBook {
+        PlainTextBook { source_id: "test".into(), title: "Test".into(), source_hash: "h".into(), pages: vec![], chunks: vec![] }
+    }
+
+    // Structural equality without requiring PartialEq on the model structs.
+    fn jv<T: serde::Serialize>(v: &T) -> Value { serde_json::to_value(v).unwrap() }
+
+    #[test]
+    fn first_play_formula_seeds_are_ruleset_neutral() {
+        // The guarded first-play formula fallback must NOT branch on ruleset id:
+        // every ruleset (and an unknown one) gets the same neutral provisional seeds.
+        let book = empty_book();
+        let dnd = source_backed_first_play_mechanical_formulas("dnd5e", &book);
+        let cpr = source_backed_first_play_mechanical_formulas("cyberpunk_red", &book);
+        let unknown = source_backed_first_play_mechanical_formulas("some_unknown_system", &book);
+        assert!(!dnd.is_empty(), "neutral fallback must still seed a non-empty pack");
+        assert_eq!(jv(&dnd), jv(&cpr), "dnd5e and cyberpunk_red must yield identical neutral seeds");
+        assert_eq!(jv(&cpr), jv(&unknown), "known and unknown rulesets must yield identical neutral seeds");
+        assert!(dnd.iter().all(|f| f.tier.as_deref() == Some("provisional_seed")),
+            "seeds stay tagged provisional_seed so executors skip exact dice binding");
+    }
+
+    #[test]
+    fn fallback_character_fields_are_ruleset_neutral() {
+        // The guarded character-field fallback must NOT branch on ruleset id.
+        let dnd = default_character_fields_for_ruleset("dnd5e");
+        let triangle = default_character_fields_for_ruleset("triangle_agency");
+        let unknown = default_character_fields_for_ruleset("some_unknown_system");
+        assert_eq!(jv(&dnd), jv(&triangle), "dnd5e and triangle_agency must yield identical neutral fields");
+        assert_eq!(jv(&triangle), jv(&unknown), "known and unknown rulesets must yield identical neutral fields");
+        let ids: Vec<&str> = dnd.iter().map(|f| f.field_id.as_str()).collect();
+        assert_eq!(ids, vec!["character_name", "concept", "background", "attributes", "skills", "resources", "equipment"],
+            "neutral fallback uses the universal character model, not per-ruleset field sets");
+    }
+
+    #[test]
+    fn fallback_character_template_fields_match_neutral_fallback() {
+        // fallback_character_template is live (e.g. dnd5e onboarding); its fields must
+        // stay byte-identical to the single-source-of-truth neutral fallback set.
+        let tmpl = fallback_character_template("dnd5e", "Demo");
+        let neutral = default_character_fields_for_ruleset("dnd5e");
+        assert_eq!(jv(&tmpl.fields), jv(&neutral),
+            "fallback_character_template fields must equal the neutral fallback (single source of truth)");
     }
 }

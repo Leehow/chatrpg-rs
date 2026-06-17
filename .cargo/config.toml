@@ -1,5 +1,6 @@
 # P0-2 CI 守卫 (引擎零硬编码): bash scripts/no_engine_ruleset_hardcode.sh
-# Cargo alias 不支持直接调 shell, CI pipeline 直接调上面的脚本; 此处仅作记录。
+# P0-2 同源 (trpg-parser chargen/mechanics fallback seed 区段中立): bash scripts/no_parser_seed_hardcode.sh
+# Cargo alias 不支持直接调 shell, CI pipeline 直接调上面两个脚本; 此处仅作记录。
 
 [build]
 target-dir = "/Users/haoli/.cache/cargo-target/chatrpg-rs-v1.20-formula"
