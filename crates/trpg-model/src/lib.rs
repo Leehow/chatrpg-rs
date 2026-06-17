@@ -1541,6 +1541,34 @@ pub fn normalize_resource_tracks(tracks: &[serde_json::Value]) -> Vec<serde_json
     tracks.iter().filter(|t| has(t, "id") || has(t, "name")).cloned().collect()
 }
 
+/// 去重共享同一非空 `derived_from` 的 resource_tracks（一公式→一资源→一 track）。
+/// 每组保留最"富"的：kind=="health" > 带行为(on_outcome/thresholds 非空) > 先出现者。
+/// 无 derived_from 的 track 全部原样保留。保持其余相对顺序。通用，无 per-ruleset 逻辑。
+/// 在 override 合并之后运行（合并后才可能出现跨 id 的 derived_from 撞组）。
+pub fn dedup_tracks_by_derived_from(tracks: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    let score = |t: &serde_json::Value| -> i32 {
+        let health = t.get("kind").and_then(|v| v.as_str()) == Some("health");
+        let has_beh = ["on_outcome", "thresholds"].iter()
+            .any(|k| t.get(*k).and_then(|v| v.as_array()).map(|a| !a.is_empty()).unwrap_or(false));
+        (if health { 2 } else { 0 }) + (if has_beh { 1 } else { 0 })
+    };
+    let df_of = |t: &serde_json::Value| t.get("derived_from").and_then(|v| v.as_str())
+        .map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty());
+    // 先为每个 derived_from 组挑出胜者(最高分, 先出现者优先)。
+    let mut best: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (i, t) in tracks.iter().enumerate() {
+        if let Some(df) = df_of(t) {
+            match best.get(&df) {
+                Some(&j) if score(&tracks[j]) >= score(t) => {}
+                _ => { best.insert(df, i); }
+            }
+        }
+    }
+    tracks.iter().enumerate().filter(|(i, t)| {
+        match df_of(t) { Some(df) => best.get(&df) == Some(i), None => true }
+    }).map(|(_, t)| t.clone()).collect()
+}
+
 /// Map an effect-roll `parameter_path` to a kernel resource-track id (semantic,
 /// no hardcoded alias table). `"hp"`/`"hp.current"` resolve via the kernel HP
 /// track; `"resources.{X}.current"` (or a bare resource name) matches a track id
@@ -7019,6 +7047,20 @@ mod resource_helpers_tests {
         assert_eq!(seeds.get("sanity"), Some(&(Some(65), Some(65))));
         let seeds = match_seed(&json!({}), &coc_tracks());
         assert_eq!(seeds.get("hit_points"), Some(&(Some(0), Some(100))), "无种子回退 kernel 静态");
+    }
+
+    #[test]
+    fn dedup_keeps_richest_track_per_derived_from() {
+        // 同一 derived_from(hp_max) 下：health-kind 带行为的 hit_points 胜过 inert 的 hp stub。
+        let tracks = vec![
+            json!({"id":"hp","derived_from":"hp_max","initial":0}), // inert stub
+            json!({"id":"hit_points","kind":"health","derived_from":"hp_max","on_outcome":[{"op":"subtract"}]}),
+            json!({"id":"sanity","derived_from":"sanity","thresholds":[{"at":0}]}), // 独占组，保留
+            json!({"id":"chaos","on_outcome":[{"op":"add"}]}), // 无 derived_from，原样保留
+        ];
+        let out = dedup_tracks_by_derived_from(&tracks);
+        let ids: Vec<&str> = out.iter().filter_map(|t| t.get("id").and_then(|v| v.as_str())).collect();
+        assert_eq!(ids, vec!["hit_points","sanity","chaos"], "inert hp stub 被去重, 其余保留原序: {ids:?}");
     }
 }
 
