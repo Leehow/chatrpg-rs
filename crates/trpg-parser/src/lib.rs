@@ -500,7 +500,7 @@ impl ProjectParseService {
         // the book like a GM -> GmRunKit (BP1 kernel + structured core + COMPLETE
         // character template/flow/options). Falls back to legacy extraction on
         // failure / when TRPG_READER_AGENT is off.
-        let reader_run_kit: Option<reader::GmRunKit> = if reader_agent_enabled() {
+        let mut reader_run_kit: Option<reader::GmRunKit> = if reader_agent_enabled() {
             let units_path = self.config.data_dir.join("parsed/source_units").join(format!("{}.semantic_units.jsonl", doc.source_id));
             match reader::load_units(&units_path) {
                 Ok(units) if !units.is_empty() => {
@@ -581,6 +581,21 @@ impl ProjectParseService {
                 let compiler_llm = build_compiler_llm().unwrap_or_else(|| self.llm.clone());
                 let gaps = reader::compile_chargen_formulas(compiler_llm.as_ref(), &mut character_template, ctx, 14).await;
                 if !gaps.is_empty() { tracing::info!(?gaps, "chargen compiler gaps (provisional/uncoerced)"); }
+
+                // 行为层对齐（与 staged.rs 2b-bis 等价）：确定性，无 LLM。
+                let dvs: Vec<serde_json::Value> = character_template.derived_values.iter()
+                    .filter_map(|d| serde_json::to_value(d).ok()).collect();
+                if let Some(kit) = reader_run_kit.as_mut() {
+                    let report = reader::align(&dvs, &mut kit.core.resource_tracks);
+                    // 三级兜底 LLM 补行为缺口：override 数据是主源，本路默认关
+                    // (TRPG_BEHAVIOR_ALIGN_LLM=1 才开)；fail-closed，绝不覆盖既有行为。
+                    if !report.behavior_gaps.is_empty() {
+                        reader::fill_behavior_from_prose(
+                            compiler_llm.as_ref(), &units, sidecar_text.clone(),
+                            &dvs, &mut kit.core.resource_tracks, 14,
+                        ).await;
+                    }
+                }
 
                 // §obj object/ability SCHEMA compiler (discover -> extract): per
                 // category a typed schema + 2 source-backed examples whose formula

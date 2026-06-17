@@ -3,6 +3,7 @@
 //! driven by the LLM via function-calling. Replaces the brute-force first-pass.
 
 pub mod agent;
+pub mod behavior_align;
 pub mod chargen_compile;
 pub mod mechanics_compile;
 pub mod mechanics_finalize;
@@ -21,6 +22,7 @@ pub mod tools;
 pub mod units;
 
 pub use agent::{run_reader, ReaderResult};
+pub use behavior_align::{align, audit_alignment, AlignmentReport, validate_emitted_on_outcome, apply_emitted_behavior, fill_behavior_from_prose};
 pub use chargen_compile::{compile_chargen_formulas, CompileCtx};
 pub use mechanics_compile::{compile_mechanics_catalog, MechCompileCtx};
 pub use mechanics_finalize::finalize_catalog;

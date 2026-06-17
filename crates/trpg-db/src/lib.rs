@@ -4613,4 +4613,46 @@ mod kernel_strategy_override_tests {
         assert!(super::embedded_kernel_override("triangle_agency").is_some());
         assert!(super::embedded_kernel_override("not_a_ruleset").is_none());
     }
+
+    /// §10.5 behavior alignment: the CoC embedded override now carries aligned
+    /// resource_tracks (hit_points/magic_points) — no DB or data/ dir needed.
+    #[test]
+    fn coc_embedded_override_carries_aligned_behavior_tracks() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("TRPG_DATA_DIR").ok();
+        let tmp = std::env::temp_dir().join(format!("trpg_embed_coc_test_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).expect("mk empty temp data dir");
+        struct Restore(Option<String>, std::path::PathBuf);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                // SAFETY (test): env restore under ENV_LOCK (single active test).
+                unsafe {
+                    match &self.0 {
+                        Some(v) => std::env::set_var("TRPG_DATA_DIR", v),
+                        None => std::env::remove_var("TRPG_DATA_DIR"),
+                    }
+                }
+                let _ = std::fs::remove_dir_all(&self.1);
+            }
+        }
+        let _restore = Restore(prev, tmp.clone());
+        // SAFETY (test): env set under ENV_LOCK.
+        unsafe { std::env::set_var("TRPG_DATA_DIR", &tmp); }
+
+        let doc = super::read_kernel_override_file("call_of_cthulhu_7e")
+            .expect("CoC override via embedded fallback");
+        let tracks = doc.get("resource_tracks").and_then(|v| v.as_array())
+            .expect("CoC embedded override carries resource_tracks");
+        let find = |id: &str| tracks.iter().find(|t| t.get("id").and_then(|v| v.as_str()) == Some(id));
+        let hp = find("hit_points").expect("hit_points track present");
+        assert_eq!(hp.get("derived_from").and_then(|v| v.as_str()), Some("hp_max"),
+            "hit_points must link to formula id hp_max");
+        assert!(hp.get("on_outcome").and_then(|v| v.as_array()).map(|a| !a.is_empty()).unwrap_or(false),
+            "hit_points must carry damage on_outcome");
+        assert!(hp.get("thresholds").and_then(|v| v.as_array()).map(|a| !a.is_empty()).unwrap_or(false),
+            "hit_points must carry wound/dying thresholds");
+        let mp = find("magic_points").expect("magic_points track present");
+        assert_eq!(mp.get("derived_from").and_then(|v| v.as_str()), Some("mp_max"),
+            "magic_points must link to formula id mp_max");
+    }
 }

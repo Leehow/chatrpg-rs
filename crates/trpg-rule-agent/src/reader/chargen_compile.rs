@@ -441,7 +441,7 @@ async fn run_compile_loop(
     None
 }
 
-fn compile_dispatch(ctx: &CompileCtx<'_>, name: &str, args: &Value) -> String {
+pub(crate) fn compile_dispatch(ctx: &CompileCtx<'_>, name: &str, args: &Value) -> String {
     let cap = |s: String| if s.len() <= 3000 { s } else { s.chars().take(3000).collect() };
     match name {
         "get_toc" => tools::toc(ctx.units, 40),
