@@ -54,6 +54,12 @@ use scene_projection::{resolve_turn_scene_id, map_check_param_need};
 mod truthgraph;
 pub use truthgraph::surfaced_events_for_scene;
 
+pub mod relationship_extraction;
+pub use relationship_extraction::{
+    build_relationship_messages, parse_relationship_triples, relationship_facts_from_inputs,
+    resolve_entity_refs, EntityRef,
+};
+
 mod context_blocks;
 use context_blocks::{memory_snapshot_block, retrieved_memory_block, actionable_situation_block, clue_board_block, world_time_block, world_events_since_block, engine_protocol_block, engine_protocol_block_agent_loop, world_state_block, dynamic_text_block};
 
@@ -519,6 +525,82 @@ impl RuntimeEngine {
                 tracing::warn!(error = %err, event_id = %ev.event_id, "truthgraph: append EntitySurfaced failed (fail-soft)");
             }
         }
+    }
+
+    /// 子项目2 知识图谱写穿（fail-soft，env 门控 `TRPG_RELATIONSHIP_EXTRACTION` 默认开）：
+    /// 在回合后处理（heavy 尾段）里，对**本局已 surface 的实体**之间，依本回合念白语义
+    /// 抽取关系三元组（subject-predicate-object）并 upsert 进 `memory_facts`，供后续回合
+    /// 经 `retrieve_memory` 召回。建在 [`crate::truthgraph`] 的 `EntitySurfaced` 之上（不
+    /// 重扫原文找新实体），复用调用方既有 `llm` 句柄（不另 from_env）。任何缺失（特性关 /
+    /// 无模组 / 念白空 / 已 surface 实体不足 2 / **本回合没 surface 新实体** / 图谱缺 /
+    /// LLM 出错）→ 跳过，绝不影响回合。成本闸：实体集没变化的回合直接跳过、不烧 LLM
+    /// （否则只会重得同样三元组，靠稳定 fact_id upsert 幂等但白花一次调用）。
+    /// 返回成功写入的三元组条数（便于可观测 / 测试）。
+    pub async fn extract_relationship_facts(
+        &self,
+        llm: &dyn trpg_llm::LlmClient,
+        session_id: &str,
+        turn_id: &str,
+        module_id: Option<&str>,
+        narration: &str,
+    ) -> usize {
+        if !relationship_extraction::relationship_extraction_enabled() || narration.trim().is_empty() {
+            return 0;
+        }
+        let Some(module_id) = module_id else { return 0 };
+        let surfaced = self.db.list_surfaced_entities(session_id).await.unwrap_or_default();
+        if surfaced.len() < 2 {
+            return 0; // 关系至少需要两个已知端点。
+        }
+        // 成本闸：只在**本回合首次 surface 了新实体**时才抽（否则已知实体集没变、再抽只会
+        // 重得同样的三元组、白烧一次 LLM）。「新实体」= EntitySurfaced 行 turn_id==本回合
+        // （append 时冻结、on-conflict 不改），是 append 时落定的事实。fail-open：判定查询
+        // 出错时退回旧行为（照抽），宁可偶尔多花一次也不漏抽关系。
+        let new_this_turn = match self.db.has_entity_surfaced_in_turn(session_id, turn_id).await {
+            Ok(b) => b,
+            Err(err) => {
+                tracing::warn!(error = %err, session_id, turn_id, "relationship: new-surface probe failed; proceeding (fail-open)");
+                true
+            }
+        };
+        if !new_this_turn {
+            return 0; // 本回合无新实体 → 跳过图谱加载与 LLM 调用。
+        }
+        let graph = match self.db.load_module_graph(module_id).await {
+            Ok(Some(g)) => g,
+            Ok(None) => return 0,
+            Err(err) => {
+                tracing::warn!(error = %err, module_id, "relationship: load_module_graph failed (fail-soft)");
+                return 0;
+            }
+        };
+        let entities = relationship_extraction::resolve_entity_refs(&surfaced, &graph);
+        if entities.len() < 2 {
+            return 0;
+        }
+        let facts = relationship_extraction::relationship_facts_from_inputs(
+            llm,
+            session_id,
+            turn_id,
+            &entities,
+            narration,
+            relationship_extraction::relationship_min_confidence(),
+            new_this_turn, // 成本闸：本回合无新实体则函数内 fail-closed 返回空（与上面早退一致）。
+        )
+        .await;
+        let mut written = 0usize;
+        for f in &facts {
+            match self.db.upsert_memory_fact(f).await {
+                Ok(()) => written += 1,
+                Err(err) => {
+                    tracing::warn!(error = %err, fact_id = %f.fact_id, "relationship fact upsert failed (fail-soft)")
+                }
+            }
+        }
+        if written > 0 {
+            tracing::info!(session_id, turn_id, written, "relationship triples written to memory_facts");
+        }
+        written
     }
 
     /// Single post-resolution funnel for EVERY check-resolution path. Runs the

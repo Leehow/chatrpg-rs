@@ -321,6 +321,18 @@ fn spawn_heavy(
         // assistant_output 用 take_outcome 清空 ctx **之前**于 run_pipeline 快照的 owned 值
         // （非现读 ctx——此刻 ctx.visible_text/awaiting_gate 已被 take_outcome 清空）。
         gm.phase_finalize_heavy_memory(&heavy_assistant_output, &input).await;
+        // 子项目2 知识图谱：对本局已 surface 的实体之间，按本回合念白语义抽关系三元组
+        // 写入 memory_facts（fail-soft、env 门控、复用既有 gm.llm 句柄）。后续回合经
+        // retrieve_memory 召回。失败/无实体 → no-op，绝不影响已发的 TurnComplete（D2）。
+        gm.engine
+            .extract_relationship_facts(
+                gm.llm.as_ref(),
+                &req.request.session_id,
+                &req.request.turn_id,
+                req.module_id.as_deref(),
+                &heavy_assistant_output,
+            )
+            .await;
         // 到场深抽 + frontier（仅 critical 真切了场景时）。
         if let (Some(commit), Some(module_id)) = (&scene_commit, req.module_id.as_deref()) {
             gm.phase_scene_navigate_heavy(&commit.to, module_id).await;

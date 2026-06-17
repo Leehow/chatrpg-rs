@@ -52,6 +52,7 @@ impl Db {
             include_str!("../../../migrations/0028_turn_pp_lifecycle_v120.sql"),
             include_str!("../../../migrations/0029_turn_trace_failure_v120.sql"),
             include_str!("../../../migrations/0030_domain_events.sql"),
+            include_str!("../../../migrations/0031_memory_fact_turn_id.sql"),
         ];
         for sql in migrations {
             for statement in split_sql_statements(sql) {
@@ -1205,8 +1206,8 @@ impl Db {
             r#"
             insert into memory_facts
               (id, fact_id, session_id, scope_type, scope_id, visibility, subject, predicate, object_json,
-               summary, status, confidence, source_event_ids, tags, importance, created_at, updated_at)
-            values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+               summary, status, confidence, source_event_ids, tags, importance, turn_id, created_at, updated_at)
+            values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
             on conflict (fact_id) do update set
               scope_type = excluded.scope_type,
               scope_id = excluded.scope_id,
@@ -1220,6 +1221,7 @@ impl Db {
               source_event_ids = excluded.source_event_ids,
               tags = excluded.tags,
               importance = excluded.importance,
+              turn_id = excluded.turn_id,
               updated_at = excluded.updated_at
             "#,
         )
@@ -1238,6 +1240,7 @@ impl Db {
         .bind(&fact.source_event_ids)
         .bind(&fact.tags)
         .bind(fact.importance)
+        .bind(&fact.turn_id)
         .bind(fact.created_at)
         .bind(fact.updated_at)
         .execute(&self.pool)
@@ -1308,7 +1311,7 @@ impl Db {
     pub async fn list_memory_facts(&self, session_id: &str, limit: i64) -> Result<Vec<MemoryFact>> {
         let rows = sqlx::query(
             r#"select fact_id, session_id, scope_type, scope_id, visibility, subject, predicate, object_json,
-                      summary, status, confidence, source_event_ids, tags, importance, created_at, updated_at
+                      summary, status, confidence, source_event_ids, tags, importance, turn_id, created_at, updated_at
                from memory_facts
                where session_id = $1 and status = 'active'
                order by importance desc, updated_at desc
@@ -1342,7 +1345,7 @@ impl Db {
         let pattern = format!("%{}%", query.text.replace('%', "\\%").replace('_', "\\_"));
         let facts_rows = sqlx::query(
             r#"select fact_id, session_id, scope_type, scope_id, visibility, subject, predicate, object_json,
-                      summary, status, confidence, source_event_ids, tags, importance, created_at, updated_at
+                      summary, status, confidence, source_event_ids, tags, importance, turn_id, created_at, updated_at
                from memory_facts
                where session_id = $1
                  and status = 'active'
@@ -2871,6 +2874,31 @@ impl Db {
             .collect())
     }
 
+    /// 反剧透 TruthGraph：本会话**本回合是否首次 surface 了新实体**。
+    ///
+    /// `EntitySurfaced` 写入是 per-session 幂等（`de_surfaced_{session}_{entity}` +
+    /// `on conflict do nothing`）：实体首次 surface 时该行的 `turn_id` **冻结为当时回合**，
+    /// 后续回合再 surface 同实体是 no-op、不改 turn_id。故「某行 turn_id == 本回合」
+    /// 当且仅当该实体**本回合才头一回出现**——这是 append 时落定的事实，而非事件存在性。
+    /// 关系抽取据此只在实体集真变化的回合才跑（省掉每回合重抽同样三元组的 LLM 调用）。
+    pub async fn has_entity_surfaced_in_turn(&self, session_id: &str, turn_id: &str) -> Result<bool> {
+        let row = sqlx::query(
+            r#"
+            select exists(
+                select 1 from domain_events
+                where session_id = $1
+                  and turn_id = $2
+                  and kind = 'EntitySurfaced'
+            ) as found
+            "#,
+        )
+        .bind(session_id)
+        .bind(turn_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.get::<bool, _>("found"))
+    }
+
     pub async fn list_world_events_since(&self, session_id: &str, since_tick: i64, since_event_seq: i64, limit: i64) -> Result<Vec<WorldEvent>> {
         let rows = sqlx::query(
             r#"
@@ -3823,6 +3851,7 @@ fn row_to_memory_fact(row: sqlx::postgres::PgRow) -> Result<MemoryFact> {
         source_event_ids: row.get::<Vec<String>, _>("source_event_ids"),
         tags: row.get::<Vec<String>, _>("tags"),
         importance: row.get("importance"),
+        turn_id: row.get::<Option<String>, _>("turn_id"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     })
