@@ -18,6 +18,10 @@ pub mod turn_loop;
 pub mod turn_plan;
 pub(crate) mod turn_trace;
 
+#[cfg(test)]
+#[path = "plugin_mechanism_tests.rs"]
+mod plugin_mechanism_tests;
+
 pub use errata::{ErrataEntry, ErrataMemory};
 pub use execute::{execute_turn, OwnedTurnRequest};
 pub use ledger::TurnLedger;

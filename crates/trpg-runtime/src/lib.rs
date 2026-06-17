@@ -2099,6 +2099,70 @@ fn dedupe_blocks(blocks: &mut Vec<ContextBlock>) {
     blocks.retain(|b| seen.insert((b.block_id.clone(), b.version)));
 }
 
+/// ContextFilter 应用：从已编译的上下文里**删除** `drop_block_ids` 命中的块，并对**真正
+/// 变动过**的 band（prefix/pinned/dynamic）用既有 `render_blocks` + `sha256_hex` 重渲染
+/// 文本与 hash——逐字复用首次装配（`ContextBuilder::build`）的同一渲染路径，保证字节级一致。
+///
+/// 未命中任何删除的 band **不触碰**（text/hash byte-stable），block_version_ids /
+/// token_estimate 仅在确有删除时按现存块重算（与 build 同口径派生）。cache_key / visibility_signature
+/// 复用首次装配值不变（删块不改 viewer / 前两 band 的语义签名规则——这里按"块集变化即重算
+/// 受影响 band hash"的最小语义，cache_key 由调用方在需要时再行处理；本 helper 只保证三 band
+/// text/hash/block_version_ids/token_estimate 与"若一开始就没有这些块"完全等价）。
+///
+/// **保守删**（漏删优于过删）：drop set 为空 → 完全 no-op（零拷贝、byte-stable）。该 helper
+/// 是纯函数（无 DB/LLM/env 依赖，redact 行为由 `render_blocks` 内既有逻辑承担），可单测。
+pub fn apply_context_filter(compiled: &mut trpg_model::CompiledContext, drop_block_ids: &[String]) {
+    if drop_block_ids.is_empty() {
+        return;
+    }
+    let drop: HashSet<&str> = drop_block_ids.iter().map(|s| s.as_str()).collect();
+    let mut any_changed = false;
+
+    let prefix_changed = retain_not_dropped(&mut compiled.prefix_blocks, &drop);
+    if prefix_changed {
+        compiled.prefix_text = render_blocks(&compiled.prefix_blocks);
+        compiled.prefix_hash = sha256_hex(&compiled.prefix_text);
+        any_changed = true;
+    }
+    let pinned_changed = retain_not_dropped(&mut compiled.pinned_blocks, &drop);
+    if pinned_changed {
+        compiled.pinned_text = render_blocks(&compiled.pinned_blocks);
+        compiled.pinned_hash = sha256_hex(&compiled.pinned_text);
+        any_changed = true;
+    }
+    let dynamic_changed = retain_not_dropped(&mut compiled.dynamic_blocks, &drop);
+    if dynamic_changed {
+        compiled.dynamic_text = render_blocks(&compiled.dynamic_blocks);
+        compiled.dynamic_hash = sha256_hex(&compiled.dynamic_text);
+        any_changed = true;
+    }
+
+    if any_changed {
+        // 派生汇总按现存块重算（与 ContextBuilder::build 同口径）。
+        compiled.token_estimate = compiled
+            .prefix_blocks
+            .iter()
+            .chain(compiled.pinned_blocks.iter())
+            .chain(compiled.dynamic_blocks.iter())
+            .map(|b| b.token_estimate.unwrap_or(0))
+            .sum();
+        compiled.block_version_ids = compiled
+            .prefix_blocks
+            .iter()
+            .chain(compiled.pinned_blocks.iter())
+            .chain(compiled.dynamic_blocks.iter())
+            .map(|b| format!("{}@{}", b.block_id, b.version))
+            .collect();
+    }
+}
+
+/// 从一个 band 删除命中 drop set 的块；返回该 band 是否真有块被删（决定是否重渲染）。
+fn retain_not_dropped(blocks: &mut Vec<ContextBlock>, drop: &HashSet<&str>) -> bool {
+    let before = blocks.len();
+    blocks.retain(|b| !drop.contains(b.block_id.as_str()));
+    blocks.len() != before
+}
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct MechanicalSignal {
@@ -2708,5 +2772,121 @@ mod merge_need_outcome_tests {
         assert_eq!(entry.source_refs.len(), 2);
         assert_eq!(entry.source_refs[0].source_id, "r1");
         assert_eq!(entry.source_refs[1].source_id, "r2");
+    }
+}
+
+#[cfg(test)]
+mod apply_context_filter_tests {
+    use super::*;
+
+    fn block(id: &str, title: &str, body: &str, zone: CacheZone) -> ContextBlock {
+        ContextBlock::new(
+            id,
+            BlockKind::GmOnboarding,
+            title,
+            BlockContent::Text(body.to_string()),
+            Visibility::GmOnly,
+            Stability::SceneStable,
+            zone,
+            Scope::global(),
+            0,
+        )
+    }
+
+    fn request() -> ContextRequest {
+        ContextRequest {
+            ruleset_id: "rs".to_string(),
+            module_id: None,
+            session_id: "s".to_string(),
+            turn_id: "t".to_string(),
+            viewer: VisibilityProfile::gm(),
+            token_budget: TokenBudget::default(),
+        }
+    }
+
+    /// 经 runtime 真路径装配 CompiledContext，删一个 dynamic band 的块：该块消失，dynamic
+    /// text/hash 与"一开始就没有这个块"的重渲染**逐字**一致，prefix band 完全 byte-stable。
+    #[test]
+    fn apply_context_filter_drops_block_and_rerenders() {
+        let req = request();
+        let planned = PlannedContext {
+            prefix_blocks: vec![block("p.keep", "Prefix", "prefix body", CacheZone::Prefix)],
+            pinned_blocks: vec![],
+            dynamic_blocks: vec![
+                block("d.keep", "Keep", "keep body", CacheZone::DynamicTail),
+                block("d.drop", "Drop", "drop body", CacheZone::DynamicTail),
+            ],
+        };
+        let mut compiled = ContextBuilder.build(planned, &req).expect("build compiled");
+
+        // 期望基线：若一开始 dynamic 只含 d.keep，build 出的 text/hash 即应等于过滤后的值。
+        let baseline_planned = PlannedContext {
+            prefix_blocks: vec![block("p.keep", "Prefix", "prefix body", CacheZone::Prefix)],
+            pinned_blocks: vec![],
+            dynamic_blocks: vec![block("d.keep", "Keep", "keep body", CacheZone::DynamicTail)],
+        };
+        let baseline = ContextBuilder.build(baseline_planned, &req).expect("build baseline");
+
+        let prefix_text_before = compiled.prefix_text.clone();
+        let prefix_hash_before = compiled.prefix_hash.clone();
+
+        apply_context_filter(&mut compiled, &["d.drop".to_string()]);
+
+        // 被删块不在了；保留块仍在。
+        let ids: Vec<&str> = compiled.dynamic_blocks.iter().map(|b| b.block_id.as_str()).collect();
+        assert_eq!(ids, vec!["d.keep"]);
+        // dynamic text/hash 与基线（从未含 d.drop 的装配）逐字一致——证明走的是同一渲染路径。
+        assert_eq!(compiled.dynamic_text, baseline.dynamic_text);
+        assert_eq!(compiled.dynamic_hash, baseline.dynamic_hash);
+        // 未受影响的 prefix band：text/hash byte-stable（未触碰）。
+        assert_eq!(compiled.prefix_text, prefix_text_before);
+        assert_eq!(compiled.prefix_hash, prefix_hash_before);
+        assert_eq!(compiled.prefix_text, baseline.prefix_text);
+        // block_version_ids 不再含被删块。
+        assert!(!compiled.block_version_ids.iter().any(|v| v.starts_with("d.drop@")));
+        assert!(compiled.block_version_ids.iter().any(|v| v.starts_with("d.keep@")));
+    }
+
+    /// 空 drop set → 完全 no-op（所有 band text/hash byte-stable）。
+    #[test]
+    fn apply_context_filter_empty_drop_is_noop() {
+        let req = request();
+        let planned = PlannedContext {
+            prefix_blocks: vec![block("p.1", "P", "p", CacheZone::Prefix)],
+            pinned_blocks: vec![block("m.1", "M", "m", CacheZone::PinnedMiddle)],
+            dynamic_blocks: vec![block("d.1", "D", "d", CacheZone::DynamicTail)],
+        };
+        let mut compiled = ContextBuilder.build(planned, &req).expect("build compiled");
+        let before = compiled.clone();
+
+        apply_context_filter(&mut compiled, &[]);
+
+        assert_eq!(compiled.prefix_text, before.prefix_text);
+        assert_eq!(compiled.prefix_hash, before.prefix_hash);
+        assert_eq!(compiled.pinned_text, before.pinned_text);
+        assert_eq!(compiled.pinned_hash, before.pinned_hash);
+        assert_eq!(compiled.dynamic_text, before.dynamic_text);
+        assert_eq!(compiled.dynamic_hash, before.dynamic_hash);
+        assert_eq!(compiled.block_version_ids, before.block_version_ids);
+    }
+
+    /// drop set 命中不存在的 id → 无 band 变动 → byte-stable（漏删优于过删的最小情形）。
+    #[test]
+    fn apply_context_filter_unknown_id_is_noop() {
+        let req = request();
+        let planned = PlannedContext {
+            prefix_blocks: vec![block("p.1", "P", "p", CacheZone::Prefix)],
+            pinned_blocks: vec![],
+            dynamic_blocks: vec![block("d.1", "D", "d", CacheZone::DynamicTail)],
+        };
+        let mut compiled = ContextBuilder.build(planned, &req).expect("build compiled");
+        let before = compiled.clone();
+
+        apply_context_filter(&mut compiled, &["nope.not_here".to_string()]);
+
+        assert_eq!(compiled.dynamic_text, before.dynamic_text);
+        assert_eq!(compiled.dynamic_hash, before.dynamic_hash);
+        assert_eq!(compiled.prefix_text, before.prefix_text);
+        assert_eq!(compiled.prefix_hash, before.prefix_hash);
     }
 }

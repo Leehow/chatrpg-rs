@@ -333,7 +333,9 @@ impl GmLoop {
             // 流后校验是 loop 之后的无条件阶段（spec §4）：awaiting 终态前可能已
             // 流出含可见掷骰结果的叙事，仅在 visible_text 非空时跑（空文本无可对账内容）。
             if !visible_text.trim().is_empty() {
-                self.verify_after_stream(input.request, &ledger, &visible_text).await;
+                // R1 legacy 路径不组装 TurnTrace，丢弃返回的 plugin trace 记录（execute.rs 默认路径
+                // 经 phase_verify_after_stream 收集）。
+                let _ = self.verify_after_stream(input.request, &ledger, &visible_text).await;
             }
             let assistant_output = if visible_text.trim().is_empty() { gate.prompt_public.clone() } else { visible_text.clone() };
             self.finalize_turn(input.request, input.state, &compiled, input.user_input, &assistant_output, "awaiting_player_roll").await;
@@ -359,7 +361,7 @@ impl GmLoop {
             }
         }
         // —— 5. 流后校验（不阻塞交付：叙事已全部流出）——
-        self.verify_after_stream(input.request, &ledger, &visible_text).await;
+        let _ = self.verify_after_stream(input.request, &ledger, &visible_text).await;
         // —— 6. 确定性收尾 ——
         self.finalize_turn(input.request, input.state, &compiled, input.user_input, &visible_text, "ready").await;
         Ok(TurnOutcome::Narration(visible_text))
@@ -671,21 +673,42 @@ impl GmLoop {
             config: json!({}),
         };
         let contributions = crate::plugin::builtin_plugin_host().run_hook(&plugin_ctx).await;
+        // ContextFilter 跨贡献汇总的 drop_block_ids（保守删：T3 才接，今天无内置 emitter →
+        // 恒空 → apply_context_filter no-op → ctx.compiled byte-stable）。
+        let mut drop_block_ids: Vec<String> = Vec::new();
         for c in &contributions {
-            // 每条贡献都记 trace（含 T3 的 ContextFilter/finding 类）。
+            // 每条贡献都记 trace（含 ContextFilter/finding 类）。
             ctx.plugin_contributions.push(c.to_trace());
-            // T2 只应用 PromptBlock：把渲染文本以同 join 风格追加进 gm_skill。
-            if let crate::plugin::PluginContributionKind::PromptBlock(block) = &c.kind {
-                gm_skill.push_str("\n\n---\n\n");
-                gm_skill.push_str(&block.content.render_text());
+            match &c.kind {
+                // PromptBlock：把渲染文本以同 join 风格追加进 gm_skill。
+                crate::plugin::PluginContributionKind::PromptBlock(block) => {
+                    gm_skill.push_str("\n\n---\n\n");
+                    gm_skill.push_str(&block.content.render_text());
+                }
+                // ContextFilter：汇总待删 block_id（应用挪到循环后，避免循环内借用 ctx.compiled）。
+                crate::plugin::PluginContributionKind::ContextFilter(spec) => {
+                    drop_block_ids.extend(spec.drop_block_ids.iter().cloned());
+                }
+                // VerifierFinding 不在 ContextAssembly hook 产出（见 AfterLlmStream）。
+                crate::plugin::PluginContributionKind::VerifierFinding(_) => {}
             }
+        }
+        // ContextFilter 应用（fail-soft）：删命中块 + 经 runtime 同渲染路径重算受影响 band
+        // 的 text/hash（drop 集为空 → 完全 no-op，零行为变更）。
+        if !drop_block_ids.is_empty() {
+            trpg_runtime::apply_context_filter(&mut ctx.compiled, &drop_block_ids);
         }
     }
 
     /// 流后校验（spec §4 第 5 步）：NarrationVerifier 对账已流出全文 → 勘误记忆
     /// （注入下一轮 dynamic tail）→ 新增勘误折 MemoryEvent 持久化（tags 含
     /// "gm_errata"；落库失败 `let _ =` 吞错——叙事已交付，校验绝不反向中断回合）。
-    pub(crate) async fn verify_after_stream(&mut self, request: &ContextRequest, ledger: &TurnLedger, visible_text: &str) {
+    /// 流后校验。返回**本回合应入 plugin trace 的贡献记录**（advisory，零行为变更）：
+    /// (a) 既算出的 NarrationVerifier findings 折成 trace（让 de-facto
+    /// `core.no_mechanical_invention` verifier 在 `trpg explain --plugins` 可见，不重跑检查）；
+    /// (b) AfterLlmStream hook 返回的 VerifierFinding 贡献（今天无内置 emitter → 空）。
+    /// 调用方（phase_verify_after_stream）把它们 push 进 ctx.plugin_contributions。
+    pub(crate) async fn verify_after_stream(&mut self, request: &ContextRequest, ledger: &TurnLedger, visible_text: &str) -> Vec<trpg_model::PluginContributionTrace> {
         let verifier = trpg_agent::NarrationVerifier;
         // B7 语义决策：agent 不显式声明引用，引擎代填"已落账事实全集"
         // （ledger_id_set 物化，排序保证确定性）——结构化核对退化为"声称的
@@ -713,6 +736,55 @@ impl GmLoop {
             })
             .collect::<Vec<_>>();
         self.obligations.absorb_retro_debts(debts);
+
+        // —— Plugin trace（advisory，零行为变更）——
+        // (a) 把既算出的 NarrationVerifier findings 折成 trace（不重跑检查，复用 result.findings）：
+        //     de-facto 的 no_mechanical_invention verifier 自此在 `trpg explain --plugins` 可见。
+        let mut traces: Vec<trpg_model::PluginContributionTrace> = result.findings.iter()
+            .map(|f| surface_verifier_finding_trace(f))
+            .collect();
+        // (b) AfterLlmStream hook 接线（fail-soft）：跑内置 policy host；返回的 VerifierFinding
+        //     贡献既 record 进 trace、又喂进既有 ErrataMemory 路径（让未来 verifier 插件接入）。
+        //     今天无内置 AfterLlmStream emitter → contributions 空 → 行为不变。
+        traces.extend(self.run_after_llm_stream_hook(request, visible_text).await);
+        traces
+    }
+
+    /// AfterLlmStream hook 接线（fail-soft）。构造只读 PluginContext（narration=visible_text），
+    /// 跑内置 policy host；对返回的 VerifierFinding 贡献：折 trace + 喂 ErrataMemory（复用既有
+    /// record/to_memory_event 持久化路径）。其余 kind 仅记 trace（AfterLlmStream 不应产 PromptBlock/
+    /// ContextFilter，但记录以便观测）。返回供调用方入 plugin trace 的记录。
+    async fn run_after_llm_stream_hook(&mut self, request: &ContextRequest, visible_text: &str) -> Vec<trpg_model::PluginContributionTrace> {
+        let surfaced_entities = self.engine.db.list_surfaced_entities(&request.session_id).await.unwrap_or_default();
+        let plugin_ctx = crate::plugin::PluginContext {
+            session_id: request.session_id.clone(),
+            turn_id: request.turn_id.clone(),
+            ruleset_id: request.ruleset_id.clone(),
+            module_id: request.module_id.clone(),
+            hook: crate::plugin::PluginHook::AfterLlmStream,
+            surfaced_entities,
+            narration: Some(visible_text.to_string()),
+            compiled_block_ids: vec![],
+            config: json!({}),
+        };
+        let contributions = crate::plugin::builtin_plugin_host().run_hook(&plugin_ctx).await;
+        let mut traces = Vec::new();
+        // VerifierFinding 贡献喂进 ErrataMemory（与既有 NarrationVerifier 路径同口径持久化）。
+        let findings: Vec<trpg_agent::VerifierFinding> = contributions.iter()
+            .filter_map(|c| match &c.kind {
+                crate::plugin::PluginContributionKind::VerifierFinding(vf) => Some(vf.clone()),
+                _ => None,
+            })
+            .collect();
+        if !findings.is_empty() {
+            let entries = self.errata.record(&request.turn_id, &findings);
+            if !entries.is_empty() {
+                let event = self.errata.to_memory_event(request, &entries);
+                let _ = self.engine.db.save_memory_event(&event).await;
+            }
+        }
+        for c in &contributions { traces.push(c.to_trace()); }
+        traces
     }
 
     /// R5 critical：只持久化回合记录 + status（save_turn）。memory/audit 移到 heavy
@@ -767,7 +839,11 @@ impl GmLoop {
     pub(crate) async fn phase_verify_after_stream(&mut self, ctx: &mut TurnContext, input: &GmTurnInput<'_>) {
         if ctx.visible_text.trim().is_empty() && ctx.awaiting_gate.is_some() { return; }
         let visible = std::mem::take(&mut ctx.visible_text);
-        self.verify_after_stream(input.request, &ctx.ledger, &visible).await;
+        // 流后校验返回 plugin trace 记录（NarrationVerifier findings 折成的 no_mechanical_invention
+        // 贡献 + AfterLlmStream hook 贡献）。push 进 ctx.plugin_contributions —— 本 phase 在
+        // execute.rs 跑于成功路径 build_turn_trace 之前，故这些 AfterLlmStream 贡献也进 TurnTrace。
+        let traces = self.verify_after_stream(input.request, &ctx.ledger, &visible).await;
+        ctx.plugin_contributions.extend(traces);
         ctx.visible_text = visible;
     }
 
@@ -865,6 +941,24 @@ fn drain_redactor(redactor: &mut RedactingBuffer, blocked: bool, on_delta: &mut 
     if blocked || rest.is_empty() { return; }
     on_delta(&rest);
     visible_text.push_str(&rest);
+}
+
+/// 把一条既算出的 NarrationVerifier finding 折成 plugin trace 记录，使 de-facto 的
+/// `core.no_mechanical_invention` verifier 在 `trpg explain --plugins` 可见。**纯映射，不重跑
+/// 检查、不改 errata 行为**——summary = finding kind（snake_case）+ 截断 detail。
+pub(crate) fn surface_verifier_finding_trace(f: &trpg_agent::VerifierFinding) -> trpg_model::PluginContributionTrace {
+    let kind_str = serde_json::to_value(f.kind)
+        .ok()
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| format!("{:?}", f.kind));
+    let detail: String = f.detail.chars().take(120).collect();
+    let summary = if detail.is_empty() { kind_str.clone() } else { format!("{kind_str}: {detail}") };
+    trpg_model::PluginContributionTrace {
+        plugin_id: "core.no_mechanical_invention".to_string(),
+        hook: crate::plugin::PluginHook::AfterLlmStream.as_str().to_string(),
+        kind: "verifier_finding".to_string(),
+        summary,
+    }
 }
 
 #[cfg(test)]
