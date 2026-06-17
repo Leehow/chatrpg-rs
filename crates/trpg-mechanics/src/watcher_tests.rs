@@ -121,6 +121,20 @@ fn turn_start_hook_entry_produces_due_with_mechanic_id() {
     assert_eq!(dues[0].hook_event.as_deref(), Some("turn_start"));
 }
 
+fn coc_hp_track() -> serde_json::Value {
+    json!({"id":"hit_points","owner_kind":"actor","thresholds":[
+        {"loss_in_one_go":0,"consequence":"major wound if a single attack inflicts >= half of max HP"},
+        {"at":0,"direction":"at_or_below","consequence":"dying"}]})
+}
+
+#[test]
+fn hp_drop_to_zero_crosses_dying_threshold() {
+    // before=4 -> after=0, Subtract：触发 cumulative(at:0) 濒死阈值。
+    let cs = detect_crossings(&coc_hp_track(), "actor", "pc.current", 4, 0, ParameterOperation::Subtract);
+    assert!(cs.iter().any(|c| c.kind == "cumulative" && c.threshold_at == Some(0)),
+        "0 线濒死阈值应穿越: {cs:?}");
+}
+
 // ===== #5 Triangle Agency chaos pool threshold regression =====
 // Mirrors the structure injected by _fix_triangle_chaos_thresholds.sql so that
 // if the DB row or the watcher logic regresses, a test catches it before playtest.
