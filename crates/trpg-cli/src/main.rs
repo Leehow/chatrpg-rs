@@ -1064,6 +1064,18 @@ fn format_turn_trace(t: &TurnTrace) -> String {
             ));
         }
     }
+    // plugin_contributions（Policy Plugin Host：本回合各插件经 hook 的贡献）。
+    out.push_str("plugin_contributions:\n");
+    if t.plugin_contributions.is_empty() {
+        out.push_str("  (none)\n");
+    } else {
+        for p in &t.plugin_contributions {
+            out.push_str(&format!(
+                "  {} @{} -> {} ({})\n",
+                p.plugin_id, p.hook, p.kind, p.summary
+            ));
+        }
+    }
     out
 }
 
@@ -1870,6 +1882,24 @@ mod tests {
         assert!(out.contains("(none)"), "empty warnings/phases should print (none):\n{out}");
         // 空 binding_trace → header + (none)。
         assert!(out.contains("binding_trace:"), "binding_trace header missing:\n{out}");
+        // 空 plugin_contributions → header + (none)。
+        assert!(out.contains("plugin_contributions:"), "plugin_contributions header missing:\n{out}");
+    }
+
+    #[test]
+    fn format_turn_trace_renders_plugin_contributions() {
+        let mut trace = TurnTrace::new("turn-p", "session-1");
+        trace.plugin_contributions = vec![trpg_model::PluginContributionTrace {
+            plugin_id: "core.no_spoiler_guard".into(),
+            hook: "context_assembly".into(),
+            kind: "prompt_block".into(),
+            summary: "防剧透（模组叙事守则）".into(),
+        }];
+        let out = format_turn_trace(&trace);
+        assert!(out.contains("plugin_contributions:"), "header missing:\n{out}");
+        assert!(out.contains("core.no_spoiler_guard"), "plugin_id missing:\n{out}");
+        assert!(out.contains("prompt_block"), "kind missing:\n{out}");
+        assert!(out.contains("context_assembly"), "hook missing:\n{out}");
     }
 
     #[test]
