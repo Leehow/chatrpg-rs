@@ -2310,6 +2310,11 @@ pub struct MemoryFact {
     pub source_event_ids: Vec<String>,
     pub tags: Vec<String>,
     pub importance: i32,
+    /// Turn that established this fact (provenance for emergent triples). Optional/
+    /// `#[serde(default)]` so pre-existing facts (and rows with a NULL column)
+    /// deserialize cleanly to `None`.
+    #[serde(default)]
+    pub turn_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

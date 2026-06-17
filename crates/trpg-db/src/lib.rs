@@ -52,6 +52,7 @@ impl Db {
             include_str!("../../../migrations/0028_turn_pp_lifecycle_v120.sql"),
             include_str!("../../../migrations/0029_turn_trace_failure_v120.sql"),
             include_str!("../../../migrations/0030_domain_events.sql"),
+            include_str!("../../../migrations/0031_memory_fact_turn_id.sql"),
         ];
         for sql in migrations {
             for statement in split_sql_statements(sql) {
@@ -1180,8 +1181,8 @@ impl Db {
             r#"
             insert into memory_facts
               (id, fact_id, session_id, scope_type, scope_id, visibility, subject, predicate, object_json,
-               summary, status, confidence, source_event_ids, tags, importance, created_at, updated_at)
-            values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+               summary, status, confidence, source_event_ids, tags, importance, turn_id, created_at, updated_at)
+            values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
             on conflict (fact_id) do update set
               scope_type = excluded.scope_type,
               scope_id = excluded.scope_id,
@@ -1195,6 +1196,7 @@ impl Db {
               source_event_ids = excluded.source_event_ids,
               tags = excluded.tags,
               importance = excluded.importance,
+              turn_id = excluded.turn_id,
               updated_at = excluded.updated_at
             "#,
         )
@@ -1213,6 +1215,7 @@ impl Db {
         .bind(&fact.source_event_ids)
         .bind(&fact.tags)
         .bind(fact.importance)
+        .bind(&fact.turn_id)
         .bind(fact.created_at)
         .bind(fact.updated_at)
         .execute(&self.pool)
@@ -1283,7 +1286,7 @@ impl Db {
     pub async fn list_memory_facts(&self, session_id: &str, limit: i64) -> Result<Vec<MemoryFact>> {
         let rows = sqlx::query(
             r#"select fact_id, session_id, scope_type, scope_id, visibility, subject, predicate, object_json,
-                      summary, status, confidence, source_event_ids, tags, importance, created_at, updated_at
+                      summary, status, confidence, source_event_ids, tags, importance, turn_id, created_at, updated_at
                from memory_facts
                where session_id = $1 and status = 'active'
                order by importance desc, updated_at desc
@@ -1317,7 +1320,7 @@ impl Db {
         let pattern = format!("%{}%", query.text.replace('%', "\\%").replace('_', "\\_"));
         let facts_rows = sqlx::query(
             r#"select fact_id, session_id, scope_type, scope_id, visibility, subject, predicate, object_json,
-                      summary, status, confidence, source_event_ids, tags, importance, created_at, updated_at
+                      summary, status, confidence, source_event_ids, tags, importance, turn_id, created_at, updated_at
                from memory_facts
                where session_id = $1
                  and status = 'active'
@@ -3798,6 +3801,7 @@ fn row_to_memory_fact(row: sqlx::postgres::PgRow) -> Result<MemoryFact> {
         source_event_ids: row.get::<Vec<String>, _>("source_event_ids"),
         tags: row.get::<Vec<String>, _>("tags"),
         importance: row.get("importance"),
+        turn_id: row.get::<Option<String>, _>("turn_id"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     })
