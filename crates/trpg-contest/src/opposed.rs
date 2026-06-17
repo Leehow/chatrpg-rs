@@ -50,6 +50,33 @@ pub fn resolve_opposed(
     (None, Some(attacker_wins), degree)
 }
 
+/// 通用骰池对抗(count_faces,如 Triangle):双方各掷自己的池,数出现 `target_face` 的骰子
+/// (hits),hits 多者胜。`threshold` 是"该侧算达成"的下限(默认 ≥1):双方都未达阈值 → status
+/// quo 防御方守成(degree=mutual_failure)。平局(都达阈值、hits 相等)→ 防御方胜
+/// (engine convention,与 resolve_opposed 一致)。fail-closed:任一池为空(未掷)→ (None,None,None)。
+/// 返回 (target=None, success=attacker_wins, degree)——形态与 resolve_opposed 对齐,供
+/// resolve_outcome 直接覆盖 target/success/degree。
+pub fn resolve_pool_opposed(
+    target_face: i32, threshold: i32,
+    atk_rolls: &[i64], def_rolls: &[i64],
+) -> (Option<i64>, Option<bool>, Option<String>) {
+    if atk_rolls.is_empty() || def_rolls.is_empty() { return (None, None, None); }
+    let face = target_face as i64;
+    let atk_hits = atk_rolls.iter().filter(|&&d| d == face).count() as i64;
+    let def_hits = def_rolls.iter().filter(|&&d| d == face).count() as i64;
+    let (atk_ok, def_ok) = (atk_hits >= threshold as i64, def_hits >= threshold as i64);
+    let attacker_wins = match (atk_ok, def_ok) {
+        (true, false) => true,
+        (false, true) => false,
+        (false, false) => false,            // 双方未达阈值:防御方守成(status quo)
+        (true, true) => atk_hits > def_hits, // 都达阈值:hits 多者胜,平局归防御方
+    };
+    let degree = Some(if !atk_ok && !def_ok { "mutual_failure".to_string() }
+        else if attacker_wins { "attacker_wins".to_string() }
+        else { "defender_wins".to_string() });
+    (None, Some(attacker_wins), degree)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,5 +134,54 @@ mod tests {
         let bands: Vec<Value> = vec![];
         let (_t, s, _d) = resolve_opposed("meet_or_beat", &bands, 18, Some(10), 11, Some(10));
         assert_eq!(s, Some(true));
+    }
+
+    // ─── count_faces 骰池对抗(Triangle):双方各掷池、数 hits 定胜负 ───
+
+    #[test]
+    fn pool_opposed_more_hits_wins() {
+        // 面=3,阈值=1。攻击池 [3,3,1,2,4,3]=3 hits;防御池 [3,1,2,2,4,1]=1 hit → 攻击方胜。
+        let (t, s, d) = resolve_pool_opposed(3, 1, &[3, 3, 1, 2, 4, 3], &[3, 1, 2, 2, 4, 1]);
+        assert_eq!(t, None, "对抗无单一 target 数,target=None");
+        assert_eq!(s, Some(true), "攻击 3 hits > 防御 1 hit → 攻击方胜");
+        assert_eq!(d.as_deref(), Some("attacker_wins"));
+    }
+
+    #[test]
+    fn pool_opposed_fewer_hits_loses() {
+        // 攻击 1 hit、防御 4 hits → 防御方胜(攻击被压制)。
+        let (_t, s, d) = resolve_pool_opposed(3, 1, &[3, 1, 2, 2, 4, 1], &[3, 3, 3, 3, 1, 2]);
+        assert_eq!(s, Some(false), "攻击 1 hit < 防御 4 hits → 防御方胜");
+        assert_eq!(d.as_deref(), Some("defender_wins"));
+    }
+
+    #[test]
+    fn pool_opposed_tie_favors_defender() {
+        // 双方各 2 hits、都达阈值 → 平局归防御方(engine convention,与 resolve_opposed 一致)。
+        let (_t, s, _d) = resolve_pool_opposed(3, 1, &[3, 3, 1, 1], &[3, 3, 2, 4]);
+        assert_eq!(s, Some(false), "平局(2=2)→ 防御方胜");
+    }
+
+    #[test]
+    fn pool_opposed_both_zero_is_mutual_failure_defender_holds() {
+        // 双方都 0 hits(都没达阈值)→ status quo,防御方胜,degree=mutual_failure。
+        let (_t, s, d) = resolve_pool_opposed(3, 1, &[1, 2, 4, 1], &[2, 4, 1, 2]);
+        assert_eq!(s, Some(false), "双 0 hits → 防御方守成");
+        assert_eq!(d.as_deref(), Some("mutual_failure"));
+    }
+
+    #[test]
+    fn pool_opposed_threshold_gates_more_raw_hits() {
+        // 阈值=2:攻击 1 hit(未达)、防御 0 hit(未达)→ 双败,防御方胜(即便攻击 hits 更多)。
+        let (_t, s, d) = resolve_pool_opposed(3, 2, &[3, 1, 2, 4], &[1, 2, 4, 1]);
+        assert_eq!(s, Some(false), "攻击虽 1>0 但未达阈值 2 → 双败,防御方守成");
+        assert_eq!(d.as_deref(), Some("mutual_failure"));
+    }
+
+    #[test]
+    fn pool_opposed_empty_pool_fails_closed() {
+        // 任一池为空(未掷)→ fail-closed (None,None,None),绝不乱判胜负。
+        assert_eq!(resolve_pool_opposed(3, 1, &[], &[3, 3, 1]), (None, None, None));
+        assert_eq!(resolve_pool_opposed(3, 1, &[3, 3, 1], &[]), (None, None, None));
     }
 }
