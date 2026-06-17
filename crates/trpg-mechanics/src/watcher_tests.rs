@@ -123,7 +123,6 @@ fn turn_start_hook_entry_produces_due_with_mechanic_id() {
 
 fn coc_hp_track() -> serde_json::Value {
     json!({"id":"hit_points","owner_kind":"actor","thresholds":[
-        {"loss_in_one_go":0,"consequence":"major wound if a single attack inflicts >= half of max HP"},
         {"at":0,"direction":"at_or_below","consequence":"dying"}]})
 }
 
