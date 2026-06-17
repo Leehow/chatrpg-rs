@@ -170,7 +170,8 @@ impl ToolRegistry {
     /// get_actor, ensure_npc_param, navigate_scene, advance_time, remember）的
     /// schema 字节与顺序绝不动；二期工具只在尾部追加：lookup_mechanic,
     /// waive_obligation（11→12）；三期姿态工具继续尾部追加：enter_mode,
-    /// exit_mode（13→14，任何姿态下均可用 = 基础 14）。
+    /// exit_mode（13→14，任何姿态下均可用 = 基础 14）；Knowledge P0a 尾部追加
+    /// reveal_fact（15，显式 GM 揭示 = 基础 15）。
     pub fn standard() -> Self {
         Self { tools: vec![
             Box::new(check::RollCheckTool),
@@ -187,6 +188,7 @@ impl ToolRegistry {
             Box::new(mechanic::WaiveObligationTool),
             Box::new(crate::mode::EnterModeTool),
             Box::new(crate::mode::ExitModeTool),
+            Box::new(world::RevealFactTool),
         ] }
     }
 
@@ -338,8 +340,8 @@ mod schema_stability_tests {
             "mode switch with extra_tools must produce different schema bytes (justified cache invalidation)");
         let count_none   = ToolRegistry::for_mode(&dir, None).unwrap().schemas().len();
         let count_combat = ToolRegistry::for_mode(&dir, Some("combat")).unwrap().schemas().len();
-        assert_eq!(count_none, 14, "base registry must have exactly 14 tools");
-        assert_eq!(count_combat, 16, "combat mode with two extra_tools must have 16 tools");
+        assert_eq!(count_none, 15, "base registry must have exactly 15 tools");
+        assert_eq!(count_combat, 17, "combat mode with two extra_tools must have 17 tools");
         fs::remove_dir_all(dir).ok();
     }
 

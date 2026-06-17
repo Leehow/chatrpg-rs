@@ -135,6 +135,76 @@ impl GmTool for NavigateSceneTool {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct RevealFactArgs {
+    pub fact_id: String,
+    pub reason: Option<String>,
+}
+
+pub fn parse_reveal_fact_args(value: Value) -> Result<RevealFactArgs> {
+    let args: RevealFactArgs = serde_json::from_value(value).map_err(|e| {
+        ToolError::recoverable(
+            "invalid_arguments",
+            format!("reveal_fact arguments invalid: {e}"),
+            Some("Provide fact_id and an optional reason.".to_string()),
+        )
+    })?;
+    if args.fact_id.trim().is_empty() {
+        return Err(ToolError::recoverable(
+            "invalid_arguments",
+            "fact_id is required",
+            Some("Use the module entity id or node id currently being explicitly revealed.".to_string()),
+        ));
+    }
+    Ok(args)
+}
+
+/// Knowledge P0a：显式 GM 揭示工具。把一条剧透事实记为对玩家方已揭示
+/// （fact_id = entity_id/node_id），自此 spoiler_guard 不再裁该实体的 secret_terms。
+/// 揭示**只由 GM 显式调用驱动**（引擎绝不关键词匹配 reveal_conditions 自动揭示）。
+pub struct RevealFactTool;
+#[async_trait]
+impl GmTool for RevealFactTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec { name: "reveal_fact", schema: json!({
+            "type": "function",
+            "function": {
+                "name": "reveal_fact",
+                "description": "Explicitly mark a module fact as revealed to the player party after a gameplay event, successful check, or confirmed NPC disclosure. Never use keyword matching; call only when the fiction has actually revealed the fact.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "fact_id": {
+                            "type": "string",
+                            "description": "Fact id to reveal. P0a accepts existing spoiler ids such as entity_id or node_id."
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "Brief source-backed explanation, e.g. player found the diary or NPC confessed."
+                        }
+                    },
+                    "required": ["fact_id"]
+                }
+            }
+        }) }
+    }
+
+    async fn call(&self, ctx: &ToolCtx<'_>, _ledger: &mut TurnLedger, args: Value) -> Result<ToolOutput> {
+        let args = parse_reveal_fact_args(args)?;
+        let fact_id = args.fact_id.trim().to_string();
+        let reason = args.reason.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        ctx.engine
+            .reveal_fact(&ctx.request.session_id, &ctx.request.turn_id, &fact_id, reason)
+            .await?;
+        Ok(ToolOutput::ok(json!({
+            "fact_id": fact_id,
+            "revealed": true,
+            "scope": "player_party",
+            "reason": reason,
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,17 +218,27 @@ mod tests {
 
     #[test]
     fn registry_has_twelve_tools_in_stable_order() {
-        // 三期批1 加入 enter_mode / exit_mode → 基础工具集扩为 14。
-        // 测试名保留（历史），断言更新到真实顺序。
+        // 三期批1 加入 enter_mode / exit_mode → 基础工具集扩为 14；
+        // Knowledge P0a 尾部追加 reveal_fact → 基础 15。测试名保留（历史），
+        // 断言更新到真实顺序。
         let names = crate::tools::ToolRegistry::standard().schemas().into_iter()
             .map(|v| v.pointer("/function/name").and_then(|x| x.as_str()).unwrap_or("").to_string())
             .collect::<Vec<_>>();
-        assert_eq!(names, vec!["roll_check", "request_player_roll", "apply_effect", "change_track", "retrieve_rules", "get_actor", "ensure_npc_param", "navigate_scene", "advance_time", "remember", "lookup_mechanic", "waive_obligation", "enter_mode", "exit_mode"]);
+        assert_eq!(names, vec!["roll_check", "request_player_roll", "apply_effect", "change_track", "retrieve_rules", "get_actor", "ensure_npc_param", "navigate_scene", "advance_time", "remember", "lookup_mechanic", "waive_obligation", "enter_mode", "exit_mode", "reveal_fact"]);
     }
 
     #[test]
     fn navigate_args_require_target() {
         let err = parse_navigate_args(json!({"reason":"move"})).unwrap_err();
+        assert!(err.to_string().contains("invalid_arguments"));
+    }
+
+    #[test]
+    fn reveal_fact_args_require_fact_id() {
+        let err = parse_reveal_fact_args(json!({"reason":"x"})).unwrap_err();
+        assert!(err.to_string().contains("invalid_arguments"));
+        // 空白 fact_id 同样 fail-closed。
+        let err = parse_reveal_fact_args(json!({"fact_id":"   "})).unwrap_err();
         assert!(err.to_string().contains("invalid_arguments"));
     }
 
