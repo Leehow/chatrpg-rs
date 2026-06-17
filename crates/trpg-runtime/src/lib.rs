@@ -1457,9 +1457,17 @@ fn fail_on_missing_source_backed_parameters() -> bool {
 
         let Some(search) = &self.search else { return Ok(vec![]); };
         let trimmed = input.trim();
-        // Align with legacy auto_search short-circuits: empty / non-rule-sensitive
-        // input does not trigger retrieval.
-        if trimmed.is_empty() || !looks_rule_or_module_sensitive(trimmed) {
+        if trimmed.is_empty() {
+            return Ok(vec![]);
+        }
+        // P0-3: rule/module sensitivity is decided by GENERIC TRPG vocabulary plus
+        // the CURRENT module's declared entity terms (harvested from module DATA),
+        // not a keyword list with module nouns baked into the engine. None module
+        // → generic baseline only.
+        let module_terms = self
+            .module_entity_terms(request.module_id.as_deref().or(state.module_id.as_deref()))
+            .await;
+        if !looks_rule_or_module_sensitive(trimmed, &module_terms) {
             return Ok(vec![]);
         }
 
@@ -1483,6 +1491,36 @@ fn fail_on_missing_source_backed_parameters() -> bool {
             merge_need_outcome(&mut blocks, need_trace, outcome, "rule", "turn context assembly");
         }
         Ok(blocks)
+    }
+
+    /// P0-3: harvest the CURRENT module's declared entity terms from module DATA
+    /// (npc-binding / tech-option matchers + scene-alias strings). These replace
+    /// the module-specific nouns (the old hardcoded `athena`/`drone`/`cable`) in
+    /// the rule-sensitivity gate, so module entity recognition is data-driven
+    /// rather than baked into the engine. None module / no config → empty.
+    async fn module_entity_terms(&self, module_id: Option<&str>) -> Vec<String> {
+        let Some(mid) = module_id else { return Vec::new(); };
+        let Some(cfg) = self.db.load_module_config(mid).await else { return Vec::new(); };
+        let mut terms = Vec::new();
+        for binding in &cfg.npc_actor_bindings {
+            for m in &binding.matcher {
+                push_lower_term(&mut terms, m);
+            }
+        }
+        if let Some(table) = &cfg.technical_option_table {
+            for opt in table {
+                for m in &opt.matcher {
+                    push_lower_term(&mut terms, m);
+                }
+            }
+        }
+        for alias in &cfg.scene_entity_aliases {
+            push_lower_term(&mut terms, &alias.canonical_id);
+            for a in &alias.aliases {
+                push_lower_term(&mut terms, a);
+            }
+        }
+        terms
     }
 
     async fn memory_blocks_for_turn(
@@ -2440,14 +2478,67 @@ fn runtime_auto_search_enabled() -> bool {
     !std::env::var("TRPG_RUNTIME_AUTO_SEARCH").map(|v| v == "false" || v == "0").unwrap_or(false)
 }
 
-fn looks_rule_or_module_sensitive(input: &str) -> bool {
+/// P0-3: decide rule/module sensitivity WITHOUT hardcoded module entity nouns.
+/// The engine baseline is GENERIC TRPG vocabulary (check/roll/attack/…) plus a
+/// long-input heuristic. Module-specific entity nouns (proper-noun NPCs, device
+/// nouns like the old hardcoded `athena`/`drone`/`cable`) now arrive as
+/// `module_terms`, harvested from the CURRENT module's DATA by
+/// `module_entity_terms` — never baked into this list.
+fn looks_rule_or_module_sensitive(input: &str, module_terms: &[String]) -> bool {
     let lowered = input.to_lowercase();
-    let keywords = [
+    const GENERIC_KEYWORDS: &[&str] = &[
         "check", "roll", "rule", "dc", "dv", "skill", "attack", "combat", "damage", "heal",
-        "netrun", "hack", "athena", "drone", "cable", "scene", "npc", "clue", "where", "how",
-        "检定", "判定", "规则", "技能", "攻击", "战斗", "伤害", "治疗", "黑客", "无人机", "线缆", "线索", "调查", "地点", "怎么", "能不能",
+        "netrun", "hack", "scene", "npc", "clue", "where", "how",
+        "检定", "判定", "规则", "技能", "攻击", "战斗", "伤害", "治疗", "黑客", "线索", "调查", "地点", "怎么", "能不能",
     ];
-    lowered.split_whitespace().count() > 8 || keywords.iter().any(|kw| lowered.contains(kw))
+    lowered.split_whitespace().count() > 8
+        || GENERIC_KEYWORDS.iter().any(|kw| lowered.contains(kw))
+        || module_terms.iter().any(|t| !t.is_empty() && lowered.contains(t.as_str()))
+}
+
+/// Push a trimmed, lowercased, de-duplicated term into the harvest set.
+fn push_lower_term(terms: &mut Vec<String>, raw: &str) {
+    let t = raw.trim().to_lowercase();
+    if !t.is_empty() && !terms.contains(&t) {
+        terms.push(t);
+    }
+}
+
+#[cfg(test)]
+mod rule_sensitivity_tests {
+    use super::looks_rule_or_module_sensitive;
+
+    // Generic TRPG vocabulary triggers retrieval with NO module data — engine baseline.
+    #[test]
+    fn generic_keyword_is_sensitive_without_module_terms() {
+        assert!(looks_rule_or_module_sensitive("I make an attack", &[]));
+        assert!(looks_rule_or_module_sensitive("掷一个检定", &[]));
+    }
+
+    // A module-declared entity term drives sensitivity (data-driven recognition).
+    #[test]
+    fn module_term_drives_sensitivity() {
+        let terms = vec!["athena".to_string(), "雅典娜".to_string()];
+        assert!(looks_rule_or_module_sensitive("i walk toward athena", &terms));
+        assert!(looks_rule_or_module_sensitive("走向雅典娜", &terms));
+    }
+
+    // De-hardcode proof: the engine NO LONGER recognizes the old hardcoded nouns
+    // (athena/drone/cable) on its own — they only matter when the current module
+    // declares them as entity terms.
+    #[test]
+    fn removed_module_nouns_are_not_hardcoded() {
+        assert!(!looks_rule_or_module_sensitive("i walk toward athena", &[]));
+        assert!(!looks_rule_or_module_sensitive("cut the cable", &[]));
+        // ...but with module data they are recognized again:
+        assert!(looks_rule_or_module_sensitive("cut the cable", &["cable".to_string()]));
+    }
+
+    // The long-input heuristic still applies (a wordy turn likely needs grounding).
+    #[test]
+    fn long_input_is_sensitive() {
+        assert!(looks_rule_or_module_sensitive("i quietly move along the wall toward the far door and listen", &[]));
+    }
 }
 
 fn looks_like_gate_help_or_question(input: &str) -> bool {
