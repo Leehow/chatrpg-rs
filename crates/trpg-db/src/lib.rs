@@ -3178,6 +3178,23 @@ impl Db {
         .bind(roll.created_at)
         .execute(&self.pool)
         .await?;
+        // eventlog 写穿（additive / fail-soft）：主 insert 成功后追加一条 DiceRolled
+        // 领域事件，幂等键 de_roll_{roll_id}。append 失败只 warn，绝不改变本函数成败。
+        let ev = trpg_model::DomainEvent::new(
+            format!("de_roll_{}", roll.roll_id),
+            roll.session_id.clone(),
+            roll.turn_id.clone(),
+            trpg_model::DomainEventKind::DiceRolled,
+            json!({
+                "check_id": roll.check_id,
+                "roller_id": roll.roller_id,
+                "expression": roll.expression,
+                "visibility": roll.visibility.as_str(),
+            }),
+        );
+        if let Err(e) = self.append_domain_event(&ev).await {
+            tracing::warn!(error=%e, "append DiceRolled domain event failed (non-fatal)");
+        }
         Ok(())
     }
 
@@ -3197,6 +3214,21 @@ impl Db {
         .bind(result.created_at)
         .execute(&self.pool)
         .await?;
+        // eventlog 写穿（additive / fail-soft）：主 insert 成功后追加一条 CheckResolved
+        // 领域事件。session/turn 取自内嵌的 result.roll；幂等键 de_check_{check_id}。
+        let ev = trpg_model::DomainEvent::new(
+            format!("de_check_{}", result.check_id),
+            result.roll.session_id.clone(),
+            result.roll.turn_id.clone(),
+            trpg_model::DomainEventKind::CheckResolved,
+            json!({
+                "check_id": result.check_id,
+                "outcome": result.outcome,
+            }),
+        );
+        if let Err(e) = self.append_domain_event(&ev).await {
+            tracing::warn!(error=%e, "append CheckResolved domain event failed (non-fatal)");
+        }
         Ok(())
     }
 

@@ -27,6 +27,10 @@ pub enum DomainEventKind {
     TurnFailed,
     /// 场景切换（scene_commit 处）。
     SceneTransitioned,
+    /// 掷骰落库（insert_dice_roll 写穿）。
+    DiceRolled,
+    /// 检定结算落库（insert_check_result 写穿）。
+    CheckResolved,
 }
 
 impl DomainEventKind {
@@ -40,6 +44,8 @@ impl DomainEventKind {
             DomainEventKind::TurnFinalized => "TurnFinalized",
             DomainEventKind::TurnFailed => "TurnFailed",
             DomainEventKind::SceneTransitioned => "SceneTransitioned",
+            DomainEventKind::DiceRolled => "DiceRolled",
+            DomainEventKind::CheckResolved => "CheckResolved",
         }
     }
 
@@ -51,6 +57,8 @@ impl DomainEventKind {
             "TurnFinalized" => DomainEventKind::TurnFinalized,
             "TurnFailed" => DomainEventKind::TurnFailed,
             "SceneTransitioned" => DomainEventKind::SceneTransitioned,
+            "DiceRolled" => DomainEventKind::DiceRolled,
+            "CheckResolved" => DomainEventKind::CheckResolved,
             _ => DomainEventKind::TurnStarted,
         }
     }
@@ -145,10 +153,12 @@ mod tests {
             DomainEventKind::TurnFinalized,
             DomainEventKind::TurnFailed,
             DomainEventKind::SceneTransitioned,
+            DomainEventKind::DiceRolled,
+            DomainEventKind::CheckResolved,
         ] {
             let v = serde_json::to_value(k).unwrap();
             let back: DomainEventKind = serde_json::from_value(v).unwrap();
-            assert_eq!(back, k, "4 variant 必 round-trip");
+            assert_eq!(back, k, "6 variant 必 round-trip");
         }
     }
 
@@ -160,6 +170,8 @@ mod tests {
             DomainEventKind::TurnFinalized,
             DomainEventKind::TurnFailed,
             DomainEventKind::SceneTransitioned,
+            DomainEventKind::DiceRolled,
+            DomainEventKind::CheckResolved,
         ] {
             assert_eq!(DomainEventKind::from_str_token(k.as_str()), k);
             // serde 序列化得到的字符串必与 as_str 钉死的契约一致。
