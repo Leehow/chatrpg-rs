@@ -1523,7 +1523,10 @@ pub fn match_seed(resources: &serde_json::Value, kernel_tracks: &[serde_json::Va
         let Some(id) = t.get("id").and_then(|v| v.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else { continue };
         let kmax = t.get("max").and_then(|v| v.as_i64()).map(|n| n as i32);
         let kinit = t.get("initial").and_then(|v| v.as_i64()).map(|n| n as i32);
-        let derived = lookup(&id);
+        // 显式 derived_from 链接优先（修 hp_max->hit_points 种子桥），再回退 track-id 查找。
+        let derived = t.get("derived_from").and_then(|v| v.as_str())
+            .and_then(|df| lookup(df))
+            .or_else(|| lookup(&id));
         out.insert(id, (derived.or(kinit), derived.or(kmax)));  // (current, max)
     }
     out
@@ -6997,6 +7000,25 @@ mod resource_helpers_tests {
         assert_eq!(wound_label(8, Some(20)), "wounded");
         assert_eq!(wound_label(15, Some(20)), "unhurt");
         assert_eq!(wound_label(15, None), "unhurt");
+    }
+
+    #[test]
+    fn match_seed_prefers_derived_from_link() {
+        // hit_points track 显式链接到公式层 hp_max；resources 只有 hp_max 键。
+        let tracks = vec![json!({"id":"hit_points","kind":"health","max":100,"initial":0,
+            "owner_kind":"actor","derived_from":"hp_max"})];
+        let seeds = match_seed(&json!({"hp_max": 12}), &tracks);
+        assert_eq!(seeds.get("hit_points"), Some(&(Some(12), Some(12))),
+            "derived_from 应把 hit_points 从 resources[hp_max] 播种");
+    }
+
+    #[test]
+    fn match_seed_without_derived_from_is_unchanged() {
+        // 无 derived_from：与现状字节等价（track id 直接命中 / 回退静态）。
+        let seeds = match_seed(&json!({"sanity": 65}), &coc_tracks());
+        assert_eq!(seeds.get("sanity"), Some(&(Some(65), Some(65))));
+        let seeds = match_seed(&json!({}), &coc_tracks());
+        assert_eq!(seeds.get("hit_points"), Some(&(Some(0), Some(100))), "无种子回退 kernel 静态");
     }
 }
 
