@@ -6,7 +6,7 @@ use trpg_db::Db;
 use trpg_interaction::InteractionLifecycleKernel;
 use trpg_model::*;
 use trpg_time::WorldTimeService;
-use trpg_semantics::SemanticIntentService;
+use trpg_semantics::{NeedSignal, SemanticIntentService, SemanticNeedClassifier};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -112,7 +112,15 @@ pub struct TurnOrchestrationResult {
     pub superseded_pending_check_id: Option<String>,
     pub repairs: Vec<InvariantRepair>,
     pub world_tick: i64,
+    /// P0-3: structured, semantically-derived need signal (rule/material/scene +
+    /// confidence) projected off the turn's `SemanticIntentResult`. This is the
+    /// keyword-free replacement for ad-hoc keyword scans; downstream retrieval
+    /// can consume it instead of re-scanning the input for module nouns.
+    #[serde(default = "need_signal_default")]
+    pub need_signal: NeedSignal,
 }
+
+fn need_signal_default() -> NeedSignal { NeedSignal::NONE }
 
 #[derive(Debug, Clone, Copy)]
 pub struct TurnOrchestratorInput<'a> {
@@ -151,6 +159,10 @@ impl TurnOrchestrator {
             actor_parameter_summary: json!({}),
         }).await.ok();
         let intent = classify_turn_intent(input, active_frame.as_ref(), open_gate.as_ref(), pending.as_ref(), semantic.as_ref());
+        // P0-3: derive the structured need signal from the SAME semantic result —
+        // a keyword-free projection (see SemanticNeedClassifier) surfaced for
+        // downstream retrieval to consume instead of scanning input for nouns.
+        let need_signal = SemanticNeedClassifier::classify_opt(semantic.as_ref());
         let mut route = route_for(&intent, active_frame.as_ref(), open_gate.as_ref(), pending.as_ref());
         let mut superseded_gate_id = None;
         let mut superseded_pending_check_id = None;
@@ -188,6 +200,7 @@ impl TurnOrchestrator {
             superseded_pending_check_id,
             repairs,
             world_tick: time.world_tick,
+            need_signal,
         };
         let _ = WorldTimeService::new(self.db.clone()).record_event(
             input.session_id,
@@ -214,7 +227,7 @@ fn classify_turn_intent(input: TurnOrchestratorInput<'_>, active_frame: Option<&
     let semantic_object_action = semantic.map(semantic_is_object_interaction).unwrap_or(false);
     let semantic_assessment = semantic.map(semantic_is_assessment_check).unwrap_or(false);
     let named_check_param = semantic.and_then(semantic_named_check_parameter);
-    let allow_lexical_fallback = !semantic_available || !semantic_confident || env_bool("TRPG_SEMANTIC_COMBAT_LEXICAL_FALLBACK_AUDIT", true);
+    let allow_lexical_fallback = lexical_fallback_allowed(semantic_available, semantic_confident);
 
     let lexical_exit = contains_any(&lower, &["撤退", "离开", "脱离", "逃", "停火", "和解", "讲和", "投降", "战斗结束", "结束战斗", "retreat", "withdraw", "leave", "escape", "ceasefire", "truce", "surrender", "stand down", "end combat"]);
     let is_exit = semantic_exit || (allow_lexical_fallback && lexical_exit);
@@ -543,6 +556,19 @@ fn env_bool(key: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
+/// P0-3: lexical keyword matching is an AUDITED FALLBACK, not the normal route.
+/// It participates ONLY when the semantic classifier is unavailable or
+/// low-confidence. When semantic routing is available AND confident, lexical
+/// keywords (including module nouns) must NOT change a routing decision — that
+/// is the semantic-over-keyword core principle. The env override
+/// (`TRPG_SEMANTIC_COMBAT_LEXICAL_FALLBACK_AUDIT`, default OFF) exists only to
+/// force-enable the lexical layer for offline audit/debugging.
+fn lexical_fallback_allowed(semantic_available: bool, semantic_confident: bool) -> bool {
+    !semantic_available
+        || !semantic_confident
+        || env_bool("TRPG_SEMANTIC_COMBAT_LEXICAL_FALLBACK_AUDIT", false)
+}
+
 fn parse_gate_relation(s: &str) -> Option<GateRelation> { match s { "no_active_gate" => Some(GateRelation::NoActiveGate), "roll_reply" => Some(GateRelation::RollReply), "choice_reply" => Some(GateRelation::ChoiceReply), "superseding_intent" => Some(GateRelation::SupersedingIntent), "unrelated_new_action" => Some(GateRelation::UnrelatedNewAction), "ambiguous" => Some(GateRelation::Ambiguous), _ => None } }
 fn is_direction_gate(gate: &InteractionGate) -> bool {
     matches!(gate.gate_kind, GateKind::ChooseActionMode)
@@ -631,12 +657,80 @@ mod named_check_tests {
     }
 
     // A combat input that also reads a parameter must NOT be hijacked into a named
-    // check — frame/object/exit routes win (护栏: 不抢战斗反应路由).
+    // check — frame/object/exit routes win (护栏: 不抢战斗反应路由). P0-3: the combat
+    // signal now comes from the SEMANTIC layer (route_cues.combat_action) rather
+    // than the lexical keyword "开枪", since lexical no longer participates when
+    // semantic is available+confident.
     #[test]
     fn combat_is_not_hijacked_by_named_check() {
-        let s = sem(json!({"materialization_requests":[{"target_kind":"actor_parameter","target_label":"Sanity"}]}));
+        let s = sem(json!({"route_cues":{"combat_action":true},"materialization_requests":[{"target_kind":"actor_parameter","target_label":"Sanity"}]}));
         let inp = TurnOrchestratorInput { session_id: "sess", turn_id: "t", ruleset_id: "call_of_cthulhu_7e", module_id: None, user_input: "我开枪射击那个怪物" };
         let intent = classify_turn_intent(inp, None, None, None, Some(&s));
         assert_ne!(intent.target_kind, "named_check");
+    }
+}
+
+#[cfg(test)]
+mod lexical_fallback_tests {
+    use super::*;
+
+    /// Build a semantic result with explicit availability/confidence knobs.
+    fn sem(classifier: &str, confidence: RulingConfidence, action: SituationActionKind, raw: serde_json::Value) -> SemanticIntentResult {
+        SemanticIntentResult {
+            semantic_id: "s".into(), session_id: "sess".into(), turn_id: "t".into(), ruleset_id: "rs".into(),
+            primary_action_kind: action, gate_relation: "ambiguous".into(),
+            frame_relation: FrameRelation::OutsideFrameAction, target_refs: vec![], object_refs: vec![], ability_refs: vec![],
+            materialization_requests: vec![], secrecy_policy: "gm_only".into(), confidence,
+            classifier: classifier.into(), rationale_brief: None, raw_json: raw, created_at: Utc::now(),
+        }
+    }
+    fn input<'a>(text: &'a str) -> TurnOrchestratorInput<'a> {
+        TurnOrchestratorInput { session_id: "sess", turn_id: "t", ruleset_id: "rs", module_id: None, user_input: text }
+    }
+
+    // ACCEPTANCE (1): with semantic available AND confident, lexical attack
+    // keywords ("开枪"/"射击") do NOT change the routing decision. The semantic
+    // result carries NO combat signal (primary=Unknown, no route_cues), so the
+    // turn stays non-combat despite the keywords. (Pre-flip default this routed
+    // to Attack/opposition — that dilution is exactly what P0-3 removes.)
+    #[test]
+    fn lexical_keywords_do_not_change_routing_when_semantic_confident() {
+        let s = sem("llm_semantic_classifier_v1_9", RulingConfidence::Medium, SituationActionKind::Unknown, json!({}));
+        let intent = classify_turn_intent(input("我开枪射击那个怪物"), None, None, None, Some(&s));
+        assert_ne!(intent.action_kind, SituationActionKind::Attack, "lexical attack keyword must not force Attack when semantic is confident");
+        assert_ne!(intent.target_kind, "opposition", "lexical attack keyword must not force the opposition route");
+    }
+
+    // ACCEPTANCE (2) regression: when semantic is UNAVAILABLE, the audited lexical
+    // fallback still classifies "我开枪射击" as an attack so deployments without a
+    // working semantic classifier keep functioning.
+    #[test]
+    fn lexical_fallback_still_works_when_semantic_unavailable() {
+        let s = sem("semantic_unavailable_no_route", RulingConfidence::Low, SituationActionKind::Unknown, json!({}));
+        let intent = classify_turn_intent(input("我开枪射击那个怪物"), None, None, None, Some(&s));
+        assert_eq!(intent.action_kind, SituationActionKind::Attack, "lexical fallback must detect attack when semantic is unavailable");
+        assert_eq!(intent.target_kind, "opposition");
+    }
+
+    // The same input + a confident-but-non-combat semantic result vs. an
+    // unavailable one must diverge — proving lexical participation is gated on
+    // semantic availability/confidence, not always-on.
+    #[test]
+    fn routing_diverges_on_semantic_availability_for_same_input() {
+        let confident = sem("llm", RulingConfidence::Medium, SituationActionKind::Unknown, json!({}));
+        let unavailable = sem("semantic_unavailable_no_route", RulingConfidence::Low, SituationActionKind::Unknown, json!({}));
+        let a = classify_turn_intent(input("我开枪射击那个怪物"), None, None, None, Some(&confident));
+        let b = classify_turn_intent(input("我开枪射击那个怪物"), None, None, None, Some(&unavailable));
+        assert_ne!(a.action_kind, b.action_kind, "lexical keyword changes routing ONLY when semantic is unavailable");
+    }
+
+    // The gate predicate itself: default OFF when available+confident; ON when
+    // unavailable or low-confidence.
+    #[test]
+    fn lexical_fallback_allowed_defaults_off_only_when_confident() {
+        assert!(!lexical_fallback_allowed(true, true), "available+confident -> lexical OFF by default");
+        assert!(lexical_fallback_allowed(false, true), "unavailable -> lexical ON");
+        assert!(lexical_fallback_allowed(true, false), "low-confidence -> lexical ON");
+        assert!(lexical_fallback_allowed(false, false), "unavailable+low -> lexical ON");
     }
 }

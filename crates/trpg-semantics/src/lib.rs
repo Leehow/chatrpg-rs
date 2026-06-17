@@ -8,6 +8,9 @@ use trpg_model::*;
 use trpg_search::SearchService;
 use uuid::Uuid;
 
+mod need;
+pub use need::{NeedSignal, SemanticNeedClassifier};
+
 #[derive(Clone)]
 pub struct SemanticIntentService {
     pub db: Db,
