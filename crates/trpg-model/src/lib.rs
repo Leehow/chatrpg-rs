@@ -16,6 +16,8 @@ pub mod observability;
 pub use observability::*;
 pub mod asset;
 pub use asset::*;
+pub mod domain_event;
+pub use domain_event::*;
 
 pub const PROJECT_SCHEMA_VERSION: &str = "chatrpg.project_bundle.v1";
 pub const RULE_SCHEMA_VERSION: &str = "chatrpg.rule_bundle.v1";

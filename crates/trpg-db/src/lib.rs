@@ -51,6 +51,7 @@ impl Db {
             include_str!("../../../migrations/0027_mechanic_dues_v120.sql"),
             include_str!("../../../migrations/0028_turn_pp_lifecycle_v120.sql"),
             include_str!("../../../migrations/0029_turn_trace_failure_v120.sql"),
+            include_str!("../../../migrations/0030_domain_events.sql"),
         ];
         for sql in migrations {
             for statement in split_sql_statements(sql) {
@@ -2742,6 +2743,64 @@ impl Db {
         Ok(())
     }
 
+    /// 优化2 #6：append-only domain_events 写入（确定性幂等——event_id 冲突 do nothing）。
+    /// kind 绑为稳定 token（`DomainEventKind::as_str`，与 list 的 parse 单一映射源对齐）；
+    /// data/source_refs 经 serde 入 jsonb。
+    pub async fn append_domain_event(&self, ev: &trpg_model::DomainEvent) -> Result<()> {
+        sqlx::query(
+            r#"
+            insert into domain_events
+              (event_id, session_id, turn_id, kind, data, source_refs, created_at)
+            values ($1,$2,$3,$4,$5,$6,$7)
+            on conflict (event_id) do nothing
+            "#,
+        )
+        .bind(&ev.event_id)
+        .bind(&ev.session_id)
+        .bind(&ev.turn_id)
+        .bind(ev.kind.as_str())
+        .bind(&ev.data)
+        .bind(serde_json::to_value(&ev.source_refs)?)
+        .bind(ev.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// 按会话取 domain events（seq 升序时间线，limit 截断）。
+    pub async fn list_domain_events(&self, session_id: &str, limit: i64) -> Result<Vec<trpg_model::DomainEvent>> {
+        let rows = sqlx::query(
+            r#"
+            select event_id, session_id, turn_id, kind, data, source_refs, created_at
+            from domain_events
+            where session_id = $1
+            order by seq asc
+            limit $2
+            "#,
+        )
+        .bind(session_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_domain_event).collect()
+    }
+
+    /// 按回合取 domain events（seq 升序；explain / inspect 附该回合摘要用）。
+    pub async fn list_domain_events_for_turn(&self, turn_id: &str) -> Result<Vec<trpg_model::DomainEvent>> {
+        let rows = sqlx::query(
+            r#"
+            select event_id, session_id, turn_id, kind, data, source_refs, created_at
+            from domain_events
+            where turn_id = $1
+            order by seq asc
+            "#,
+        )
+        .bind(turn_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_domain_event).collect()
+    }
+
     pub async fn list_world_events_since(&self, session_id: &str, since_tick: i64, since_event_seq: i64, limit: i64) -> Result<Vec<WorldEvent>> {
         let rows = sqlx::query(
             r#"
@@ -3886,6 +3945,21 @@ fn row_to_world_event(row: sqlx::postgres::PgRow) -> Result<WorldEvent> {
         source_refs: serde_json::from_value(source_refs_value).unwrap_or_default(),
         caused_by_event_ids: row.get("caused_by_event_ids"),
         state_patch_ids: row.get("state_patch_ids"),
+        created_at: row.get("created_at"),
+    })
+}
+
+fn row_to_domain_event(row: sqlx::postgres::PgRow) -> Result<trpg_model::DomainEvent> {
+    let source_refs_value: serde_json::Value = row.get("source_refs");
+    // turn_id 列 nullable；模型字段是 String（serde default 空）——NULL 归一为空串。
+    let turn_id: Option<String> = row.get("turn_id");
+    Ok(trpg_model::DomainEvent {
+        event_id: row.get("event_id"),
+        session_id: row.get("session_id"),
+        turn_id: turn_id.unwrap_or_default(),
+        kind: trpg_model::DomainEventKind::from_str_token(&row.get::<String, _>("kind")),
+        data: row.get("data"),
+        source_refs: serde_json::from_value(source_refs_value).unwrap_or_default(),
         created_at: row.get("created_at"),
     })
 }
