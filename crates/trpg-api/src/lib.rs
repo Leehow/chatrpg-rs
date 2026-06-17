@@ -6,7 +6,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
 use futures_util::StreamExt;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -937,6 +937,40 @@ async fn start_session(State(state): State<AppState>, Json(req): Json<StartSessi
     Ok(Json(json!({"session_id": session_id})))
 }
 
+/// ServerRecent 策略默认从 DB 载入的最近回合数（旧→新拼成 transcript）。
+/// 命名常量——不在调用点散落魔法数字。
+const SERVER_RECENT_HISTORY_TURNS: i64 = 12;
+
+/// 回合历史来源策略（请求体 `history_policy`，serde snake_case tag）。
+/// 默认 `ServerRecent`：前端只传 user_input 时，服务端从 DB 载最近 N 回合
+/// transcript，第二回合不再丢上下文（与 CLI play 循环的进程内历史对齐）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryPolicy {
+    /// 服务端从 DB 载最近 N 回合历史（默认）。
+    #[default]
+    ServerRecent,
+    /// 沿用客户端传来的 recent_transcript（旧行为，前端自管历史时用）。
+    ClientSupplied,
+    /// 不附带任何历史（空上下文）。
+    None,
+}
+
+/// 纯决策：按策略 + 客户端传值 + 服务端载入结果，定 recent_transcript。
+/// ServerRecent 优先用服务端载入，载不到（首回合无历史 / DB 失败已 fail-soft 成 None）
+/// 回退客户端传值——绝不因策略丢信息。无 I/O ⇒ 确定性可单测。
+fn resolve_recent_transcript(
+    policy: HistoryPolicy,
+    client_supplied: Option<String>,
+    server_loaded: Option<String>,
+) -> Option<String> {
+    match policy {
+        HistoryPolicy::ClientSupplied => client_supplied,
+        HistoryPolicy::None => None,
+        HistoryPolicy::ServerRecent => server_loaded.or(client_supplied),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct PlayTurnRequest {
     pub ruleset_id: String,
@@ -944,6 +978,9 @@ pub struct PlayTurnRequest {
     pub user_input: String,
     pub runtime_state: Option<RuntimeState>,
     pub recent_transcript: Option<String>,
+    /// 历史来源策略——缺省即 `ServerRecent`（服务端从 DB 载历史）。
+    #[serde(default)]
+    pub history_policy: HistoryPolicy,
 }
 
 async fn play_turn_sse(Path(session_id): Path<String>, State(state): State<AppState>, Json(req): Json<PlayTurnRequest>) -> impl IntoResponse {
@@ -1001,6 +1038,21 @@ async fn play_turn_sse(Path(session_id): Path<String>, State(state): State<AppSt
         if runtime_state.scene_id.is_none() {
             runtime_state.scene_id = db.load_session_scene(&session_id).await.ok().flatten();
         }
+        // P1-2：按 history_policy 解析回合历史来源（默认 ServerRecent 从 DB 载最近 N 回合）。
+        // I/O（DB 载 + 失败 fail-soft 成 None）与纯合并决策（resolve_recent_transcript）分离；
+        // CLI 路径不经此处，行为不变。
+        let server_loaded = if matches!(req.history_policy, HistoryPolicy::ServerRecent) {
+            match db.load_recent_transcript(&session_id, SERVER_RECENT_HISTORY_TURNS).await {
+                Ok(t) => t,
+                Err(err) => {
+                    tracing::warn!(error = %err, session_id = %session_id, "load_recent_transcript failed; fall back to client transcript");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let recent_transcript = resolve_recent_transcript(req.history_policy, req.recent_transcript.clone(), server_loaded);
         let context_request = ContextRequest {
             ruleset_id: req.ruleset_id.clone(),
             module_id: req.module_id.clone(),
@@ -1014,7 +1066,7 @@ async fn play_turn_sse(Path(session_id): Path<String>, State(state): State<AppSt
             state: runtime_state,
             user_input: req.user_input.clone(),
             history: Vec::new(),
-            recent_transcript: req.recent_transcript.clone(),
+            recent_transcript,
             module_id: req.module_id.clone(),
             data_dir: data_dir.clone(),
         };
@@ -1328,6 +1380,80 @@ mod tests {
         let pct = snapshot.get("progress_pct").and_then(Value::as_u64).unwrap_or(0);
         assert_eq!(stage, "character");
         assert_eq!(pct, 35);
+    }
+
+    // P1-2: 前端只传必填字段（无 history_policy）时，默认 ServerRecent ——
+    // 服务端从 DB 载最近 N 回合历史，第二回合不再丢上下文。
+    #[test]
+    fn play_turn_request_defaults_history_policy_to_server_recent() {
+        let req: PlayTurnRequest = serde_json::from_value(json!({
+            "ruleset_id": "call_of_cthulhu_7e",
+            "user_input": "我推开门"
+        }))
+        .expect("PlayTurnRequest 必能在缺省 history_policy 下反序列化");
+        assert_eq!(req.history_policy, HistoryPolicy::ServerRecent);
+    }
+
+    // P1-2: history_policy 经 serde round-trip（snake_case tag ⇄ variant），
+    // 且 ServerRecent 是缺省值。
+    #[test]
+    fn history_policy_round_trips_through_serde() {
+        for (variant, tag) in [
+            (HistoryPolicy::ServerRecent, "server_recent"),
+            (HistoryPolicy::ClientSupplied, "client_supplied"),
+            (HistoryPolicy::None, "none"),
+        ] {
+            assert_eq!(serde_json::to_value(variant).unwrap(), json!(tag));
+            let back: HistoryPolicy = serde_json::from_value(json!(tag)).unwrap();
+            assert_eq!(back, variant);
+        }
+        assert_eq!(HistoryPolicy::default(), HistoryPolicy::ServerRecent);
+    }
+
+    // P1-2: 显式 history_policy 值在请求体里被正确反序列化（不被默认值吞掉）。
+    #[test]
+    fn play_turn_request_honors_explicit_history_policy() {
+        let req: PlayTurnRequest = serde_json::from_value(json!({
+            "ruleset_id": "x", "user_input": "go", "history_policy": "client_supplied"
+        }))
+        .unwrap();
+        assert_eq!(req.history_policy, HistoryPolicy::ClientSupplied);
+    }
+
+    // P1-2: ServerRecent 载到 DB transcript 时，组装出的 recent_transcript 即该历史
+    //（前端只传 user_input → 第二回合仍带上一回合内容；acceptance #1 的合并决策核心）。
+    #[test]
+    fn server_recent_uses_db_transcript_when_present() {
+        let out = resolve_recent_transcript(
+            HistoryPolicy::ServerRecent,
+            None,                                  // 前端没传 transcript
+            Some("\nPlayer: 我推开门\nGM: 门后是浓雾\n".to_string()), // DB 载到上一回合
+        );
+        assert_eq!(out.as_deref(), Some("\nPlayer: 我推开门\nGM: 门后是浓雾\n"));
+    }
+
+    // P1-2: ServerRecent 但 DB 无历史（首回合 / 失败 fail-soft 成 None）→ 回退客户端传值，不丢信息。
+    #[test]
+    fn server_recent_falls_back_to_client_when_db_empty() {
+        assert_eq!(
+            resolve_recent_transcript(HistoryPolicy::ServerRecent, Some("client".into()), None).as_deref(),
+            Some("client"),
+        );
+        // 首回合：两者皆空 → None（不注入空块）。
+        assert_eq!(resolve_recent_transcript(HistoryPolicy::ServerRecent, None, None), None);
+    }
+
+    // P1-2: ClientSupplied 沿用客户端传值（旧行为，忽略服务端载入）；None 永远空。
+    #[test]
+    fn client_supplied_and_none_policies_preserve_semantics() {
+        assert_eq!(
+            resolve_recent_transcript(HistoryPolicy::ClientSupplied, Some("c".into()), Some("s".into())).as_deref(),
+            Some("c"),
+        );
+        assert_eq!(
+            resolve_recent_transcript(HistoryPolicy::None, Some("c".into()), Some("s".into())),
+            None,
+        );
     }
 
     // Live integration smoke (needs a Postgres at DATABASE_URL + a reachable LLM):

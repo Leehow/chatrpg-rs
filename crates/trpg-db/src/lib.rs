@@ -1027,6 +1027,31 @@ impl Db {
         Ok(())
     }
 
+    /// P1-2：拼接会话最近 N 回合的对白成单段 transcript（旧→新时间序），供 API
+    /// ServerRecent 历史策略注入 prepare_turn_context——前端只传 user_input 时
+    /// 第二回合不再丢上下文（与 CLI play 循环 `Player: …\nGM: …` 约定一致）。
+    /// 无回合 → None（调用方据此不注入空 transcript 块）。
+    pub async fn load_recent_transcript(&self, session_id: &str, n: i64) -> Result<Option<String>> {
+        // 取最近 N 回合（created_at desc）再反转回时间序——transcript 自上而下 = 旧→新。
+        let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+            "select user_input, assistant_output from turns \
+             where session_id = $1 order by created_at desc limit $2",
+        )
+        .bind(session_id)
+        .bind(n)
+        .fetch_all(&self.pool)
+        .await?;
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        let mut transcript = String::new();
+        for (user_input, assistant_output) in rows.into_iter().rev() {
+            let gm = assistant_output.unwrap_or_default();
+            transcript.push_str(&format!("\nPlayer: {user_input}\nGM: {gm}\n"));
+        }
+        Ok(Some(transcript))
+    }
+
     /// R5：流转某回合的 postprocess 生命周期阶段（critical 末写 critical_done、heavy 末写 complete）。
     /// 只触 pp_lifecycle 列，绝不动 postprocess_status（两列正交）。
     pub async fn set_turn_pp_lifecycle(&self, turn_id: &str, phase: &str) -> Result<()> {
