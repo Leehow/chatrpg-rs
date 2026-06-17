@@ -6769,6 +6769,19 @@ pub enum CheckResolutionModel {
     /// Count dice showing `target_face` in the rolled pool; success when the
     /// count >= `threshold`. Resolution reads the per-die array, not the sum.
     DicePoolCount { target_face: i32, threshold: i32, label: String },
+    /// Opposed dice-pool (e.g. Triangle): attacker and defender each roll their
+    /// OWN pool and count dice showing `target_face`; the side with more hits
+    /// wins (ties favor the defender — engine convention). Mirrors OpposedRoll
+    /// but the verdict is a hit-count contest, not a total-vs-value compare; the
+    /// defender rolls for real (runtime pre-rolls the pool, per-die array kept).
+    DicePoolOpposed {
+        target_face: i32,
+        threshold: i32,
+        attacker_expression: String,
+        defender_actor_id: Option<String>,
+        defender_expression: String,
+        defender_roll_visibility: RollVisibility,
+    },
     Provisional { reason: String, suggested_target: Option<i32> },
 }
 impl Default for CheckResolutionModel { fn default() -> Self { Self::Provisional { reason: "no contest model selected".into(), suggested_target: None } } }

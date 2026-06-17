@@ -30,6 +30,16 @@ impl ContestService {
                 target = t; success = s; degree = d;
             }
         }
+        // 骰池对抗结算覆盖（count_faces，如 Triangle）：DicePoolOpposed + 防御方骰子都在时，
+        // 数双方 hits 定胜负（resolve_pool_opposed，零 RNG）。防御骰缺 → 不覆盖，success 维持
+        // null + awaiting_binding（fail-closed，见 resolve_against_model）。
+        if let CheckResolutionModel::DicePoolOpposed { target_face, threshold, .. } = &profile.resolution_model {
+            if let Some(def_roll) = defender_roll {
+                let def_rolls = roll_dice_array(def_roll);
+                let (t, s, d) = opposed::resolve_pool_opposed(*target_face, *threshold, &rolls, &def_rolls);
+                target = t; success = s; degree = d;
+            }
+        }
         let mut outcome = json!({
             "check_id": contract.check_id,
             "check_label": contract.check_label,
@@ -80,6 +90,26 @@ impl ContestService {
                 "attacker_value": attacker_value,
                 "defender_total": defender_roll.map(roll_total),
                 "defender_value": defender_value,
+                "defender_actor_id": defender_actor_id,
+                "winner": match success { Some(true) => "attacker", Some(false) => "defender", None => "unresolved" },
+            });
+        }
+        // 骰池对抗富化：双方 hits + 各自骰面 + 胜者。攻击方的 success_count/pool_miss_count 仍按
+        // 通用名透出（on_outcome 如 Triangle Chaos 读 pool_miss_count 照常触发）。
+        if let CheckResolutionModel::DicePoolOpposed { target_face, defender_actor_id, .. } = &profile.resolution_model {
+            let face = *target_face as i64;
+            let atk_hits = rolls.iter().filter(|&&d| d == face).count();
+            let def_rolls = defender_roll.map(roll_dice_array).unwrap_or_default();
+            let def_hits = def_rolls.iter().filter(|&&d| d == face).count();
+            outcome[outcome_fields::SUCCESS_COUNT] = json!(atk_hits);
+            outcome[outcome_fields::POOL_MISS_COUNT] = json!(rolls.len().saturating_sub(atk_hits));
+            outcome["dice"] = json!(rolls);
+            outcome["opposed"] = json!({
+                "target_face": target_face,
+                "attacker_hits": atk_hits,
+                "attacker_dice": rolls,
+                "defender_hits": def_hits,
+                "defender_dice": def_rolls,
                 "defender_actor_id": defender_actor_id,
                 "winner": match success { Some(true) => "attacker", Some(false) => "defender", None => "unresolved" },
             });
@@ -175,12 +205,17 @@ impl ContestService {
         let tnum = dc.get("target_number").and_then(|v| v.as_i64()).map(|n| n as i32);
         match compare {
             "count_faces" => {
-                // Same fail-soft recovery as the contract-target path: prefer the
-                // machine target_face, else parse compare_to ("3"); threshold
-                // defaults to 1. Fail-closed (None) if no parseable face.
-                let target_face = count_faces_target_face(dc)? as i32;
+                // 成功面统一 fail-closed 还原（target_face → compare_to）。null/不可解析 →
+                // count_faces 专属清晰 Provisional（不再静默落回 infer 通用兜底破契约）。
+                let face = match count_faces_target_face(dc) { Some(f) => f as i32, None => return Some(count_faces_model(dc)) };
                 let threshold = count_faces_threshold(dc) as i32;
-                Some(CheckResolutionModel::DicePoolCount { target_face, threshold, label: "kernel core mechanic (dice pool)".into() })
+                // 对抗路径（对称 roll_under/meet_or_beat）：target_actor + opponent_tested_parameter
+                // 都在 → 建 DicePoolOpposed（双方各掷池数 hits，runtime 预掷防御池）。
+                if contract_is_opposed(contract) {
+                    let def_expr = dc.get("dice").and_then(|v| v.as_str()).unwrap_or(&contract.dice_expression).to_string();
+                    return Some(build_pool_opposed_model(contract, face, threshold, &def_expr));
+                }
+                Some(CheckResolutionModel::DicePoolCount { target_face: face, threshold, label: "kernel core mechanic (dice pool)".into() })
             }
             "roll_under" => {
                 // 对抗路径：target_actor + opponent_tested_parameter 都存在时建 OpposedRoll。
@@ -315,7 +350,16 @@ impl ContestService {
             CheckTargetModel::Opposed { opponent_id, opponent_check } => CheckResolutionModel::OpposedRoll { attacker_expression: contract.dice_expression.clone(), attacker_value: None, defender_actor_id: Some(opponent_id.clone()), defender_expression: opponent_check.clone(), defender_value: None, defender_roll_visibility: RollVisibility::PrivateGmRoll },
             CheckTargetModel::DegreeOnly => CheckResolutionModel::RulesetProcedureLookup { procedure_label: "degree_only".into(), unresolved_fields: vec!["success_band".into()] },
             CheckTargetModel::SuccessCount { threshold } => CheckResolutionModel::StaticTargetNumber { value: *threshold, label: "success_count_threshold".into() },
-            CheckTargetModel::DicePoolCount { target_face, threshold, label } => CheckResolutionModel::DicePoolCount { target_face: *target_face, threshold: *threshold, label: label.clone() },
+            CheckTargetModel::DicePoolCount { target_face, threshold, label } => {
+                // 主路径：apply_kernel_defaults 已把 Triangle 的 count_faces 填成具体 DicePoolCount。
+                // 对抗时（target_actor + opponent_tested_parameter）建 DicePoolOpposed 双方各掷池数 hits；
+                // 否则维持单方 DicePoolCount。零规则集硬编码（与 kernel 路径对称）。
+                if contract_is_opposed(contract) {
+                    build_pool_opposed_model(contract, *target_face, *threshold, &contract.dice_expression)
+                } else {
+                    CheckResolutionModel::DicePoolCount { target_face: *target_face, threshold: *threshold, label: label.clone() }
+                }
+            }
             CheckTargetModel::UnknownUntilLookup => infer_ruleset_default_model(contract),
         }
     }
@@ -413,6 +457,13 @@ fn resolve_against_model(model: &CheckResolutionModel, total: i64, rolls: &[i64]
             (None, None, None, Some("opposed check is unbound: the defender's contested value (defense/DV/evasion or the opponent's tested skill) was not found; synthesize or look it up, request_player_roll, or narratively de-escalate".into()))
         }
         CheckResolutionModel::OpposedRoll { .. } => (None, None, None, None),
+        // 骰池对抗：胜负要数双方 hits，需防御方真掷池（runtime 预掷）。此处见不到防御骰 →
+        // fail-closed 给显式 awaiting_binding；resolve_outcome 的 resolve_pool_opposed 覆盖在
+        // 防御骰齐备时算出胜负 → success=Some → 抑制本信号（零回归，对称 OpposedRoll）。
+        CheckResolutionModel::DicePoolOpposed { .. } => (
+            None, None, None,
+            Some("opposed dice-pool check is unresolved: the defender's contested pool has not been rolled; pre-roll the defender pool (system) or request_player_roll before resolving".into()),
+        ),
         CheckResolutionModel::Provisional { reason, .. } => (None, None, None, Some(reason.clone())),
         CheckResolutionModel::RulesetProcedureLookup { procedure_label, unresolved_fields } => {
             (None, None, None, Some(format!("ruleset procedure `{}` needs source-backed binding for {:?} before this check can resolve", procedure_label, unresolved_fields)))
@@ -492,6 +543,39 @@ fn build_opposed_model(
     }
 }
 
+/// count_faces 非对抗模型：从 dice_core 还原成功面（machine target_face → compare_to 整数），
+/// 阈值默认 ≥1。**fail-closed 收口**：无可解析面时给 count_faces 专属的**清晰** Provisional，
+/// 而非返 None 静默落回 infer_ruleset_default_model 的通用兜底（那会产出与骰池无关的破契约理由）。
+fn count_faces_model(dc: &Value) -> CheckResolutionModel {
+    match count_faces_target_face(dc) {
+        Some(face) => CheckResolutionModel::DicePoolCount {
+            target_face: face as i32,
+            threshold: count_faces_threshold(dc) as i32,
+            label: "kernel core mechanic (dice pool)".into(),
+        },
+        None => CheckResolutionModel::Provisional {
+            reason: "count_faces pool check: the success face (target_face) is null/absent and no integer face is parseable from compare_to; bind the kernel target_face or compare_to before resolving".into(),
+            suggested_target: None,
+        },
+    }
+}
+
+/// count_faces 对抗模型构造器（双方各掷自己的池数 hits，零技能值读取）。defender_expression
+/// 取入参（kernel 核心掷式或攻击掷式）；防御方 actor id 来自 target_actor。compare 方向无关
+/// （hits 比大小由 resolve_pool_opposed 算）。与 build_opposed_model 对称，pool 版独立。
+fn build_pool_opposed_model(
+    contract: &CheckContract, target_face: i32, threshold: i32, def_expr: &str,
+) -> CheckResolutionModel {
+    CheckResolutionModel::DicePoolOpposed {
+        target_face,
+        threshold,
+        attacker_expression: contract.dice_expression.clone(),
+        defender_actor_id: contract.target_actor.as_ref().map(|a| a.actor_id.clone()),
+        defender_expression: def_expr.to_string(),
+        defender_roll_visibility: RollVisibility::PrivateGmRoll,
+    }
+}
+
 fn defender_for_contract(contract: &CheckContract) -> Option<String> {
     contract.target_actor.as_ref().map(|a| a.actor_id.clone())
         .or_else(|| contract.actor_snapshot_ids.iter().find(|id| id.starts_with("npc.") || id.contains("opposition") || id.contains("enemy")).cloned())
@@ -513,6 +597,7 @@ fn contest_kind_for_contract(contract: &CheckContract, model: &CheckResolutionMo
     match model {
         CheckResolutionModel::AttackVsDefense { .. } => ContestKind::Attack,
         CheckResolutionModel::OpposedRoll { .. } => ContestKind::OpposedCheck,
+        CheckResolutionModel::DicePoolOpposed { .. } => ContestKind::OpposedCheck,
         CheckResolutionModel::PercentileRollUnder { .. } => ContestKind::PercentileAbility,
         CheckResolutionModel::SavingThrow { .. } => ContestKind::SavingThrow,
         CheckResolutionModel::RulesetProcedureLookup { .. } => ContestKind::RulesetProcedure,
@@ -817,3 +902,8 @@ mod tested_param_tests {
 #[cfg(test)]
 #[path = "opposed_meet_or_beat_tests.rs"]
 mod opposed_meet_or_beat_tests;
+
+// count_faces 骰池(Triangle)：target_face=null fail-closed + 骰池对抗单测（拆出文件）。
+#[cfg(test)]
+#[path = "opposed_dice_pool_tests.rs"]
+mod opposed_dice_pool_tests;
