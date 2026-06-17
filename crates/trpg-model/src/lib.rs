@@ -7062,6 +7062,19 @@ mod resource_helpers_tests {
         let ids: Vec<&str> = out.iter().filter_map(|t| t.get("id").and_then(|v| v.as_str())).collect();
         assert_eq!(ids, vec!["hit_points","sanity","chaos"], "inert hp stub 被去重, 其余保留原序: {ids:?}");
     }
+
+    #[test]
+    fn match_seed_dnd_hp_static_without_link_derived_with_link() {
+        // D&D hit_points track, 公式层 id = hit_points_max。
+        // 现存数据(无 derived_from): 查 resources["hit_points"] 落空 -> 回退 kernel 静态(冻结基线, 不变)。
+        let plain = vec![json!({"id":"hit_points","kind":"health","max":10,"initial":10,"owner_kind":"actor"})];
+        let seeds = match_seed(&json!({"hit_points_max": 27}), &plain);
+        assert_eq!(seeds.get("hit_points"), Some(&(Some(10), Some(10))), "无 derived_from: 冻结静态回退");
+        // 重 parse 后(align 落 derived_from): 读派生 HP 上限(本特性的修复)。
+        let linked = vec![json!({"id":"hit_points","kind":"health","max":10,"initial":10,"owner_kind":"actor","derived_from":"hit_points_max"})];
+        let seeds = match_seed(&json!({"hit_points_max": 27}), &linked);
+        assert_eq!(seeds.get("hit_points"), Some(&(Some(27), Some(27))), "有 derived_from: 读派生 HP");
+    }
 }
 
 #[cfg(test)]
