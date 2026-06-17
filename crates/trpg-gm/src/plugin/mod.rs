@@ -13,11 +13,15 @@
 //! Flight Recorder 记录 `PluginContributionTrace` 定义在 trpg-model（让 `TurnTrace`
 //! 能持有，保持 model 依赖洁净）；`PluginContribution::to_trace()` 返回它。
 
+pub mod builtin_no_mechanical;
 pub mod builtin_no_spoiler;
+pub mod builtin_player_agency;
 pub mod host;
 pub mod types;
 
+pub use builtin_no_mechanical::NoMechanicalInvention;
 pub use builtin_no_spoiler::NoSpoilerGuard;
+pub use builtin_player_agency::PlayerAgencyGuard;
 pub use host::{PluginHost, RuntimePlugin};
 pub use types::{
     ContextFilterSpec, ContributionMeta, FailPolicy, PluginContext, PluginContribution,
@@ -36,6 +40,9 @@ use std::sync::LazyLock;
 static PLUGIN_HOST: LazyLock<PluginHost> = LazyLock::new(|| {
     let mut host = PluginHost::new();
     host.register(Box::new(NoSpoilerGuard));
+    // 通用纯 prompt 守卫（always-on，无模组门）：不私造机械结果 + 玩家自主权。
+    host.register(Box::new(NoMechanicalInvention));
+    host.register(Box::new(PlayerAgencyGuard));
     host
 });
 
@@ -48,16 +55,47 @@ pub fn builtin_plugin_host() -> &'static PluginHost {
 mod host_seed_tests {
     use super::*;
 
-    /// 进程级 host 已 seed NoSpoilerGuard：模组 ContextAssembly → 1 条贡献。
-    #[tokio::test]
-    async fn builtin_host_seeds_no_spoiler_guard() {
-        let ctx = PluginContext {
-            module_id: Some("mod".into()),
+    fn assembly_ctx(module: Option<&str>) -> PluginContext {
+        PluginContext {
+            module_id: module.map(|s| s.to_string()),
             hook: PluginHook::ContextAssembly,
             ..Default::default()
-        };
-        let out = builtin_plugin_host().run_hook(&ctx).await;
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].meta.plugin_id, "core.no_spoiler_guard");
+        }
+    }
+
+    /// 进程级 host 已 seed 三个内置插件。
+    #[test]
+    fn builtin_host_seeds_three_plugins() {
+        assert_eq!(builtin_plugin_host().len(), 3);
+    }
+
+    /// 非模组 session：always-on 两守卫产 2 条（no_spoiler 是模组门，不产）。
+    #[tokio::test]
+    async fn builtin_host_non_module_emits_two_universal_guards() {
+        let out = builtin_plugin_host().run_hook(&assembly_ctx(None)).await;
+        let ids: Vec<&str> = out.iter().map(|c| c.meta.plugin_id.as_str()).collect();
+        // 同为 Safety 级，按 priority 降序：no_mech(850) > player_agency(800)。
+        assert_eq!(
+            ids,
+            vec!["core.no_mechanical_invention", "core.player_agency_guard"]
+        );
+    }
+
+    /// 模组 session：三守卫全产 3 条，且按 (safety_class, priority desc) 排序。
+    #[tokio::test]
+    async fn builtin_host_module_emits_three_ordered() {
+        let out = builtin_plugin_host()
+            .run_hook(&assembly_ctx(Some("mod")))
+            .await;
+        let ids: Vec<&str> = out.iter().map(|c| c.meta.plugin_id.as_str()).collect();
+        // 全 Safety 级 → priority 降序：no_spoiler(900) > no_mech(850) > player_agency(800)。
+        assert_eq!(
+            ids,
+            vec![
+                "core.no_spoiler_guard",
+                "core.no_mechanical_invention",
+                "core.player_agency_guard",
+            ]
+        );
     }
 }
