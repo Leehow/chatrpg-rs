@@ -37,6 +37,9 @@ pub enum DomainEventKind {
     /// 客户端在 SSE 回合流中途断开，且断开发生在本回合状态已变更之后——引擎续跑
     /// critical finalize 保一致后，在该回合上记此标记（P1-3）。幂等 per-turn。
     ClientDisconnected,
+    /// 某条剧透事实（按 entity_id/node_id 作 fact_id）被揭示——revealed-facts 账本
+    /// 落账即记，spoiler_guard 据此放行该实体的 secret_terms（幂等 per-session+fact）。
+    FactRevealed,
 }
 
 impl DomainEventKind {
@@ -54,6 +57,7 @@ impl DomainEventKind {
             DomainEventKind::CheckResolved => "CheckResolved",
             DomainEventKind::EntitySurfaced => "EntitySurfaced",
             DomainEventKind::ClientDisconnected => "ClientDisconnected",
+            DomainEventKind::FactRevealed => "FactRevealed",
         }
     }
 
@@ -69,6 +73,7 @@ impl DomainEventKind {
             "CheckResolved" => DomainEventKind::CheckResolved,
             "EntitySurfaced" => DomainEventKind::EntitySurfaced,
             "ClientDisconnected" => DomainEventKind::ClientDisconnected,
+            "FactRevealed" => DomainEventKind::FactRevealed,
             _ => DomainEventKind::TurnStarted,
         }
     }
@@ -207,6 +212,18 @@ mod tests {
         assert_eq!(DomainEventKind::from_str_token("ClientDisconnected"), k);
         let v = serde_json::to_value(k).unwrap();
         assert_eq!(v.as_str(), Some("ClientDisconnected"));
+        let back: DomainEventKind = serde_json::from_value(v).unwrap();
+        assert_eq!(back, k);
+    }
+
+    #[test]
+    fn fact_revealed_kind_token_and_serde_roundtrip() {
+        // 反剧透账本事件：token 稳定契约 + serde 闭环 + 未知回退不受影响。
+        let k = DomainEventKind::FactRevealed;
+        assert_eq!(k.as_str(), "FactRevealed");
+        assert_eq!(DomainEventKind::from_str_token("FactRevealed"), k);
+        let v = serde_json::to_value(k).unwrap();
+        assert_eq!(v.as_str(), Some("FactRevealed"), "serde token 必与 as_str 一致");
         let back: DomainEventKind = serde_json::from_value(v).unwrap();
         assert_eq!(back, k);
     }

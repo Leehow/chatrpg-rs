@@ -2909,6 +2909,49 @@ impl Db {
         Ok(row.get::<bool, _>("found"))
     }
 
+    /// 反剧透 revealed-facts 账本落账（LEDGER 切片）：把一条事实（按 entity_id/node_id
+    /// 作 `fact_id`）记为已揭示。复用 domain_events 表，kind=FactRevealed，幂等键
+    /// `de_revealed_{session}_{fact}`（同 session+fact 重放 on-conflict no-op）。
+    /// 与 EntitySurfaced 立场区分：surfaced=玩家见过该实体，revealed=该实体的剧透已解锁。
+    pub async fn record_revealed_fact(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        fact_id: &str,
+        reason: Option<&str>,
+    ) -> Result<()> {
+        let data = serde_json::json!({ "fact_id": fact_id, "reason": reason });
+        let ev = trpg_model::DomainEvent::new(
+            format!("de_revealed_{session_id}_{fact_id}"),
+            session_id,
+            turn_id,
+            trpg_model::DomainEventKind::FactRevealed,
+            data,
+        );
+        self.append_domain_event(&ev).await
+    }
+
+    /// 反剧透 revealed-facts 账本投影：本会话已揭示的 distinct `fact_id` 集。
+    /// 从 `FactRevealed` 事件的 `data` jsonb 抽 distinct `fact_id`；event_id 已幂等
+    /// per-session+fact，distinct 兜底 data 异常重复；按 fact_id 稳定排序。
+    /// spoiler_guard 据此放行实体 secret_terms（不在集内 = 未揭示 = 裁剪）。
+    pub async fn list_revealed_facts(&self, session_id: &str) -> Result<Vec<String>> {
+        let rows = sqlx::query(
+            r#"
+            select distinct data->>'fact_id' as fact_id
+            from domain_events
+            where session_id = $1
+              and kind = 'FactRevealed'
+              and data->>'fact_id' is not null
+            order by fact_id
+            "#,
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|r| r.get::<String, _>("fact_id")).collect())
+    }
+
     pub async fn list_world_events_since(&self, session_id: &str, since_tick: i64, since_event_seq: i64, limit: i64) -> Result<Vec<WorldEvent>> {
         let rows = sqlx::query(
             r#"

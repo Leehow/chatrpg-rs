@@ -5,12 +5,15 @@
 //! scene_node_to_blocks). R2 收口后这是唯一的当前场景投影路径——旧直连
 //! `module_scene_blocks_for_turn` 已删，prepare_turn_context 只经此 resolver。
 
+use std::collections::HashSet;
+
 use async_trait::async_trait;
 use trpg_db::Db;
 use trpg_model::{ContextBlock, ScenarioNode, SceneExtractionStatus};
 use trpg_need::{Need, NeedKind, NeedOutcome, NeedResolver, SceneNeed};
 
 use crate::scene_projection::scene_node_to_blocks;
+use crate::spoiler_guard::guard_scene;
 
 /// 纯函数包装：给定已选中的 node + graph.npcs + graph.scenes，
 /// 产出与 scene_node_to_blocks 字节等价的块。单独提取便于测试隔离。
@@ -88,7 +91,18 @@ impl NeedResolver for SceneNeedResolver {
             return Ok(NeedOutcome::default()); // fail-closed: 无可用场景
         };
 
-        let blocks = resolve_scene_blocks(module_id, node, &graph.npcs, &graph.scenes);
+        // 反剧透 ENFORCEMENT：投影前对未揭示的场景/实体剧透做裁剪。revealed = 本会话已
+        // 揭示 fact_id 集；DB 取不到（抖动）→ 空集 = 全部按未揭示裁剪（fail-closed 宁可不泄，
+        // 不赌 DB）。没标 spoiler 或已揭示的内容由 guard_scene 原样透传（别太严，不裁可玩内容）。
+        let revealed: HashSet<String> = self
+            .db
+            .list_revealed_facts(&scene_need.scopes.session_id)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        let (guarded_node, guarded_npcs) = guard_scene(node, &graph.npcs, &revealed);
+        let blocks = resolve_scene_blocks(module_id, &guarded_node, &guarded_npcs, &graph.scenes);
         Ok(NeedOutcome { blocks, source_refs: vec![] })
     }
 }

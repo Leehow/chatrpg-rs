@@ -60,6 +60,8 @@ pub use relationship_extraction::{
     resolve_entity_refs, EntityRef,
 };
 
+mod spoiler_guard;
+
 mod context_blocks;
 use context_blocks::{memory_snapshot_block, retrieved_memory_block, actionable_situation_block, clue_board_block, world_time_block, world_events_since_block, engine_protocol_block, engine_protocol_block_agent_loop, world_state_block, dynamic_text_block};
 
@@ -601,6 +603,19 @@ impl RuntimeEngine {
             tracing::info!(session_id, turn_id, written, "relationship triples written to memory_facts");
         }
         written
+    }
+
+    /// 反剧透 revealed-facts 写路径：把某条剧透事实（entity_id/node_id 作 fact_id）记为
+    /// 已揭示，自此 spoiler_guard 不再裁该实体的 secret_terms。揭示**由 GM/玩家显式驱动**
+    /// （引擎绝不关键词匹配 reveal_conditions 自动揭示）；幂等 per-session+fact。
+    pub async fn reveal_fact(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        fact_id: &str,
+        reason: Option<&str>,
+    ) -> Result<()> {
+        self.db.record_revealed_fact(session_id, turn_id, fact_id, reason).await
     }
 
     /// Single post-resolution funnel for EVERY check-resolution path. Runs the

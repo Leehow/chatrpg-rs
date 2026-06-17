@@ -18,6 +18,8 @@ pub mod asset;
 pub use asset::*;
 pub mod domain_event;
 pub use domain_event::*;
+pub mod spoiler;
+pub use spoiler::*;
 
 pub const PROJECT_SCHEMA_VERSION: &str = "chatrpg.project_bundle.v1";
 pub const RULE_SCHEMA_VERSION: &str = "chatrpg.rule_bundle.v1";
@@ -1735,6 +1737,10 @@ pub struct ScenarioNode {
     #[serde(default)] pub referenced_location_ids: Vec<String>,
     #[serde(default)] pub referenced_encounter_ids: Vec<String>,
     #[serde(default)] pub scene_mechanics: Vec<SceneMechanicIntent>,
+    /// 反剧透元数据（场景级剧透词/安全别名/揭示条件）。揭示前由 spoiler_guard 裁剪，
+    /// 揭示态由 revealed-facts 账本按 node_id 控制。空时序列化省略，保旧数据字节不变。
+    #[serde(default, skip_serializing_if = "SpoilerMeta::is_empty")]
+    pub spoiler: SpoilerMeta,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
@@ -6912,6 +6918,29 @@ mod module_graph_compat_tests {
         let back: ScenarioNode = serde_json::from_str(&s).unwrap();
         assert_eq!(back.extraction_status, SceneExtractionStatus::DeepExtracted);
         assert_eq!(back.links[0].link_type, LinkType::Spatial);
+    }
+
+    // 反剧透 spoiler 元数据：带 spoiler 的场景节点 round-trip + 旧 bundle 无字段照常 load。
+    // （acceptance #1：secret_terms/public_aliases/reveal_conditions 序列化/反序列化；
+    //  旧 bundle 无字段仍能加载。）
+    #[test]
+    fn scenario_node_spoiler_roundtrips_and_back_compat() {
+        // 旧 bundle 无 spoiler 键 → 反序列化为空 SpoilerMeta（向后兼容）。
+        let old = r#"{"node_id":"n1","title":"序幕","node_type":"chapter","summary":"s",
+            "read_aloud":null,"gm_notes":null,"links":[],"assets":[],"data":null}"#;
+        let n: ScenarioNode = serde_json::from_str(old).expect("旧 bundle（无 spoiler）应可反序列化");
+        assert!(n.spoiler.is_empty(), "旧 bundle → 空 spoiler");
+        // 带 spoiler 的场景节点 round-trip。
+        let mut node = ScenarioNode::default();
+        node.node_id = "sc01".into();
+        node.spoiler = SpoilerMeta {
+            secret_terms: vec!["真凶".into()],
+            public_aliases: vec!["神秘访客".into()],
+            reveal_conditions: vec!["搜查书房后".into()],
+        };
+        let s = serde_json::to_string(&node).unwrap();
+        let back: ScenarioNode = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.spoiler, node.spoiler, "spoiler 必 round-trip");
     }
 
     // 旧 ScenarioLink（无 link_type）→ 默认 Sequential。
