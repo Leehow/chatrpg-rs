@@ -20,6 +20,11 @@ const DEEP_SYS: &str = "你是模组场景深抽器。对给定的入口场景�
 （仅当文本有可念的 boxed/念白文本时；优先锚句如『read, or paraphrase the following text:』或第二\
 人称『你们』的 boxed 段，没有就留 null，绝不编造）、gm_notes、referenced_*_ids、闭包实体详情\
 （entities，每个带 id+kind+name+正文）。\
+反剧透（spoiler）：若某实体或场景含**玩家此刻不该知道**的隐藏身份/真相/反转（真凶、伪装、密谋、\
+怪物真面目等），给它一个 spoiler 对象：secret_terms=揭示前必须隐藏的剧透词/短语（真名、真实身份等\
+**正文里字面出现**的用词）、public_aliases=玩家此刻已知的安全称呼、reveal_conditions=原文写明的\
+揭示时机（描述性，引擎不据此自动揭示）。**没有隐藏秘密的实体/场景绝不要造 spoiler**（宁缺毋滥、别太严，\
+绝不编造剧透词）。\
 links（出口）规则：to_node_id **只能从给定候选 node_id 里选**（不在候选里的一律不输出）；\
 每条 link 必须带 link_type∈{spatial,trigger,timeline,sequential,branch} 与 **source_anchor\
 （摘当前页原文片段，证明这条通路/触发存在）**，抽不出锚点就**不要**输出该条边，绝不编造。\

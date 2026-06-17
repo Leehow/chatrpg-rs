@@ -34,6 +34,9 @@ pub enum DomainEventKind {
     /// 模组实体（线索/NPC）首次进入本回合 GM context 即被"surfaced"——玩家已被
     /// 暴露给该实体（反剧透 TruthGraph 起步切片，观测层；幂等 per-session）。
     EntitySurfaced,
+    /// 某条剧透事实（按 entity_id/node_id 作 fact_id）被揭示——revealed-facts 账本
+    /// 落账即记，spoiler_guard 据此放行该实体的 secret_terms（幂等 per-session+fact）。
+    FactRevealed,
 }
 
 impl DomainEventKind {
@@ -50,6 +53,7 @@ impl DomainEventKind {
             DomainEventKind::DiceRolled => "DiceRolled",
             DomainEventKind::CheckResolved => "CheckResolved",
             DomainEventKind::EntitySurfaced => "EntitySurfaced",
+            DomainEventKind::FactRevealed => "FactRevealed",
         }
     }
 
@@ -64,6 +68,7 @@ impl DomainEventKind {
             "DiceRolled" => DomainEventKind::DiceRolled,
             "CheckResolved" => DomainEventKind::CheckResolved,
             "EntitySurfaced" => DomainEventKind::EntitySurfaced,
+            "FactRevealed" => DomainEventKind::FactRevealed,
             _ => DomainEventKind::TurnStarted,
         }
     }
@@ -190,6 +195,18 @@ mod tests {
             DomainEventKind::from_str_token("Bogus"),
             DomainEventKind::TurnStarted
         );
+    }
+
+    #[test]
+    fn fact_revealed_kind_token_and_serde_roundtrip() {
+        // 反剧透账本事件：token 稳定契约 + serde 闭环 + 未知回退不受影响。
+        let k = DomainEventKind::FactRevealed;
+        assert_eq!(k.as_str(), "FactRevealed");
+        assert_eq!(DomainEventKind::from_str_token("FactRevealed"), k);
+        let v = serde_json::to_value(k).unwrap();
+        assert_eq!(v.as_str(), Some("FactRevealed"), "serde token 必与 as_str 一致");
+        let back: DomainEventKind = serde_json::from_value(v).unwrap();
+        assert_eq!(back, k);
     }
 
     #[test]
