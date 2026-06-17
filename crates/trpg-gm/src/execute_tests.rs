@@ -384,3 +384,78 @@ async fn context_assembly_failure_emits_turn_failed_not_complete() {
     assert!(trace.phases_run.iter().any(|p| p == "ContextAssembly"), "phases_run 必须含已尝试的 ContextAssembly: {:?}", trace.phases_run);
     assert!(trace.narration_hash.is_none(), "失败回合 narration=None ⇒ narration_hash 必须 None");
 }
+
+// ============================ T2: domain_events write-through（优化2 #6） ============================
+
+// 成功回合 → domain_events 落 TurnStarted + TurnFinalized（fail-soft write-through，零行为变更）。
+// 不改任何已发的 TurnEvent；这里只额外断言 DB 旁路落了两条生命周期事件。需 :54347（DB-gated）。
+#[tokio::test]
+async fn success_turn_appends_started_and_finalized_domain_events() {
+    if std::env::var("SKIP_DB_TESTS").is_ok() { return; }
+    let session_id = format!("s_de_ok_{}", uuid::Uuid::new_v4().simple());
+    let turn_id = format!("t_de_ok_{}", uuid::Uuid::new_v4().simple());
+    let (gm, mut req) = exec_fixture(vec![vec![
+        StreamEvent::ContentDelta("叙事。".into()),
+        StreamEvent::Done { finish_reason: Some("stop".into()) },
+    ]]);
+    req.request.session_id = session_id.clone();
+    req.request.turn_id = turn_id.clone();
+
+    let probe_db = Db { pool: PgPoolOptions::new().connect_lazy("postgres://chatrpg:chatrpg@localhost:54347/chatrpg").expect("lazy pool") };
+    // domain_events.session_id 不带 FK，但保持与其它测试同形先建 session 行（无害）。
+    probe_db.create_session(&session_id, &req.request.ruleset_id, req.request.module_id.as_deref()).await.expect("create session row");
+
+    let mut stream = execute_turn(gm, req, CANONICAL_TURN_PLAN);
+    let mut completed = false;
+    while let Some(ev) = stream.next().await {
+        if let TurnEvent::TurnComplete { .. } = ev { completed = true; }
+    }
+    assert!(completed, "回合必须以 TurnComplete 收尾");
+
+    // TurnStarted 在入口 append、TurnFinalized 在 TurnComplete 后（仍同步在主 spawn 内）append；
+    // 轮询稳健（append fail-soft，但成功路径必落）。
+    let mut kinds: Vec<String> = vec![];
+    for _ in 0..30 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let evs = probe_db.list_domain_events_for_turn(&turn_id).await.expect("list_domain_events_for_turn");
+        kinds = evs.iter().map(|e| e.kind.as_str().to_string()).collect();
+        if kinds.iter().any(|k| k == "TurnStarted") && kinds.iter().any(|k| k == "TurnFinalized") { break; }
+    }
+    assert!(kinds.iter().any(|k| k == "TurnStarted"), "成功回合必须 append TurnStarted domain event，得到: {kinds:?}");
+    assert!(kinds.iter().any(|k| k == "TurnFinalized"), "成功回合必须 append TurnFinalized domain event，得到: {kinds:?}");
+}
+
+// 失败回合（context_assembly fail-closed）→ domain_events 落 TurnFailed（与 TurnTrace.failure 同源）。
+// 镜像 context_assembly_failure_emits_turn_failed_not_complete，额外查 domain event。需 :54347。
+#[tokio::test]
+async fn failure_turn_appends_turn_failed_domain_event() {
+    if std::env::var("SKIP_DB_TESTS").is_ok() { return; }
+    let session_id = format!("s_de_fail_{}", uuid::Uuid::new_v4().simple());
+    let turn_id = format!("t_de_fail_{}", uuid::Uuid::new_v4().simple());
+    let (gm, mut req) = exec_fixture_context_fail();
+    req.request.session_id = session_id.clone();
+    req.request.turn_id = turn_id.clone();
+
+    let probe_db = Db { pool: PgPoolOptions::new().connect_lazy("postgres://chatrpg:chatrpg@localhost:54347/chatrpg").expect("lazy pool") };
+    probe_db.create_session(&session_id, &req.request.ruleset_id, req.request.module_id.as_deref()).await.expect("create session row");
+
+    let mut stream = execute_turn(gm, req, CANONICAL_TURN_PLAN);
+    let mut saw_failed = false;
+    while let Some(ev) = stream.next().await {
+        if let TurnEvent::TurnFailed { .. } = ev { saw_failed = true; }
+    }
+    assert!(saw_failed, "失败回合必须发 TurnFailed");
+
+    let mut found: Option<trpg_model::DomainEvent> = None;
+    for _ in 0..30 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let evs = probe_db.list_domain_events_for_turn(&turn_id).await.expect("list_domain_events_for_turn");
+        if let Some(e) = evs.into_iter().find(|e| e.kind == trpg_model::DomainEventKind::TurnFailed) {
+            found = Some(e);
+            break;
+        }
+    }
+    let ev = found.expect("失败回合必须 append TurnFailed domain event");
+    // data 携带 phase（ContextAssembly）+ failure_kind（与 TurnTrace.failure 同源）。
+    assert_eq!(ev.data.get("phase").and_then(|v| v.as_str()), Some("ContextAssembly"), "TurnFailed data.phase 必须是 ContextAssembly: {:?}", ev.data);
+}

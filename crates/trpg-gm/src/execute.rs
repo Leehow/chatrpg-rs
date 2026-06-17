@@ -125,6 +125,16 @@ async fn run_pipeline(
             recent_transcript: req.recent_transcript.as_deref(),
         };
 
+        // —— 0. domain event write-through（优化2 #6，additive/fail-soft/零行为变更）——
+        // TurnStarted：回合入口。append 失败仅 warn，绝不入控制流、绝不改任何 emit 的 TurnEvent。
+        append_lifecycle_event(
+            &gm,
+            &req.request,
+            trpg_model::DomainEventKind::TurnStarted,
+            serde_json::json!({ "ruleset_id": req.request.ruleset_id, "module_id": req.module_id }),
+        )
+        .await;
+
         // —— 1. 确定性头部：按 plan 顺序跑所有 Deterministic phase ——
         // mode_inference / context_assembly fail-closed 返 Err（P1-1）：发 TurnFailed
         // （**不再**发空 TurnComplete 伪装成功）+ 落 turns.failure_kind + 写失败 TurnTrace 后早返。
@@ -150,6 +160,15 @@ async fn run_pipeline(
                 if let Err(e) = gm.engine.db.upsert_turn_trace(&trace).await {
                     tracing::warn!(error = %e, turn_id = %req.request.turn_id, "upsert_turn_trace (failure path) failed (non-fatal)");
                 }
+                // domain event write-through：TurnFailed（与 TurnTrace.failure 同源）。fail-soft，
+                // emit TurnFailed 之前 append（与 DB 落账同序），但不入控制流、不改后续 emit。
+                append_lifecycle_event(
+                    &gm,
+                    &req.request,
+                    trpg_model::DomainEventKind::TurnFailed,
+                    serde_json::json!({ "phase": phase_label, "failure_kind": kind }),
+                )
+                .await;
                 // DB 已落账后再发失败事件代替空 TurnComplete——客户端能区分"失败"与"成功的空白回合"。
                 let _ = tx
                     .send(TurnEvent::TurnFailed { phase: phase_label, message: f.message, recoverable: false })
@@ -191,6 +210,14 @@ async fn run_pipeline(
                     phases_run.push(format!("{:?}", PhaseId::SceneNavigate));
                     if let Some(t) = gm.phase_scene_navigate_critical(&ctx, &input).await {
                         let _ = tx.send(TurnEvent::SceneTransition { from: t.from.clone(), to: t.to.clone(), reason: t.reason.clone() }).await;
+                        // domain event write-through：SceneTransitioned（fail-soft，SceneTransition emit 之后）。
+                        append_lifecycle_event(
+                            &gm,
+                            &req.request,
+                            trpg_model::DomainEventKind::SceneTransitioned,
+                            serde_json::json!({ "from": t.from, "to": t.to, "reason": t.reason }),
+                        )
+                        .await;
                         scene_commit = Some(t);
                     }
                 }
@@ -229,11 +256,41 @@ async fn run_pipeline(
         if let Err(e) = gm.engine.db.upsert_turn_trace(&trace).await {
             tracing::warn!(error = %e, turn_id = %req.request.turn_id, "upsert_turn_trace (success path) failed (non-fatal)");
         }
+        // domain event write-through：TurnFinalized（成功路径，TurnComplete 已发 + critical 已落账后）。
+        // fail-soft，纯附加 DB 写，绝不回退/影响已发的 Delta…TurnComplete 序列（D2 失败隔离）。
+        append_lifecycle_event(
+            &gm,
+            &req.request,
+            trpg_model::DomainEventKind::TurnFinalized,
+            serde_json::json!({ "signal": format!("{signal:?}") }),
+        )
+        .await;
         // input 在此块结束时释放对 req 的借用，下面 move req 进 heavy spawn。
     }
 
     // —— 3b. HEAVY 尾段（TurnComplete 后另起 spawn，gm/ctx/req 整体 move）——
     spawn_heavy(gm, ctx, req, signal, scene_commit, heavy_assistant_output);
+}
+
+/// domain event write-through 收口（优化2 #6）：构造确定性幂等 `DomainEvent` 并 append。
+/// event_id = `de_{turn_id}_{kind}`（idempotent on event_id：同回合同种类二次 append 不重复）。
+/// **fail-soft**：append 失败仅 warn，绝不入控制流、绝不影响回合或任何已发的 TurnEvent。
+async fn append_lifecycle_event(
+    gm: &GmLoop,
+    request: &trpg_model::ContextRequest,
+    kind: trpg_model::DomainEventKind,
+    data: serde_json::Value,
+) {
+    let ev = trpg_model::DomainEvent::new(
+        format!("de_{}_{}", request.turn_id, kind.as_str()),
+        request.session_id.clone(),
+        request.turn_id.clone(),
+        kind,
+        data,
+    );
+    if let Err(e) = gm.engine.db.append_domain_event(&ev).await {
+        tracing::warn!(error = %e, turn_id = %request.turn_id, kind = %kind.as_str(), "append_domain_event failed (non-fatal)");
+    }
 }
 
 /// HEAVY 尾段：TurnComplete 后台跑——audit/memory 写、到场深抽+frontier、carryover。

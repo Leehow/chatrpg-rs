@@ -956,7 +956,29 @@ async fn explain_cli(session: &str, turn: &str) -> Result<()> {
             println!("{}", format_turn_trace(&t));
         }
     }
+    // domain events（优化2 #6 write-through 的可见化）：附该回合的生命周期事件摘要。
+    // fail-soft 读：取不到就当空，不影响 trace 主输出。
+    let evs = db.list_domain_events_for_turn(turn).await.unwrap_or_default();
+    print!("{}", format_domain_events(&evs));
     Ok(())
+}
+
+/// 纯函数 domain events 摘要格式化器（DB-free 可测）：每条一行 `  <kind> <紧凑 data>`，
+/// data 经 `serde_json::to_string` 截到 ~120 字符；空则 `(none)`。
+fn format_domain_events(evs: &[DomainEvent]) -> String {
+    let mut out = String::from("domain_events:\n");
+    if evs.is_empty() {
+        out.push_str("  (none)\n");
+        return out;
+    }
+    for ev in evs {
+        let mut data = serde_json::to_string(&ev.data).unwrap_or_default();
+        if data.chars().count() > 120 {
+            data = format!("{}…", data.chars().take(120).collect::<String>());
+        }
+        out.push_str(&format!("  {} {}\n", ev.kind.as_str(), data));
+    }
+    out
 }
 
 /// hash 短显：取前 12 字符，None → "-"（DB-free 可测）。
@@ -1649,5 +1671,53 @@ mod tests {
         assert!(out.contains("(none)"), "empty warnings/phases should print (none):\n{out}");
         // 空 binding_trace → header + (none)。
         assert!(out.contains("binding_trace:"), "binding_trace header missing:\n{out}");
+    }
+
+    #[test]
+    fn format_domain_events_empty_prints_none() {
+        let out = format_domain_events(&[]);
+        assert!(out.contains("domain_events:"), "missing header:\n{out}");
+        assert!(out.contains("(none)"), "empty list should print (none):\n{out}");
+    }
+
+    #[test]
+    fn format_domain_events_renders_kind_and_compact_data() {
+        let evs = vec![
+            DomainEvent::new(
+                "de_turn-1_TurnStarted",
+                "session-1",
+                "turn-1",
+                DomainEventKind::TurnStarted,
+                serde_json::json!({ "ruleset_id": "coc7e", "module_id": null }),
+            ),
+            DomainEvent::new(
+                "de_turn-1_TurnFinalized",
+                "session-1",
+                "turn-1",
+                DomainEventKind::TurnFinalized,
+                serde_json::json!({ "signal": "Narration" }),
+            ),
+        ];
+        let out = format_domain_events(&evs);
+        assert!(out.contains("TurnStarted"), "missing TurnStarted kind:\n{out}");
+        assert!(out.contains("coc7e"), "missing compact data:\n{out}");
+        assert!(out.contains("TurnFinalized"), "missing TurnFinalized kind:\n{out}");
+        assert!(out.contains("Narration"), "missing signal data:\n{out}");
+    }
+
+    #[test]
+    fn format_domain_events_truncates_long_data() {
+        let big = "x".repeat(300);
+        let evs = vec![DomainEvent::new(
+            "de_turn-1_TurnStarted",
+            "session-1",
+            "turn-1",
+            DomainEventKind::TurnStarted,
+            serde_json::json!({ "reason": big }),
+        )];
+        let out = format_domain_events(&evs);
+        assert!(out.contains('…'), "long data should be truncated with ellipsis:\n{out}");
+        // 截断后每行字符数应远小于原始 data（~120 + 前缀 + kind），不会把 300 字符全打出来。
+        assert!(out.chars().count() < 200, "truncated output too long ({}):\n{out}", out.chars().count());
     }
 }
