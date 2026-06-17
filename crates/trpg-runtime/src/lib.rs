@@ -33,6 +33,12 @@ pub use binding::{
     shadow_bind_with_kernel, CapabilityRegistry,
 };
 
+pub mod binding_exec;
+pub use binding_exec::{
+    binding_takeover_enabled, check_binding_plan, execute_check_with_binding,
+    plan_authorizes_check_exec,
+};
+
 mod need_resolvers;
 
 mod scene_need_resolver;
@@ -1386,30 +1392,61 @@ fn fail_on_missing_source_backed_parameters() -> bool {
     /// contest 保持零 RNG。defender_expression 取 kernel 核心掷式(dice_core.dice),fallback 攻击式。
     async fn resolve_outcome_with_opposition(&self, contract: &CheckContract, roll: &DiceRollRecord) -> Result<serde_json::Value> {
         let svc = ContestService::new(self.db.clone());
-        if !contract_is_opposed(contract) {
-            return svc.resolve_outcome(contract, roll, None).await;
-        }
-        let def_expr = self.db.load_rule_kernel(&contract.ruleset_id).await.ok().flatten()
-            .and_then(|k| k.dice_core.get("dice").and_then(|v| v.as_str()).map(str::to_string))
-            .unwrap_or_else(|| contract.dice_expression.clone());
-        let rolled = roll_dice(&def_expr)?;
-        let seed_material = format!("{}:{}:defender:{}", contract.session_id, contract.turn_id, contract.check_id);
-        let def_record = DiceRollRecord {
-            roll_id: format!("roll_{}", Uuid::new_v4().simple()),
-            session_id: contract.session_id.clone(),
-            turn_id: contract.turn_id.clone(),
-            check_id: Some(contract.check_id.clone()),
-            roller_kind: ActorKind::Npc,
-            roller_id: contract.target_actor.as_ref().map(|a| a.actor_id.clone()),
-            visibility: RollVisibility::PrivateGmRoll,
-            expression: def_expr.clone(),
-            result: json!({"mode":"rolled","expression":rolled.expression,"rolls":rolled.rolls,"modifier":rolled.modifier,"total":rolled.total}),
-            seed_commitment: sha256_hex(seed_material),
-            revealed_at: None,
-            created_at: chrono::Utc::now(),
+        // 先把（如对抗则）防御方骰子算好，再把两路径汇到单点 dispatch。
+        let def_record: Option<DiceRollRecord> = if contract_is_opposed(contract) {
+            let def_expr = self.db.load_rule_kernel(&contract.ruleset_id).await.ok().flatten()
+                .and_then(|k| k.dice_core.get("dice").and_then(|v| v.as_str()).map(str::to_string))
+                .unwrap_or_else(|| contract.dice_expression.clone());
+            let rolled = roll_dice(&def_expr)?;
+            let seed_material = format!("{}:{}:defender:{}", contract.session_id, contract.turn_id, contract.check_id);
+            let rec = DiceRollRecord {
+                roll_id: format!("roll_{}", Uuid::new_v4().simple()),
+                session_id: contract.session_id.clone(),
+                turn_id: contract.turn_id.clone(),
+                check_id: Some(contract.check_id.clone()),
+                roller_kind: ActorKind::Npc,
+                roller_id: contract.target_actor.as_ref().map(|a| a.actor_id.clone()),
+                visibility: RollVisibility::PrivateGmRoll,
+                expression: def_expr.clone(),
+                result: json!({"mode":"rolled","expression":rolled.expression,"rolls":rolled.rolls,"modifier":rolled.modifier,"total":rolled.total}),
+                seed_commitment: sha256_hex(seed_material),
+                revealed_at: None,
+                created_at: chrono::Utc::now(),
+            };
+            self.db.insert_dice_roll(&rec).await.ok(); // 落库供复算(失败不阻断)
+            Some(rec)
+        } else {
+            None
         };
-        self.db.insert_dice_roll(&def_record).await.ok(); // 落库供复算(失败不阻断)
-        svc.resolve_outcome(contract, roll, Some(&def_record)).await
+        self.resolve_check_dispatch(&svc, contract, roll, def_record.as_ref()).await
+    }
+
+    /// 检定结算单点分发。binding takeover **关**（默认）→ 直调权威 `resolve_outcome`（零行为变更）。
+    /// **开** → 从 kernel 派生检定 BindingPlan：Exact-可绑定则经 capability executor 执行
+    /// （内部仍调 resolve_outcome → 逐字节等价）；非 Exact → fail-closed 回退原路径 + warn。
+    /// 这是 BindingResolver/ExecutionTier 第一次真正驱动结算（非影子），见 [`crate::binding_exec`]。
+    async fn resolve_check_dispatch(
+        &self,
+        svc: &ContestService,
+        contract: &CheckContract,
+        roll: &DiceRollRecord,
+        defender_roll: Option<&DiceRollRecord>,
+    ) -> Result<serde_json::Value> {
+        if binding_exec::binding_takeover_enabled() {
+            if let Ok(Some(kernel)) = self.db.load_rule_kernel(&contract.ruleset_id).await {
+                let plan = binding_exec::check_binding_plan(&kernel);
+                if binding_exec::plan_authorizes_check_exec(&plan) {
+                    return binding_exec::execute_check_with_binding(svc, contract, roll, defender_roll, &plan).await;
+                }
+                tracing::warn!(
+                    ruleset = %contract.ruleset_id,
+                    verdict = ?plan.verdict,
+                    tier = ?plan.execution_tier,
+                    "binding takeover: 检定非 Exact-可绑定，fail-closed 回退权威 resolve"
+                );
+            }
+        }
+        svc.resolve_outcome(contract, roll, defender_roll).await
     }
 
     /// Audit a completed turn and write learning-side artifacts.
