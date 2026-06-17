@@ -134,7 +134,7 @@ impl StagedParse {
         let compiler = crate::build_compiler_llm().unwrap_or_else(|| self.llm.clone());
 
         // 2a resolution + gm (concurrent inside the slice fn).
-        let rg = reader::read_resolution_and_gm(self.llm.as_ref(), &self.units, &self.ruleset_id, plan, budget).await.ok();
+        let mut rg = reader::read_resolution_and_gm(self.llm.as_ref(), &self.units, &self.ruleset_id, plan, budget).await.ok();
 
         // 2b chargen compile (derived value formulas) — backfill into the template.
         st.note("compiling character formulas");
@@ -149,6 +149,18 @@ impl StagedParse {
             skill_names: skills.clone(),
         };
         let _ = reader::compile_chargen_formulas(compiler.as_ref(), &mut template, ctx, budget).await;
+
+        // 2b-bis 行为层对齐：把 chargen 公式层 id 与 kernel resource_tracks 行为层按 id 对齐
+        // （落 derived_from 链接 + 缺 track 建 stub，fail-closed，不臆造行为）。确定性、无 LLM。
+        if let Some(rg) = rg.as_mut() {
+            let dvs: Vec<serde_json::Value> = template.derived_values.iter()
+                .filter_map(|d| serde_json::to_value(d).ok()).collect();
+            let report = reader::align(&dvs, &mut rg.core.resource_tracks);
+            if !report.behavior_gaps.is_empty() {
+                st.note(&format!("行为对齐缺口(待 override/LLM 补): {:?}", report.behavior_gaps));
+            }
+            // TODO(behavior-align LLM fill): 后续任务在此对 report.behavior_gaps 调 fill_behavior_from_prose。
+        }
 
         // 2c object schemas: FULL compile (discover + extract) in the background.
         // Stage 2 is non-blocking (the user is creating a character meanwhile), so we
