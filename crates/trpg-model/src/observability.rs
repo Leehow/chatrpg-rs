@@ -61,6 +61,27 @@ pub struct TurnFailureRecord {
     pub failure_kind: String,
 }
 
+/// 单条插件贡献的飞行记录（Policy Plugin Host v1，T1）。
+///
+/// 由 trpg-gm 的 `PluginContribution::to_trace()` 产出，写入
+/// `TurnTrace.plugin_contributions`，供 `trpg explain --plugins` 解释。
+/// 只存可解释摘要（plugin_id / hook / kind / summary），不存贡献正文。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default, PartialEq)]
+pub struct PluginContributionTrace {
+    /// 产出贡献的插件 id（如 core.no_spoiler_guard）。
+    #[serde(default)]
+    pub plugin_id: String,
+    /// 贡献产出的 hook（context_assembly / after_llm_stream）。
+    #[serde(default)]
+    pub hook: String,
+    /// 贡献种类（prompt_block / context_filter / verifier_finding）。
+    #[serde(default)]
+    pub kind: String,
+    /// 人读摘要（block 标题 / 删除块数 / finding 种类）。
+    #[serde(default)]
+    pub summary: String,
+}
+
 /// 单回合飞行记录（Flight Recorder 初版）。
 ///
 /// write-through、fail-soft 捕获：写失败仅 warn，绝不影响回合主流程或已发事件。
@@ -107,6 +128,10 @@ pub struct TurnTrace {
     /// 附加 serde-default 字段：旧 JSON（无该字段）反序列化为空 Vec，向后兼容。
     #[serde(default)]
     pub binding_trace: Vec<BindingPlan>,
+    /// 本回合各插件（Policy Plugin Host v1）产出的贡献记录（T1）。
+    /// 附加 serde-default 字段：旧 JSON（无该字段）反序列化为空 Vec，向后兼容。
+    #[serde(default)]
+    pub plugin_contributions: Vec<PluginContributionTrace>,
 }
 
 impl TurnTrace {
@@ -181,6 +206,32 @@ mod tests {
         assert_eq!(trace.signal, "");
         assert_eq!(trace.pp_lifecycle, "");
         assert!(trace.binding_trace.is_empty());
+        assert!(trace.plugin_contributions.is_empty());
+    }
+
+    #[test]
+    fn turn_trace_plugin_contributions_back_compat() {
+        // 附加 serde-default 字段 plugin_contributions：旧 JSON（无该字段）应反序列化
+        // 为空 Vec，证明这是向后兼容的附加字段（不破坏既有 turn_traces JSON）。
+        let json = r#"{"turn_id":"t","session_id":"s"}"#;
+        let trace: TurnTrace = serde_json::from_str(json).expect("deserialize minimal TurnTrace");
+        assert_eq!(trace.turn_id, "t");
+        assert_eq!(trace.session_id, "s");
+        assert!(trace.plugin_contributions.is_empty());
+
+        // 携带 plugin_contributions 的 JSON 也应能 round-trip。
+        let mut full = TurnTrace::new("t2", "s2");
+        full.plugin_contributions = vec![PluginContributionTrace {
+            plugin_id: "core.no_spoiler_guard".to_string(),
+            hook: "context_assembly".to_string(),
+            kind: "prompt_block".to_string(),
+            summary: "anti_spoiler".to_string(),
+        }];
+        let out = serde_json::to_string(&full).expect("serialize TurnTrace");
+        let back: TurnTrace = serde_json::from_str(&out).expect("deserialize TurnTrace");
+        assert_eq!(full, back);
+        assert_eq!(back.plugin_contributions.len(), 1);
+        assert_eq!(back.plugin_contributions[0].kind, "prompt_block");
     }
 
     #[test]
