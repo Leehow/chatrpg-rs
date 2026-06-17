@@ -2,7 +2,8 @@ use crate::errata::ErrataMemory;
 use crate::gate::GateResolverFn;
 use crate::ledger::TurnLedger;
 use crate::obligations::{carryover_memory_event, ObligationLedger, RetroDebtKind, RetroactiveEffectDebt};
-use crate::prompts::{load_gm_skill_with_mode, DynamicTailInput, TurnMessages};
+use crate::plugins::load_gm_skill_with_plugins;
+use crate::prompts::{DynamicTailInput, TurnMessages};
 use crate::stream::RedactingBuffer;
 use crate::tools::{AwaitingPlayerRoll, SceneDeepExtractFn, ToolCtx, ToolRegistry};
 use anyhow::Result;
@@ -597,7 +598,9 @@ impl GmLoop {
             Ok(k) => ctx.rule_kernel = k,
             Err(err) => tracing::warn!(error = %err, "rule kernel load failed (shadow binding/mode catalog degrade)"),
         }
-        let mut gm_skill = load_gm_skill_with_mode(&self.data_dir, &input.request.ruleset_id, ctx.mode_id.as_deref())?;
+        // 四级 gm_skill 合并 + 声明式 prompt 插件（按当前 ruleset/module 过滤）。
+        // 无命中插件时与 load_gm_skill_with_mode 字节级一致 → 不影响缓存稳定性。
+        let mut gm_skill = load_gm_skill_with_plugins(&self.data_dir, &input.request.ruleset_id, ctx.mode_id.as_deref(), input.request.module_id.as_deref())?;
         if let Some(manifest) = &ctx.mode_manifest {
             match ctx.rule_kernel.as_ref() {
                 Some(kernel) => {
