@@ -586,7 +586,15 @@ impl ProjectParseService {
                 let dvs: Vec<serde_json::Value> = character_template.derived_values.iter()
                     .filter_map(|d| serde_json::to_value(d).ok()).collect();
                 if let Some(kit) = reader_run_kit.as_mut() {
-                    let _report = reader::align(&dvs, &mut kit.core.resource_tracks);
+                    let report = reader::align(&dvs, &mut kit.core.resource_tracks);
+                    // 三级兜底 LLM 补行为缺口：override 数据是主源，本路默认关
+                    // (TRPG_BEHAVIOR_ALIGN_LLM=1 才开)；fail-closed，绝不覆盖既有行为。
+                    if !report.behavior_gaps.is_empty() {
+                        reader::fill_behavior_from_prose(
+                            compiler_llm.as_ref(), &units, sidecar_text.clone(),
+                            &dvs, &mut kit.core.resource_tracks, 14,
+                        ).await;
+                    }
                 }
 
                 // §obj object/ability SCHEMA compiler (discover -> extract): per

@@ -1,6 +1,10 @@
 //! 公式层(derived_values) ↔ 行为层(resource_tracks) 按 id 对齐。
 //! audit_alignment 是纯函数脊柱：既给 parse 时记 gap，也给测试直接断言。零 per-ruleset 硬编码。
+use super::chargen_compile::{self, CompileCtx};
+use super::tools;
+use super::units::Unit;
 use serde_json::Value;
+use trpg_llm::LlmClient;
 use trpg_model::outcome_fields;
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -131,6 +135,108 @@ pub fn apply_emitted_behavior(track: &mut Value, on_outcome: &[Value], threshold
     if !thresholds.is_empty() && obj.get("thresholds").and_then(Value::as_array).map(|a| a.is_empty()).unwrap_or(true) {
         obj.insert("thresholds".into(), Value::Array(thresholds.to_vec()));
     }
+}
+
+// ---------------------------------------------------------------------------
+// 行为层最优努力 LLM 补全（tertiary fallback；override 数据是主源，默认关）。
+// ---------------------------------------------------------------------------
+
+const BEHAVIOR_SYS: &str = r#"You extract a tabletop RPG resource's IN-PLAY behavior into machine records for a deterministic engine. You are given ONE resource (e.g. Hit Points, Sanity, Magic Points) and tools to read the rulebook. Read the relevant rules and submit how PLAY changes this resource:
+- on_outcome: how a check/effect changes it. Each: {op:"subtract"|"add", amount, trigger:"always"|"on_failure"|"on_success", check_match:"<pipe|regex of when it applies, e.g. damage|attack or sanity|san roll>"}. `amount` is a dice string ("1d6"), an integer, or "=<field>" where <field> is ONE OF: total,target,success,success_count,pool_miss_count,success_tier_rank. If damage/loss has no standard field, give a dice fallback in `default_amount`.
+- thresholds: state changes at a value or on a big single loss. Each is EITHER {at:<int>,direction:"at_or_below"|"at_or_above",consequence:"<prose>"} OR {loss_in_one_go:<int>,consequence:"<prose>"}.
+Ground every record in rules you READ. If the book does not specify a behavior, OMIT it — never invent numbers or thresholds. Submit {on_outcome:[...],thresholds:[...]} (either may be empty)."#;
+
+/// Best-effort LLM fill for behavior_gaps. GATED OFF by default (set TRPG_BEHAVIOR_ALIGN_LLM=1 to enable).
+/// Override data is primary; this only fills tracks that still lack on_outcome AND thresholds.
+/// Fail-closed: validates =field refs, never overwrites existing/override behavior, omits when prose is silent.
+pub async fn fill_behavior_from_prose(
+    client: &dyn LlmClient,
+    units: &[Unit],
+    sidecar_text: Option<String>,
+    derived_values: &[Value],
+    resource_tracks: &mut Vec<Value>,
+    budget: usize,
+) {
+    let enabled = std::env::var("TRPG_BEHAVIOR_ALIGN_LLM")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if !enabled {
+        return; // 默认关：override 数据才是主源，本路只是三级兜底。
+    }
+    let report = audit_alignment(derived_values, resource_tracks);
+    if report.behavior_gaps.is_empty() {
+        return;
+    }
+    let ctx = CompileCtx { units, sidecar_text, located_pages: String::new(), skill_names: Vec::new() };
+    for track_id in &report.behavior_gaps {
+        // 给 prompt 一个人类可读的名字：优先 track 的 name，否则 id。
+        let name = resource_tracks
+            .iter()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(track_id.as_str()))
+            .and_then(|t| t.get("name").and_then(Value::as_str))
+            .unwrap_or(track_id)
+            .to_string();
+        let seed = format!(
+            "Resource to extract behavior for: \"{name}\" (track id `{track_id}`). Read the rules for how it is lost/restored and any thresholds, then call submit_behavior."
+        );
+        if let Some(submitted) = run_behavior_loop(client, &seed, &ctx, budget).await {
+            let oo: Vec<Value> = submitted.get("on_outcome").and_then(Value::as_array).cloned().unwrap_or_default();
+            let th: Vec<Value> = submitted.get("thresholds").and_then(Value::as_array).cloned().unwrap_or_default();
+            if let Some(t) = resource_tracks
+                .iter_mut()
+                .find(|t| t.get("id").and_then(Value::as_str) == Some(track_id.as_str()))
+            {
+                apply_emitted_behavior(t, &oo, &th);
+            }
+        }
+    }
+}
+
+/// 单条 track 的行为抽取循环：复用 chargen 的导航工具 + dispatch，submit_behavior 返回整个提交对象。
+async fn run_behavior_loop(
+    client: &dyn LlmClient,
+    seed: &str,
+    ctx: &CompileCtx<'_>,
+    budget: usize,
+) -> Option<Value> {
+    let submit = tools::submit_tool(
+        "submit_behavior",
+        "Submit the resource's in-play behavior records.",
+        serde_json::json!({"on_outcome":{"type":"array","items":{"type":"object"}},"thresholds":{"type":"array","items":{"type":"object"}}}),
+        &["on_outcome", "thresholds"],
+    );
+    let mut tool_schemas = tools::nav_tools();
+    tool_schemas.push(submit);
+    let mut msgs = vec![
+        serde_json::json!({"role":"system","content":BEHAVIOR_SYS}),
+        serde_json::json!({"role":"user","content":seed}),
+    ];
+    for _ in 0..(budget + 8) {
+        let resp = client.complete_with_tools(msgs.clone(), tool_schemas.to_vec()).await.ok()?;
+        let message = resp.pointer("/choices/0/message").cloned().unwrap_or_else(|| serde_json::json!({}));
+        let tcs = message.get("tool_calls").and_then(Value::as_array).cloned().unwrap_or_default();
+        if tcs.is_empty() {
+            msgs.push(message);
+            msgs.push(serde_json::json!({"role":"user","content":"Use the tools, then call submit_behavior."}));
+            continue;
+        }
+        msgs.push(message);
+        for tc in &tcs {
+            let name = tc.pointer("/function/name").and_then(Value::as_str).unwrap_or("");
+            let args: Value = tc
+                .pointer("/function/arguments")
+                .and_then(Value::as_str)
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_else(|| serde_json::json!({}));
+            let id = tc.get("id").and_then(Value::as_str).unwrap_or("");
+            if name == "submit_behavior" {
+                return Some(args);
+            }
+            let out = chargen_compile::compile_dispatch(ctx, name, &args);
+            msgs.push(serde_json::json!({"role":"tool","tool_call_id":id,"content":out}));
+        }
+    }
+    None
 }
 
 #[cfg(test)]

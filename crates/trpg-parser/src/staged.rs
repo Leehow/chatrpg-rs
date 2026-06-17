@@ -158,8 +158,18 @@ impl StagedParse {
             let report = reader::align(&dvs, &mut rg.core.resource_tracks);
             if !report.behavior_gaps.is_empty() {
                 st.note(&format!("行为对齐缺口(待 override/LLM 补): {:?}", report.behavior_gaps));
+                // 三级兜底：override 数据是主源，本路默认关(TRPG_BEHAVIOR_ALIGN_LLM=1 才开)。
+                // fail-closed：内部校验 =field、绝不覆盖既有/override 行为、prose 缺则省略。
+                reader::fill_behavior_from_prose(
+                    compiler.as_ref(),
+                    &self.units,
+                    self.sidecar_text.clone(),
+                    &dvs,
+                    &mut rg.core.resource_tracks,
+                    budget,
+                )
+                .await;
             }
-            // TODO(behavior-align LLM fill): 后续任务在此对 report.behavior_gaps 调 fill_behavior_from_prose。
         }
 
         // 2c object schemas: FULL compile (discover + extract) in the background.
