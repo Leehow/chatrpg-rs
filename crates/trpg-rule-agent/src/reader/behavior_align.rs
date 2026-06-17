@@ -335,4 +335,31 @@ mod tests {
             &[json!({"at":0,"direction":"at_or_below","consequence":"out"})]);
         assert!(t_empty.get("on_outcome").is_some() && t_empty.get("thresholds").is_some());
     }
+
+    #[test]
+    fn coc_override_shape_aligns_hp_and_mp() {
+        // 模拟 CoC 加载后：公式层 hp_max/mp_max/sanity + override 的 hit_points/magic_points + DB 的 sanity。
+        let dvs = coc_dvs();
+        let tracks = vec![
+            json!({"id":"hit_points","kind":"health","derived_from":"hp_max",
+                   "on_outcome":[{"op":"subtract","amount":"=damage"}],"thresholds":[{"at":0}]}),
+            json!({"id":"magic_points","derived_from":"mp_max","initial":0}),
+            json!({"id":"sanity","on_outcome":[{"op":"subtract","amount":"=total"}],"thresholds":[{"loss_in_one_go":5}]}),
+        ];
+        let r = audit_alignment(&dvs, &tracks);
+        assert_eq!(r.aligned.len(), 3, "{r:?}");
+        assert!(r.orphan_formulas.is_empty() && r.orphan_tracks.is_empty(), "{r:?}");
+        // magic_points 仅对齐无行为 -> 进 behavior_gaps（fail-closed，可被 override/LLM 后补）。
+        assert_eq!(r.behavior_gaps, vec!["magic_points".to_string()], "{r:?}");
+    }
+
+    #[test]
+    fn dnd_hp_aligns_by_base_id_without_data_change() {
+        // D&D 公式层 hit_points_max 对齐 kernel hit_points track —— base-id 桥，无需改 D&D 数据。
+        let dvs = vec![json!({"id":"hit_points_max","role":"resource_max"})];
+        let tracks = vec![json!({"id":"hit_points","kind":"health","on_outcome":[{"op":"subtract"}]})];
+        let r = audit_alignment(&dvs, &tracks);
+        assert_eq!(r.aligned, vec![("hit_points_max".to_string(), "hit_points".to_string())], "{r:?}");
+        assert!(r.behavior_gaps.is_empty(), "D&D HP 有行为，无 gap: {r:?}");
+    }
 }

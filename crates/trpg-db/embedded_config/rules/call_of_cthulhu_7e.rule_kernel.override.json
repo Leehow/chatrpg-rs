@@ -62,6 +62,24 @@
       }
     }
   },
+  "_note_behavior_align": "2026-06-17 §10.5 behavior<->formula alignment: hit_points/magic_points get derived_from links to the chargen formula ids (hp_max/mp_max) + HP damage/wound behavior. sanity is left to the reader+DB baseline (frozen, unchanged). Canonical CoC 7e; page unverified.",
+  "resource_tracks": [
+    {
+      "id": "hit_points", "name": "Hit Points", "kind": "health", "owner_kind": "actor",
+      "initial": 0, "derived_from": "hp_max", "zero_means": "dying",
+      "on_outcome": [
+        { "op": "subtract", "amount": "=damage", "trigger": "always", "check_match": "damage|attack" }
+      ],
+      "thresholds": [
+        { "at": 0, "direction": "at_or_below", "consequence": "dying (major wound rules / death checks apply)" },
+        { "loss_in_one_go": 0, "consequence": "major wound if a single attack inflicts >= half of max HP" }
+      ]
+    },
+    {
+      "id": "magic_points", "name": "Magic Points", "kind": "track", "owner_kind": "actor",
+      "initial": 0, "derived_from": "mp_max", "zero_means": "no spellcasting"
+    }
+  ],
   "_note": "Read-time kernel override applied by trpg-db load_rule_kernel (override wins). Heals the CoC 7e success_bands when the LLM reader under-extracts on a re-parse (missing `critical`/`failure` bands, malformed fumble guard). dice_core keys are shallow-merged; success_bands is replaced wholesale. Same canonical set as the DB fix _fix_coc_success_bands.sql and the unit test coc_tiers_skill75. Pure data, no per-ruleset Rust.",
   "dice_core": {
     "success_bands": [
