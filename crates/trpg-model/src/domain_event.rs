@@ -34,6 +34,9 @@ pub enum DomainEventKind {
     /// 模组实体（线索/NPC）首次进入本回合 GM context 即被"surfaced"——玩家已被
     /// 暴露给该实体（反剧透 TruthGraph 起步切片，观测层；幂等 per-session）。
     EntitySurfaced,
+    /// 客户端在 SSE 回合流中途断开，且断开发生在本回合状态已变更之后——引擎续跑
+    /// critical finalize 保一致后，在该回合上记此标记（P1-3）。幂等 per-turn。
+    ClientDisconnected,
 }
 
 impl DomainEventKind {
@@ -50,6 +53,7 @@ impl DomainEventKind {
             DomainEventKind::DiceRolled => "DiceRolled",
             DomainEventKind::CheckResolved => "CheckResolved",
             DomainEventKind::EntitySurfaced => "EntitySurfaced",
+            DomainEventKind::ClientDisconnected => "ClientDisconnected",
         }
     }
 
@@ -64,6 +68,7 @@ impl DomainEventKind {
             "DiceRolled" => DomainEventKind::DiceRolled,
             "CheckResolved" => DomainEventKind::CheckResolved,
             "EntitySurfaced" => DomainEventKind::EntitySurfaced,
+            "ClientDisconnected" => DomainEventKind::ClientDisconnected,
             _ => DomainEventKind::TurnStarted,
         }
     }
@@ -161,6 +166,7 @@ mod tests {
             DomainEventKind::DiceRolled,
             DomainEventKind::CheckResolved,
             DomainEventKind::EntitySurfaced,
+            DomainEventKind::ClientDisconnected,
         ] {
             let v = serde_json::to_value(k).unwrap();
             let back: DomainEventKind = serde_json::from_value(v).unwrap();
@@ -179,6 +185,7 @@ mod tests {
             DomainEventKind::DiceRolled,
             DomainEventKind::CheckResolved,
             DomainEventKind::EntitySurfaced,
+            DomainEventKind::ClientDisconnected,
         ] {
             assert_eq!(DomainEventKind::from_str_token(k.as_str()), k);
             // serde 序列化得到的字符串必与 as_str 钉死的契约一致。
@@ -190,6 +197,18 @@ mod tests {
             DomainEventKind::from_str_token("Bogus"),
             DomainEventKind::TurnStarted
         );
+    }
+
+    #[test]
+    fn client_disconnected_kind_roundtrips() {
+        // P1-3：客户端中途断开后落在回合上的标记，经 append_domain_event 写库。
+        let k = DomainEventKind::ClientDisconnected;
+        assert_eq!(k.as_str(), "ClientDisconnected");
+        assert_eq!(DomainEventKind::from_str_token("ClientDisconnected"), k);
+        let v = serde_json::to_value(k).unwrap();
+        assert_eq!(v.as_str(), Some("ClientDisconnected"));
+        let back: DomainEventKind = serde_json::from_value(v).unwrap();
+        assert_eq!(back, k);
     }
 
     #[test]
