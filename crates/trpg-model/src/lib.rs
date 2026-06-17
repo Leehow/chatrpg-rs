@@ -22,6 +22,8 @@ pub mod domain_event;
 pub use domain_event::*;
 pub mod spoiler;
 pub use spoiler::*;
+pub mod knowledge;
+pub use knowledge::*;
 
 pub const PROJECT_SCHEMA_VERSION: &str = "chatrpg.project_bundle.v1";
 pub const RULE_SCHEMA_VERSION: &str = "chatrpg.rule_bundle.v1";
