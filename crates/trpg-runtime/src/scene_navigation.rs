@@ -76,6 +76,8 @@ pub async fn extract_module_scenes(
         encounters: graph.encounters.clone(),
         handouts: graph.handouts.clone(),
         module_specific_rules: graph.module_specific_rules.clone(),
+        // 续抽路径不重抽引导事实;写回(110-120)也不覆盖 g.director_facilitation,故原抽取值保真。
+        ..Default::default()
     };
 
     // Pick the target scene indices: SkeletonOnly scenes, optionally narrowed to

@@ -726,14 +726,22 @@ impl Db {
         Ok(Some(kernel))
     }
 
-    /// P0-2: load a module's lightweight engine config from the module bundle.
-    /// File: `{TRPG_DATA_DIR}/modules/{module_id}.module_config.json` (mirrors
-    /// the kernel-override convention). Returns None when absent/unreadable so
-    /// the engine falls back to its neutral (non-module) behavior. This is the
-    /// data home for combat's npc_actor_bindings + technical_option_table, so
-    /// scav_boss/athena_drone/DV14-12 live as data, not Rust.
+    /// load a module's lightweight engine config: **extracted ⊕ override**.
+    /// - `extracted`: director facilitation auto-extracted by the module reader,
+    ///   stored in `ModuleGraph.director_facilitation` (read via `load_module_graph`).
+    /// - `override`: the optional sidecar `{TRPG_DATA_DIR}/modules/{id}.module_config.json`
+    ///   (file → embedded fallback), highest precedence (override > extracted).
+    /// `merge_module_config` resolves the `director` field; ModuleConfig's other fields
+    /// (npc_actor_bindings / technical_option_table / aliases / search profile) still come
+    /// only from the sidecar. None when neither side present → engine falls back to neutral.
     pub async fn load_module_config(&self, module_id: &str) -> Option<ModuleConfig> {
-        read_module_config_file(module_id)
+        let extracted = self
+            .load_module_graph(module_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|g| g.director_facilitation);
+        merge_module_config(read_module_config_file(module_id), extracted)
     }
 
     /// The ruleset's core dice expression from the parsed kernel
@@ -4395,6 +4403,26 @@ fn embedded_module_config(module_id: &str) -> Option<&'static str> {
     })
 }
 
+/// 合并 director 引导事实:**override(sidecar) > extracted**。`sidecar.director` 存在则整块胜出;
+/// 否则用 module reader 自动抽取的 `extracted`。仅 director 字段享 extracted 兜底 ——
+/// ModuleConfig 其它字段(npc 绑定 / tech 表 / 别名 / 搜索画像)仍只来自 sidecar。
+/// 三态:有 sidecar → 填/留 director 后返回;无 sidecar 有 extracted → 仅包 director;都无 → None。
+fn merge_module_config(
+    sidecar: Option<ModuleConfig>,
+    extracted: Option<DirectorModuleConfig>,
+) -> Option<ModuleConfig> {
+    match (sidecar, extracted) {
+        (Some(mut cfg), ext) => {
+            if cfg.director.is_none() {
+                cfg.director = ext; // override 胜:仅当无 sidecar.director 才用 extracted
+            }
+            Some(cfg)
+        }
+        (None, Some(ext)) => Some(ModuleConfig { director: Some(ext), ..Default::default() }),
+        (None, None) => None,
+    }
+}
+
 /// Shallow-merge an override `dice_core` object onto the base (override keys win).
 /// Container values like `success_bands` (an array whose ids may repeat, e.g. two
 /// fumble bands) are REPLACED wholesale, not deep-merged — the override supplies the
@@ -4417,6 +4445,53 @@ fn merge_resource_tracks(base: Vec<serde_json::Value>, overrides: Vec<serde_json
         if let Some(slot) = out.iter_mut().find(|b| idof(b) == oid) { *slot = o; } else { out.push(o); }
     }
     out
+}
+
+#[cfg(test)]
+mod merge_module_config_tests {
+    use super::merge_module_config;
+    use trpg_model::{DirectorModuleConfig, DirectorSceneFact, ModuleConfig, NpcActorBinding};
+
+    fn cfg_with_fact(text: &str) -> DirectorModuleConfig {
+        DirectorModuleConfig {
+            scene_facts: vec![DirectorSceneFact { text: text.into(), source: "x".into() }],
+            ..Default::default()
+        }
+    }
+
+    /// 无 sidecar、有 extracted → director = extracted(验收 1 的合并侧)。
+    #[test]
+    fn extracted_only_when_no_sidecar() {
+        let out = merge_module_config(None, Some(cfg_with_fact("从场景抽的"))).expect("应有配置");
+        assert_eq!(out.director.unwrap().scene_facts[0].text, "从场景抽的");
+    }
+
+    /// sidecar.director 存在 → 整块盖掉 extracted(验收 2 override 胜)。
+    #[test]
+    fn sidecar_director_wins_over_extracted() {
+        let sidecar = ModuleConfig { director: Some(cfg_with_fact("override")), ..Default::default() };
+        let out = merge_module_config(Some(sidecar), Some(cfg_with_fact("extracted"))).unwrap();
+        assert_eq!(out.director.unwrap().scene_facts[0].text, "override");
+    }
+
+    /// sidecar 有别的字段但 director=None → director 用 extracted,其它 sidecar 字段保留。
+    #[test]
+    fn extracted_fills_when_sidecar_has_no_director() {
+        let sidecar = ModuleConfig {
+            npc_actor_bindings: vec![NpcActorBinding { matcher: vec!["boss".into()], actor_id: "npc.boss".into(), display_name: None }],
+            director: None,
+            ..Default::default()
+        };
+        let out = merge_module_config(Some(sidecar), Some(cfg_with_fact("extracted"))).unwrap();
+        assert_eq!(out.director.unwrap().scene_facts[0].text, "extracted");
+        assert_eq!(out.npc_actor_bindings.len(), 1, "sidecar 非 director 字段必须保留");
+    }
+
+    /// 都没有 → None(回退通用兜底)。
+    #[test]
+    fn both_absent_is_none() {
+        assert!(merge_module_config(None, None).is_none());
+    }
 }
 
 #[cfg(test)]

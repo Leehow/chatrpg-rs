@@ -961,6 +961,8 @@ impl ProjectParseService {
             handouts: readout.as_ref().map(|r| r.handouts.clone()).unwrap_or_default(),
             encounters: readout.as_ref().map(|r| r.encounters.clone()).unwrap_or_default(),
             module_specific_rules: readout.as_ref().map(|r| r.module_specific_rules.clone()).unwrap_or_default(),
+            // 自动抽取的模组级引导事实(无 reader/未抽到 → None,director 回退通用兜底)。
+            director_facilitation: readout.as_ref().and_then(|r| r.facilitation_facts.clone()),
         };
 
         conversion_trace.push(ConversionTraceEvent::new("module_parse_finished", format!("Parsed {} blocks", context_blocks.len())));

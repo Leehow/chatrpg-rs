@@ -5,6 +5,7 @@
 pub mod agent;
 pub mod behavior_align;
 pub mod chargen_compile;
+pub mod facilitation;
 pub mod mechanics_compile;
 pub mod mechanics_finalize;
 pub mod module_graph_build;
@@ -24,6 +25,7 @@ pub mod units;
 pub use agent::{run_reader, ReaderResult};
 pub use behavior_align::{align, audit_alignment, AlignmentReport, validate_emitted_on_outcome, apply_emitted_behavior, fill_behavior_from_prose};
 pub use chargen_compile::{compile_chargen_formulas, CompileCtx};
+pub use facilitation::extract_facilitation_facts;
 pub use mechanics_compile::{compile_mechanics_catalog, MechCompileCtx};
 pub use mechanics_finalize::finalize_catalog;
 pub use module_graph_edges::apply_bridge_edges;
