@@ -39,6 +39,8 @@ pub use binding_exec::{
     plan_authorizes_check_exec,
 };
 
+pub mod knowledge_projection;
+
 mod need_resolvers;
 
 mod scene_need_resolver;
