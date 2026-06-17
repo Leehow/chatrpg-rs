@@ -1,5 +1,7 @@
 pub mod stream_tools;
 pub use stream_tools::*;
+pub mod sse;
+pub use sse::{SseDecoder, SseItem};
 
 use anyhow::{anyhow, Context, Result};
 use async_stream::try_stream;
@@ -269,39 +271,27 @@ impl LlmClient for OpenAiCompatibleClient {
         let resp = resp_opt.ok_or_else(|| last_error.unwrap_or_else(|| anyhow!("LLM streaming request failed without a recorded error")))?;
         let mut bytes = resp.bytes_stream();
         let s = try_stream! {
-            let mut buffer = String::new();
-            let mut done = false;
-            while let Some(chunk) = bytes.next().await {
+            // 增量 SSE 解码：就地排干 buffer（无每行整体复制），parse error 计数+告警。
+            let mut decoder = SseDecoder::new();
+            'outer: while let Some(chunk) = bytes.next().await {
                 let chunk = chunk?;
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
-                while let Some(pos) = buffer.find('\n') {
-                    let line = buffer[..pos].trim().to_string();
-                    buffer = buffer[pos + 1..].to_string();
-                    if !line.starts_with("data:") {
-                        continue;
-                    }
-                    let data = line.trim_start_matches("data:").trim();
-                    if data == "[DONE]" {
-                        done = true;
-                        break;
-                    }
-                    let parsed: Value = match serde_json::from_str(data) {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
-                    if let Some(delta) = parsed.pointer("/choices/0/delta/content").and_then(Value::as_str) {
-                        if !delta.is_empty() {
-                            yield delta.to_string();
+                decoder.push_bytes(&chunk);
+                for item in decoder.drain_items() {
+                    match item {
+                        SseItem::Data(parsed) => {
+                            if let Some(delta) = parsed.pointer("/choices/0/delta/content").and_then(Value::as_str) {
+                                if !delta.is_empty() {
+                                    yield delta.to_string();
+                                }
+                            }
+                            if let Some(text) = parsed.pointer("/choices/0/text").and_then(Value::as_str) {
+                                if !text.is_empty() {
+                                    yield text.to_string();
+                                }
+                            }
                         }
+                        SseItem::Done => break 'outer,
                     }
-                    if let Some(text) = parsed.pointer("/choices/0/text").and_then(Value::as_str) {
-                        if !text.is_empty() {
-                            yield text.to_string();
-                        }
-                    }
-                }
-                if done {
-                    break;
                 }
             }
         };

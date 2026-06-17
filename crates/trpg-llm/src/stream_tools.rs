@@ -1,3 +1,4 @@
+use crate::sse::{SseDecoder, SseItem};
 use anyhow::{anyhow, Result};
 use async_stream::try_stream;
 use futures_core::Stream;
@@ -213,31 +214,25 @@ impl crate::OpenAiCompatibleClient {
         let resp = resp_opt.ok_or_else(|| last_error.unwrap_or_else(|| anyhow!("LLM tool streaming request failed without a recorded error")))?;
         let mut bytes = resp.bytes_stream();
         let s = try_stream! {
-            let mut buffer = String::new();
+            // 与 lib.rs::stream_chat 共用增量 SSE 解码器：就地排干 + parse error 计数。
+            let mut decoder = SseDecoder::new();
             let mut agg = ToolStreamAggregator::new();
             let mut done = false;
-            while let Some(chunk) = bytes.next().await {
+            'outer: while let Some(chunk) = bytes.next().await {
                 let chunk = chunk?;
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
-                while let Some(pos) = buffer.find('\n') {
-                    let line = buffer[..pos].trim().to_string();
-                    buffer = buffer[pos + 1..].to_string();
-                    if !line.starts_with("data:") {
-                        continue;
+                decoder.push_bytes(&chunk);
+                for item in decoder.drain_items() {
+                    match item {
+                        SseItem::Data(parsed) => {
+                            for event in agg.feed_chunk(&parsed) { yield event; }
+                        }
+                        SseItem::Done => {
+                            for event in agg.finish(None) { yield event; }
+                            done = true;
+                            break 'outer;
+                        }
                     }
-                    let data = line.trim_start_matches("data:").trim();
-                    if data == "[DONE]" {
-                        for event in agg.finish(None) { yield event; }
-                        done = true;
-                        break;
-                    }
-                    let parsed: Value = match serde_json::from_str(data) {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
-                    for event in agg.feed_chunk(&parsed) { yield event; }
                 }
-                if done { break; }
             }
             if !done {
                 for event in agg.finish(None) { yield event; }
