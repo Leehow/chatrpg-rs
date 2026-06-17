@@ -13,7 +13,7 @@ use super::units::Unit;
 use serde_json::{json, Value};
 use std::time::Instant;
 use trpg_llm::LlmClient;
-use trpg_model::{LinkType, ScenarioLink, ScenarioNode, SceneExtractionStatus};
+use trpg_model::{DirectorModuleConfig, LinkType, ScenarioLink, ScenarioNode, SceneExtractionStatus};
 
 // ---- Context + readout ----
 
@@ -38,6 +38,9 @@ pub struct ModuleReadout {
     pub encounters: Vec<Value>,
     pub handouts: Vec<Value>,
     pub module_specific_rules: Vec<Value>,
+    /// 模组级引导事实(facilitation.rs 从已解析开场场景+spine 抽取);装入
+    /// `ModuleGraph.director_facilitation`,退役 director sidecar 的 REQUIRED 注入。None = 没抽到。
+    pub facilitation_facts: Option<DirectorModuleConfig>,
 }
 
 // ---- Deterministic helpers (round-trip / fail-closed; unit-tested) ----
@@ -370,6 +373,18 @@ pub async fn run_module_reader(
         deep_extracted = out.scenes[entry_idx].extraction_status == SceneExtractionStatus::DeepExtracted,
         "minimal playable unit done (Pass A + Pass B)"
     );
+    // ---- 收尾：模组级引导事实抽取（从已解析开场场景 + spine，存 director_facilitation）----
+    // env 门 TRPG_MODULE_FACILITATION 默认开；fail-closed：抽不到 → None，零行为倒退
+    //（无 sidecar 时 director 仍回退到通用兜底，与今天一致）。
+    if super::facilitation::facilitation_enabled() {
+        out.facilitation_facts =
+            super::facilitation::extract_facilitation_facts(client, &out, entry_idx).await;
+        tracing::info!(
+            target: "module_reader", phase = "facilitation",
+            extracted = out.facilitation_facts.is_some(),
+            "facilitation facts extraction done"
+        );
+    }
     // Pass B 失败 → 入口保持 SkeletonOnly（fail-closed），已得骨架照常返回。
     Ok(out)
 }

@@ -1732,6 +1732,13 @@ pub struct ModuleGraph {
     pub handouts: Vec<serde_json::Value>,
     pub encounters: Vec<serde_json::Value>,
     pub module_specific_rules: Vec<serde_json::Value>,
+    /// 模组级引导事实(scene_facts/pressure/affordances/risks/npc_advice/open_question/
+    /// place_summary)——module reader 从解析后的 scene 数据自动抽取并存于此,让 director 从
+    /// 解析数据读,退役 `{id}.module_config.json` 的 REQUIRED 注入。`#[serde(default)]` →
+    /// 旧 bundle 反序列化为 None,向后兼容。override sidecar 仍是最高优先级(见
+    /// `Db::load_module_config` 的 extracted⊕override 合并)。
+    #[serde(default)]
+    pub director_facilitation: Option<DirectorModuleConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
@@ -7182,5 +7189,36 @@ mod referee_value_bands_tests {
         let json = serde_json::json!({"kernel_id":"x","ruleset_id":"y","version":"1"});
         let k: RuleKernel = serde_json::from_value(json).unwrap();
         assert!(k.referee_value_bands.is_none(), "old kernels must not fail on missing field");
+    }
+}
+
+#[cfg(test)]
+mod module_graph_facilitation_tests {
+    use super::*;
+
+    /// 旧 bundle 的 module_graph(无 director_facilitation 键)必须反序列化为 None,
+    /// 不报错(向后兼容,#[serde(default)])。
+    #[test]
+    fn old_module_graph_without_director_facilitation_is_none() {
+        let mut v = serde_json::to_value(ModuleGraph::default()).unwrap();
+        v.as_object_mut().unwrap().remove("director_facilitation");
+        let g: ModuleGraph = serde_json::from_value(v).unwrap();
+        assert!(g.director_facilitation.is_none());
+    }
+
+    /// 抽取出的 DirectorModuleConfig 经 module_graph 序列化往返保真。
+    #[test]
+    fn director_facilitation_roundtrips_on_module_graph() {
+        let g = ModuleGraph {
+            director_facilitation: Some(DirectorModuleConfig {
+                scene_facts: vec![DirectorSceneFact { text: "门半开着".into(), source: "read_aloud".into() }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let back: ModuleGraph = serde_json::from_value(serde_json::to_value(&g).unwrap()).unwrap();
+        let df = back.director_facilitation.expect("should survive roundtrip");
+        assert_eq!(df.scene_facts.len(), 1);
+        assert_eq!(df.scene_facts[0].text, "门半开着");
     }
 }
