@@ -1136,9 +1136,20 @@ fn format_coverage_report(session: &str, traces: &[TurnTrace], events: &[DomainE
     let mut degree_dist: Vec<(String, usize)> = Vec::new();
     let mut scene_transitions = 0usize;
     let mut scene_routes: Vec<String> = Vec::new();
+    // TruthGraph 观测（优化2 #5）：玩家已被 surfaced（见过）的实体 distinct 集，按
+    // entity_kind 计数（clue/npc）。event_id 幂等 per-session，但仍按 (kind,id) 去重兜底。
+    let mut surfaced_seen: Vec<(String, String)> = Vec::new();
     for ev in events {
         match ev.kind {
             DomainEventKind::DiceRolled => dice_rolled += 1,
+            DomainEventKind::EntitySurfaced => {
+                let id = ev.data.get("entity_id").and_then(|v| v.as_str()).unwrap_or("");
+                let kind = ev.data.get("entity_kind").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let pair = (kind.to_string(), id.to_string());
+                if !id.is_empty() && !surfaced_seen.contains(&pair) {
+                    surfaced_seen.push(pair);
+                }
+            }
             DomainEventKind::CheckResolved => {
                 checks_resolved += 1;
                 let degree = ev
@@ -1171,6 +1182,14 @@ fn format_coverage_report(session: &str, traces: &[TurnTrace], events: &[DomainE
     } else {
         out.push_str(&format!("    routes: {}\n", scene_routes.join(", ")));
     }
+
+    // ── 玩家知识（surfaced 实体，反剧透 TruthGraph 观测层）─────
+    // 玩家本会话已被暴露的模组实体：N 线索 + M NPC（强制裁剪留后续切片，此处只观测）。
+    let clues_seen = surfaced_seen.iter().filter(|(k, _)| k == "clue").count();
+    let npcs_seen = surfaced_seen.iter().filter(|(k, _)| k == "npc").count();
+    out.push_str(&format!(
+        "player_knowledge (surfaced entities): {clues_seen} clues, {npcs_seen} npcs\n"
+    ));
 
     // ── 绑定覆盖（from traces[].binding_trace）────────────────
     // per need_kind：verdict 分布 + 达到的最高 ExecutionTier。
@@ -1971,6 +1990,33 @@ mod tests {
         assert!(out.contains("top_tier=ExactExecution"), "highest tier:\n{out}");
         // 覆盖等级行：检定 + 掷骰 + 切场景齐全 → L3_combat。
         assert!(out.contains("coverage level: L3_combat"), "coverage level line:\n{out}");
+    }
+
+    #[test]
+    fn format_coverage_report_shows_surfaced_player_knowledge() {
+        // TruthGraph 观测：distinct (kind,id) 去重后按 clue/npc 计数；幂等重复不双算。
+        let surfaced = |id: &str, kind: &str| {
+            DomainEvent::new(
+                format!("de_surfaced_session-tg_{id}"),
+                "session-tg",
+                "turn-1",
+                DomainEventKind::EntitySurfaced,
+                serde_json::json!({ "entity_id": id, "entity_kind": kind, "scene_id": "sc01" }),
+            )
+        };
+        let t = TurnTrace::new("turn-1", "session-tg");
+        let events = vec![
+            surfaced("clue_letter", "clue"),
+            surfaced("clue_map", "clue"),
+            surfaced("npc_ras", "npc"),
+            // 同 (kind,id) 重复（再 surface）→ 不双算。
+            surfaced("clue_letter", "clue"),
+        ];
+        let out = format_coverage_report("session-tg", &[t], &events);
+        assert!(
+            out.contains("player_knowledge (surfaced entities): 2 clues, 1 npcs"),
+            "surfaced player knowledge line:\n{out}"
+        );
     }
 
     #[test]

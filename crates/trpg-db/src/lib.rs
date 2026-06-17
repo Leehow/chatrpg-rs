@@ -2817,6 +2817,35 @@ impl Db {
         rows.into_iter().map(row_to_domain_event).collect()
     }
 
+    /// 反剧透 TruthGraph 投影（优化2 #5）：本会话已被 surfaced（玩家见过）的实体集。
+    /// 从 `EntitySurfaced` 事件的 `data` jsonb 抽 distinct `(entity_id, entity_kind)`。
+    /// event_id 已幂等 per-session，但保留 distinct 兜底 data 异常重复；按 entity_id 稳定排序。
+    pub async fn list_surfaced_entities(&self, session_id: &str) -> Result<Vec<(String, String)>> {
+        let rows = sqlx::query(
+            r#"
+            select distinct
+                   data->>'entity_id'   as entity_id,
+                   data->>'entity_kind' as entity_kind
+            from domain_events
+            where session_id = $1
+              and kind = 'EntitySurfaced'
+              and data->>'entity_id' is not null
+            order by entity_id
+            "#,
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let id: String = r.get("entity_id");
+                let kind: Option<String> = r.get("entity_kind");
+                (id, kind.unwrap_or_default())
+            })
+            .collect())
+    }
+
     pub async fn list_world_events_since(&self, session_id: &str, since_tick: i64, since_event_seq: i64, limit: i64) -> Result<Vec<WorldEvent>> {
         let rows = sqlx::query(
             r#"

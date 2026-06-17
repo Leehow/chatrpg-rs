@@ -31,6 +31,9 @@ pub enum DomainEventKind {
     DiceRolled,
     /// 检定结算落库（insert_check_result 写穿）。
     CheckResolved,
+    /// 模组实体（线索/NPC）首次进入本回合 GM context 即被"surfaced"——玩家已被
+    /// 暴露给该实体（反剧透 TruthGraph 起步切片，观测层；幂等 per-session）。
+    EntitySurfaced,
 }
 
 impl DomainEventKind {
@@ -46,6 +49,7 @@ impl DomainEventKind {
             DomainEventKind::SceneTransitioned => "SceneTransitioned",
             DomainEventKind::DiceRolled => "DiceRolled",
             DomainEventKind::CheckResolved => "CheckResolved",
+            DomainEventKind::EntitySurfaced => "EntitySurfaced",
         }
     }
 
@@ -59,6 +63,7 @@ impl DomainEventKind {
             "SceneTransitioned" => DomainEventKind::SceneTransitioned,
             "DiceRolled" => DomainEventKind::DiceRolled,
             "CheckResolved" => DomainEventKind::CheckResolved,
+            "EntitySurfaced" => DomainEventKind::EntitySurfaced,
             _ => DomainEventKind::TurnStarted,
         }
     }
@@ -155,10 +160,11 @@ mod tests {
             DomainEventKind::SceneTransitioned,
             DomainEventKind::DiceRolled,
             DomainEventKind::CheckResolved,
+            DomainEventKind::EntitySurfaced,
         ] {
             let v = serde_json::to_value(k).unwrap();
             let back: DomainEventKind = serde_json::from_value(v).unwrap();
-            assert_eq!(back, k, "6 variant 必 round-trip");
+            assert_eq!(back, k, "7 variant 必 round-trip");
         }
     }
 
@@ -172,6 +178,7 @@ mod tests {
             DomainEventKind::SceneTransitioned,
             DomainEventKind::DiceRolled,
             DomainEventKind::CheckResolved,
+            DomainEventKind::EntitySurfaced,
         ] {
             assert_eq!(DomainEventKind::from_str_token(k.as_str()), k);
             // serde 序列化得到的字符串必与 as_str 钉死的契约一致。

@@ -51,6 +51,9 @@ mod scene_projection;
 pub use scene_projection::{module_entry_scene_id, contract_is_opposed, stamp_opposed_check};
 use scene_projection::{resolve_turn_scene_id, map_check_param_need};
 
+mod truthgraph;
+pub use truthgraph::surfaced_events_for_scene;
+
 mod context_blocks;
 use context_blocks::{memory_snapshot_block, retrieved_memory_block, actionable_situation_block, clue_board_block, world_time_block, world_events_since_block, engine_protocol_block, engine_protocol_block_agent_loop, world_state_block, dynamic_text_block};
 
@@ -476,7 +479,46 @@ impl RuntimeEngine {
             };
             let _ = self.db.upsert_context_watermark(&watermark).await;
         }
+        // 反剧透 TruthGraph 起步切片（优化2 #5）——观测层 write-through：当前场景引用的
+        // clue/NPC 进了本回合 context，即记 EntitySurfaced（幂等 per-session）。fail-soft、
+        // 加在主 context 构建完之后（非关键路径），任何失败仅 warn、绝不影响返回的 compiled。
+        self.record_surfaced_entities(request, state).await;
         Ok(compiled)
+    }
+
+    /// 反剧透 TruthGraph T1 观测写穿（fail-soft，零行为变更）：把**当前场景**引用的
+    /// 线索/NPC 记成幂等 `EntitySurfaced` 事件。无模组 / 无场景 / 图谱加载失败 → warn 跳过，
+    /// 绝不 error 回合。scene 引用经纯函数 [`surfaced_events_for_scene`] 映射后逐条
+    /// append（on-conflict-do-nothing 保 per-session 只记一次）。
+    async fn record_surfaced_entities(&self, request: &ContextRequest, state: &RuntimeState) {
+        let Some(module_id) = request.module_id.as_deref().or(state.module_id.as_deref()) else {
+            return; // 无模组：纯规则书会话，无场景实体可记。
+        };
+        let Some(scene_id) = state.scene_id.as_deref() else {
+            tracing::warn!(module_id, "truthgraph: no current scene_id; skipping EntitySurfaced");
+            return;
+        };
+        let graph = match self.db.load_module_graph(module_id).await {
+            Ok(Some(g)) => g,
+            Ok(None) => {
+                tracing::warn!(module_id, "truthgraph: no module graph; skipping EntitySurfaced");
+                return;
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, module_id, "truthgraph: load_module_graph failed; skipping EntitySurfaced");
+                return;
+            }
+        };
+        let Some(node) = graph.scenes.iter().find(|s| s.node_id == scene_id) else {
+            tracing::warn!(module_id, scene_id, "truthgraph: current scene not in graph; skipping EntitySurfaced");
+            return;
+        };
+        let events = surfaced_events_for_scene(&request.session_id, &request.turn_id, scene_id, node);
+        for ev in &events {
+            if let Err(err) = self.db.append_domain_event(ev).await {
+                tracing::warn!(error = %err, event_id = %ev.event_id, "truthgraph: append EntitySurfaced failed (fail-soft)");
+            }
+        }
     }
 
     /// Single post-resolution funnel for EVERY check-resolution path. Runs the
