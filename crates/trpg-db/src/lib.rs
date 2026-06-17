@@ -1093,6 +1093,22 @@ impl Db {
         }
     }
 
+    /// 取一个会话全部回合的 Flight-Recorder trace（created_at 升序）。
+    /// 反序列化镜像 `load_turn_trace`（jsonb → TurnTrace）。`trpg coverage`
+    /// 聚合用：只读，单一 trace_json 事实源。
+    pub async fn list_turn_traces(&self, session_id: &str, limit: i64) -> Result<Vec<trpg_model::TurnTrace>> {
+        let rows: Vec<(serde_json::Value,)> = sqlx::query_as(
+            "select trace_json from turn_traces where session_id = $1 order by created_at asc limit $2",
+        )
+        .bind(session_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|(value,)| serde_json::from_value(value).map_err(Into::into))
+            .collect()
+    }
+
     pub async fn record_load_event(&self, session_id: Option<&str>, turn_id: Option<&str>, block: &ContextBlock, reason: &str) -> Result<()> {
         sqlx::query(
             r#"insert into context_block_load_events

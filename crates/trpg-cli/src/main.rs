@@ -86,6 +86,13 @@ enum Commands {
         #[arg(long)]
         turn: String,
     },
+    /// Read-only session activity/coverage report: aggregates the domain_events log +
+    /// turn_traces (Flight Recorder) into a human-readable summary (turns, failures,
+    /// pp_lifecycle health, mechanical activity, binding coverage). No behavior change.
+    Coverage {
+        #[arg(long)]
+        session: String,
+    },
     /// Unified Tantivy search. Short alias inspired by ripgrep.
     Rg(SearchArgs),
     /// Grep the duotext `.layout.md` table sidecars for exact aligned rows (e.g. weapon params).
@@ -543,6 +550,7 @@ async fn main() -> Result<()> {
         }
         Commands::Turn(args) => turn_cli(args).await,
         Commands::Explain { session, turn } => explain_cli(&session, &turn).await,
+        Commands::Coverage { session } => coverage_cli(&session).await,
         Commands::Rg(args) => search_query_cli(args).await,
         Commands::GrepTable { query, limit, data_dir } => {
             let dir = data_dir.unwrap_or_else(default_data_dir);
@@ -1057,6 +1065,178 @@ fn format_turn_trace(t: &TurnTrace) -> String {
         }
     }
     out
+}
+
+/// `trpg coverage --session S`：只读会话活动/绑定覆盖报告。
+/// 聚合 turn_traces（Flight Recorder）+ domain_events 成人读摘要，零行为变更。
+async fn coverage_cli(session: &str) -> Result<()> {
+    let db = connect_db().await?;
+    let traces = db.list_turn_traces(session, 1000).await?;
+    let events = db.list_domain_events(session, 5000).await?;
+    println!("{}", format_coverage_report(session, &traces, &events));
+    Ok(())
+}
+
+/// 升序计数器：保插入序的 (key, count) 列表（小基数分布渲染稳定确定）。
+fn tally_push(acc: &mut Vec<(String, usize)>, key: &str) {
+    if let Some(slot) = acc.iter_mut().find(|(k, _)| k == key) {
+        slot.1 += 1;
+    } else {
+        acc.push((key.to_string(), 1));
+    }
+}
+
+/// 把 (key, count) 列表渲染为 `a=1, b=2` 紧凑串；空则 "(none)"。
+fn render_tally(acc: &[(String, usize)]) -> String {
+    if acc.is_empty() {
+        return "(none)".to_string();
+    }
+    acc.iter()
+        .map(|(k, c)| format!("{k}={c}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// 纯函数会话覆盖报告聚合器（DB-free 可测）。
+///
+/// 只输出计数 / kind / tier / verdict —— 与 explain 同隐私立场：不打私密念白正文、
+/// 不 dump 原始 json。覆盖等级（L0~L3）是**文档化启发式**，按实际执行了什么推断，
+/// 绝不按规则集 / 模组名分支（零硬编码）。
+fn format_coverage_report(session: &str, traces: &[TurnTrace], events: &[DomainEvent]) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("coverage report | session {session}\n"));
+
+    // ── 回合总览 ──────────────────────────────────────────────
+    let turns_total = traces.len();
+    if turns_total == 0 && events.is_empty() {
+        out.push_str("  (no turns)\n");
+        return out;
+    }
+    let mut failure_kinds: Vec<(String, usize)> = Vec::new();
+    let mut lifecycle: Vec<(String, usize)> = Vec::new();
+    let mut turns_failed = 0usize;
+    for t in traces {
+        if let Some(f) = &t.failure {
+            turns_failed += 1;
+            let kind = if f.failure_kind.is_empty() { "unknown" } else { &f.failure_kind };
+            tally_push(&mut failure_kinds, kind);
+        }
+        let life = if t.pp_lifecycle.is_empty() { "unknown" } else { &t.pp_lifecycle };
+        tally_push(&mut lifecycle, life);
+    }
+    out.push_str(&format!(
+        "turns: total={turns_total} failed={turns_failed}\n"
+    ));
+    out.push_str(&format!("  failure_kind: {}\n", render_tally(&failure_kinds)));
+    out.push_str(&format!("pp_lifecycle: {}\n", render_tally(&lifecycle)));
+
+    // ── 机械活动（from domain_events）─────────────────────────
+    let mut dice_rolled = 0usize;
+    let mut checks_resolved = 0usize;
+    let mut degree_dist: Vec<(String, usize)> = Vec::new();
+    let mut scene_transitions = 0usize;
+    let mut scene_routes: Vec<String> = Vec::new();
+    for ev in events {
+        match ev.kind {
+            DomainEventKind::DiceRolled => dice_rolled += 1,
+            DomainEventKind::CheckResolved => {
+                checks_resolved += 1;
+                let degree = ev
+                    .data
+                    .get("outcome")
+                    .and_then(|o| o.get("degree"))
+                    .and_then(|d| d.as_str())
+                    .unwrap_or("unknown");
+                tally_push(&mut degree_dist, degree);
+            }
+            DomainEventKind::SceneTransitioned => {
+                scene_transitions += 1;
+                let from = ev.data.get("from").and_then(|v| v.as_str()).unwrap_or("?");
+                let to = ev.data.get("to").and_then(|v| v.as_str()).unwrap_or("?");
+                let route = format!("{from}->{to}");
+                if !scene_routes.contains(&route) {
+                    scene_routes.push(route);
+                }
+            }
+            _ => {}
+        }
+    }
+    out.push_str("mechanical activity:\n");
+    out.push_str(&format!("  dice_rolled: {dice_rolled}\n"));
+    out.push_str(&format!("  checks_resolved: {checks_resolved}\n"));
+    out.push_str(&format!("    degree: {}\n", render_tally(&degree_dist)));
+    out.push_str(&format!("  scene_transitions: {scene_transitions}\n"));
+    if scene_routes.is_empty() {
+        out.push_str("    routes: (none)\n");
+    } else {
+        out.push_str(&format!("    routes: {}\n", scene_routes.join(", ")));
+    }
+
+    // ── 绑定覆盖（from traces[].binding_trace）────────────────
+    // per need_kind：verdict 分布 + 达到的最高 ExecutionTier。
+    struct BindAgg {
+        verdicts: Vec<(String, usize)>,
+        top_tier: ExecutionTier,
+    }
+    let mut binding: Vec<(String, BindAgg)> = Vec::new();
+    for t in traces {
+        for b in &t.binding_trace {
+            let nk = if b.need_kind.is_empty() { "unknown" } else { &b.need_kind };
+            let entry = match binding.iter_mut().find(|(k, _)| k == nk) {
+                Some((_, agg)) => agg,
+                None => {
+                    binding.push((nk.to_string(), BindAgg { verdicts: Vec::new(), top_tier: ExecutionTier::SourceOnly }));
+                    &mut binding.last_mut().unwrap().1
+                }
+            };
+            tally_push(&mut entry.verdicts, &format!("{:?}", b.verdict));
+            if execution_tier_rank(b.execution_tier) > execution_tier_rank(entry.top_tier) {
+                entry.top_tier = b.execution_tier;
+            }
+        }
+    }
+    out.push_str("binding coverage:\n");
+    if binding.is_empty() {
+        out.push_str("  (none)\n");
+    } else {
+        for (nk, agg) in &binding {
+            out.push_str(&format!(
+                "  {nk}: verdicts {{{}}} top_tier={:?}\n",
+                render_tally(&agg.verdicts),
+                agg.top_tier
+            ));
+        }
+    }
+
+    // ── 覆盖等级启发式（文档化，零规则集硬编码）───────────────
+    // 按本会话"实际执行了什么"由低到高推断，全部来自通用执行信号：
+    //   L0_indexed   : 仅有回合记录 / 念白，无任何机械活动。
+    //   L1_narrative  : 跑过场景切换（叙事在世界里移动）但仍无检定。
+    //   L2_checks     : 有检定结算（机械规则真在裁决）。
+    //   L3_combat     : 检定 + 掷骰 + 场景切换齐全（高机械密度，近战斗节奏）。
+    let level = if checks_resolved > 0 && dice_rolled > 0 && scene_transitions > 0 {
+        "L3_combat"
+    } else if checks_resolved > 0 {
+        "L2_checks"
+    } else if scene_transitions > 0 {
+        "L1_narrative"
+    } else {
+        "L0_indexed"
+    };
+    out.push_str(&format!("coverage level: {level}\n"));
+    out
+}
+
+/// ExecutionTier 的全序 rank（高=更精确执行）。binding 覆盖取"最高 tier"用。
+/// SourceOnly < GuidedRuling < PartialExecution < ExactExecution < VerifiedExecution。
+fn execution_tier_rank(t: ExecutionTier) -> u8 {
+    match t {
+        ExecutionTier::SourceOnly => 0,
+        ExecutionTier::GuidedRuling => 1,
+        ExecutionTier::PartialExecution => 2,
+        ExecutionTier::ExactExecution => 3,
+        ExecutionTier::VerifiedExecution => 4,
+    }
 }
 
 async fn resolve_text_input(
@@ -1719,5 +1899,92 @@ mod tests {
         assert!(out.contains('…'), "long data should be truncated with ellipsis:\n{out}");
         // 截断后每行字符数应远小于原始 data（~120 + 前缀 + kind），不会把 300 字符全打出来。
         assert!(out.chars().count() < 200, "truncated output too long ({}):\n{out}", out.chars().count());
+    }
+
+    // ── coverage 报告聚合器（DB-free）─────────────────────────────────────────
+    fn check_event(turn: &str, degree: &str) -> DomainEvent {
+        DomainEvent::new(
+            format!("de_{turn}_CheckResolved"),
+            "session-c",
+            turn,
+            DomainEventKind::CheckResolved,
+            serde_json::json!({ "check_id": "chk", "outcome": { "total": 55, "degree": degree } }),
+        )
+    }
+
+    #[test]
+    fn format_coverage_report_aggregates_turns_checks_bindings_and_level() {
+        // 两个回合：t1 成功带绑定，t2 失败。
+        let mut t1 = TurnTrace::new("turn-1", "session-c");
+        t1.signal = "turn_complete".into();
+        t1.pp_lifecycle = "complete".into();
+        t1.binding_trace = vec![
+            BindingPlan {
+                need_kind: "rule".into(),
+                verdict: BindingVerdict::Exact,
+                execution_tier: ExecutionTier::ExactExecution,
+                ..Default::default()
+            },
+            BindingPlan {
+                need_kind: "rule".into(),
+                verdict: BindingVerdict::Partial,
+                execution_tier: ExecutionTier::PartialExecution,
+                ..Default::default()
+            },
+        ];
+        let mut t2 = TurnTrace::new("turn-2", "session-c");
+        t2.signal = "turn_failed".into();
+        t2.pp_lifecycle = "failed".into();
+        t2.failure = Some(TurnFailureRecord {
+            phase: "finalize".into(),
+            message: "save_turn timeout".into(),
+            failure_kind: "failed_finalize".into(),
+        });
+        let traces = vec![t1, t2];
+
+        let events = vec![
+            DomainEvent::new("de_t1_DiceRolled", "session-c", "turn-1", DomainEventKind::DiceRolled,
+                serde_json::json!({ "expression": "1d100", "roller_id": "pc" })),
+            check_event("turn-1", "strong_success"),
+            check_event("turn-2", "failure"),
+            DomainEvent::new("de_t2_SceneTransitioned", "session-c", "turn-2", DomainEventKind::SceneTransitioned,
+                serde_json::json!({ "from": "sc01", "to": "sc02", "reason": "moved" })),
+        ];
+
+        let out = format_coverage_report("session-c", &traces, &events);
+
+        // 回合计数 + 失败 kind。
+        assert!(out.contains("total=2"), "turn count:\n{out}");
+        assert!(out.contains("failed=1"), "failed count:\n{out}");
+        assert!(out.contains("failed_finalize"), "failure_kind tally:\n{out}");
+        // pp_lifecycle 健康分布。
+        assert!(out.contains("complete=1"), "lifecycle complete:\n{out}");
+        assert!(out.contains("failed=1"), "lifecycle failed:\n{out}");
+        // 机械活动：dice + check degree tally + scene route。
+        assert!(out.contains("dice_rolled: 1"), "dice count:\n{out}");
+        assert!(out.contains("strong_success=1"), "degree tally:\n{out}");
+        assert!(out.contains("failure=1"), "degree tally failure:\n{out}");
+        assert!(out.contains("sc01->sc02"), "scene route:\n{out}");
+        // 绑定覆盖：verdict 计数 + 最高 tier。
+        assert!(out.contains("Exact=1"), "binding verdict Exact count:\n{out}");
+        assert!(out.contains("Partial=1"), "binding verdict Partial count:\n{out}");
+        assert!(out.contains("top_tier=ExactExecution"), "highest tier:\n{out}");
+        // 覆盖等级行：检定 + 掷骰 + 切场景齐全 → L3_combat。
+        assert!(out.contains("coverage level: L3_combat"), "coverage level line:\n{out}");
+    }
+
+    #[test]
+    fn format_coverage_report_empty_says_no_turns() {
+        let out = format_coverage_report("session-empty", &[], &[]);
+        assert!(out.contains("(no turns)"), "empty session should say (no turns):\n{out}");
+    }
+
+    #[test]
+    fn format_coverage_level_l2_checks_without_scene() {
+        // 有检定、无场景切换 → L2_checks（启发式按实际执行推断，无规则集分支）。
+        let t = TurnTrace::new("turn-1", "session-l2");
+        let events = vec![check_event("turn-1", "success")];
+        let out = format_coverage_report("session-l2", &[t], &events);
+        assert!(out.contains("coverage level: L2_checks"), "L2 level:\n{out}");
     }
 }
