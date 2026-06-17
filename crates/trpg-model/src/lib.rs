@@ -34,6 +34,8 @@ pub mod scope;
 pub use scope::*;
 pub mod context_block;
 pub use context_block::*;
+pub mod knowledge;
+pub use knowledge::*;
 
 pub const PROJECT_SCHEMA_VERSION: &str = "chatrpg.project_bundle.v1";
 pub const RULE_SCHEMA_VERSION: &str = "chatrpg.rule_bundle.v1";
