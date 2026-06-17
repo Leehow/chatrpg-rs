@@ -79,6 +79,9 @@ pub(crate) struct TurnContext {
     max_tool_rounds: u8,
     effect_closure_per_cluster: bool,
     messages: Option<TurnMessages>,
+    // 本回合已解析的 RuleKernel（context_assembly 单点载，影子 binding 读 → 出权威 Exact 绑定）。
+    // 不持久化、advisory；None = 未载到（fail-soft，影子退化为仅 need_kind 启发式）。
+    rule_kernel: Option<trpg_model::RuleKernel>,
     // —— T4 agent_loop 产物（run_agent_loop 填，尾部 phase 读）——
     visible_text: String,
     awaiting_gate: Option<AwaitingPlayerRoll>,
@@ -102,6 +105,7 @@ impl TurnContext {
             max_tool_rounds: 0,
             effect_closure_per_cluster: false,
             messages: None,
+            rule_kernel: None,
             visible_text: String::new(),
             awaiting_gate: None,
         }
@@ -123,6 +127,18 @@ impl TurnContext {
     /// 字段私有（module-private to turn_loop）故经此 accessor 暴露——不开放可变写。
     pub(crate) fn compiled(&self) -> &CompiledContext {
         &self.compiled
+    }
+
+    /// 本回合已解析的 RuleKernel（context_assembly 填）。影子 binding 读它派生权威 facet。
+    pub(crate) fn rule_kernel(&self) -> Option<&trpg_model::RuleKernel> {
+        self.rule_kernel.as_ref()
+    }
+
+    /// 测试 seam（kernel-facets 单测）：直接植入已解析 kernel，让 build_turn_trace 单测覆盖
+    /// 影子 binding 从 kernel 出 ruleset_check 计划，无需跑真 context_assembly / DB。
+    #[cfg(test)]
+    pub(crate) fn set_rule_kernel_for_test(&mut self, kernel: trpg_model::RuleKernel) {
+        self.rule_kernel = Some(kernel);
     }
 
     /// 测试 seam：直接植入 agent_loop 产物（visible_text / awaiting_gate），让纯单测
@@ -574,17 +590,23 @@ impl GmLoop {
             None => self.engine.prepare_turn_context(input.request, &ctx.state_agent, Some(input.user_input), input.recent_transcript).await?,
         };
         crate::prompts::validate_compiled_budget(&ctx.compiled, input.request)?;
+        // 单点载 RuleKernel：供 mode-catalog 子集（下方）+ 影子 binding（turn_trace 读 ctx.rule_kernel
+        // 出权威 ruleset_check/ruleset_resource 绑定）。一次 DB 读、fail-soft（载不到 → None，
+        // 影子退化为仅 need_kind 启发式，零行为变更）。
+        match self.engine.db.load_rule_kernel(&input.request.ruleset_id).await {
+            Ok(k) => ctx.rule_kernel = k,
+            Err(err) => tracing::warn!(error = %err, "rule kernel load failed (shadow binding/mode catalog degrade)"),
+        }
         let mut gm_skill = load_gm_skill_with_mode(&self.data_dir, &input.request.ruleset_id, ctx.mode_id.as_deref())?;
         if let Some(manifest) = &ctx.mode_manifest {
-            match self.engine.db.load_rule_kernel(&input.request.ruleset_id).await {
-                Ok(Some(kernel)) => {
+            match ctx.rule_kernel.as_ref() {
+                Some(kernel) => {
                     if let Some(section) = crate::mode_catalog::mode_catalog_section(&manifest.mode_id, &manifest.catalog_filter, &kernel.mechanics_catalog) {
                         gm_skill.push_str("\n\n---\n\n");
                         gm_skill.push_str(&section);
                     }
                 }
-                Ok(None) => tracing::warn!(ruleset_id = %input.request.ruleset_id, "mode catalog subset skipped: no active rule kernel"),
-                Err(err) => tracing::warn!(error = %err, "mode catalog subset skipped: rule kernel load failed"),
+                None => tracing::warn!(ruleset_id = %input.request.ruleset_id, "mode catalog subset skipped: no active rule kernel"),
             }
         }
         ctx.gm_skill = gm_skill;

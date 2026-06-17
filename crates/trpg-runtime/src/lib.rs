@@ -28,7 +28,10 @@ mod chargen;
 pub use chargen::{generate_starter_character, materialize_actor_params, CreatedCharacter};
 
 pub mod binding;
-pub use binding::{facets_from_need_traces, resolve_binding, shadow_bind, CapabilityRegistry};
+pub use binding::{
+    facets_from_kernel, facets_from_need_traces, resolve_binding, shadow_bind,
+    shadow_bind_with_kernel, CapabilityRegistry,
+};
 
 mod need_resolvers;
 

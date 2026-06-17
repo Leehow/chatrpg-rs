@@ -80,9 +80,12 @@ pub(crate) fn build_turn_trace(
     let mut trace = TurnTrace::new(&req.request.turn_id, &req.request.session_id);
     trace.phases_run = phases_run;
     trace.need_trace = compiled.need_trace.clone();
-    // 影子绑定（advisory，优化2 #3 起步）：按本回合 Need traces 产 BindingPlan 记进 Flight Recorder。
-    // 纯函数、确定性、零行为变更——不改任何 emit/结算/状态，仅充实 trace。
-    trace.binding_trace = trpg_runtime::shadow_bind(&compiled.need_trace, &SHADOW_REGISTRY);
+    // 影子绑定（advisory，优化2 #3）：按本回合 Need traces 产 BindingPlan，**并加上**（kernel 已载时）
+    // 从已解析 RuleKernel 派生的权威 ruleset_check/ruleset_resource 绑定（dice_core→检定 capability +
+    // 资源轨，有据 → Exact）记进 Flight Recorder。纯函数、确定性、零行为变更——不改任何
+    // emit/结算/状态，仅充实 trace。kernel=None（载失败/无）→ 退化为仅 need_kind 启发式。
+    trace.binding_trace =
+        trpg_runtime::shadow_bind_with_kernel(&compiled.need_trace, ctx.rule_kernel(), &SHADOW_REGISTRY);
     trace.bp1_hash = hash_opt(&compiled.prefix_hash);
     trace.bp2_hash = hash_opt(&compiled.pinned_hash);
     trace.bp3_hash = hash_opt(&compiled.dynamic_hash);
@@ -246,6 +249,33 @@ mod tests {
         assert_eq!(plan.need_kind, "rule");
         assert_eq!(plan.verdict, BindingVerdict::Exact, "候选命中 registry + 有来源 → Exact");
         assert!(plan.capability.is_some(), "Exact 必带命中的 capability");
+    }
+
+    // kernel-facets：ctx 携带已解析 kernel（dice_core.compare="roll_under" + source_refs）→
+    // binding_trace 含一条权威 ruleset_check 计划（Exact、capability=check.roll_under）。
+    #[test]
+    fn build_turn_trace_with_kernel_yields_exact_ruleset_check_plan() {
+        let req = req_with("turn-k", "sess-k");
+        let mut ctx = TurnContext::new();
+        ctx.set_compiled_for_test(CompiledContext::default()); // need_trace 空
+        ctx.set_rule_kernel_for_test(trpg_model::RuleKernel {
+            kernel_id: "k".into(),
+            ruleset_id: "rs".into(),
+            version: "1".into(),
+            dice_core: serde_json::json!({ "compare": "roll_under" }),
+            source_refs: vec![SourceRef { source_id: "coc_rulebook".into(), page: Some(82), ..Default::default() }],
+            ..Default::default()
+        });
+
+        let trace = build_turn_trace(
+            &req, &ctx, "TurnComplete".into(), vec!["context_assembly".into()],
+            None, None, vec![], "complete",
+        );
+
+        let plan = trace.binding_trace.iter().find(|p| p.need_kind == "ruleset_check")
+            .expect("kernel 派生 ruleset_check 计划");
+        assert_eq!(plan.verdict, BindingVerdict::Exact, "kernel dice_core 有据 → Exact");
+        assert_eq!(plan.capability.as_deref(), Some("check.roll_under"));
     }
 
     // 失败路径（空 need_trace）：shadow_bind 产空 → binding_trace 空（零行为变更佐证）。

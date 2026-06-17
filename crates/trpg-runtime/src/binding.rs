@@ -21,8 +21,8 @@
 
 use std::collections::HashSet;
 use trpg_model::{
-    AssetFacet, BindingPlan, BindingVerdict, ExecutionTier, NeedResolutionTrace, SourceRef,
-    CAP_ACTOR_PATCH, CAP_CHECK_COUNT_FACES, CAP_CHECK_MEET_OR_BEAT, CAP_CHECK_OPPOSED,
+    AssetFacet, BindingPlan, BindingVerdict, ExecutionTier, NeedResolutionTrace, RuleKernel,
+    SourceRef, CAP_ACTOR_PATCH, CAP_CHECK_COUNT_FACES, CAP_CHECK_MEET_OR_BEAT, CAP_CHECK_OPPOSED,
     CAP_CHECK_ROLL_UNDER, CAP_CLOCK_TICK, CAP_RESOURCE_DELTA, CAP_TABLE_LOOKUP,
     CAP_VISIBILITY_REVEAL, ALL_CAPABILITIES,
 };
@@ -188,149 +188,104 @@ pub fn facets_from_need_traces(
 }
 
 /// 便利函数：adapter + 逐组 resolve，产出 advisory `BindingPlan` 列表（trpg-gm T3 入口）。
+/// 仅经 need_kind 启发式（无 kernel）；back-compat 委派给 `shadow_bind_with_kernel(None)`。
 pub fn shadow_bind(
     need_traces: &[NeedResolutionTrace],
     reg: &CapabilityRegistry,
 ) -> Vec<BindingPlan> {
-    facets_from_need_traces(need_traces)
+    shadow_bind_with_kernel(need_traces, None, reg)
+}
+
+/// kernel.dice_core.compare 值 → 检定 capability id 的**确定性**映射（无 LLM、无规则集名）。
+/// 这是通用 check-model 名（roll_under/meet_or_beat/count_faces），非规则集名 → 守卫放行。
+/// 未知/空 → None（fail-soft，不造 facet）。
+fn check_capability_for_compare(compare: &str) -> Option<&'static str> {
+    match compare {
+        "roll_under" => Some(CAP_CHECK_ROLL_UNDER),
+        "meet_or_beat" => Some(CAP_CHECK_MEET_OR_BEAT),
+        "count_faces" => Some(CAP_CHECK_COUNT_FACES),
+        _ => None,
+    }
+}
+
+/// 纯函数（确定性、无 LLM/DB/随机/时钟）：从已解析的 `RuleKernel` 派生权威 `AssetFacet`。
+///
+/// - **check_model facet**：读 `kernel.dice_core.compare` 字符串 → `check_capability_for_compare`
+///   映射到对应检定 capability；facet_kind="check_model"、binding_candidates=[该 capability]、
+///   confidence=0.9、source_refs=kernel.source_refs（**有据** → resolve_binding 出 Exact）。
+///   compare 未知/缺失 → 不产 check facet（fail-soft）。
+/// - **resource facet**：若 `kernel.resource_tracks` 非空 → 产一条聚合 resource facet
+///   （facet_kind="resource"、binding_candidates=[CAP_RESOURCE_DELTA]、confidence=0.8、
+///   source_refs=kernel.source_refs）。
+/// - 无可用 dice_core/resources → 返回空 Vec（fail-soft）。
+pub fn facets_from_kernel(kernel: &RuleKernel) -> Vec<AssetFacet> {
+    let mut facets: Vec<AssetFacet> = Vec::new();
+
+    let compare = kernel
+        .dice_core
+        .get("compare")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    if let Some(cap) = check_capability_for_compare(compare) {
+        facets.push(AssetFacet {
+            facet_kind: "check_model".to_string(),
+            binding_candidates: vec![cap.to_string()],
+            confidence: 0.9,
+            source_refs: kernel.source_refs.clone(),
+        });
+    }
+
+    if !kernel.resource_tracks.is_empty() {
+        facets.push(AssetFacet {
+            facet_kind: "resource".to_string(),
+            binding_candidates: vec![CAP_RESOURCE_DELTA.to_string()],
+            confidence: 0.8,
+            source_refs: kernel.source_refs.clone(),
+        });
+    }
+
+    facets
+}
+
+/// 便利函数（trpg-gm 影子入口）：need-trace 启发式计划 **加上**（kernel 存在时）从已解析
+/// kernel 派生的权威计划——`ruleset_check`（dice_core→检定 capability，有据 → Exact）与
+/// `ruleset_resource`（resource_tracks → CAP_RESOURCE_DELTA）。kernel=None 则等价旧 `shadow_bind`。
+///
+/// 仍是 advisory / SHADOW：只充实 trace.binding_trace，**零行为变更**（不改 emit/结算/状态）。
+pub fn shadow_bind_with_kernel(
+    need_traces: &[NeedResolutionTrace],
+    kernel: Option<&RuleKernel>,
+    reg: &CapabilityRegistry,
+) -> Vec<BindingPlan> {
+    let mut plans: Vec<BindingPlan> = facets_from_need_traces(need_traces)
         .into_iter()
         .map(|(need_kind, facets)| resolve_binding(&need_kind, &facets, reg))
-        .collect()
+        .collect();
+
+    if let Some(kernel) = kernel {
+        let kernel_facets = facets_from_kernel(kernel);
+        let check_facets: Vec<AssetFacet> = kernel_facets
+            .iter()
+            .filter(|f| f.facet_kind == "check_model")
+            .cloned()
+            .collect();
+        if !check_facets.is_empty() {
+            plans.push(resolve_binding("ruleset_check", &check_facets, reg));
+        }
+        let resource_facets: Vec<AssetFacet> = kernel_facets
+            .iter()
+            .filter(|f| f.facet_kind == "resource")
+            .cloned()
+            .collect();
+        if !resource_facets.is_empty() {
+            plans.push(resolve_binding("ruleset_resource", &resource_facets, reg));
+        }
+    }
+
+    plans
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use trpg_model::{CAP_CHECK_MEET_OR_BEAT, CAP_CHECK_ROLL_UNDER};
-
-    fn a_source_ref() -> SourceRef {
-        SourceRef {
-            source_id: "coc_rulebook".to_string(),
-            page: Some(88),
-            ..Default::default()
-        }
-    }
-
-    fn facet(candidates: Vec<&str>, sources: Vec<SourceRef>) -> AssetFacet {
-        AssetFacet {
-            facet_kind: "check".to_string(),
-            binding_candidates: candidates.into_iter().map(|c| c.to_string()).collect(),
-            confidence: 0.5,
-            source_refs: sources,
-        }
-    }
-
-    fn trace(need_kind: &str, sources: Vec<SourceRef>) -> NeedResolutionTrace {
-        NeedResolutionTrace {
-            need_kind: need_kind.to_string(),
-            source_refs: sources,
-            reason: "test".to_string(),
-            block_count: 0,
-        }
-    }
-
-    #[test]
-    fn verdict_exact_when_candidate_registered_and_sourced() {
-        let reg = CapabilityRegistry::with_defaults();
-        let facets = vec![facet(vec![CAP_CHECK_ROLL_UNDER], vec![a_source_ref()])];
-        let plan = resolve_binding("rule", &facets, &reg);
-        assert_eq!(plan.verdict, BindingVerdict::Exact);
-        assert_eq!(plan.capability.as_deref(), Some(CAP_CHECK_ROLL_UNDER));
-        assert_eq!(plan.execution_tier, ExecutionTier::ExactExecution);
-        assert_eq!(plan.confidence, 0.9);
-        assert!(plan.unresolved_reason.is_none());
-    }
-
-    #[test]
-    fn verdict_partial_when_registered_no_source() {
-        let reg = CapabilityRegistry::with_defaults();
-        let facets = vec![facet(vec![CAP_CHECK_MEET_OR_BEAT], vec![])];
-        let plan = resolve_binding("rule", &facets, &reg);
-        assert_eq!(plan.verdict, BindingVerdict::Partial);
-        assert_eq!(plan.capability.as_deref(), Some(CAP_CHECK_MEET_OR_BEAT));
-        assert_eq!(plan.execution_tier, ExecutionTier::PartialExecution);
-        assert_eq!(plan.confidence, 0.6);
-    }
-
-    #[test]
-    fn verdict_guided_when_candidate_unregistered_but_sourced() {
-        let reg = CapabilityRegistry::with_defaults();
-        let facets = vec![facet(vec!["check.bogus_unregistered"], vec![a_source_ref()])];
-        let plan = resolve_binding("rule", &facets, &reg);
-        assert_eq!(plan.verdict, BindingVerdict::Guided);
-        assert!(plan.capability.is_none());
-        assert_eq!(plan.execution_tier, ExecutionTier::GuidedRuling);
-        assert_eq!(plan.confidence, 0.4);
-        assert_eq!(
-            plan.unresolved_reason.as_deref(),
-            Some("no registered capability for candidates")
-        );
-    }
-
-    #[test]
-    fn verdict_source_only_when_only_source() {
-        let reg = CapabilityRegistry::with_defaults();
-        let facets = vec![facet(vec![], vec![a_source_ref()])];
-        let plan = resolve_binding("rule", &facets, &reg);
-        assert_eq!(plan.verdict, BindingVerdict::SourceOnly);
-        assert!(plan.capability.is_none());
-        assert_eq!(plan.execution_tier, ExecutionTier::SourceOnly);
-        assert_eq!(plan.confidence, 0.3);
-    }
-
-    #[test]
-    fn verdict_unsupported_when_empty() {
-        let reg = CapabilityRegistry::with_defaults();
-        let facets = vec![facet(vec![], vec![])];
-        let plan = resolve_binding("rule", &facets, &reg);
-        assert_eq!(plan.verdict, BindingVerdict::Unsupported);
-        assert!(plan.capability.is_none());
-        assert_eq!(plan.execution_tier, ExecutionTier::SourceOnly);
-        assert_eq!(plan.confidence, 0.0);
-        assert_eq!(
-            plan.unresolved_reason.as_deref(),
-            Some("no facet candidates or source")
-        );
-    }
-
-    #[test]
-    fn resolve_binding_is_deterministic() {
-        let reg = CapabilityRegistry::with_defaults();
-        let facets = vec![facet(vec![CAP_CHECK_ROLL_UNDER], vec![a_source_ref()])];
-        let a = resolve_binding("rule", &facets, &reg);
-        let b = resolve_binding("rule", &facets, &reg);
-        assert_eq!(a, b);
-        assert_eq!(a.binding_id, "bind:rule");
-    }
-
-    #[test]
-    fn shadow_bind_over_need_traces() {
-        let reg = CapabilityRegistry::with_defaults();
-        let traces = vec![
-            trace("rule", vec![a_source_ref()]),
-            trace("scene", vec![]),
-        ];
-        let plans = shadow_bind(&traces, &reg);
-        assert_eq!(plans.len(), 2);
-
-        let rule_plan = plans.iter().find(|p| p.need_kind == "rule").unwrap();
-        // rule → candidates include registered check caps + has source → Exact.
-        assert_eq!(rule_plan.verdict, BindingVerdict::Exact);
-        assert_eq!(rule_plan.binding_id, "bind:rule");
-
-        let scene_plan = plans.iter().find(|p| p.need_kind == "scene").unwrap();
-        // scene → candidates registered (visibility/clock) but no source → Partial.
-        assert_eq!(scene_plan.verdict, BindingVerdict::Partial);
-        assert_eq!(scene_plan.binding_id, "bind:scene");
-    }
-
-    #[test]
-    fn registry_has_all_11() {
-        let reg = CapabilityRegistry::with_defaults();
-        assert_eq!(ALL_CAPABILITIES.len(), 11);
-        for cap in ALL_CAPABILITIES {
-            assert!(reg.has(cap), "registry should have {cap}");
-        }
-        assert!(!reg.has("nope"));
-    }
-}
+#[path = "binding_tests.rs"]
+mod tests;
