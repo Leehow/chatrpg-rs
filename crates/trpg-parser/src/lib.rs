@@ -2435,6 +2435,28 @@ fn default_character_sections_for_fields(ruleset_id: &str, fields: &[CharacterFi
     }
     sections
 }
+
+/// The ruleset-neutral starter-archetype fallback: a small set of universal
+/// play-role recommendations (frontline / specialist / social-support / balanced
+/// generalist) that fit any system. Fires only when the LLM-compiled starter pack
+/// has zero archetypes; concrete per-ruleset archetypes come from that compiled
+/// pack (the single source of truth), never from a per-ruleset Rust branch.
+fn default_starter_archetypes(_ruleset_id: &str) -> Vec<RecommendedArchetype> {
+    let a = |archetype_id: &str, title: &str, summary: &str, fit_tags: &[&str]| RecommendedArchetype {
+        archetype_id: archetype_id.into(),
+        title: title.into(),
+        summary: summary.into(),
+        fit_tags: fit_tags.iter().map(|s| s.to_string()).collect(),
+        required_option_refs: vec![],
+        source_refs: vec![],
+    };
+    vec![
+        a("frontline_combatant", "Frontline combatant", "A durable character built to hold the line in direct conflict and protect allies.", &["combat", "frontline"]),
+        a("skilled_specialist", "Skilled specialist", "A versatile expert for investigation, exploration, technical problems, and other non-combat obstacles.", &["skills", "exploration", "investigation"]),
+        a("social_support", "Social / support", "A people-facing character built around contacts, negotiation, support, and keeping allies going.", &["social", "support"]),
+        a("balanced_starter", "Balanced starter character", "A concept-first generalist with enough source-backed mechanics to enter the first scene.", &["starter", "balanced"]),
+    ]
+}
 // guard:no-ruleset-name-literals END
 
 fn source_refs_for_keywords(book: &PlainTextBook, keywords: &[&str], limit: usize) -> Vec<SourceRef> {
@@ -2578,33 +2600,6 @@ fn pregens_from_book(book: &PlainTextBook, ruleset_id: &str) -> Vec<PregenCharac
         }
     }
     pregens
-}
-
-fn default_starter_archetypes(ruleset_id: &str) -> Vec<RecommendedArchetype> {
-    if ruleset_id.contains("cyberpunk") {
-        vec![
-            RecommendedArchetype { archetype_id: "tech_or_netrunner".into(), title: "Tech / Netrunner investigator".into(), summary: "Good for technical clues, devices, NET architecture, and unusual hardware.".into(), fit_tags: vec!["technical".into(), "investigation".into()], required_option_refs: vec![], source_refs: vec![] },
-            RecommendedArchetype { archetype_id: "solo_or_lawman".into(), title: "Solo / Lawman responder".into(), summary: "Good for dangerous scenes, firefights, protecting bystanders, and tactical pressure.".into(), fit_tags: vec!["combat".into(), "street".into()], required_option_refs: vec![], source_refs: vec![] },
-            RecommendedArchetype { archetype_id: "fixer_or_media".into(), title: "Fixer / Media connector".into(), summary: "Good for contacts, legwork, negotiation, and street-level complications.".into(), fit_tags: vec!["social".into(), "contacts".into()], required_option_refs: vec![], source_refs: vec![] },
-        ]
-    } else if ruleset_id.contains("cthulhu") || ruleset_id.contains("brp") {
-        vec![
-            RecommendedArchetype { archetype_id: "investigator".into(), title: "Investigator".into(), summary: "Built around observation, research, interviewing, and following clues.".into(), fit_tags: vec!["investigation".into()], required_option_refs: vec![], source_refs: vec![] },
-            RecommendedArchetype { archetype_id: "doctor_or_academic".into(), title: "Doctor / Academic".into(), summary: "Good for specialized knowledge, analysis, medicine, and slow-burn horror.".into(), fit_tags: vec!["knowledge".into(), "support".into()], required_option_refs: vec![], source_refs: vec![] },
-        ]
-    } else if ruleset_id.contains("triangle") {
-        vec![
-            RecommendedArchetype { archetype_id: "field_agent_balanced".into(), title: "Balanced Field Agent".into(), summary: "Choose ARC and Competency to cover investigation, weird powers, and workplace complications.".into(), fit_tags: vec!["fieldwork".into(), "anomaly".into()], required_option_refs: vec![], source_refs: vec![] },
-        ]
-    } else if ruleset_id.contains("sword_world") || ruleset_id.contains("dnd") {
-        vec![
-            RecommendedArchetype { archetype_id: "frontline".into(), title: "Frontline defender".into(), summary: "A durable character who can survive direct conflict.".into(), fit_tags: vec!["frontline".into(), "combat".into()], required_option_refs: vec![], source_refs: vec![] },
-            RecommendedArchetype { archetype_id: "healer_support".into(), title: "Healer / support".into(), summary: "A support character with recovery or protective abilities.".into(), fit_tags: vec!["support".into(), "healing".into()], required_option_refs: vec![], source_refs: vec![] },
-            RecommendedArchetype { archetype_id: "scout_expert".into(), title: "Scout / expert".into(), summary: "Useful for exploration, traps, knowledge, or non-combat obstacles.".into(), fit_tags: vec!["exploration".into(), "skills".into()], required_option_refs: vec![], source_refs: vec![] },
-        ]
-    } else {
-        vec![RecommendedArchetype { archetype_id: "balanced_starter".into(), title: "Balanced starter character".into(), summary: "A concept-first character with enough source-backed mechanics to enter the first scene.".into(), fit_tags: vec!["starter".into()], required_option_refs: vec![], source_refs: vec![] }]
-    }
 }
 
 fn infer_character_runtime_bindings(template: &CharacterTemplate) -> Vec<CharacterRuntimeBinding> {
@@ -3922,5 +3917,18 @@ mod dehardcode_seed_tests {
         let neutral = default_character_fields_for_ruleset("dnd5e");
         assert_eq!(jv(&tmpl.fields), jv(&neutral),
             "fallback_character_template fields must equal the neutral fallback (single source of truth)");
+    }
+
+    #[test]
+    fn starter_archetypes_are_ruleset_neutral() {
+        // The starter-archetype fallback must NOT branch on ruleset id: every ruleset
+        // (and an unknown one) gets the same neutral generic archetype set. Per-ruleset
+        // archetypes come from the LLM-compiled starter pack, never from a Rust branch.
+        let cpr = default_starter_archetypes("cyberpunk_red");
+        let coc = default_starter_archetypes("call_of_cthulhu");
+        let unknown = default_starter_archetypes("some_unknown_system");
+        assert!(!cpr.is_empty(), "neutral fallback must still recommend at least one archetype");
+        assert_eq!(jv(&cpr), jv(&coc), "cyberpunk_red and call_of_cthulhu must yield identical neutral archetypes");
+        assert_eq!(jv(&coc), jv(&unknown), "known and unknown rulesets must yield identical neutral archetypes");
     }
 }
