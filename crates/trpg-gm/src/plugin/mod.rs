@@ -16,12 +16,16 @@
 pub mod builtin_no_mechanical;
 pub mod builtin_no_spoiler;
 pub mod builtin_player_agency;
+pub mod builtin_scene_boundary;
+pub mod builtin_source_backed;
 pub mod host;
 pub mod types;
 
 pub use builtin_no_mechanical::NoMechanicalInvention;
 pub use builtin_no_spoiler::NoSpoilerGuard;
 pub use builtin_player_agency::PlayerAgencyGuard;
+pub use builtin_scene_boundary::SceneBoundaryGuard;
+pub use builtin_source_backed::SourceBackedRulesGuard;
 pub use host::{PluginHost, RuntimePlugin};
 pub use types::{
     ContextFilterSpec, ContributionMeta, FailPolicy, PluginContext, PluginContribution,
@@ -40,9 +44,12 @@ use std::sync::LazyLock;
 static PLUGIN_HOST: LazyLock<PluginHost> = LazyLock::new(|| {
     let mut host = PluginHost::new();
     host.register(Box::new(NoSpoilerGuard));
-    // 通用纯 prompt 守卫（always-on，无模组门）：不私造机械结果 + 玩家自主权。
+    // 通用纯 prompt 守卫（always-on，无模组门）：不私造机械结果 + 玩家自主权 + 规则来源可考。
     host.register(Box::new(NoMechanicalInvention));
     host.register(Box::new(PlayerAgencyGuard));
+    host.register(Box::new(SourceBackedRulesGuard));
+    // 模组门控纯 prompt 守卫：场景边界（只对有预设场景图的模组生效）。
+    host.register(Box::new(SceneBoundaryGuard));
     host
 });
 
@@ -63,38 +70,46 @@ mod host_seed_tests {
         }
     }
 
-    /// 进程级 host 已 seed 三个内置插件。
+    /// 进程级 host 已 seed 五个内置插件。
     #[test]
-    fn builtin_host_seeds_three_plugins() {
-        assert_eq!(builtin_plugin_host().len(), 3);
+    fn builtin_host_seeds_five_plugins() {
+        assert_eq!(builtin_plugin_host().len(), 5);
     }
 
-    /// 非模组 session：always-on 两守卫产 2 条（no_spoiler 是模组门，不产）。
+    /// 非模组 session：always-on 三守卫产 3 条（no_spoiler/scene_boundary 是模组门，不产）。
     #[tokio::test]
-    async fn builtin_host_non_module_emits_two_universal_guards() {
+    async fn builtin_host_non_module_emits_universal_guards() {
         let out = builtin_plugin_host().run_hook(&assembly_ctx(None)).await;
         let ids: Vec<&str> = out.iter().map(|c| c.meta.plugin_id.as_str()).collect();
-        // 同为 Safety 级，按 priority 降序：no_mech(850) > player_agency(800)。
+        // 同为 Safety 级，按 priority 降序：
+        // no_mech(850) > player_agency(800) > source_backed(750)。
         assert_eq!(
             ids,
-            vec!["core.no_mechanical_invention", "core.player_agency_guard"]
+            vec![
+                "core.no_mechanical_invention",
+                "core.player_agency_guard",
+                "core.source_backed_rules_guard",
+            ]
         );
     }
 
-    /// 模组 session：三守卫全产 3 条，且按 (safety_class, priority desc) 排序。
+    /// 模组 session：五守卫全产 5 条，且按 (safety_class, priority desc) 排序。
     #[tokio::test]
-    async fn builtin_host_module_emits_three_ordered() {
+    async fn builtin_host_module_emits_all_ordered() {
         let out = builtin_plugin_host()
             .run_hook(&assembly_ctx(Some("mod")))
             .await;
         let ids: Vec<&str> = out.iter().map(|c| c.meta.plugin_id.as_str()).collect();
-        // 全 Safety 级 → priority 降序：no_spoiler(900) > no_mech(850) > player_agency(800)。
+        // 全 Safety 级 → priority 降序：no_spoiler(900) > no_mech(850) >
+        // player_agency(800) > source_backed(750) > scene_boundary(700)。
         assert_eq!(
             ids,
             vec![
                 "core.no_spoiler_guard",
                 "core.no_mechanical_invention",
                 "core.player_agency_guard",
+                "core.source_backed_rules_guard",
+                "core.scene_boundary_guard",
             ]
         );
     }
