@@ -12,6 +12,7 @@ use futures_util::StreamExt;
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 use trpg_interaction::InteractionLifecycleKernel;
 use trpg_llm::{LlmClient, StreamEvent, ToolChoice};
 use trpg_model::{ChatMessage, CompiledContext, ContextRequest, MechanicDue, MemoryEvent, MemoryKind, RuntimeState, StateFrame, Visibility, WorldEventKind};
@@ -375,11 +376,18 @@ impl GmLoop {
     /// 产物（visible_text / awaiting_gate）写回 `ctx` 供尾部 phase 读。verify /
     /// finalize 不在此跑——解释器作为 Postprocess phase 跑。run_gm_turn 与本方法
     /// 暂时共存（重复可接受、临时——run_gm_turn 在 Task 5/7 删除）。
+    ///
+    /// P1-3 follow-up：`cancel` 是 transport（trpg-api SSE 驱动器）的取消令牌。客户端
+    /// 在状态变更前断开 → driver `cancel.cancel()`。本 loop 在**每轮起点**与 **LLM 流分块
+    /// 之间**检查它，一旦 fire 就放弃在途生成（drop stream 即停 relay，不再续烧 token）、
+    /// `break 'rounds`、并跳过「轮耗尽逼散文」那一轮。`cancel=None`（CLI/测试）⇒ 取消等待
+    /// 分支永久 pending ⇒ 退化为裸 `stream.next().await`，非取消路径逐字节零行为变更。
     pub(crate) async fn run_agent_loop(
         &mut self,
         ctx: &mut TurnContext,
         input: &GmTurnInput<'_>,
         tx: &tokio::sync::mpsc::Sender<crate::turn_event::TurnEvent>,
+        cancel: Option<&CancellationToken>,
     ) -> crate::execute::AgentSignal {
         use crate::turn_event::TurnEvent;
         let messages = ctx.messages.as_mut().expect("context_assembly assembles messages");
@@ -392,6 +400,9 @@ impl GmLoop {
         let mut visible_text = String::new();
         let mut awaiting: Option<AwaitingPlayerRoll> = None;
         let mut narrated = false;
+        // P1-3 follow-up：取消标志——top-of-round 检查或流分块间 select 命中取消时置 true，
+        // 用于 `break 'rounds` 后跳过「轮耗尽逼散文」并指示尾段已被放弃。
+        let mut cancelled = false;
         // B6：obligations 暂入互斥单元——与 run_gm_turn 同款（dispatch 链上 ToolCtx
         // 是共享引用，waive_obligation 需点改清单；块结束取回持久字段）。
         let obligations_cell = std::sync::Mutex::new(std::mem::take(&mut self.obligations));
@@ -399,6 +410,8 @@ impl GmLoop {
             let tools = ctx.mode_tools.as_ref().unwrap_or(&self.tools);
             let tool_ctx = ToolCtx { engine: &self.engine, request: input.request, state: &ctx.state_agent, scene_extractor: self.scene_extractor.as_ref(), obligations: Some(&obligations_cell), data_dir: Some(&self.data_dir), current_mode: mode_id.as_deref(), opposed_binding: opposed_binding.as_ref() };
             'rounds: for round in 0..max_tool_rounds {
+                // P1-3 follow-up：本轮起点先查取消——已 fire 则连 LLM 请求都不发（最省 token）。
+                if is_cancelled(cancel) { cancelled = true; break 'rounds; }
                 tracing::info!(
                     target: "gm_cache",
                     session_id = %input.request.session_id,
@@ -435,7 +448,7 @@ impl GmLoop {
                 };
                 let mut saw_tool = false;
                 let mut redactor = RedactingBuffer::new(ledger.private_roll_tokens());
-                while let Some(event) = stream.next().await {
+                while let Some(event) = next_stream_event(&mut stream, cancel, &mut cancelled).await {
                     let event = match event { Ok(e) => e, Err(err) => { tracing::warn!(error = %err, "agent loop stream event error"); break; } };
                     match event {
                         StreamEvent::ContentDelta(delta) => {
@@ -481,6 +494,8 @@ impl GmLoop {
                     }
                 }
                 drain_redactor_tx(&mut redactor, blocked, tx, &mut visible_text).await;
+                // P1-3 follow-up：流分块间 select 命中取消 ⇒ 放弃整个 agent loop（不续轮、不逼散文）。
+                if cancelled { break 'rounds; }
                 if saw_tool || blocked { continue 'rounds; }
                 narrated = true;
                 break 'rounds;
@@ -495,19 +510,23 @@ impl GmLoop {
             return crate::execute::AgentSignal::AwaitingPlayerRoll;
         }
         // —— 轮数耗尽且模型仍要工具：追加唯一一轮 ToolChoice::None 逼散文 ——
-        if !narrated {
+        // P1-3 follow-up：已取消则连这轮逼散文 LLM 都不发（cancelled 在主循环置位）。
+        if !narrated && !cancelled {
             match self.llm.stream_chat_with_tools(messages.to_request_messages(), schemas, ToolChoice::None).await {
                 Ok(mut stream) => {
                     let mut redactor = RedactingBuffer::new(ledger.private_roll_tokens());
-                    while let Some(event) = stream.next().await {
+                    while let Some(event) = next_stream_event(&mut stream, cancel, &mut cancelled).await {
                         let event = match event { Ok(e) => e, Err(err) => { tracing::warn!(error = %err, "agent loop forced-prose stream error"); break; } };
                         if let StreamEvent::ContentDelta(delta) = event {
                             let safe = redactor.push(&delta);
                             if !safe.is_empty() { let _ = tx.send(TurnEvent::Delta(safe.clone())).await; visible_text.push_str(&safe); }
                         }
                     }
-                    let rest = redactor.finish();
-                    if !rest.is_empty() { let _ = tx.send(TurnEvent::Delta(rest.clone())).await; visible_text.push_str(&rest); }
+                    // 取消则放弃残余尾窗（生成已弃）；非取消路径与原逐字一致。
+                    if !cancelled {
+                        let rest = redactor.finish();
+                        if !rest.is_empty() { let _ = tx.send(TurnEvent::Delta(rest.clone())).await; visible_text.push_str(&rest); }
+                    }
                 }
                 Err(err) => tracing::warn!(error = %err, "agent loop forced-prose stream failed"),
             }
@@ -912,6 +931,39 @@ impl GmLoop {
             Some(gate) => TurnOutcome::AwaitingPlayerRoll { check_id: gate.check_id, prompt_public: gate.prompt_public },
             None => TurnOutcome::Narration(std::mem::take(&mut ctx.visible_text)),
         }
+    }
+}
+
+/// P1-3 follow-up：取消等待 future。有令牌 → 等其 `cancelled()`；无令牌 → 永久 pending
+/// （让 `select!` 永远选中流事件分支）⇒ 非取消路径与裸 `stream.next().await` 逐字节等价。
+async fn wait_for_cancel(cancel: Option<&CancellationToken>) {
+    match cancel {
+        Some(tok) => tok.cancelled().await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+/// P1-3 follow-up：令牌是否已 fire（top-of-round / 逼散文前的同步检查）。无令牌恒 false。
+fn is_cancelled(cancel: Option<&CancellationToken>) -> bool {
+    cancel.is_some_and(|c| c.is_cancelled())
+}
+
+/// P1-3 follow-up：取下一个 LLM 流事件，但取消令牌 fire 时**放弃在途生成**。返回 `None`
+/// 既表示流自然结束、也表示被取消——用 `*cancelled` 区分（被取消 ⇒ caller `break 'rounds`
+/// 不再续轮/逼散文）。`biased` 让每次 poll 先查取消（及时止血、测试确定）；`cancel=None` ⇒
+/// 取消分支永久 pending ⇒ 退化为裸 `stream.next().await`，非取消路径逐字节零行为变更。
+async fn next_stream_event<S>(
+    stream: &mut S,
+    cancel: Option<&CancellationToken>,
+    cancelled: &mut bool,
+) -> Option<anyhow::Result<StreamEvent>>
+where
+    S: futures_core::Stream<Item = anyhow::Result<StreamEvent>> + Unpin,
+{
+    tokio::select! {
+        biased;
+        _ = wait_for_cancel(cancel) => { *cancelled = true; None }
+        ev = stream.next() => ev,
     }
 }
 

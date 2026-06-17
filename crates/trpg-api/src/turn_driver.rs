@@ -11,13 +11,19 @@
 //!   不落半截回合；变更**后** → 续 drain 让 critical finalize 落地，并在该回合记
 //!   `client_disconnected` 标记。
 //!
-//! ## 范围与诚实的边界
-//! 本驱动器只活在 trpg-api（「只读 GM 类型」约束）。`execute_turn` 内部自起 detached
-//! tokio 任务跑 pipeline，并不返回其 JoinHandle，且 `run_agent_loop` 对自己的 `tx.send`
-//! 也 `let _ =` 吞错——**故从 trpg-api 无法硬中断已在飞的 LLM 生成**。这里的「取消」是
-//! 尽力而为：停止 relay、drop 掉事件流、fire CancellationToken（语义信号，且为未来把
-//! token 穿进 `execute_turn` 留好接缝）。真正的 mid-LLM 硬中断需 `execute_turn` 协作
-//! （后续切片，需改 GM crate，超出本任务范围）。
+//! ## 范围与诚实的边界（P1-3 follow-up 已让取消令牌真正有牙）
+//! 本驱动器只活在 trpg-api（「只读 GM 类型」约束）。**P1-3 follow-up** 已把这枚
+//! [`CancellationToken`] 经 `OwnedTurnRequest.cancel` 穿进 `execute_turn` → `run_agent_loop`：
+//! 此处 `cancel.cancel()` 现在**真正掐断在飞的 LLM 生成**——run_agent_loop 在每轮起点与
+//! LLM 流分块之间 `select!` 检查令牌，一旦 fire 即放弃在途流（drop stream 停 relay、不再续烧
+//! token）、`break 'rounds`，`execute_turn` 的 pipeline 随即短路尾段（不 verify/finalize/
+//! save_turn、不 spawn heavy、不落半截回合）。故 `CancelBeforeStateMutation` 不再只是「停
+//! relay」的尽力而为，而是真正取消在途工作 + 省 token。
+//!
+//! 仍存的边界：回合**确定性头部**（含 stimulus_pass / opposed_prepass 的少量 LLM 调用）跑在
+//! run_agent_loop 之前、不在取消窗口内——断开几乎只发生在长流式叙事阶段，头部为毫秒级 DB/
+//! 短 LLM，故未把令牌穿进每个头部 phase（属可接受的范围取舍，非遗漏）。drive_turn_stream 本身
+//! 仍是把「发送失败 + Sender::closed」当断开信号的尽力而为探测，与 fire 令牌互补。
 
 use axum::response::sse::Event;
 use serde::Deserialize;

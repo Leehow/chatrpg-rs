@@ -892,6 +892,7 @@ async fn turn_cli(args: TurnArgs) -> Result<()> {
         recent_transcript: req.recent_transcript.clone(),
         module_id: module_id.clone(),
         data_dir: data_dir.clone(),
+        cancel: None, // CLI 单回合：无客户端断开概念，不可取消。
     };
 
     let mut stream = Box::pin(execute_turn(gm, owned, CANONICAL_TURN_PLAN));

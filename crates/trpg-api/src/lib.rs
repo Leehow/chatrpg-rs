@@ -1016,6 +1016,10 @@ async fn play_turn_sse(Path(session_id): Path<String>, State(state): State<AppSt
             viewer: VisibilityProfile::gm(),
             token_budget: TokenBudget::default(),
         };
+        // P1-3 follow-up：建一个取消令牌，**同一**实例既经 OwnedTurnRequest.cancel 穿进
+        // execute_turn → run_agent_loop（断开前置取消时真正掐断在途 LLM、短路尾段不落半截回合），
+        // 又交给 drive_turn_stream（由它在状态变更前断开时 fire 这枚 token）。
+        let cancel = CancellationToken::new();
         let owned = OwnedTurnRequest {
             request: context_request,
             state: runtime_state,
@@ -1024,6 +1028,7 @@ async fn play_turn_sse(Path(session_id): Path<String>, State(state): State<AppSt
             recent_transcript: req.recent_transcript.clone(),
             module_id: req.module_id.clone(),
             data_dir: data_dir.clone(),
+            cancel: Some(cancel.clone()),
         };
         // execute_turn 内部已 tokio::spawn pipeline 并经自带 mpsc 推 TurnEvent；本 handler
         // 把事件流交给 turn_driver（P1-3）：逐 token 直通叙事 + 跟踪 state_mutated/first_delta_sent
@@ -1039,7 +1044,7 @@ async fn play_turn_sse(Path(session_id): Path<String>, State(state): State<AppSt
             stream,
             sink,
             policy,
-            CancellationToken::new(),
+            cancel,
             &marker,
             &turn_id,
         )

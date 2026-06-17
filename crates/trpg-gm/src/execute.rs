@@ -7,6 +7,7 @@ use crate::turn_loop::{GmLoop, GmTurnInput, TurnContext};
 use crate::turn_plan::{PhaseId, PhaseKind, TurnPhasePlan};
 use crate::turn_trace::{build_turn_trace, failure_kind_for, phase_error_policy, PhaseFailure};
 use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::sync::CancellationToken;
 use trpg_model::TurnFailureRecord;
 
 /// owned 版回合请求（spawn 进 tokio 任务需 'static / owned —— 借用版
@@ -20,6 +21,11 @@ pub struct OwnedTurnRequest {
     pub recent_transcript: Option<String>,
     pub module_id: Option<String>,
     pub data_dir: std::path::PathBuf,
+    /// 可选取消令牌（P1-3 follow-up）：transport 把驱动器的**同一** [`CancellationToken`]
+    /// 经此穿进 pipeline。客户端在状态变更前断开 → driver `cancel.cancel()` → run_agent_loop
+    /// 在 LLM 流边界 break（放弃在途生成、不再续烧 token）+ run_pipeline 短路尾段（不落半截
+    /// 回合）。`None` ⇒ 不可取消（CLI/测试默认）——非取消路径逐字节零行为变更。
+    pub cancel: Option<CancellationToken>,
 }
 
 /// agent_loop phase 的终态信号——决定尾部 phase 取舍（早返 vs 全尾部）。
@@ -179,7 +185,22 @@ async fn run_pipeline(
 
         // —— 2. AgentLoop body：产 Delta / AwaitingPlayerRoll 经 tx，返回终态信号 ——
         phases_run.push(format!("{:?}", PhaseId::AgentLoop));
-        signal = gm.run_agent_loop(&mut ctx, &input, tx).await;
+        // P1-3 follow-up：把取消令牌穿进 agent loop——客户端在状态变更前断开时 driver fire 它，
+        // run_agent_loop 在 LLM 流边界 break、放弃在途生成（不再续烧 token）。
+        signal = gm.run_agent_loop(&mut ctx, &input, tx, req.cancel.as_ref()).await;
+
+        // P1-3 follow-up：令牌已 fire ⇒ run_agent_loop 已放弃在途生成。此处同样短路尾段——
+        // 不跑 verify/finalize/save_turn、不 spawn heavy，绝不持久化半截回合（兑现 driver
+        // CancelBeforeStateMutation 的「no partial persisted」契约）。客户端早已断开、无人接收，
+        // 不再 emit 任何事件。fail-closed：仅令牌存在且已 cancelled 时短路；非取消路径
+        // （cancel=None 或未 fire）逐字节零行为变更。
+        if req.cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
+            tracing::info!(
+                turn_id = %req.request.turn_id,
+                "turn cancelled (client disconnected before state mutation); skipping tail phases — no partial persisted"
+            );
+            return;
+        }
 
         // —— 3a. CRITICAL 尾段（同步，TurnComplete 前 await）——
         // 与 R1 同 phase 集合（select_phases），但只跑 critical 半边：VerifyAfterStream
