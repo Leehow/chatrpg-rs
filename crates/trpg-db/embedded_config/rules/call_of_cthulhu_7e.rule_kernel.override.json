@@ -62,7 +62,7 @@
       }
     }
   },
-  "_note_behavior_align": "2026-06-17 §10.5 behavior<->formula alignment: hit_points/magic_points get derived_from links to the chargen formula ids (hp_max/mp_max) + HP damage/wound behavior. sanity is left to the reader+DB baseline (frozen, unchanged). Canonical CoC 7e; page unverified.",
+  "_note_behavior_align": "2026-06-17 §10.5 behavior<->formula alignment: hit_points/magic_points get derived_from links to the chargen formula ids (hp_max/mp_max) + HP damage/wound behavior. sanity is left to the reader+DB baseline (frozen, unchanged). Canonical CoC 7e; page unverified. Major wound (>= half max HP in one hit) is GM-narrated prose, not an engine threshold (the engine has no fraction-of-max magnitude).",
   "resource_tracks": [
     {
       "id": "hit_points", "name": "Hit Points", "kind": "health", "owner_kind": "actor",
@@ -71,8 +71,7 @@
         { "op": "subtract", "amount": "=damage", "trigger": "always", "check_match": "damage|attack" }
       ],
       "thresholds": [
-        { "at": 0, "direction": "at_or_below", "consequence": "dying (major wound rules / death checks apply)" },
-        { "loss_in_one_go": 0, "consequence": "major wound if a single attack inflicts >= half of max HP" }
+        { "at": 0, "direction": "at_or_below", "consequence": "dying (major wound rules / death checks apply)" }
       ]
     },
     {

@@ -720,6 +720,8 @@ impl Db {
             // into data; a malformed override value is ignored (fail-closed → the
             // kernel field stays None → engine uses GENERIC_*).
             apply_kernel_strategy_overrides(&mut kernel, &doc);
+            // 去重共享 derived_from 的 track（align 可能建 stub 而 override 又提供了正式 track）。
+            kernel.resource_tracks = trpg_model::dedup_tracks_by_derived_from(&kernel.resource_tracks);
         }
         Ok(Some(kernel))
     }
