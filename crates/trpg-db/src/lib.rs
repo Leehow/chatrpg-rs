@@ -53,6 +53,7 @@ impl Db {
             include_str!("../../../migrations/0029_turn_trace_failure_v120.sql"),
             include_str!("../../../migrations/0030_domain_events.sql"),
             include_str!("../../../migrations/0031_memory_fact_turn_id.sql"),
+            include_str!("../../../migrations/0032_knowledge_edges.sql"),
         ];
         for sql in migrations {
             for statement in split_sql_statements(sql) {
@@ -2928,21 +2929,65 @@ impl Db {
             trpg_model::DomainEventKind::FactRevealed,
             data,
         );
-        self.append_domain_event(&ev).await
+        self.append_domain_event(&ev).await?;
+        // P0b 写穿：FactRevealed 同步落 KnowledgeEdge (player_party, knows_true)。
+        // append 在同 (session,fact) 重放会 no-op，但 upsert 仍幂等保证边存在，
+        // 使 revealed-facts 投影（现读 knowledge_edges）不漏旧事件。
+        self.upsert_knowledge_edge_player_party(session_id, turn_id, fact_id, "knows_true", reason)
+            .await
     }
 
-    /// 反剧透 revealed-facts 账本投影：本会话已揭示的 distinct `fact_id` 集。
-    /// 从 `FactRevealed` 事件的 `data` jsonb 抽 distinct `fact_id`；event_id 已幂等
-    /// per-session+fact，distinct 兜底 data 异常重复；按 fact_id 稳定排序。
-    /// spoiler_guard 据此放行实体 secret_terms（不在集内 = 未揭示 = 裁剪）。
-    pub async fn list_revealed_facts(&self, session_id: &str) -> Result<Vec<String>> {
+    /// P0b KnowledgeEdge upsert：把 (session, player_party, fact) 的知识态落账。
+    /// edge_id 在 SQL 内用 md5 确定性生成（uuid crate 无 v5 feature），与 0032 回填
+    /// 同方案 → 跨回填/运行时幂等。on-conflict 更新态/来源/理由（coalesce 保留旧非空）。
+    pub async fn upsert_knowledge_edge_player_party(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        fact_id: &str,
+        knowledge_state: &str,
+        reason: Option<&str>,
+    ) -> Result<()> {
+        // turn_id 当前不入 knowledge_edges 列；source_event_id 复用 record_revealed_fact
+        // 的幂等键 de_revealed_{session}_{fact}（与 domain_events.event_id 对齐）。
+        let _ = turn_id;
+        sqlx::query(
+            r#"
+            insert into knowledge_edges
+              (edge_id, session_id, holder_kind, holder_id, fact_id, knowledge_state, source_event_id, reason)
+            values (
+              'ke_' || md5($1 || ':player_party:' || $2),
+              $1, 'player_party', '', $2, $3, $4, $5
+            )
+            on conflict (session_id, holder_kind, holder_id, fact_id)
+            do update set
+              knowledge_state = excluded.knowledge_state,
+              source_event_id = coalesce(excluded.source_event_id, knowledge_edges.source_event_id),
+              reason = coalesce(excluded.reason, knowledge_edges.reason),
+              updated_at = now()
+            "#,
+        )
+        .bind(session_id)
+        .bind(fact_id)
+        .bind(knowledge_state)
+        .bind(format!("de_revealed_{session_id}_{fact_id}"))
+        .bind(reason)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// P0b 玩家已知事实投影：本会话 (player_party, knows_true) 的 distinct fact_id 集，
+    /// 按 fact_id 稳定排序。revealed-facts 兼容投影的统一真相源（list_revealed_facts 委托）。
+    pub async fn list_player_known_fact_ids(&self, session_id: &str) -> Result<Vec<String>> {
         let rows = sqlx::query(
             r#"
-            select distinct data->>'fact_id' as fact_id
-            from domain_events
+            select fact_id
+            from knowledge_edges
             where session_id = $1
-              and kind = 'FactRevealed'
-              and data->>'fact_id' is not null
+              and holder_kind = 'player_party'
+              and holder_id = ''
+              and knowledge_state = 'knows_true'
             order by fact_id
             "#,
         )
@@ -2950,6 +2995,15 @@ impl Db {
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.into_iter().map(|r| r.get::<String, _>("fact_id")).collect())
+    }
+
+    /// 反剧透 revealed-facts 账本投影（P0b 起委托 KnowledgeEdge）：本会话已揭示的
+    /// distinct `fact_id` 集 = (player_party, knows_true) 子集，按 fact_id 稳定排序。
+    /// 不再直接扫 domain_events.FactRevealed；写穿保证两者一致。EntitySurfaced 绝不混入
+    /// （surfaced ≠ revealed，且根本不写 knowledge_edges）。spoiler_guard 据此放行实体
+    /// secret_terms（不在集内 = 未揭示 = 裁剪）。
+    pub async fn list_revealed_facts(&self, session_id: &str) -> Result<Vec<String>> {
+        self.list_player_known_fact_ids(session_id).await
     }
 
     pub async fn list_world_events_since(&self, session_id: &str, since_tick: i64, since_event_seq: i64, limit: i64) -> Result<Vec<WorldEvent>> {
