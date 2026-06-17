@@ -192,7 +192,7 @@ impl ToolRegistry {
         ] }
     }
 
-    /// 三期 §4.3 工具按 mode 组装：基础 14（任何姿态可用）+ manifest.extra_tools
+    /// 三期 §4.3 工具按 mode 组装：基础 15（任何姿态可用）+ manifest.extra_tools
     /// （按名解析，未知名 fail-closed 报配置错误）。mode=None ⇒ 与 standard()
     /// 完全等同（schema 字节回归测试护）。
     pub fn for_mode(data_dir: &Path, mode: Option<&str>) -> Result<Self> {
@@ -325,7 +325,7 @@ mod schema_stability_tests {
     }
 
     /// 批5 mode 维度参数化 ③ — mode 切换=工具 schema 有因失效断言：
-    /// mode=None → 基础 14 工具 schema；mode="combat"（含 extra_tools）→ 16 工具
+    /// mode=None → 基础 15 工具 schema；mode="combat"（含 extra_tools）→ 17 工具
     /// schema；两者序列化字节不同 → 工具 schema 变化是 mode 切换的有因失效依据。
     #[test]
     fn mode_switch_changes_tool_schema_bytes() {
@@ -335,7 +335,7 @@ mod schema_stability_tests {
         );
         let schemas_none   = serde_json::to_vec(&ToolRegistry::for_mode(&dir, None).unwrap().schemas()).unwrap();
         let schemas_combat = serde_json::to_vec(&ToolRegistry::for_mode(&dir, Some("combat")).unwrap().schemas()).unwrap();
-        // mode=None → 14 工具；mode=combat → 16 工具（extra_tools 追加）。
+        // mode=None → 15 工具；mode=combat → 17 工具（extra_tools 追加）。
         assert_ne!(schemas_none, schemas_combat,
             "mode switch with extra_tools must produce different schema bytes (justified cache invalidation)");
         let count_none   = ToolRegistry::for_mode(&dir, None).unwrap().schemas().len();
