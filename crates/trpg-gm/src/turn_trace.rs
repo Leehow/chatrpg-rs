@@ -86,6 +86,9 @@ pub(crate) fn build_turn_trace(
     // emit/结算/状态，仅充实 trace。kernel=None（载失败/无）→ 退化为仅 need_kind 启发式。
     trace.binding_trace =
         trpg_runtime::shadow_bind_with_kernel(&compiled.need_trace, ctx.rule_kernel(), &SHADOW_REGISTRY);
+    // Policy 插件贡献（T2）：context_assembly 经 PluginHost 折好的 trace，拷进 TurnTrace
+    // （advisory，零行为变更——供 `trpg explain --plugins`）。
+    trace.plugin_contributions = ctx.plugin_contributions().to_vec();
     trace.bp1_hash = hash_opt(&compiled.prefix_hash);
     trace.bp2_hash = hash_opt(&compiled.pinned_hash);
     trace.bp3_hash = hash_opt(&compiled.dynamic_hash);

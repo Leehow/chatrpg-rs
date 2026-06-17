@@ -205,18 +205,19 @@ fn with_plugins_matching_plugin_is_appended() {
 }
 
 #[test]
-fn ship_anti_spoiler_plugin_loads_for_module_session() {
-    // 仓库真实 data/agent/plugins/anti_spoiler.md：applies_when=module。
-    // 模组 session 命中、非模组 session 不命中。
+fn anti_spoiler_md_superseded_by_builtin_plugin() {
+    // T2 迁移：原 data/agent/plugins/anti_spoiler.md 已删，防剧透引导改走内置
+    // policy 插件 core.no_spoiler_guard（PluginHost 路径）。这里守卫**双注入回归**：
+    // .md 路径（load_plugins）的真实 data 目录不再产出防剧透文本——否则模组回合会
+    // 同时从 .md 与插件各注入一次。
     let data_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data");
     let with_module = load_plugins(&data_dir, "call_of_cthulhu_7e", Some("blood_highway")).unwrap();
     assert!(
-        with_module.contains("防剧透"),
-        "anti_spoiler plugin must load in a module session"
+        !with_module.contains("防剧透"),
+        "anti_spoiler.md 已删：.md 路径不应再产防剧透文本（防双注入），现由内置插件供给"
     );
-    let no_module = load_plugins(&data_dir, "call_of_cthulhu_7e", None).unwrap();
     assert!(
-        !no_module.contains("防剧透"),
-        "anti_spoiler must NOT load in a non-module session"
+        !data_dir.join("agent/plugins/anti_spoiler.md").exists(),
+        "anti_spoiler.md 必须已被内置插件取代（删除）"
     );
 }

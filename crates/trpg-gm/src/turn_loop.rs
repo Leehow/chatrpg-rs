@@ -83,6 +83,9 @@ pub(crate) struct TurnContext {
     // 本回合已解析的 RuleKernel（context_assembly 单点载，影子 binding 读 → 出权威 Exact 绑定）。
     // 不持久化、advisory；None = 未载到（fail-soft，影子退化为仅 need_kind 启发式）。
     rule_kernel: Option<trpg_model::RuleKernel>,
+    // policy 插件本回合贡献的 Flight Recorder 折叠（context_assembly 经 PluginHost 填，
+    // build_turn_trace 拷进 TurnTrace.plugin_contributions）。advisory、零行为变更。
+    plugin_contributions: Vec<trpg_model::PluginContributionTrace>,
     // —— T4 agent_loop 产物（run_agent_loop 填，尾部 phase 读）——
     visible_text: String,
     awaiting_gate: Option<AwaitingPlayerRoll>,
@@ -107,6 +110,7 @@ impl TurnContext {
             effect_closure_per_cluster: false,
             messages: None,
             rule_kernel: None,
+            plugin_contributions: Vec::new(),
             visible_text: String::new(),
             awaiting_gate: None,
         }
@@ -133,6 +137,12 @@ impl TurnContext {
     /// 本回合已解析的 RuleKernel（context_assembly 填）。影子 binding 读它派生权威 facet。
     pub(crate) fn rule_kernel(&self) -> Option<&trpg_model::RuleKernel> {
         self.rule_kernel.as_ref()
+    }
+
+    /// 本回合 policy 插件贡献的 Flight Recorder 折叠（context_assembly 填）。
+    /// build_turn_trace 拷进 TurnTrace.plugin_contributions（advisory，零行为变更）。
+    pub(crate) fn plugin_contributions(&self) -> &[trpg_model::PluginContributionTrace] {
+        &self.plugin_contributions
     }
 
     /// 测试 seam（kernel-facets 单测）：直接植入已解析 kernel，让 build_turn_trace 单测覆盖
@@ -612,6 +622,12 @@ impl GmLoop {
                 None => tracing::warn!(ruleset_id = %input.request.ruleset_id, "mode catalog subset skipped: no active rule kernel"),
             }
         }
+        // Policy 插件 host（ContextAssembly hook）：内置 policy 插件 propose PromptBlock 贡献，
+        // 按 host 序（safety>priority）把其渲染文本以同 join 风格追加进 gm_skill，并把每条
+        // 贡献折成 trace 进 ctx（build_turn_trace 拷进 TurnTrace.plugin_contributions）。
+        // 全程 fail-soft：host/追加任何环节出错只 warn，绝不中断回合。T3 再接 ContextFilter
+        // 删块 + AfterLlmStream verifier。
+        self.apply_context_assembly_plugins(ctx, input, &mut gm_skill).await;
         ctx.gm_skill = gm_skill;
         if let Some(block) = self.errata.errata_block() { ctx.errata_blocks.push(block); }
         if let Some(block) = self.errata.standing_reminder_block() { ctx.errata_blocks.push(block); }
@@ -627,6 +643,43 @@ impl GmLoop {
         ctx.max_tool_rounds = ctx.mode_manifest.as_ref().and_then(|m| m.tempo.max_tool_rounds).unwrap_or(self.cfg.max_tool_rounds);
         ctx.effect_closure_per_cluster = ctx.mode_manifest.as_ref().and_then(|m| m.tempo.effect_closure_per_cluster).unwrap_or(false);
         Ok(())
+    }
+
+    /// ContextAssembly hook：跑内置 policy 插件 host，把 PromptBlock 贡献的渲染文本以
+    /// `\n\n---\n\n`（同 load_gm_skill_with_plugins 风格）追加进 `gm_skill`，并把**每条**
+    /// 贡献（含未来 ContextFilter/finding 类）折成 trace 进 `ctx.plugin_contributions`。
+    ///
+    /// 全程 fail-soft（D2）：插件路径任何环节失败只 warn，绝不中断回合——叙事/缓存优先。
+    /// T2 只应用 PromptBlock（追加文本）；ContextFilter 删块留 T3。无贡献时 gm_skill 逐字
+    /// 不变（非模组 session = NoSpoilerGuard 空贡献 → 缓存稳定）。
+    pub(crate) async fn apply_context_assembly_plugins(&self, ctx: &mut TurnContext, input: &GmTurnInput<'_>, gm_skill: &mut String) {
+        let surfaced_entities = self.engine.db.list_surfaced_entities(&input.request.session_id).await.unwrap_or_default();
+        let compiled_block_ids: Vec<String> = ctx.compiled.prefix_blocks.iter()
+            .chain(ctx.compiled.pinned_blocks.iter())
+            .chain(ctx.compiled.dynamic_blocks.iter())
+            .map(|b| b.block_id.clone())
+            .collect();
+        let plugin_ctx = crate::plugin::PluginContext {
+            session_id: input.request.session_id.clone(),
+            turn_id: input.request.turn_id.clone(),
+            ruleset_id: input.request.ruleset_id.clone(),
+            module_id: input.request.module_id.clone(),
+            hook: crate::plugin::PluginHook::ContextAssembly,
+            surfaced_entities,
+            narration: None,
+            compiled_block_ids,
+            config: json!({}),
+        };
+        let contributions = crate::plugin::builtin_plugin_host().run_hook(&plugin_ctx).await;
+        for c in &contributions {
+            // 每条贡献都记 trace（含 T3 的 ContextFilter/finding 类）。
+            ctx.plugin_contributions.push(c.to_trace());
+            // T2 只应用 PromptBlock：把渲染文本以同 join 风格追加进 gm_skill。
+            if let crate::plugin::PluginContributionKind::PromptBlock(block) = &c.kind {
+                gm_skill.push_str("\n\n---\n\n");
+                gm_skill.push_str(&block.content.render_text());
+            }
+        }
     }
 
     /// 流后校验（spec §4 第 5 步）：NarrationVerifier 对账已流出全文 → 勘误记忆
