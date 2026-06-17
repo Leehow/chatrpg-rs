@@ -92,15 +92,16 @@ impl NeedResolver for SceneNeedResolver {
         };
 
         // 反剧透 ENFORCEMENT：投影前对未揭示的场景/实体剧透做裁剪。revealed = 本会话已
-        // 揭示 fact_id 集；DB 取不到（抖动）→ 空集 = 全部按未揭示裁剪（fail-closed 宁可不泄，
-        // 不赌 DB）。没标 spoiler 或已揭示的内容由 guard_scene 原样透传（别太严，不裁可玩内容）。
-        let revealed: HashSet<String> = self
-            .db
-            .list_revealed_facts(&scene_need.scopes.session_id)
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
+        // 揭示 fact_id 集，P0b 起统一经 KnowledgeProjection 读 KnowledgeEdge 账本；DB 取不到
+        //（抖动）→ 空集 = 全部按未揭示裁剪（fail-closed 宁可不泄，不赌 DB）。没标 spoiler 或
+        // 已揭示的内容由 guard_scene 原样透传（别太严，不裁可玩内容）。
+        let revealed: HashSet<String> = crate::knowledge_projection::player_knowledge_projection(
+            &self.db,
+            &scene_need.scopes.session_id,
+        )
+        .await
+        .map(|p| p.revealed_fact_ids)
+        .unwrap_or_default();
         let (guarded_node, guarded_npcs) = guard_scene(node, &graph.npcs, &revealed);
         let blocks = resolve_scene_blocks(module_id, &guarded_node, &guarded_npcs, &graph.scenes);
         Ok(NeedOutcome { blocks, source_refs: vec![] })
