@@ -7,6 +7,8 @@ pub mod hash;
 pub use hash::*;
 pub mod source;
 pub use source::*;
+pub mod visibility;
+pub use visibility::*;
 pub mod turn_lifecycle;
 pub use turn_lifecycle::*;
 pub mod mechanics;
@@ -38,79 +40,6 @@ pub const CHARACTER_ONBOARDING_SCHEMA_VERSION: &str = "chatrpg.character_onboard
 // （`sha256_hex`/`stable_json_hash`）移至 `hash` 模块；回合后处理生命周期常量
 // （`PP_*`/`pp_lifecycle_rank`）移至 `turn_lifecycle` 模块。三者均经 `pub use`
 // 在 crate 根重导出，公共 API 保持不变。
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case")]
-pub enum CacheZone {
-    Prefix,
-    PinnedMiddle,
-    DynamicTail,
-    NeverPrompt,
-}
-
-impl CacheZone {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            CacheZone::Prefix => "prefix",
-            CacheZone::PinnedMiddle => "pinned_middle",
-            CacheZone::DynamicTail => "dynamic_tail",
-            CacheZone::NeverPrompt => "never_prompt",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum Visibility {
-    Public,
-    PlayerVisible,
-    GmOnly,
-    NpcPrivate,
-    SystemOnly,
-}
-
-impl Visibility {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Visibility::Public => "public",
-            Visibility::PlayerVisible => "player_visible",
-            Visibility::GmOnly => "gm_only",
-            Visibility::NpcPrivate => "npc_private",
-            Visibility::SystemOnly => "system_only",
-        }
-    }
-}
-
-impl Default for Visibility {
-    fn default() -> Self { Self::GmOnly }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum Stability {
-    Immutable,
-    RarelyChanged,
-    SceneStable,
-    TurnDynamic,
-    Ephemeral,
-}
-
-
-impl Default for Stability {
-    fn default() -> Self { Self::RarelyChanged }
-}
-
-impl Stability {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Stability::Immutable => "immutable",
-            Stability::RarelyChanged => "rarely_changed",
-            Stability::SceneStable => "scene_stable",
-            Stability::TurnDynamic => "turn_dynamic",
-            Stability::Ephemeral => "ephemeral",
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
