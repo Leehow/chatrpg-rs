@@ -45,8 +45,19 @@ module TLM
   }.freeze
 
   ACTIVE_JOB_STATES = %w[submitted running].freeze
-  # Dependency is satisfied only once its producing task is fully landed.
-  DEP_SATISFIED_STATES = %w[integrated done accepted].freeze
+  # Dependency is satisfied once its producing task has fully landed
+  # (integrated/done/accepted) or been independently verified. A producer in
+  # `accepted_not_integrated` is deliberately NOT satisfied: its commits are
+  # accepted but not yet on the integration branch, so dependents must wait.
+  DEP_SATISFIED_STATES = %w[integrated done accepted verified].freeze
+
+  # Task states that need no further scheduling, planning, or integration. Used
+  # by the idle gate so a fully terminal graph is allowed to be idle.
+  TERMINAL_TASK_STATES = %w[integrated done accepted verified ignored cancelled skipped dropped obsolete wontfix].freeze
+
+  # Nonterminal states pending integration rather than scheduling/planning.
+  # These are tracked by integration backlog, not by ready-buffer starvation.
+  INTEGRATION_PENDING_STATES = %w[accepted_not_integrated].freeze
 
   # Thin wrapper over the sqlite3 CLI so we avoid any gem dependency.
   class Store
@@ -300,6 +311,23 @@ module TLM
       wg + jobs
     end
 
+    # Nonterminal tasks that still need scheduling or planning: not terminal, not
+    # currently active/running, and not merely pending integration. Drives the
+    # ready-buffer starvation gate so a terminal graph is not starved by an empty
+    # buffer, while a graph with unplanned/blocked work is held non-idle.
+    def scheduling_pending
+      job_ids = active_jobs.map { |j| j['task_id'] }
+      tasks.select do |t|
+        st = t['state'].to_s
+        next false if TERMINAL_TASK_STATES.include?(st)
+        next false if st == 'running'
+        next false if INTEGRATION_PENDING_STATES.include?(st)
+        next false if job_ids.include?(t['id'])
+
+        true
+      end
+    end
+
     def backpressure(review_b, integration_b, ready_count)
       bp = scheduler_cfg['backpressure'] || {}
       {
@@ -336,16 +364,37 @@ module TLM
         m && counts[lane] < m
       end
 
+      min_buf = (scheduler_cfg['planning'] || {})['min_ready_buffer'].to_i
       recommendations = []
       recommendations << 'increase_review_capacity' if bp[:review]
       recommendations << 'integration_train_behind' if bp[:integration]
-      min_buf = (scheduler_cfg['planning'] || {})['min_ready_buffer'].to_i
       recommendations << 'ready_buffer_below_min' if selected.size < min_buf
       recommendations << 'ready_starvation' if bp[:ready_starved]
 
-      gate_reasons = dispatchable.map do |t|
-        lane = lane_of(t)
-        "dispatchable:#{t['id']} lane=#{lane} active=#{counts[lane]} max=#{eff_max[lane]}"
+      # ---- hard idle gate ------------------------------------------------------
+      # The lead is NOT idle while any scheduler work remains. Each true condition
+      # below is a concrete blocker; idle_allowed is true only when none hold. A
+      # fully terminal graph (no active jobs, no backlogs, no pending scheduling
+      # work) produces no blockers and is therefore allowed to be idle even though
+      # its ready buffer is below min.
+      integ_ready = integrate_ready
+      wg_running = tasks.count { |t| t['state'] == 'running' }
+      sched_pending = scheduling_pending
+      ready_buffer_starved = selected.size < min_buf && sched_pending.any?
+
+      blockers = []
+      if active_jobs.any? || wg_running.positive?
+        blockers << "jobs_active:runtime=#{active_jobs.size} workgraph_running=#{wg_running}"
+      end
+      blockers << "dispatchable:#{dispatchable.map { |t| t['id'] }.join(',')}" if dispatchable.any?
+      blockers << "review_backlog:#{review_b}" if review_b.to_i.positive?
+      if integration_b.to_i.positive? || integ_ready.any?
+        blockers << "integration_backlog:#{integration_b} integrate_ready=#{integ_ready.size}"
+      end
+      blockers << 'backpressure:review' if bp[:review]
+      blockers << 'backpressure:integration' if bp[:integration]
+      if ready_buffer_starved
+        blockers << "ready_buffer_starved:buffer=#{selected.size} min=#{min_buf} pending=#{sched_pending.size}"
       end
 
       {
@@ -360,8 +409,9 @@ module TLM
         backpressure: bp,
         recommendations: recommendations,
         dispatchable: dispatchable.map { |t| t['id'] },
-        idle_allowed: dispatchable.empty?,
-        gate_reasons: gate_reasons
+        idle_allowed: blockers.empty?,
+        idle_blockers: blockers,
+        gate_reasons: blockers
       }
     end
 
@@ -553,6 +603,7 @@ module TLM
         'integration_actions' => integration,
         'active' => a[:active],
         'idle_allowed' => a[:idle_allowed],
+        'idle_blockers' => a[:idle_blockers],
         'recommendations' => a[:recommendations],
         'next_wait' => next_wait,
         'changed' => changed
@@ -589,6 +640,7 @@ module TLM
         'backpressure' => a[:backpressure],
         'effective_max' => a[:effective_max],
         'idle_allowed' => a[:idle_allowed],
+        'idle_blockers' => a[:idle_blockers],
         'gate_reasons' => a[:gate_reasons],
         'recommendations' => a[:recommendations]
       }
@@ -668,6 +720,71 @@ module TLM
         review_rec = a[:recommendations].include?('increase_review_capacity')
         check(failures, 'backpressure throttles impl or recommends review', impl_throttled || review_rec)
         check(failures, 'review backlog reflected in assess', a[:review_backlog] == baseline + added)
+
+        # 6. dependency satisfaction: `verified` producer satisfies, but
+        #    `accepted_not_integrated` does not.
+        dep = mini_repo(root, 'deptest', <<~YAML)
+          version: 1
+          work_id: deptest
+          tasks:
+            - { id: P, kind: implementation, state: verified, depends_on: [], write_set: [crates/p/**], hotspot_leases: [], validation_profile: ct-p }
+            - { id: Q, kind: implementation, state: accepted_not_integrated, depends_on: [], write_set: [crates/q/**], hotspot_leases: [], validation_profile: ct-q }
+            - { id: R, kind: implementation, state: ready, depends_on: [P], write_set: [crates/r/**], hotspot_leases: [], validation_profile: ct-r }
+            - { id: S, kind: implementation, state: ready, depends_on: [Q], write_set: [crates/s/**], hotspot_leases: [], validation_profile: ct-s }
+        YAML
+        dsel, dexcl = dep.conflict_free_ready
+        dids = dsel.map { |t| t['id'] }
+        check(failures, 'R selected (depends on verified)', dids.include?('R'))
+        check(failures, 'S excluded (depends on accepted_not_integrated)', excl_reason(dexcl, 'S') == 'dependency_unsatisfied')
+
+        # 7. idle gate: review backlog alone holds the lead non-idle.
+        rev = mini_repo(root, 'revtest', <<~YAML)
+          version: 1
+          work_id: revtest
+          tasks:
+            - { id: T1, kind: implementation, state: done, depends_on: [], write_set: [crates/t1/**], hotspot_leases: [], validation_profile: ct-1 }
+        YAML
+        rev.store.insert_job('task_id' => 'rdone', 'lane' => 'implementation', 'state' => 'finished', 'exit_code' => 0, 'reviewed' => 0, 'started_at' => rev.store.now, 'finished_at' => rev.store.now)
+        ra = rev.assess
+        check(failures, 'idle false for review backlog only', ra[:idle_allowed] == false)
+        check(failures, 'review backlog is the sole blocker', ra[:idle_blockers].size == 1 && ra[:idle_blockers].first.start_with?('review_backlog'))
+
+        # 8. idle gate: integration backlog alone holds the lead non-idle.
+        intg = mini_repo(root, 'intgtest', <<~YAML)
+          version: 1
+          work_id: intgtest
+          tasks:
+            - { id: U1, kind: implementation, state: accepted_not_integrated, depends_on: [], write_set: [crates/u1/**], hotspot_leases: [], commits: [abc123], validation_profile: ct-u }
+        YAML
+        ia = intg.assess
+        check(failures, 'idle false for integration backlog only', ia[:idle_allowed] == false)
+        check(failures, 'integration backlog is the sole blocker', ia[:idle_blockers].size == 1 && ia[:idle_blockers].first.start_with?('integration_backlog'))
+
+        # 9. idle gate: ready-buffer starvation in a nonterminal graph holds the
+        #    lead non-idle even with nothing dispatchable.
+        starv = mini_repo(root, 'starvtest', <<~YAML)
+          version: 1
+          work_id: starvtest
+          tasks:
+            - { id: V1, kind: implementation, state: blocked, depends_on: [], write_set: [crates/v1/**], hotspot_leases: [], validation_profile: ct-v }
+        YAML
+        sa = starv.assess
+        check(failures, 'idle false for ready-buffer starvation', sa[:idle_allowed] == false)
+        check(failures, 'starvation is the sole blocker', sa[:idle_blockers].size == 1 && sa[:idle_blockers].first.start_with?('ready_buffer_starved'))
+
+        # 10. idle gate: a fully terminal graph with no jobs/backlogs is idle,
+        #     despite the ready buffer being below min.
+        term = mini_repo(root, 'termtest', <<~YAML)
+          version: 1
+          work_id: termtest
+          tasks:
+            - { id: W1, kind: implementation, state: done, depends_on: [], write_set: [crates/w1/**], hotspot_leases: [], validation_profile: ct-w }
+            - { id: W2, kind: verification, state: verified, depends_on: [W1], write_set: [crates/w2/**], hotspot_leases: [], validation_profile: rev-w }
+            - { id: W3, kind: integration, state: integrated, depends_on: [W1], write_set: [crates/w3/**], hotspot_leases: [], validation_profile: int-w }
+        YAML
+        ta = term.assess
+        check(failures, 'idle true for terminal graph', ta[:idle_allowed] == true)
+        check(failures, 'no blockers for terminal graph', ta[:idle_blockers].empty?)
       end
 
       if failures.empty?
@@ -695,6 +812,25 @@ module TLM
 
         sleep 0.1
       end
+    end
+
+    # Build a throwaway sub-repo with the default scheduler config and the given
+    # WorkGraph YAML, returning a Scheduler bound to its own sqlite db.
+    def self.mini_repo(parent, name, workgraph_yaml)
+      dir = File.join(parent, name)
+      FileUtils.mkdir_p(File.join(dir, 'docs', 'team-lead'))
+      File.write(File.join(dir, 'docs', 'team-lead', 'ProjectPipeline.yaml'), <<~YAML)
+        version: 1
+        scheduler:
+          implementation: { min: 6, max: 8 }
+          review: { min: 2, max: 3 }
+          journey_validation: { min: 1, max: 2 }
+          integration: { max: 1 }
+          planning: { min_ready_buffer: 12, target_ready_buffer: 16 }
+          backpressure: { review_backlog: 6, integration_backlog: 4, ready_starvation: 4 }
+      YAML
+      File.write(File.join(dir, 'docs', 'team-lead', 'WorkGraph.yaml'), workgraph_yaml)
+      Scheduler.new(repo: dir, db_path: File.join(dir, 'runtime.sqlite'))
     end
 
     def self.write_fixture(root)
