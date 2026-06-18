@@ -55,6 +55,7 @@ impl Db {
             include_str!("../../../migrations/0031_memory_fact_turn_id.sql"),
             include_str!("../../../migrations/0032_knowledge_edges.sql"),
             include_str!("../../../migrations/0033_npc_relationships.sql"),
+            include_str!("../../../migrations/0034_knowledge_edges_npc_holder.sql"),
         ];
         for sql in migrations {
             for statement in split_sql_statements(sql) {
@@ -3102,34 +3103,79 @@ impl Db {
         .bind(target_id)
         .fetch_optional(&self.pool)
         .await?;
-        let Some(r) = row else { return Ok(None) };
-        let target = NpcRelationshipTarget::from_parts(
-            &r.get::<String, _>("target_kind"),
-            &r.get::<String, _>("target_id"),
+        match row {
+            Some(r) => Ok(Some(npc_relationship_from_row(session_id, npc_id, &r)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// 读回某 NPC 在本会话的全部 durable relationship 行（TC-NPC-02），按
+    /// (target_kind, target_id) 稳定排序。`npc_id` 经 actor-identity 契约规范化后查询。
+    /// load_npc_mind_view 用它装配 NpcMindView 的关系摘要——不再依赖单一硬编码 target。
+    pub async fn list_npc_relationships(
+        &self,
+        session_id: &str,
+        npc_id: &str,
+    ) -> Result<Vec<NpcRelationship>> {
+        let holder = trpg_model::KnowledgeHolder::npc_from_actor_id(npc_id)
+            .map_err(|u| anyhow::anyhow!("list_npc_relationships: {u}"))?;
+        let npc_id = holder.holder_id().expect("npc holder 必有 stable id");
+        let rows = sqlx::query(
+            r#"
+            select target_kind, target_id, trust, respect, affection, debt, fear, suspicion,
+                   hostility, leverage, talkativeness, interaction_desire, stance,
+                   last_interaction_turn_id, evidence_event_ids
+            from npc_relationships
+            where session_id = $1 and npc_id = $2
+            order by target_kind, target_id
+            "#,
         )
-        .map_err(|e| anyhow::anyhow!("load_npc_relationship: {e}"))?;
-        let stance: RelationshipStance =
-            serde_json::from_value(serde_json::Value::String(r.get::<String, _>("stance")))?;
-        let evidence_event_ids: Vec<String> =
-            serde_json::from_value(r.get::<serde_json::Value, _>("evidence_event_ids"))?;
-        Ok(Some(NpcRelationship {
-            session_id: session_id.to_string(),
-            npc_id: npc_id.to_string(),
-            target,
-            trust: r.get("trust"),
-            respect: r.get("respect"),
-            affection: r.get("affection"),
-            debt: r.get("debt"),
-            fear: r.get("fear"),
-            suspicion: r.get("suspicion"),
-            hostility: r.get("hostility"),
-            leverage: r.get("leverage"),
-            talkativeness: r.get("talkativeness"),
-            interaction_desire: r.get("interaction_desire"),
-            stance,
-            last_interaction_turn_id: r.get("last_interaction_turn_id"),
-            evidence_event_ids,
-        }))
+        .bind(session_id)
+        .bind(npc_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|r| npc_relationship_from_row(session_id, npc_id, r))
+            .collect()
+    }
+
+    /// P1 slice-1 NPC 知识投影（**只读**）：读回某 NPC 自己的 durable knowledge_edges 行
+    /// （holder_kind='npc'，holder_id=规范化稳定 NPC id），映射为 NpcKnowledgeEntry，按
+    /// fact_id 稳定排序。fail-closed：`npc_actor_id` 经 actor-identity 契约校验——
+    /// `npc.opposition`/空/展示名等占位 → Err，绝不查到挂在占位上的边。NpcMindView::build 再
+    /// 把这些 entry 过滤到 known + belief 态。这是只读投影面，无 gameplay 写门（测试用 SQL
+    /// 直接 seed knowledge_edges）。
+    pub async fn list_npc_knowledge_entries(
+        &self,
+        session_id: &str,
+        npc_actor_id: &str,
+    ) -> Result<Vec<NpcKnowledgeEntry>> {
+        let holder = trpg_model::KnowledgeHolder::npc_from_actor_id(npc_actor_id)
+            .map_err(|u| anyhow::anyhow!("list_npc_knowledge_entries: {u}"))?;
+        let npc_id = holder.holder_id().expect("npc holder 必有 stable id");
+        let rows = sqlx::query(
+            r#"
+            select fact_id, knowledge_state
+            from knowledge_edges
+            where session_id = $1 and holder_kind = 'npc' and holder_id = $2
+            order by fact_id
+            "#,
+        )
+        .bind(session_id)
+        .bind(npc_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|r| {
+                let state: KnowledgeState = serde_json::from_value(serde_json::Value::String(
+                    r.get::<String, _>("knowledge_state"),
+                ))?;
+                Ok(NpcKnowledgeEntry {
+                    fact_id: r.get::<String, _>("fact_id"),
+                    state,
+                })
+            })
+            .collect()
     }
 
     pub async fn list_world_events_since(&self, session_id: &str, since_tick: i64, since_event_seq: i64, limit: i64) -> Result<Vec<WorldEvent>> {
@@ -4121,6 +4167,43 @@ fn row_to_memory_snapshot(row: sqlx::postgres::PgRow) -> Result<MemorySnapshot> 
         content_hash: row.get("content_hash"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
+    })
+}
+
+/// 把一行 npc_relationships 映射回 NpcRelationship。session_id/npc_id 由调用方传入（这两列
+/// 不在 select 投影里，且对一个 NPC 的全部关系行是常量），其余通道全来自该行。
+/// load_npc_relationship 与 list_npc_relationships 共用，确保单/多读路径解码一致。
+fn npc_relationship_from_row(
+    session_id: &str,
+    npc_id: &str,
+    r: &sqlx::postgres::PgRow,
+) -> Result<NpcRelationship> {
+    let target = NpcRelationshipTarget::from_parts(
+        &r.get::<String, _>("target_kind"),
+        &r.get::<String, _>("target_id"),
+    )
+    .map_err(|e| anyhow::anyhow!("npc_relationship_from_row: {e}"))?;
+    let stance: RelationshipStance =
+        serde_json::from_value(serde_json::Value::String(r.get::<String, _>("stance")))?;
+    let evidence_event_ids: Vec<String> =
+        serde_json::from_value(r.get::<serde_json::Value, _>("evidence_event_ids"))?;
+    Ok(NpcRelationship {
+        session_id: session_id.to_string(),
+        npc_id: npc_id.to_string(),
+        target,
+        trust: r.get("trust"),
+        respect: r.get("respect"),
+        affection: r.get("affection"),
+        debt: r.get("debt"),
+        fear: r.get("fear"),
+        suspicion: r.get("suspicion"),
+        hostility: r.get("hostility"),
+        leverage: r.get("leverage"),
+        talkativeness: r.get("talkativeness"),
+        interaction_desire: r.get("interaction_desire"),
+        stance,
+        last_interaction_turn_id: r.get("last_interaction_turn_id"),
+        evidence_event_ids,
     })
 }
 

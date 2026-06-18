@@ -7,15 +7,19 @@
 //!
 //! It commits nothing: no DB writes, no events, no relationship mutation.
 //!
-//! Scope note (P0b foundation): the DB-bound load-and-plan entry points from the original
-//! port (`load_npc_behavior_plan` / `load_active_npc_guidance`) depended on the gated
-//! NPC-as-holder mind-view DB read (see runtime `npc_mind::assemble_npc_mind_view` scope
-//! note and `docs/superpowers/specs/2026-06-17-npc-holder-identity-gate.md`). They are
-//! intentionally NOT provided here; a caller assembles the mind view (supplying the NPC's
-//! knowledge entries) and then derives the plan via [`derive_npc_behavior_plan`].
+//! Scope note (P1 slice-1): the holder identity gate's id prerequisite is closed, so the
+//! DB-bound [`load_npc_behavior_plan`] is now provided. It loads the DB-bound mind view
+//! ([`crate::load_npc_mind_view`]) and the player party's known fact ids
+//! ([`trpg_db::Db::list_player_known_fact_ids`]), builds the non-truth context via
+//! [`viewer_behavior_context`], and derives the plan. It still commits nothing — read-only,
+//! no writer decides what an NPC learns. The pure [`derive_npc_behavior_plan`] /
+//! [`viewer_behavior_context`] entry points are preserved.
 use std::collections::HashSet;
 
-use trpg_model::{NpcBehaviorContext, NpcBehaviorPlan, NpcMindView};
+use trpg_db::Db;
+use trpg_model::{NpcBehaviorContext, NpcBehaviorPlan, NpcMindView, NpcProfile};
+
+use crate::npc_mind::load_npc_mind_view;
 
 /// Pure derivation step: project the behavior plan from an already-built mind view and a
 /// non-truth context. No IO. Deterministic.
@@ -46,6 +50,23 @@ pub fn viewer_behavior_context(
         secret_fact_ids,
         ..Default::default()
     }
+}
+
+/// DB-bound load-and-plan: assemble this NPC's DB-bound mind view, read the player party's
+/// known fact ids, and derive the behavior plan. Only facts this NPC knows as TRUE that the
+/// party does NOT know become secrets (see [`viewer_behavior_context`]). Read-only and
+/// fail-closed — an unstable/placeholder id is rejected before any query, and nothing is
+/// written, no event emitted.
+pub async fn load_npc_behavior_plan(
+    db: &Db,
+    session_id: &str,
+    npc_actor_id: &str,
+    profile: &NpcProfile,
+) -> anyhow::Result<NpcBehaviorPlan> {
+    let view = load_npc_mind_view(db, session_id, npc_actor_id, profile).await?;
+    let player_known = db.list_player_known_fact_ids(session_id).await?;
+    let ctx = viewer_behavior_context(&view, &player_known);
+    Ok(derive_npc_behavior_plan(&view, &ctx))
 }
 
 #[cfg(test)]

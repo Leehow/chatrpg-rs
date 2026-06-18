@@ -60,9 +60,11 @@ pub use npc_profile::persona_from_profile;
 pub mod npc_relationship;
 pub use npc_relationship::{apply_npc_relationship_delta, next_relationship};
 pub mod npc_mind;
-pub use npc_mind::assemble_npc_mind_view;
+pub use npc_mind::{assemble_npc_mind_view, load_npc_mind_view};
 pub mod npc_behavior;
-pub use npc_behavior::{derive_npc_behavior_plan, viewer_behavior_context};
+pub use npc_behavior::{
+    derive_npc_behavior_plan, load_npc_behavior_plan, viewer_behavior_context,
+};
 
 mod scene_projection;
 pub use scene_projection::{module_entry_scene_id, contract_is_opposed, stamp_opposed_check};

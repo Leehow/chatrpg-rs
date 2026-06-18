@@ -1,16 +1,22 @@
 //! KnowledgeEdge 账本（P0b）：揭示事实的统一超集/投影源。
-//! P0b 仅 gm / player_party 两类 holder；NPC holder 留待 P1（actor-id 统一后）。
+//! P0b 落 gm / player_party 两类 holder；P1 slice-1（holder identity gate 已开）起新增
+//! `Npc` holder——durable NPC 知识边，holder_id 为校验过的稳定 NPC actor id（只读投影面，
+//! 见 trpg-db list_npc_knowledge_entries / runtime load_npc_mind_view）。
 //! revealed-facts 兼容投影 = 本表 (player_party, knows_true) 子集；
 //! 与 domain_events.FactRevealed 写穿对齐（见 trpg-db record_revealed_fact）。
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// 知识 holder 种类。P0b 只落 gm / player_party，NPC 等具体角色 holder 见 P1 gate。
+/// 知识 holder 种类。P0b 起 gm / player_party；P1 slice-1（NPC holder identity gate 已开）
+/// 起新增 `Npc`——durable `knowledge_edges` 的 NPC holder 种类。`Npc` 行的 `holder_id` 必须是
+/// 经 [`KnowledgeHolder::npc_from_actor_id`] 校验的稳定 module-graph NPC id，绝不能是
+/// `npc.opposition` 这类占位（DB 0034 的 CHECK 也作 backstop 拒绝）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KnowledgeHolderKind {
     Gm,
     PlayerParty,
+    Npc,
 }
 
 /// holder 对某 fact 的知识态。knows_true = 已确知为真（revealed 兼容投影只取此态）。
@@ -59,11 +65,11 @@ pub struct KnowledgeEdge {
 // 一个**纯内存**的身份校验类型 `KnowledgeHolder`，供 NpcRelationship / NpcMindView 做
 // fail-closed 的 id 校验+规范化。
 //
-// 重要边界：本契约只定义并校验 holder **身份**，不写任何 durable knowledge_edges。
-// P0b 的 `knowledge_edges` 仍仅 gm / player_party（见上方 schema 与 `KnowledgeHolderKind`）；
-// NPC-as-holder 的 durable 边持久化仍 gated（见
-// docs/superpowers/specs/2026-06-17-npc-holder-identity-gate.md，须先统一运行时 NPC id 空间）。
-// 因此这里**不**新增 `KnowledgeHolderKind::Npc`，**不**提供 durable 写门，避免误signal P1 已开。
+// 重要边界：本契约只定义并校验 holder **身份**，本身不写任何 durable knowledge_edges。
+// P1 slice-1 起 `knowledge_edges` 已可挂 `npc` holder（见上方 `KnowledgeHolderKind::Npc`
+// 与 DB 0034），但**只读投影面**：list_npc_knowledge_entries 读、测试用 SQL 直接 seed，
+// 不存在「NPC 何时学到某事实」的 gameplay 写门（见 npc-holder-identity-gate spec slice-3）。
+// 该读路径仍以本契约的稳定 id 校验为门：`npc.opposition` 等占位 fail-closed（见 PLACEHOLDER_IDS）。
 // -----------------------------------------------------------------------------
 
 /// holder 身份解析失败的归因（typed，绝不退化成「拿原串当 holder」）。
@@ -118,6 +124,9 @@ const PLACEHOLDER_IDS: &[&str] = &[
     "unknown", "none", "null", "nil", "na", "tbd", "todo", "n/a", "?", "??", "???", "-", "--",
     "enemy", "enemies", "npc", "npcs", "actor", "target", "foe", "monster", "mob", "placeholder",
     "anonymous", "someone", "somebody", "stranger", "person", "guy", "thing", "it", "them",
+    // 单槽 / 对抗占位：跨场景复用、非持久化的运行时占位 id（npc-holder-identity-gate spec
+    // §2「Synthetic npc.opposition placeholder」）。绝不能当稳定 holder id 持久化。
+    "npc.opposition", "opposition", "pc.current",
 ];
 
 /// 校验一个 actor id 是否「稳定」：source-backed / runtime-owned 的 id 形态，
@@ -318,6 +327,22 @@ mod tests {
             KnowledgeHolder::npc_from_actor_id("enemy").unwrap_err().reason,
             UnresolvedReason::Placeholder
         );
+    }
+
+    /// 战斗对抗占位 `npc.opposition`（及裸 `opposition` / `pc.current` 占位）绝不能成为
+    /// 稳定 holder id——它跨场景复用、非持久化（见 npc-holder-identity-gate spec §2）。
+    /// 必须 fail-closed，否则 durable npc 知识边会挂到一个下个场景指向别的 NPC 的占位上。
+    #[test]
+    fn npc_opposition_placeholder_fails_closed() {
+        for placeholder in ["npc.opposition", "NPC.Opposition", "opposition", "pc.current"] {
+            let err = KnowledgeHolder::npc_from_actor_id(placeholder)
+                .expect_err("对抗/单槽占位串必须被拒，绝不持久化 NPC 知识边到占位");
+            assert_eq!(
+                err.reason,
+                UnresolvedReason::Placeholder,
+                "{placeholder:?} 应归因为 Placeholder"
+            );
+        }
     }
 
     /// 两个不同 NPC id 保持互异，且任一都不会与 gm / player_party 撞 token（前缀保证）。
