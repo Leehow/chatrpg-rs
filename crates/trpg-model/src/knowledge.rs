@@ -160,7 +160,8 @@ fn validate_actor_id(raw: &str) -> Result<String, UnresolvedHolder> {
 ///
 /// 派生 token：`gm` / `player_party` / `pc:<id>` / `npc:<id>` / `faction:<id>`。
 /// 扩展策略 = 新增 variant（受 source/runtime 控制），绝不让 LLM 文本凭空构造 holder。
-/// 注意：本类型只做身份校验，**不**代表对应 holder 已可 durable 持久化（NPC 边仍 gated）。
+/// 注意：本类型只做 holder **身份**校验，不授权 durable/写面。P1 slice-1 起 `npc` durable
+/// 读面已开（list_npc_knowledge_entries）；「NPC 何时学到某事实」gameplay 写门仍 gated。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KnowledgeHolder {
     /// GM / 叙事主权方。
