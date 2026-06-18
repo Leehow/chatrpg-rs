@@ -1,0 +1,789 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+#
+# tlm - Team Lead Runtime Scheduler runner.
+#
+# Models the Team Lead as a work-conserving, event-driven scheduler instead of a
+# dispatch-one / wait-one / review-one loop. Implements Burst Dispatch, Wait Any,
+# Harvest All, Immediate Refill (before deep review), Parallel Review, Rolling
+# Integration awareness, Ready Buffer warnings, conflict-aware ready selection,
+# and simple Backpressure.
+#
+# Safe by default: no command launches a real worker unless `--execute` is passed
+# AND `TLM_WORKER_COMMAND` is set. `self-test` uses fake local processes only.
+#
+# Dependencies: Ruby stdlib + the system `sqlite3` CLI. No gems.
+
+require 'json'
+require 'yaml'
+require 'optparse'
+require 'open3'
+require 'fileutils'
+require 'tmpdir'
+require 'time'
+
+module TLM
+  LANES = %w[implementation review journey_validation integration].freeze
+
+  # Defaults mirror docs/team-lead/ProjectPipeline.yaml scheduler: block. Used when
+  # the pipeline file omits a scheduler section.
+  DEFAULT_SCHEDULER = {
+    'implementation' => { 'min' => 6, 'max' => 8 },
+    'review' => { 'min' => 2, 'max' => 3 },
+    'journey_validation' => { 'min' => 1, 'max' => 2 },
+    'integration' => { 'max' => 1 },
+    'planning' => { 'min_ready_buffer' => 12, 'target_ready_buffer' => 16 },
+    'backpressure' => { 'review_backlog' => 6, 'integration_backlog' => 4, 'ready_starvation' => 4 }
+  }.freeze
+
+  # WorkGraph task.kind -> scheduler lane. Tasks whose validation_profile starts
+  # with "journey" are routed to the journey_validation lane regardless of kind.
+  KIND_TO_LANE = {
+    'implementation' => 'implementation',
+    'verification' => 'review',
+    'integration' => 'integration'
+  }.freeze
+
+  ACTIVE_JOB_STATES = %w[submitted running].freeze
+  # Dependency is satisfied only once its producing task is fully landed.
+  DEP_SATISFIED_STATES = %w[integrated done accepted].freeze
+
+  # Thin wrapper over the sqlite3 CLI so we avoid any gem dependency.
+  class Store
+    def initialize(db_path)
+      @db = db_path
+      FileUtils.mkdir_p(File.dirname(@db))
+      init_schema
+    end
+
+    attr_reader :db
+
+    def init_schema
+      exec_sql(<<~SQL)
+        CREATE TABLE IF NOT EXISTS jobs(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          task_id TEXT NOT NULL,
+          lane TEXT NOT NULL,
+          state TEXT NOT NULL,
+          pid INTEGER,
+          backend TEXT,
+          worker_command TEXT,
+          worktree TEXT,
+          branch TEXT,
+          stdout_path TEXT,
+          handoff_path TEXT,
+          exit_file TEXT,
+          write_set_json TEXT,
+          lease_json TEXT,
+          reviewed INTEGER NOT NULL DEFAULT 0,
+          started_at TEXT,
+          finished_at TEXT,
+          exit_code INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS events(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          ts TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          task_id TEXT,
+          detail TEXT
+        );
+        CREATE TABLE IF NOT EXISTS metadata(
+          key TEXT PRIMARY KEY,
+          value TEXT
+        );
+      SQL
+    end
+
+    def exec_sql(sql)
+      out, err, st = Open3.capture3('sqlite3', @db, sql)
+      raise "sqlite3 error: #{err.strip}\nSQL: #{sql}" unless st.success?
+
+      out
+    end
+
+    def query(sql)
+      out, err, st = Open3.capture3('sqlite3', '-json', @db, sql)
+      raise "sqlite3 error: #{err.strip}\nSQL: #{sql}" unless st.success?
+
+      out.strip.empty? ? [] : JSON.parse(out)
+    end
+
+    def insert_job(fields)
+      cols = fields.keys
+      vals = cols.map { |c| lit(fields[c]) }
+      exec_sql("INSERT INTO jobs(#{cols.join(',')}) VALUES(#{vals.join(',')});")
+      query('SELECT last_insert_rowid() AS id;').first['id']
+    end
+
+    def update_job(id, fields)
+      sets = fields.map { |k, v| "#{k}=#{lit(v)}" }
+      exec_sql("UPDATE jobs SET #{sets.join(',')} WHERE id=#{id.to_i};")
+    end
+
+    def log_event(kind, task_id, detail)
+      exec_sql("INSERT INTO events(ts,kind,task_id,detail) VALUES(#{lit(now)},#{lit(kind)},#{lit(task_id)},#{lit(detail)});")
+    end
+
+    def now
+      Time.now.utc.iso8601
+    end
+
+    # SQL literal: NULL, integer, or single-quote-escaped string.
+    def lit(v)
+      return 'NULL' if v.nil?
+      return v.to_s if v.is_a?(Integer)
+
+      "'" + v.to_s.gsub("'", "''") + "'"
+    end
+  end
+
+  # Reads pipeline + workgraph, owns scheduling logic against a Store.
+  class Scheduler
+    def initialize(repo:, db_path: nil)
+      @repo = File.expand_path(repo)
+      db = db_path || File.join(@repo, '.tmp', 'team-lead', 'runtime.sqlite')
+      @store = Store.new(db)
+    end
+
+    attr_reader :repo, :store
+
+    def pipeline_path
+      File.join(@repo, 'docs', 'team-lead', 'ProjectPipeline.yaml')
+    end
+
+    def workgraph_path
+      File.join(@repo, 'docs', 'team-lead', 'WorkGraph.yaml')
+    end
+
+    def scheduler_cfg
+      @scheduler_cfg ||= begin
+        cfg = DEFAULT_SCHEDULER
+        if File.exist?(pipeline_path)
+          pipe = YAML.load_file(pipeline_path) || {}
+          cfg = deep_merge(DEFAULT_SCHEDULER, pipe['scheduler']) if pipe['scheduler']
+        end
+        cfg
+      end
+    end
+
+    def workgraph
+      @workgraph ||= (File.exist?(workgraph_path) ? (YAML.load_file(workgraph_path) || {}) : {})
+    end
+
+    def tasks
+      workgraph['tasks'] || []
+    end
+
+    def task_by_id(id)
+      tasks.find { |t| t['id'] == id }
+    end
+
+    def lane_of(task)
+      vp = task['validation_profile'].to_s
+      return 'journey_validation' if vp.start_with?('journey')
+
+      KIND_TO_LANE[task['kind']] || 'implementation'
+    end
+
+    def cap(lane, key)
+      (scheduler_cfg[lane] || {})[key]
+    end
+
+    # ---- conflict model -------------------------------------------------------
+
+    # Normalize a write_set glob to a directory-ish prefix for overlap testing.
+    def norm_path(p)
+      p.to_s.sub(%r{/\*\*$}, '').sub(%r{/\*$}, '').sub(/\*+$/, '').sub(%r{/$}, '')
+    end
+
+    def paths_conflict?(a, b)
+      na = norm_path(a)
+      nb = norm_path(b)
+      return false if na.empty? || nb.empty?
+      return true if na == nb
+
+      na.start_with?(nb + '/') || nb.start_with?(na + '/')
+    end
+
+    def sets_conflict?(set_a, set_b)
+      set_a.any? { |a| set_b.any? { |b| paths_conflict?(a, b) } }
+    end
+
+    # Resources held by everything currently active: runtime jobs we launched plus
+    # WorkGraph tasks in `running` state driven by external workers.
+    def active_resources
+      jobs = active_jobs
+      job_task_ids = jobs.map { |j| j['task_id'] }
+      paths = []
+      leases = []
+      task_ids = []
+      jobs.each do |j|
+        paths.concat(JSON.parse(j['write_set_json'] || '[]'))
+        leases.concat(JSON.parse(j['lease_json'] || '[]'))
+        task_ids << j['task_id']
+      end
+      tasks.each do |t|
+        next unless t['state'] == 'running'
+        next if job_task_ids.include?(t['id'])
+
+        paths.concat(t['write_set'] || [])
+        leases.concat(t['hotspot_leases'] || [])
+        task_ids << t['id']
+      end
+      { paths: paths, leases: leases, task_ids: task_ids }
+    end
+
+    def active_jobs
+      @store.query("SELECT * FROM jobs WHERE state IN ('submitted','running');")
+    end
+
+    def dep_satisfied?(task)
+      (task['depends_on'] || []).all? do |dep|
+        dt = task_by_id(dep)
+        dt.nil? || DEP_SATISFIED_STATES.include?(dt['state'])
+      end
+    end
+
+    # Greedy maximal conflict-free set over ready tasks, seeded by active resources.
+    # Returns [selected_tasks, excluded:[{id,reason}]].
+    def conflict_free_ready
+      active = active_resources
+      used_paths = active[:paths].dup
+      used_leases = active[:leases].dup
+      selected = []
+      excluded = []
+      ready = tasks.select { |t| t['state'] == 'ready' && !active[:task_ids].include?(t['id']) }
+      ready.each do |t|
+        unless dep_satisfied?(t)
+          excluded << { 'id' => t['id'], 'reason' => 'dependency_unsatisfied' }
+          next
+        end
+        ws = t['write_set'] || []
+        leases = t['hotspot_leases'] || []
+        if sets_conflict?(ws, used_paths)
+          excluded << { 'id' => t['id'], 'reason' => 'write_set_conflict' }
+          next
+        end
+        if (leases & used_leases).any?
+          excluded << { 'id' => t['id'], 'reason' => 'hotspot_lease_conflict' }
+          next
+        end
+        selected << t
+        used_paths.concat(ws)
+        used_leases.concat(leases)
+      end
+      [selected, excluded]
+    end
+
+    # ---- counts & backpressure ------------------------------------------------
+
+    def active_counts
+      counts = Hash.new(0)
+      active_jobs.each { |j| counts[j['lane']] += 1 }
+      job_task_ids = active_jobs.map { |j| j['task_id'] }
+      tasks.each do |t|
+        next unless t['state'] == 'running'
+        next if job_task_ids.include?(t['id'])
+
+        counts[lane_of(t)] += 1
+      end
+      counts
+    end
+
+    def review_backlog
+      @store.query("SELECT COUNT(*) AS n FROM jobs WHERE lane='implementation' AND state='finished' AND exit_code=0 AND reviewed=0;").first['n']
+    end
+
+    def integration_backlog
+      wg = tasks.count { |t| t['state'] == 'accepted_not_integrated' }
+      jobs = @store.query("SELECT COUNT(*) AS n FROM jobs WHERE state='finished' AND exit_code=0 AND lane='integration';").first['n']
+      wg + jobs
+    end
+
+    def backpressure(review_b, integration_b, ready_count)
+      bp = scheduler_cfg['backpressure'] || {}
+      {
+        review: review_b >= bp['review_backlog'].to_i,
+        integration: integration_b >= bp['integration_backlog'].to_i,
+        ready_starved: ready_count <= bp['ready_starvation'].to_i
+      }
+    end
+
+    # Effective per-lane ceiling. Under review backpressure, implementation is
+    # throttled toward its floor so freed capacity flows into review instead.
+    def effective_max(lane, bp)
+      base = cap(lane, 'max')
+      return base unless lane == 'implementation' && bp[:review]
+
+      [cap('implementation', 'min'), base].min
+    end
+
+    # Single source of truth for scheduler state, reused by status/tick/self-test.
+    def assess
+      counts = active_counts
+      selected, excluded = conflict_free_ready
+      ready_total = tasks.count { |t| t['state'] == 'ready' }
+      review_b = review_backlog
+      integration_b = integration_backlog
+      bp = backpressure(review_b, integration_b, selected.size)
+
+      eff_max = {}
+      LANES.each { |l| eff_max[l] = effective_max(l, bp) }
+
+      dispatchable = selected.select do |t|
+        lane = lane_of(t)
+        m = eff_max[lane]
+        m && counts[lane] < m
+      end
+
+      recommendations = []
+      recommendations << 'increase_review_capacity' if bp[:review]
+      recommendations << 'integration_train_behind' if bp[:integration]
+      min_buf = (scheduler_cfg['planning'] || {})['min_ready_buffer'].to_i
+      recommendations << 'ready_buffer_below_min' if selected.size < min_buf
+      recommendations << 'ready_starvation' if bp[:ready_starved]
+
+      gate_reasons = dispatchable.map do |t|
+        lane = lane_of(t)
+        "dispatchable:#{t['id']} lane=#{lane} active=#{counts[lane]} max=#{eff_max[lane]}"
+      end
+
+      {
+        active: LANES.each_with_object({}) { |l, h| h[l] = counts[l] },
+        effective_max: eff_max,
+        ready_total: ready_total,
+        conflict_free_ready: selected.map { |t| t['id'] },
+        conflict_free_count: selected.size,
+        excluded: excluded,
+        review_backlog: review_b,
+        integration_backlog: integration_b,
+        backpressure: bp,
+        recommendations: recommendations,
+        dispatchable: dispatchable.map { |t| t['id'] },
+        idle_allowed: dispatchable.empty?,
+        gate_reasons: gate_reasons
+      }
+    end
+
+    # ---- dispatch -------------------------------------------------------------
+
+    # Burst plan: assign conflict-free ready tasks to lanes with open slots.
+    def dispatch_plan
+      a = assess
+      counts = a[:active].dup
+      eff_max = a[:effective_max]
+      selected, = conflict_free_ready
+      plan = []
+      selected.each do |t|
+        lane = lane_of(t)
+        next unless %w[implementation review journey_validation].include?(lane)
+
+        m = eff_max[lane]
+        next unless m && counts[lane] < m
+
+        plan << { 'task_id' => t['id'], 'lane' => lane, 'task' => t }
+        counts[lane] += 1
+      end
+      plan
+    end
+
+    def runtime_dir(task_id)
+      d = File.join(@repo, '.tmp', 'team-lead', 'runtime', task_id)
+      FileUtils.mkdir_p(d)
+      d
+    end
+
+    # Launch one fake/real worker in the background. The command is wrapped so its
+    # exit code lands in an exit_file; harvest reads that across separate processes.
+    def launch(task, lane)
+      cmd = ENV['TLM_WORKER_COMMAND']
+      raise 'TLM_WORKER_COMMAND not set; refusing to launch (use --dry-run)' if cmd.nil? || cmd.strip.empty?
+
+      task_id = task['id']
+      dir = runtime_dir(task_id)
+      stdout_path = File.join(dir, 'stdout.log')
+      exit_file = File.join(dir, 'exit.code')
+      handoff_path = File.join(dir, 'handoff.md')
+      FileUtils.rm_f(exit_file)
+
+      env = {
+        'TLM_TASK_ID' => task_id,
+        'TLM_LANE' => lane,
+        'TLM_WORKTREE' => (task['worktree'] || @repo).to_s,
+        'TLM_BRANCH' => (task['branch'] || '').to_s,
+        'TLM_HANDOFF' => handoff_path,
+        'TLM_VALIDATION_PROFILE' => task['validation_profile'].to_s
+      }
+      wrapped = "( #{cmd} ) > #{shellesc(stdout_path)} 2>&1; echo $? > #{shellesc(exit_file)}"
+      pid = Process.spawn(env, wrapped, pgroup: true)
+      Process.detach(pid)
+
+      id = @store.insert_job(
+        'task_id' => task_id, 'lane' => lane, 'state' => 'running', 'pid' => pid,
+        'backend' => ENV['TLM_BACKEND'] || 'cc-print', 'worker_command' => cmd,
+        'worktree' => env['TLM_WORKTREE'], 'branch' => env['TLM_BRANCH'],
+        'stdout_path' => stdout_path, 'handoff_path' => handoff_path, 'exit_file' => exit_file,
+        'write_set_json' => JSON.generate(task['write_set'] || []),
+        'lease_json' => JSON.generate(task['hotspot_leases'] || []),
+        'started_at' => @store.now
+      )
+      @store.log_event('launch', task_id, "lane=#{lane} pid=#{pid}")
+      { 'id' => id, 'task_id' => task_id, 'lane' => lane, 'pid' => pid }
+    end
+
+    def shellesc(s)
+      "'" + s.to_s.gsub("'", "'\\''") + "'"
+    end
+
+    def alive?(pid)
+      return false if pid.nil?
+
+      Process.kill(0, pid.to_i)
+      true
+    rescue Errno::ESRCH
+      false
+    rescue Errno::EPERM
+      true
+    end
+
+    # Harvest-all gate: reconcile every active job in one pass.
+    def harvest
+      results = []
+      active_jobs.each do |j|
+        ef = j['exit_file']
+        if ef && File.exist?(ef)
+          code = File.read(ef).strip.to_i
+          state = code.zero? ? 'finished' : 'failed'
+          @store.update_job(j['id'], 'state' => state, 'exit_code' => code, 'finished_at' => @store.now)
+          @store.log_event('harvest', j['task_id'], "state=#{state} code=#{code}")
+          results << { 'task_id' => j['task_id'], 'lane' => j['lane'], 'state' => state, 'exit_code' => code }
+        elsif alive?(j['pid'])
+          @store.update_job(j['id'], 'state' => 'running') if j['state'] != 'running'
+        else
+          # PID gone but no exit_file: treat as finished-unknown rather than wedged.
+          @store.update_job(j['id'], 'state' => 'failed', 'exit_code' => -1, 'finished_at' => @store.now)
+          @store.log_event('harvest', j['task_id'], 'state=failed code=unknown')
+          results << { 'task_id' => j['task_id'], 'lane' => j['lane'], 'state' => 'failed', 'exit_code' => -1 }
+        end
+      end
+      results
+    end
+
+    # Wait-any: poll active PIDs until any exits or timeout. Never waits on a name.
+    def next_event(timeout)
+      deadline = Time.now + timeout
+      poll = 0.2
+      loop do
+        active = active_jobs
+        return { 'event' => 'idle', 'reason' => 'no_active_jobs' } if active.empty?
+
+        done = active.find { |j| (j['exit_file'] && File.exist?(j['exit_file'])) || !alive?(j['pid']) }
+        return { 'event' => 'completion', 'task_id' => done['task_id'], 'lane' => done['lane'] } if done
+        return { 'event' => 'timeout', 'active' => active.size } if Time.now >= deadline
+
+        sleep([poll, [deadline - Time.now, 0].max].min)
+      end
+    end
+
+    # ---- planning views -------------------------------------------------------
+
+    def review_ready
+      @store.query("SELECT task_id, lane, finished_at FROM jobs WHERE lane='implementation' AND state='finished' AND exit_code=0 AND reviewed=0 ORDER BY finished_at;")
+    end
+
+    # Serial integration train: accepted-but-not-integrated tasks in dependency order.
+    def integrate_ready
+      accepted = tasks.select { |t| t['state'] == 'accepted_not_integrated' }
+      ordered = topo_order(accepted)
+      ordered.map { |t| { 'id' => t['id'], 'commits' => t['commits'] || [], 'depends_on' => t['depends_on'] || [] } }
+    end
+
+    def topo_order(subset)
+      ids = subset.map { |t| t['id'] }
+      ordered = []
+      remaining = subset.dup
+      guard = 0
+      until remaining.empty?
+        guard += 1
+        break ordered.concat(remaining) if guard > subset.size + 1
+
+        ready = remaining.select { |t| ((t['depends_on'] || []) & ids).all? { |d| ordered.any? { |o| o['id'] == d } } }
+        ready = [remaining.first] if ready.empty?
+        ready.each { |t| ordered << t }
+        remaining -= ready
+      end
+      ordered
+    end
+
+    # ---- tick -----------------------------------------------------------------
+
+    # One scheduler tick. Critical ordering: harvest -> refill BEFORE deep review,
+    # so a freed implementation slot is repopulated before any expensive review work.
+    def tick(execute:, dry_run:)
+      harvested = harvest
+      a_before = assess
+
+      plan = dispatch_plan
+      launched = []
+      if execute && !dry_run
+        plan.each { |p| launched << launch(p['task'], p['lane']) }
+      end
+
+      a = assess
+      review = review_ready
+      integration = integrate_ready
+
+      next_wait =
+        if active_jobs.any? then 'next-event'
+        elsif a[:dispatchable].any? then 'dispatch --fill'
+        elsif review.any? then 'review'
+        elsif integration.any? then 'integrate'
+        else 'idle_or_terminal'
+        end
+
+      changed = harvested.any? || launched.any?
+      {
+        'harvested' => harvested,
+        'refill' => {
+          'planned' => plan.map { |p| { 'task_id' => p['task_id'], 'lane' => p['lane'] } },
+          'launched' => launched,
+          'mode' => (execute && !dry_run) ? 'execute' : 'dry-run'
+        },
+        'review_actions' => review,
+        'integration_actions' => integration,
+        'active' => a[:active],
+        'idle_allowed' => a[:idle_allowed],
+        'recommendations' => a[:recommendations],
+        'next_wait' => next_wait,
+        'changed' => changed
+      }
+    end
+
+    def run_until_terminal(execute:, dry_run:, max_ticks:)
+      ticks = []
+      n = 0
+      loop do
+        n += 1
+        t = tick(execute: execute, dry_run: dry_run)
+        ticks << t
+        break if n >= max_ticks
+        # Dry-run never mutates state, so one pass is terminal for planning.
+        break if dry_run
+        # Execute mode: stop when nothing changed and nothing is dispatchable/active.
+        break if !t['changed'] && t['next_wait'] == 'idle_or_terminal'
+        # If only waiting remains, harvest-on-next-tick will drive progress; cap by max.
+      end
+      { 'ticks' => ticks, 'tick_count' => n, 'stopped' => (n >= max_ticks ? 'max_ticks' : 'terminal_or_stable') }
+    end
+
+    def status
+      a = assess
+      {
+        'repo' => @repo,
+        'db' => @store.db,
+        'active' => a[:active],
+        'ready_count' => a[:ready_total],
+        'conflict_free_ready' => a[:conflict_free_count],
+        'review_backlog' => a[:review_backlog],
+        'integration_backlog' => a[:integration_backlog],
+        'backpressure' => a[:backpressure],
+        'effective_max' => a[:effective_max],
+        'idle_allowed' => a[:idle_allowed],
+        'gate_reasons' => a[:gate_reasons],
+        'recommendations' => a[:recommendations]
+      }
+    end
+
+    def plan_ready(lane: nil, limit: nil)
+      selected, excluded = conflict_free_ready
+      selected = selected.select { |t| lane_of(t) == lane } if lane
+      limited = limit ? selected.first(limit) : selected
+      {
+        'lane' => lane || 'all',
+        'limit' => limit,
+        'ready_total' => tasks.count { |t| t['state'] == 'ready' },
+        'selected' => limited.map { |t| { 'id' => t['id'], 'lane' => lane_of(t), 'write_set' => t['write_set'] || [], 'hotspot_leases' => t['hotspot_leases'] || [] } },
+        'excluded' => excluded
+      }
+    end
+
+    def deep_merge(base, override)
+      merged = base.dup
+      (override || {}).each do |k, v|
+        merged[k] = (base[k].is_a?(Hash) && v.is_a?(Hash)) ? deep_merge(base[k], v) : v
+      end
+      merged
+    end
+  end
+end
+
+# ---------------------------------------------------------------------------
+# Self-test: builds a throwaway fixture repo, exercises the gates with asserts.
+# Never launches a real Claude worker; the fake worker is `sh -c exit 0`.
+# ---------------------------------------------------------------------------
+module TLM
+  class SelfTest
+    def self.run
+      failures = []
+      Dir.mktmpdir('tlm-selftest') do |root|
+        write_fixture(root)
+        s = Scheduler.new(repo: root, db_path: File.join(root, 'runtime.sqlite'))
+
+        # 1. conflict-free ready selection excludes overlapping write_set + leases + active conflicts.
+        selected, excluded = s.conflict_free_ready
+        ids = selected.map { |t| t['id'] }
+        check(failures, 'A and B selected', ids.include?('A') && ids.include?('B'))
+        check(failures, 'C excluded (write_set conflict with A)', excl_reason(excluded, 'C') == 'write_set_conflict')
+        check(failures, 'E excluded (hotspot lease conflict with D)', excl_reason(excluded, 'E') == 'hotspot_lease_conflict')
+        check(failures, 'H excluded (conflicts active running G)', excl_reason(excluded, 'H') == 'write_set_conflict')
+        check(failures, 'D selected (distinct lease)', ids.include?('D'))
+
+        # 2. burst dispatch fills more than one implementation slot in one call.
+        plan = s.dispatch_plan
+        impl_plan = plan.select { |p| p['lane'] == 'implementation' }
+        check(failures, 'burst dispatch fills >1 impl slot', impl_plan.size > 1)
+
+        # 4. idle_allowed is false while a ready task + open slot exist.
+        check(failures, 'idle_allowed false with dispatchable work', s.assess[:idle_allowed] == false)
+
+        # 3. harvest marks ALL completed fake workers finished in one pass.
+        ENV['TLM_WORKER_COMMAND'] = 'sh -c "echo done > $TLM_HANDOFF; exit 0"'
+        launched = impl_plan.map { |p| s.launch(p['task'], p['lane']) }
+        check(failures, 'launched >1 fake worker', launched.size > 1)
+        wait_for_exit_files(s, launched.size)
+        harvested = s.harvest
+        check(failures, 'harvest finished all in one pass', harvested.size == launched.size && harvested.all? { |h| h['state'] == 'finished' })
+        check(failures, 'no active jobs after harvest', s.active_jobs.empty?)
+        ENV.delete('TLM_WORKER_COMMAND')
+
+        # 5. backpressure: review backlog over threshold throttles impl and/or asks for review.
+        bp_thresh = s.scheduler_cfg['backpressure']['review_backlog']
+        baseline = s.review_backlog
+        added = bp_thresh + 1
+        added.times do |i|
+          s.store.insert_job('task_id' => "rev#{i}", 'lane' => 'implementation', 'state' => 'finished', 'exit_code' => 0, 'reviewed' => 0, 'started_at' => s.store.now, 'finished_at' => s.store.now)
+        end
+        a = s.assess
+        impl_throttled = a[:effective_max]['implementation'] < s.cap('implementation', 'max')
+        review_rec = a[:recommendations].include?('increase_review_capacity')
+        check(failures, 'backpressure throttles impl or recommends review', impl_throttled || review_rec)
+        check(failures, 'review backlog reflected in assess', a[:review_backlog] == baseline + added)
+      end
+
+      if failures.empty?
+        puts JSON.generate('self_test' => 'pass', 'checks' => 'all')
+        0
+      else
+        puts JSON.generate('self_test' => 'fail', 'failures' => failures)
+        1
+      end
+    end
+
+    def self.check(failures, name, cond)
+      failures << name unless cond
+    end
+
+    def self.excl_reason(excluded, id)
+      row = excluded.find { |e| e['id'] == id }
+      row && row['reason']
+    end
+
+    def self.wait_for_exit_files(scheduler, count)
+      30.times do
+        done = scheduler.active_jobs.count { |j| j['exit_file'] && File.exist?(j['exit_file']) }
+        return if done >= count
+
+        sleep 0.1
+      end
+    end
+
+    def self.write_fixture(root)
+      FileUtils.mkdir_p(File.join(root, 'docs', 'team-lead'))
+      File.write(File.join(root, 'docs', 'team-lead', 'ProjectPipeline.yaml'), <<~YAML)
+        version: 1
+        scheduler:
+          implementation: { min: 6, max: 8 }
+          review: { min: 2, max: 3 }
+          journey_validation: { min: 1, max: 2 }
+          integration: { max: 1 }
+          planning: { min_ready_buffer: 12, target_ready_buffer: 16 }
+          backpressure: { review_backlog: 6, integration_backlog: 4, ready_starvation: 4 }
+      YAML
+      File.write(File.join(root, 'docs', 'team-lead', 'WorkGraph.yaml'), <<~YAML)
+        version: 1
+        work_id: selftest
+        tasks:
+          - { id: A, kind: implementation, state: ready, depends_on: [], write_set: [crates/a/**], hotspot_leases: [], validation_profile: ct-a }
+          - { id: B, kind: implementation, state: ready, depends_on: [], write_set: [crates/b/**], hotspot_leases: [], validation_profile: ct-b }
+          - { id: C, kind: implementation, state: ready, depends_on: [], write_set: [crates/a/src/x.rs], hotspot_leases: [], validation_profile: ct-c }
+          - { id: D, kind: implementation, state: ready, depends_on: [], write_set: [crates/d/**], hotspot_leases: [hot1], validation_profile: ct-d }
+          - { id: E, kind: implementation, state: ready, depends_on: [], write_set: [crates/e/**], hotspot_leases: [hot1], validation_profile: ct-e }
+          - { id: F, kind: verification, state: ready, depends_on: [], write_set: [harness/f/**], hotspot_leases: [], validation_profile: rev-f }
+          - { id: G, kind: implementation, state: running, external_worker: w-g, depends_on: [], write_set: [crates/g/**], hotspot_leases: [hot2], validation_profile: ct-g }
+          - { id: H, kind: implementation, state: ready, depends_on: [], write_set: [crates/g/sub/**], hotspot_leases: [], validation_profile: ct-h }
+      YAML
+    end
+  end
+end
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+module TLM
+  class CLI
+    def self.run(argv)
+      argv = argv.dup
+      cmd = argv.shift
+      opts = { repo: '.', dry_run: false, execute: false, timeout: 30, max_ticks: 50 }
+      parser = OptionParser.new do |o|
+        o.banner = 'usage: tlm <command> [options]'
+        o.on('--repo PATH') { |v| opts[:repo] = v }
+        o.on('--db PATH') { |v| opts[:db] = v }
+        o.on('--lane LANE') { |v| opts[:lane] = v }
+        o.on('--limit N', Integer) { |v| opts[:limit] = v }
+        o.on('--timeout SECONDS', Float) { |v| opts[:timeout] = v }
+        o.on('--max-ticks N', Integer) { |v| opts[:max_ticks] = v }
+        o.on('--dry-run') { opts[:dry_run] = true }
+        o.on('--execute') { opts[:execute] = true }
+        o.on('--fill') { opts[:fill] = true }
+      end
+      parser.parse!(argv)
+
+      return SelfTest.run if cmd == 'self-test'
+
+      unless cmd && %w[status plan-ready dispatch harvest review-ready integrate-ready next-event tick run-until-terminal].include?(cmd)
+        warn parser.to_s
+        warn "\ncommands: status plan-ready dispatch harvest review-ready integrate-ready next-event tick run-until-terminal self-test"
+        return 2
+      end
+
+      s = Scheduler.new(repo: opts[:repo], db_path: opts[:db])
+      out =
+        case cmd
+        when 'status' then s.status
+        when 'plan-ready' then s.plan_ready(lane: opts[:lane], limit: opts[:limit])
+        when 'harvest' then { 'harvested' => s.harvest }
+        when 'review-ready' then { 'review_ready' => s.review_ready }
+        when 'integrate-ready' then { 'integrate_ready' => s.integrate_ready }
+        when 'next-event' then s.next_event(opts[:timeout])
+        when 'dispatch'
+          plan = s.dispatch_plan
+          launched = []
+          if opts[:execute] && !opts[:dry_run]
+            plan.each { |p| launched << s.launch(p['task'], p['lane']) }
+          end
+          {
+            'mode' => (opts[:execute] && !opts[:dry_run]) ? 'execute' : 'dry-run',
+            'planned' => plan.map { |p| { 'task_id' => p['task_id'], 'lane' => p['lane'] } },
+            'launched' => launched
+          }
+        when 'tick' then s.tick(execute: opts[:execute], dry_run: opts[:dry_run])
+        when 'run-until-terminal' then s.run_until_terminal(execute: opts[:execute], dry_run: opts[:dry_run], max_ticks: opts[:max_ticks])
+        end
+      puts JSON.generate(out)
+      0
+    end
+  end
+end
+
+exit(TLM::CLI.run(ARGV)) if $PROGRAM_NAME == __FILE__

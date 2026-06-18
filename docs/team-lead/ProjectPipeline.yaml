@@ -8,6 +8,33 @@ wip:
   verification_wip_max: 2
   integration_wip: 1
 
+# Work-conserving, event-driven scheduler caps consumed by scripts/team-lead/tlm.
+# `wip:` above is retained for backward compatibility; `scheduler:` is authoritative
+# for the runner. min = WIP floor (refill target), max = lane ceiling.
+scheduler:
+  implementation:
+    min: 6
+    max: 8
+  review:
+    min: 2
+    max: 3
+  journey_validation:
+    min: 1
+    max: 2
+  integration:
+    max: 1
+  planning:
+    min_ready_buffer: 12
+    target_ready_buffer: 16
+  # Backpressure trips when a backlog/starvation count reaches the threshold.
+  # review_backlog throttles new implementation dispatch and asks for more review;
+  # integration_backlog warns the serial integration train is falling behind;
+  # ready_starvation flags the planner to produce more conflict-free ready work.
+  backpressure:
+    review_backlog: 6
+    integration_backlog: 4
+    ready_starvation: 4
+
 git:
   worktree_required_for_code: true
   commit_policy: scoped_commit
