@@ -689,6 +689,12 @@ impl GmLoop {
             surfaced_entities,
             narration: None,
             compiled_block_ids,
+            // 私有过滤源（player_known/private_blocks）尚未在本接线点喂生产数据 → 空 =
+            // fail-closed 默认（恒按未知，无块可删）：ContextFilter emitter 存在但无输入 →
+            // no-op，ctx.compiled byte-stable。生产源接线（DB 投影 + 模组图谱派生）属后续卡。
+            player_known_fact_ids: vec![],
+            private_blocks: vec![],
+            secret_terms: vec![],
             config: json!({}),
         };
         let contributions = crate::plugin::builtin_plugin_host().run_hook(&plugin_ctx).await;
@@ -784,6 +790,12 @@ impl GmLoop {
             surfaced_entities,
             narration: Some(visible_text.to_string()),
             compiled_block_ids: vec![],
+            // 私有泄漏术语源（secret_terms）尚未在本接线点喂生产数据 → 空 = verifier 不检测
+            // （fail-soft，无误报）。已揭示放行靠 player_known_fact_ids（同样暂空）。生产源
+            // 接线（模组图谱 harvest）属后续卡。
+            player_known_fact_ids: vec![],
+            private_blocks: vec![],
+            secret_terms: vec![],
             config: json!({}),
         };
         let contributions = crate::plugin::builtin_plugin_host().run_hook(&plugin_ctx).await;

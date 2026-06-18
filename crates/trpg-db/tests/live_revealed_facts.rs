@@ -1,7 +1,7 @@
 //! 反剧透 revealed-facts 账本（DATA/ENFORCEMENT 半，LEDGER 切片）：
-//! record_revealed_fact 落账 + list_revealed_facts distinct 投影。
-//! 复用既有 domain_events 表（无新迁移），kind=FactRevealed，幂等键
-//! `de_revealed_{session}_{fact}`，mirror EntitySurfaced/list_surfaced_entities。
+//! record_revealed_fact 落账 + list_revealed_facts 投影。P0b 起 list_revealed_facts
+//! 委托 KnowledgeEdge (player_party, knows_true)，record_revealed_fact 写穿两边，
+//! 幂等键 `de_revealed_{session}_{fact}`，mirror EntitySurfaced/list_surfaced_entities。
 //! Run: DATABASE_URL=postgres://chatrpg:chatrpg@127.0.0.1:54347/chatrpg \
 //!      cargo test -p trpg-db --test live_revealed_facts -- --nocapture
 //! 无 DATABASE_URL 时 SKIP（fail-closed，不卡 CI）。
@@ -12,19 +12,11 @@ use trpg_model::{DomainEvent, DomainEventKind};
 
 const SESSION: &str = "sess_revealed_facts_ledger";
 
-/// 0030 就地自施（幂等 create table / index if not exists）。
-async fn ensure_schema(db: &Db) {
-    for stmt in include_str!("../../../migrations/0030_domain_events.sql").split(';') {
-        let s = stmt.trim();
-        if s.is_empty() {
-            continue;
-        }
-        if let Err(e) = sqlx::query(s).execute(&db.pool).await {
-            let msg = e.to_string();
-            let dup = msg.contains("already exists") || msg.contains("23505") || msg.contains("42P07");
-            assert!(dup, "0030 statement must apply: {e}");
-        }
-    }
+/// 清掉本会话两边账本（domain_events 写穿源 + knowledge_edges 投影源），
+/// 保证空会话基线，避免上次运行残留行污染断言。
+async fn reset_session(db: &Db) {
+    sqlx::query("delete from domain_events where session_id=$1").bind(SESSION).execute(&db.pool).await.unwrap();
+    sqlx::query("delete from knowledge_edges where session_id=$1").bind(SESSION).execute(&db.pool).await.unwrap();
 }
 
 #[tokio::test]
@@ -43,8 +35,12 @@ async fn record_and_list_revealed_facts_distinct_idempotent() {
             return;
         }
     };
-    ensure_schema(&db).await;
-    sqlx::query("delete from domain_events where session_id=$1").bind(SESSION).execute(&db.pool).await.unwrap();
+    // 幂等 migrate：含 0030 domain_events + 0032 knowledge_edges（list_revealed_facts 现读后者）。
+    if let Err(e) = db.migrate().await {
+        eprintln!("SKIP: migrate failed: {e}");
+        return;
+    }
+    reset_session(&db).await;
 
     // 空会话 → 空账本。
     assert!(db.list_revealed_facts(SESSION).await.unwrap().is_empty(), "空会话 → 无揭示事实");
@@ -77,5 +73,5 @@ async fn record_and_list_revealed_facts_distinct_idempotent() {
         "distinct fact_id；幂等不重复；EntitySurfaced 不混入"
     );
 
-    sqlx::query("delete from domain_events where session_id=$1").bind(SESSION).execute(&db.pool).await.unwrap();
+    reset_session(&db).await;
 }

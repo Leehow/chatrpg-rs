@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+name = "trpg_harness"
+path = "src/lib.rs"
+
 [[bin]]
 name = "trpg-harness"
 path = "src/main.rs"
@@ -17,3 +21,7 @@ tokio.workspace = true
 chrono.workspace = true
 dotenvy.workspace = true
 sqlx.workspace = true
+
+[dev-dependencies]
+trpg-model = { path = "../trpg-model" }
+trpg-runtime = { path = "../trpg-runtime" }

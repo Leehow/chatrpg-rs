@@ -53,6 +53,9 @@ impl Db {
             include_str!("../../../migrations/0029_turn_trace_failure_v120.sql"),
             include_str!("../../../migrations/0030_domain_events.sql"),
             include_str!("../../../migrations/0031_memory_fact_turn_id.sql"),
+            include_str!("../../../migrations/0032_knowledge_edges.sql"),
+            include_str!("../../../migrations/0033_npc_relationships.sql"),
+            include_str!("../../../migrations/0034_knowledge_edges_npc_holder.sql"),
         ];
         for sql in migrations {
             for statement in split_sql_statements(sql) {
@@ -2928,21 +2931,65 @@ impl Db {
             trpg_model::DomainEventKind::FactRevealed,
             data,
         );
-        self.append_domain_event(&ev).await
+        self.append_domain_event(&ev).await?;
+        // P0b 写穿：FactRevealed 同步落 KnowledgeEdge (player_party, knows_true)。
+        // append 在同 (session,fact) 重放会 no-op，但 upsert 仍幂等保证边存在，
+        // 使 revealed-facts 投影（现读 knowledge_edges）不漏旧事件。
+        self.upsert_knowledge_edge_player_party(session_id, turn_id, fact_id, "knows_true", reason)
+            .await
     }
 
-    /// 反剧透 revealed-facts 账本投影：本会话已揭示的 distinct `fact_id` 集。
-    /// 从 `FactRevealed` 事件的 `data` jsonb 抽 distinct `fact_id`；event_id 已幂等
-    /// per-session+fact，distinct 兜底 data 异常重复；按 fact_id 稳定排序。
-    /// spoiler_guard 据此放行实体 secret_terms（不在集内 = 未揭示 = 裁剪）。
-    pub async fn list_revealed_facts(&self, session_id: &str) -> Result<Vec<String>> {
+    /// P0b KnowledgeEdge upsert：把 (session, player_party, fact) 的知识态落账。
+    /// edge_id 在 SQL 内用 md5 确定性生成（uuid crate 无 v5 feature），与 0032 回填
+    /// 同方案 → 跨回填/运行时幂等。on-conflict 更新态/来源/理由（coalesce 保留旧非空）。
+    pub async fn upsert_knowledge_edge_player_party(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        fact_id: &str,
+        knowledge_state: &str,
+        reason: Option<&str>,
+    ) -> Result<()> {
+        // turn_id 当前不入 knowledge_edges 列；source_event_id 复用 record_revealed_fact
+        // 的幂等键 de_revealed_{session}_{fact}（与 domain_events.event_id 对齐）。
+        let _ = turn_id;
+        sqlx::query(
+            r#"
+            insert into knowledge_edges
+              (edge_id, session_id, holder_kind, holder_id, fact_id, knowledge_state, source_event_id, reason)
+            values (
+              'ke_' || md5($1 || ':player_party:' || $2),
+              $1, 'player_party', '', $2, $3, $4, $5
+            )
+            on conflict (session_id, holder_kind, holder_id, fact_id)
+            do update set
+              knowledge_state = excluded.knowledge_state,
+              source_event_id = coalesce(excluded.source_event_id, knowledge_edges.source_event_id),
+              reason = coalesce(excluded.reason, knowledge_edges.reason),
+              updated_at = now()
+            "#,
+        )
+        .bind(session_id)
+        .bind(fact_id)
+        .bind(knowledge_state)
+        .bind(format!("de_revealed_{session_id}_{fact_id}"))
+        .bind(reason)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// P0b 玩家已知事实投影：本会话 (player_party, knows_true) 的 distinct fact_id 集，
+    /// 按 fact_id 稳定排序。revealed-facts 兼容投影的统一真相源（list_revealed_facts 委托）。
+    pub async fn list_player_known_fact_ids(&self, session_id: &str) -> Result<Vec<String>> {
         let rows = sqlx::query(
             r#"
-            select distinct data->>'fact_id' as fact_id
-            from domain_events
+            select fact_id
+            from knowledge_edges
             where session_id = $1
-              and kind = 'FactRevealed'
-              and data->>'fact_id' is not null
+              and holder_kind = 'player_party'
+              and holder_id = ''
+              and knowledge_state = 'knows_true'
             order by fact_id
             "#,
         )
@@ -2950,6 +2997,185 @@ impl Db {
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.into_iter().map(|r| r.get::<String, _>("fact_id")).collect())
+    }
+
+    /// 反剧透 revealed-facts 账本投影（P0b 起委托 KnowledgeEdge）：本会话已揭示的
+    /// distinct `fact_id` 集 = (player_party, knows_true) 子集，按 fact_id 稳定排序。
+    /// 不再直接扫 domain_events.FactRevealed；写穿保证两者一致。EntitySurfaced 绝不混入
+    /// （surfaced ≠ revealed，且根本不写 knowledge_edges）。spoiler_guard 据此放行实体
+    /// secret_terms（不在集内 = 未揭示 = 裁剪）。
+    pub async fn list_revealed_facts(&self, session_id: &str) -> Result<Vec<String>> {
+        self.list_player_known_fact_ids(session_id).await
+    }
+
+    /// 写穿 durable NPC relationship（TC-NPC-02）：把一个 NPC 对某 target 的有界、
+    /// 证据锚定的态度状态整体落库（独立于 knowledge_edges / memory_facts，是结构化关系态
+    /// 而非自由文本记忆摘要）。fail-closed：`rel.npc_id` 与 `rel.target` 双双经 TC-KNOW-00
+    /// actor-identity 契约校验+规范化后才落库——NpcRelationship 字段/枚举 variant 全 public
+    /// 且可由 serde 构造，故写边界必须重新校验，非法 id → Err 且不写任何行。唯一键
+    /// (session_id, npc_id, target_kind, target_id) on-conflict 更新全通道，重写幂等。
+    pub async fn upsert_npc_relationship(&self, rel: &NpcRelationship) -> Result<()> {
+        // 身份门：稳定 NPC holder 校验（kind 通过 ≠ id 合法）。规范化（trim）后落库。
+        let holder = trpg_model::KnowledgeHolder::npc_from_actor_id(&rel.npc_id)
+            .map_err(|u| anyhow::anyhow!("upsert_npc_relationship: {u}"))?;
+        let npc_id = holder.holder_id().expect("npc holder 必有 stable id");
+        // target 身份门：pc/npc/faction 经 kind-specific 契约；非法 target → fail-closed。
+        let target = rel
+            .target
+            .validated()
+            .map_err(|e| anyhow::anyhow!("upsert_npc_relationship target: {e}"))?;
+        let evidence = serde_json::to_value(&rel.evidence_event_ids)?;
+        let stance = serde_json::to_value(rel.stance)?
+            .as_str()
+            .expect("stance serializes to a string token")
+            .to_string();
+        sqlx::query(
+            r#"
+            insert into npc_relationships
+              (session_id, npc_id, target_kind, target_id, trust, respect, affection, debt,
+               fear, suspicion, hostility, leverage, talkativeness, interaction_desire, stance,
+               last_interaction_turn_id, evidence_event_ids)
+            values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+            on conflict (session_id, npc_id, target_kind, target_id)
+            do update set
+              trust = excluded.trust,
+              respect = excluded.respect,
+              affection = excluded.affection,
+              debt = excluded.debt,
+              fear = excluded.fear,
+              suspicion = excluded.suspicion,
+              hostility = excluded.hostility,
+              leverage = excluded.leverage,
+              talkativeness = excluded.talkativeness,
+              interaction_desire = excluded.interaction_desire,
+              stance = excluded.stance,
+              last_interaction_turn_id = excluded.last_interaction_turn_id,
+              evidence_event_ids = excluded.evidence_event_ids,
+              updated_at = now()
+            "#,
+        )
+        .bind(&rel.session_id)
+        .bind(npc_id)
+        .bind(target.kind_token())
+        .bind(target.target_id())
+        .bind(rel.trust)
+        .bind(rel.respect)
+        .bind(rel.affection)
+        .bind(rel.debt)
+        .bind(rel.fear)
+        .bind(rel.suspicion)
+        .bind(rel.hostility)
+        .bind(rel.leverage)
+        .bind(rel.talkativeness)
+        .bind(rel.interaction_desire)
+        .bind(&stance)
+        .bind(rel.last_interaction_turn_id.as_deref())
+        .bind(&evidence)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// 读回 durable NPC relationship（TC-NPC-02）。无行返回 None（首次互动）。
+    /// `npc_id` 同样经 actor-identity 契约规范化后查询，跨 raw 空白稳定命中。
+    pub async fn load_npc_relationship(
+        &self,
+        session_id: &str,
+        npc_id: &str,
+        target_kind: &str,
+        target_id: &str,
+    ) -> Result<Option<NpcRelationship>> {
+        let holder = trpg_model::KnowledgeHolder::npc_from_actor_id(npc_id)
+            .map_err(|u| anyhow::anyhow!("load_npc_relationship: {u}"))?;
+        let npc_id = holder.holder_id().expect("npc holder 必有 stable id");
+        let row = sqlx::query(
+            r#"
+            select target_kind, target_id, trust, respect, affection, debt, fear, suspicion,
+                   hostility, leverage, talkativeness, interaction_desire, stance,
+                   last_interaction_turn_id, evidence_event_ids
+            from npc_relationships
+            where session_id = $1 and npc_id = $2 and target_kind = $3 and target_id = $4
+            "#,
+        )
+        .bind(session_id)
+        .bind(npc_id)
+        .bind(target_kind)
+        .bind(target_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        match row {
+            Some(r) => Ok(Some(npc_relationship_from_row(session_id, npc_id, &r)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// 读回某 NPC 在本会话的全部 durable relationship 行（TC-NPC-02），按
+    /// (target_kind, target_id) 稳定排序。`npc_id` 经 actor-identity 契约规范化后查询。
+    /// load_npc_mind_view 用它装配 NpcMindView 的关系摘要——不再依赖单一硬编码 target。
+    pub async fn list_npc_relationships(
+        &self,
+        session_id: &str,
+        npc_id: &str,
+    ) -> Result<Vec<NpcRelationship>> {
+        let holder = trpg_model::KnowledgeHolder::npc_from_actor_id(npc_id)
+            .map_err(|u| anyhow::anyhow!("list_npc_relationships: {u}"))?;
+        let npc_id = holder.holder_id().expect("npc holder 必有 stable id");
+        let rows = sqlx::query(
+            r#"
+            select target_kind, target_id, trust, respect, affection, debt, fear, suspicion,
+                   hostility, leverage, talkativeness, interaction_desire, stance,
+                   last_interaction_turn_id, evidence_event_ids
+            from npc_relationships
+            where session_id = $1 and npc_id = $2
+            order by target_kind, target_id
+            "#,
+        )
+        .bind(session_id)
+        .bind(npc_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|r| npc_relationship_from_row(session_id, npc_id, r))
+            .collect()
+    }
+
+    /// P1 slice-1 NPC 知识投影（**只读**）：读回某 NPC 自己的 durable knowledge_edges 行
+    /// （holder_kind='npc'，holder_id=规范化稳定 NPC id），映射为 NpcKnowledgeEntry，按
+    /// fact_id 稳定排序。fail-closed：`npc_actor_id` 经 actor-identity 契约校验——
+    /// `npc.opposition`/空/展示名等占位 → Err，绝不查到挂在占位上的边。NpcMindView::build 再
+    /// 把这些 entry 过滤到 known + belief 态。这是只读投影面，无 gameplay 写门（测试用 SQL
+    /// 直接 seed knowledge_edges）。
+    pub async fn list_npc_knowledge_entries(
+        &self,
+        session_id: &str,
+        npc_actor_id: &str,
+    ) -> Result<Vec<NpcKnowledgeEntry>> {
+        let holder = trpg_model::KnowledgeHolder::npc_from_actor_id(npc_actor_id)
+            .map_err(|u| anyhow::anyhow!("list_npc_knowledge_entries: {u}"))?;
+        let npc_id = holder.holder_id().expect("npc holder 必有 stable id");
+        let rows = sqlx::query(
+            r#"
+            select fact_id, knowledge_state
+            from knowledge_edges
+            where session_id = $1 and holder_kind = 'npc' and holder_id = $2
+            order by fact_id
+            "#,
+        )
+        .bind(session_id)
+        .bind(npc_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|r| {
+                let state: KnowledgeState = serde_json::from_value(serde_json::Value::String(
+                    r.get::<String, _>("knowledge_state"),
+                ))?;
+                Ok(NpcKnowledgeEntry {
+                    fact_id: r.get::<String, _>("fact_id"),
+                    state,
+                })
+            })
+            .collect()
     }
 
     pub async fn list_world_events_since(&self, session_id: &str, since_tick: i64, since_event_seq: i64, limit: i64) -> Result<Vec<WorldEvent>> {
@@ -3941,6 +4167,43 @@ fn row_to_memory_snapshot(row: sqlx::postgres::PgRow) -> Result<MemorySnapshot> 
         content_hash: row.get("content_hash"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
+    })
+}
+
+/// 把一行 npc_relationships 映射回 NpcRelationship。session_id/npc_id 由调用方传入（这两列
+/// 不在 select 投影里，且对一个 NPC 的全部关系行是常量），其余通道全来自该行。
+/// load_npc_relationship 与 list_npc_relationships 共用，确保单/多读路径解码一致。
+fn npc_relationship_from_row(
+    session_id: &str,
+    npc_id: &str,
+    r: &sqlx::postgres::PgRow,
+) -> Result<NpcRelationship> {
+    let target = NpcRelationshipTarget::from_parts(
+        &r.get::<String, _>("target_kind"),
+        &r.get::<String, _>("target_id"),
+    )
+    .map_err(|e| anyhow::anyhow!("npc_relationship_from_row: {e}"))?;
+    let stance: RelationshipStance =
+        serde_json::from_value(serde_json::Value::String(r.get::<String, _>("stance")))?;
+    let evidence_event_ids: Vec<String> =
+        serde_json::from_value(r.get::<serde_json::Value, _>("evidence_event_ids"))?;
+    Ok(NpcRelationship {
+        session_id: session_id.to_string(),
+        npc_id: npc_id.to_string(),
+        target,
+        trust: r.get("trust"),
+        respect: r.get("respect"),
+        affection: r.get("affection"),
+        debt: r.get("debt"),
+        fear: r.get("fear"),
+        suspicion: r.get("suspicion"),
+        hostility: r.get("hostility"),
+        leverage: r.get("leverage"),
+        talkativeness: r.get("talkativeness"),
+        interaction_desire: r.get("interaction_desire"),
+        stance,
+        last_interaction_turn_id: r.get("last_interaction_turn_id"),
+        evidence_event_ids,
     })
 }
 

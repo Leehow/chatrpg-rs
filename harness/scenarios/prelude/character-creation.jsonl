@@ -1,0 +1,4 @@
+{"event":"phase","phase":"start","data":{"kind":"character_create_auto"}}
+{"event":"phase","phase":"character_created","data":{"character_id":"character_prelude_jin","name":"Jin","status":"ready","session_id":"sess_prelude_1","actor_id":"pc.current","validation":{"status":"ok","errors":[],"warnings":[],"info":[]},"sheet":{"name":"Jin","role":"netrunner","stats":{"INT":7,"REF":6}}}}
+{"event":"phase","phase":"bound","data":{"session_id":"sess_prelude_1","actor_id":"pc.current"}}
+{"event":"phase","phase":"done","data":{}}

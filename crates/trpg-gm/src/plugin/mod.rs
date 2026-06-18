@@ -19,6 +19,7 @@ pub mod builtin_player_agency;
 pub mod builtin_scene_boundary;
 pub mod builtin_source_backed;
 pub mod host;
+pub mod spoiler_source;
 pub mod types;
 
 pub use builtin_no_mechanical::NoMechanicalInvention;
@@ -27,9 +28,12 @@ pub use builtin_player_agency::PlayerAgencyGuard;
 pub use builtin_scene_boundary::SceneBoundaryGuard;
 pub use builtin_source_backed::SourceBackedRulesGuard;
 pub use host::{PluginHost, RuntimePlugin};
+pub use spoiler_source::{
+    derive_scene_block_view, harvest_module_secret_terms, scene_node_id_from_block,
+};
 pub use types::{
     ContextFilterSpec, ContributionMeta, FailPolicy, PluginContext, PluginContribution,
-    PluginContributionKind, PluginHook, SafetyClass,
+    PluginContributionKind, PluginHook, PrivateBlockView, SafetyClass, SecretTerm,
 };
 
 use std::sync::LazyLock;

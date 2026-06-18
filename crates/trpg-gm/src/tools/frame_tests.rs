@@ -242,13 +242,13 @@ fn combat_manifest_loads_with_frame_tools_and_tight_tempo() {
     assert!(filter.matches("reaction", &[], &[]), "reaction tier entries are combat-relevant: {filter:?}");
     assert!(!filter.matches("downtime", &["development_phase".to_string()], &["rest".to_string()]), "filter must NOT select downtime entries: {filter:?}");
     assert!(!filter.matches("lore", &[], &["worldbuilding".to_string()]), "filter must NOT select unrelated entries: {filter:?}");
-    // for_mode 真组装：基础 14 + 两个 frame 工具在尾部（schema 确定性）。
+    // for_mode 真组装：基础 15 + 两个 frame 工具在尾部（schema 确定性）。
     let registry = ToolRegistry::for_mode(&data_dir, Some("combat")).expect("combat extra tools must resolve");
     let schemas = registry.schemas();
-    assert_eq!(schemas.len(), 16);
+    assert_eq!(schemas.len(), 17);
     let names: Vec<&str> = schemas.iter().filter_map(|s| s.pointer("/function/name").and_then(|v| v.as_str())).collect();
-    assert_eq!(names[14], "open_combat_frame");
-    assert_eq!(names[15], "close_frame");
+    assert_eq!(names[15], "open_combat_frame");
+    assert_eq!(names[16], "close_frame");
 }
 
 #[test]

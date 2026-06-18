@@ -1,0 +1,39 @@
+{
+  "identity": {
+    "scenario_id": "npc-connected-journey",
+    "scenario_version": "1",
+    "evidence_schema_version": "tc-jrny-02.evidence.v1"
+  },
+  "recorded_mode": "live",
+  "turns": [
+    {
+      "user_input": "我走到摊位前，问 Mara 发电机为什么一直在抖。",
+      "count_delta": {},
+      "player_visible_body": "Mara 抬眼看了你一下，手仍然按着发电机外壳。"
+    },
+    {
+      "user_input": "我蹲下来重新接好松掉的地线，把火花压下去。",
+      "count_delta": {},
+      "player_visible_body": "火花收住后，摊位灯串稳定下来，Mara 终于把手从急停开关上挪开。"
+    },
+    {
+      "user_input": "我等她缓过来后，再问她愿不愿意告诉我市场里谁在盯着我们。",
+      "count_delta": {},
+      "player_visible_body": "Mara 的语气比刚才松了些：\"你刚帮了我，我愿意告诉你我亲眼看到的事。\""
+    }
+  ],
+  "npc_journey": {
+    "session_id": "sess_npc_connected_1",
+    "npc_id": "npc_mara",
+    "known_fact_ids": ["fact_generator_fault"],
+    "secret_fact_ids": ["fact_hidden_safehouse"],
+    "unknown_fact_id": "fact_unknown_mayor",
+    "relationship_evidence_event_ids": ["evt_player_repairs_generator"],
+    "baseline_dialogue": "Mara 把扳手抱在胸前，语气很短，只说发电机今晚一直不稳。",
+    "later_dialogue": "Mara 把扳手放低，认真道谢，并愿意说出她亲眼看到的巡逻路线。",
+    "reload": {
+      "relationship_evidence_event_ids": ["evt_player_repairs_generator"],
+      "known_fact_ids": ["fact_generator_fault"]
+    }
+  }
+}

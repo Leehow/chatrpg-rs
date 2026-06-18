@@ -145,10 +145,11 @@ fn for_mode_unknown_extra_tool_is_config_error() {
 #[test]
 fn base_registry_has_fourteen_tools_with_mode_tools_at_tail() {
     let schemas = ToolRegistry::standard().schemas();
-    assert_eq!(schemas.len(), 14, "基础 14 = 二期 12 + enter_mode/exit_mode");
+    assert_eq!(schemas.len(), 15, "基础 15 = 二期 12 + enter_mode/exit_mode + reveal_fact");
     let names: Vec<&str> = schemas.iter().filter_map(|s| s.pointer("/function/name").and_then(|v| v.as_str())).collect();
     assert_eq!(names[12], "enter_mode");
     assert_eq!(names[13], "exit_mode");
+    assert_eq!(names[14], "reveal_fact");
 }
 
 fn typed_err(result: anyhow::Result<crate::tools::ToolOutput>) -> ToolError {

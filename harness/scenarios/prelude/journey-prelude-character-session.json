@@ -1,0 +1,25 @@
+{
+  "scenario_id": "journey-prelude-character-session",
+  "scenario_version": "1",
+  "evidence_schema_version": "tc-jrny-02.evidence.v1",
+  "ruleset_id": "cyberpunk_red",
+  "setup": {
+    "character": {
+      "auto": true,
+      "require_persisted": true,
+      "require_session_binding": true
+    }
+  },
+  "turns": [
+    {
+      "user_input": "我拆开墙边的接线盒，动手切断公寓的供电电缆。",
+      "check": {
+        "label": "cut_power",
+        "require_dice": true,
+        "require_check_resolution": true,
+        "require_player_visible_effect": true,
+        "player_visible_effect_any": ["切断", "成功"]
+      }
+    }
+  ]
+}

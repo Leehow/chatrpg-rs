@@ -10,11 +10,66 @@
 //! branch. The CombatMode variant names below are mode names, not ruleset names.
 
 use crate::{ReactionAdvice, RulesetCombatProfile};
+use serde_json::{json, Value};
 use trpg_model::{
     ActorKind, ActorRef, CheckLabelPolicy, CombatMode, CombatModePolicy, CombatProfile,
     ConflictIntent, DiceQualification, ModuleConfig, SituationActionKind,
     GENERIC_CHECK_LABEL_POLICY, GENERIC_COMBAT_MODE_POLICY, GENERIC_DICE_QUALIFICATION,
 };
+
+/// The single-slot, non-persistent combat opposition placeholder. It is reused
+/// across turns and scenes (the "串台坑 §6③" the runtime comments call out) and
+/// must NEVER be persisted as a knowledge holder id. NPC-holder identity gate:
+/// `docs/superpowers/specs/2026-06-17-npc-holder-identity-gate.md`.
+pub const COMBAT_OPPOSITION_PLACEHOLDER: &str = "npc.opposition";
+
+/// Recover the stable module-graph NPC id behind a resolved combat opposition
+/// actor, or `None` when none exists. Returns `None` for the `npc.opposition`
+/// placeholder, empty ids, and non-`Npc` actors — it never fabricates a
+/// persistent id. This is the frame-time seed the future
+/// `persistent_npc_holder_id` resolver (gate spec, slice 2) consumes to reject
+/// the placeholder and recover the real graph id when one exists.
+pub fn persistent_opposition_graph_id(actor: Option<&ActorRef>) -> Option<String> {
+    let actor = actor?;
+    if actor.actor_kind != ActorKind::Npc {
+        return None;
+    }
+    let id = actor.actor_id.trim();
+    if id.is_empty() || id == COMBAT_OPPOSITION_PLACEHOLDER {
+        return None;
+    }
+    Some(id.to_string())
+}
+
+/// Build the explicit identity binding recorded on the combat opposition
+/// participant's `metadata`. When a stable module-graph id exists it is carried
+/// as `persistent_graph_id` with `persistent: true`; the generic fallback
+/// (no module binding matched / no combat intent) is marked `persistent: false`
+/// with a null id — never a fabricated holder. A future
+/// `persistent_npc_holder_id` resolver reads this off the active frame to reject
+/// the placeholder and recover the real id without reopening the knowledge schema.
+pub fn opposition_identity_binding(resolved: Option<&ActorRef>) -> Value {
+    match persistent_opposition_graph_id(resolved) {
+        Some(graph_id) => json!({
+            "source": "runtime_parameter_hydrator_v1_8",
+            "npc_identity_binding": {
+                "placeholder_actor_id": COMBAT_OPPOSITION_PLACEHOLDER,
+                "persistent_graph_id": graph_id,
+                "persistent": true,
+                "binding_source": "module_config.npc_actor_bindings",
+            }
+        }),
+        None => json!({
+            "source": "runtime_parameter_hydrator_v1_8",
+            "npc_identity_binding": {
+                "placeholder_actor_id": COMBAT_OPPOSITION_PLACEHOLDER,
+                "persistent_graph_id": Value::Null,
+                "persistent": false,
+                "binding_source": "generic_opposition_fallback",
+            }
+        }),
+    }
+}
 
 /// Resolve the CombatMode for an intent from the kernel's data policy.
 /// Replaces `infer_combat_mode_from_intent`'s ruleset_id.contains branches:
@@ -319,6 +374,54 @@ mod tests {
         // non-attack intent -> None (unchanged)
         let inv = ConflictIntent { action_kind: SituationActionKind::InvestigateDuringConflict, ..base_intent() };
         assert!(actor_for_combat_input(Some(&cfg), "look around", &inv).is_none());
+    }
+
+    // 2F: NPC-holder identity gate (combat half). The combat opposition slot keeps
+    // the non-persistent `npc.opposition` placeholder, but the frame must carry an
+    // EXPLICIT binding to the resolved module-graph id when one exists, and stay
+    // explicitly non-persistent (no fabricated id) when none does.
+    fn npc(actor_id: &str) -> ActorRef {
+        ActorRef { actor_id: actor_id.into(), actor_kind: ActorKind::Npc, display_name: None }
+    }
+
+    #[test]
+    fn persistent_opposition_graph_id_recovers_real_id_rejects_placeholder() {
+        // a real module-graph binding id is persistent
+        assert_eq!(
+            persistent_opposition_graph_id(Some(&npc("npc.scav_boss"))),
+            Some("npc.scav_boss".to_string())
+        );
+        // the single-slot placeholder is NEVER a persistent holder id
+        assert_eq!(persistent_opposition_graph_id(Some(&npc("npc.opposition"))), None);
+        assert_eq!(persistent_opposition_graph_id(Some(&npc("  npc.opposition  "))), None);
+        // empty / None never fabricate an id
+        assert_eq!(persistent_opposition_graph_id(Some(&npc(""))), None);
+        assert_eq!(persistent_opposition_graph_id(None), None);
+        // a non-NPC actor is not an opposition holder
+        let pc = ActorRef { actor_id: "pc.current".into(), actor_kind: ActorKind::PlayerCharacter, display_name: None };
+        assert_eq!(persistent_opposition_graph_id(Some(&pc)), None);
+    }
+
+    #[test]
+    fn opposition_identity_binding_marks_persistence_explicitly() {
+        // resolved real id -> persistent binding carrying the graph id
+        let bound = opposition_identity_binding(Some(&npc("npc.scav_boss")));
+        let b = &bound["npc_identity_binding"];
+        assert_eq!(b["placeholder_actor_id"], "npc.opposition");
+        assert_eq!(b["persistent_graph_id"], "npc.scav_boss");
+        assert_eq!(b["persistent"], true);
+
+        // generic fallback (placeholder) -> explicitly non-persistent, no fabricated id
+        let fallback = opposition_identity_binding(Some(&npc("npc.opposition")));
+        let f = &fallback["npc_identity_binding"];
+        assert_eq!(f["placeholder_actor_id"], "npc.opposition");
+        assert!(f["persistent_graph_id"].is_null());
+        assert_eq!(f["persistent"], false);
+
+        // no resolved actor at all -> also explicitly non-persistent
+        let none = opposition_identity_binding(None);
+        assert_eq!(none["npc_identity_binding"]["persistent"], false);
+        assert!(none["npc_identity_binding"]["persistent_graph_id"].is_null());
     }
 
     #[test]
