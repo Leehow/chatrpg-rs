@@ -122,8 +122,8 @@ module TLM
     def insert_job(fields)
       cols = fields.keys
       vals = cols.map { |c| lit(fields[c]) }
-      exec_sql("INSERT INTO jobs(#{cols.join(',')}) VALUES(#{vals.join(',')});")
-      query('SELECT last_insert_rowid() AS id;').first['id']
+      sql = "INSERT INTO jobs(#{cols.join(',')}) VALUES(#{vals.join(',')});\nSELECT last_insert_rowid() AS id;"
+      query(sql).first['id']
     end
 
     def update_job(id, fields)
@@ -702,6 +702,9 @@ module TLM
         ENV['TLM_WORKER_COMMAND'] = 'sh -c "echo done > $TLM_HANDOFF; exit 0"'
         launched = impl_plan.map { |p| s.launch(p['task'], p['lane']) }
         check(failures, 'launched >1 fake worker', launched.size > 1)
+        launched_ids = launched.map { |l| l['id'].to_i }
+        check(failures, 'launched job ids all positive', launched_ids.all? { |id| id > 0 })
+        check(failures, 'launched job ids all unique', launched_ids.uniq.size == launched_ids.size)
         wait_for_exit_files(s, launched.size)
         harvested = s.harvest
         check(failures, 'harvest finished all in one pass', harvested.size == launched.size && harvested.all? { |h| h['state'] == 'finished' })
