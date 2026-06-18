@@ -711,8 +711,24 @@ impl CombatAgent {
         let world_tick = WorldTimeService::new(self.db.clone()).ensure_session_time(input.session_id, Some(input.session_id)).await.map(|t| t.world_tick).unwrap_or_default();
         let params = RuntimeParameterService::new(self.db.clone());
         let pc_params = params.ensure_actor_parameters(input.session_id, input.ruleset_id, &actor_id, ActorKind::PlayerCharacter, world_tick).await.ok();
-        let npc_actor_id = "npc.opposition".to_string();
+        // NPC-holder identity gate (combat half): the opposition stays the
+        // single-slot, non-persistent `npc.opposition` placeholder (changing the
+        // participant id would break the out-of-scope `npc.opposition` live
+        // fixtures across crates), but the frame must still carry an EXPLICIT
+        // binding to the resolved module-graph NPC id when module config / intent
+        // can supply one. The generic fallback stays explicitly non-persistent
+        // (no fabricated id). See
+        // docs/superpowers/specs/2026-06-17-npc-holder-identity-gate.md (slice 1).
+        let npc_actor_id = policy::COMBAT_OPPOSITION_PLACEHOLDER.to_string();
         let npc_params = params.ensure_actor_parameters(input.session_id, input.ruleset_id, &npc_actor_id, ActorKind::Npc, world_tick).await.ok();
+        let module_cfg = match input.module_id {
+            Some(mid) => self.db.load_module_config(mid).await,
+            None => None,
+        };
+        let resolved_opposition = intent
+            .as_ref()
+            .and_then(|it| actor_for_combat_input(module_cfg.as_ref(), input.user_input, it));
+        let opposition_metadata = policy::opposition_identity_binding(resolved_opposition.as_ref());
         // Participant HP from the single source of truth (live current in
         // generic_parameter_states via the kernel HP track). No gps row yet
         // (combat just started) -> load_resource_current falls back to the
@@ -733,7 +749,7 @@ impl CombatAgent {
             ],
             participants: vec![
                 CombatParticipantState { actor_id: actor_id.clone(), actor_kind: ActorKind::PlayerCharacter, display_name: Some("Current PC".into()), side_id: "pcs".into(), hp_current: pc_hp, hp_max: pc_hp, visible_to_players: true, combat_status: CombatantStatus::Active, morale: Some(100), patience: Some(100), resources: pc_params.as_ref().map(|p| p.status_json.clone()).unwrap_or_else(|| json!({"source_policy":"unresolved_no_synthetic_default"})), ..Default::default() },
-                CombatParticipantState { actor_id: npc_actor_id.clone(), actor_kind: ActorKind::Npc, display_name: Some("Opposition".into()), side_id: "opposition".into(), hp_current: npc_hp, hp_max: npc_hp, visible_to_players: false, combat_status: CombatantStatus::Active, morale: Some(55), patience: Some(45), resources: npc_params.as_ref().map(|p| p.status_json.clone()).unwrap_or_else(|| json!({"source_policy":"unresolved_no_synthetic_default"})), ..Default::default() },
+                CombatParticipantState { actor_id: npc_actor_id.clone(), actor_kind: ActorKind::Npc, display_name: Some("Opposition".into()), side_id: "opposition".into(), hp_current: npc_hp, hp_max: npc_hp, visible_to_players: false, combat_status: CombatantStatus::Active, morale: Some(55), patience: Some(45), resources: npc_params.as_ref().map(|p| p.status_json.clone()).unwrap_or_else(|| json!({"source_policy":"unresolved_no_synthetic_default"})), metadata: opposition_metadata, ..Default::default() },
             ],
             sides: vec![
                 CombatSide { side_id: "pcs".into(), label: "Player characters".into(), actor_ids: vec![actor_id.clone()], disposition: "allied".into() },
