@@ -36,6 +36,14 @@ pub mod context_block;
 pub use context_block::*;
 pub mod knowledge;
 pub use knowledge::*;
+pub mod npc_profile;
+pub use npc_profile::*;
+pub mod npc_relationship;
+pub use npc_relationship::*;
+pub mod npc_mind;
+pub use npc_mind::*;
+pub mod npc_behavior;
+pub use npc_behavior::*;
 
 pub const PROJECT_SCHEMA_VERSION: &str = "chatrpg.project_bundle.v1";
 pub const RULE_SCHEMA_VERSION: &str = "chatrpg.rule_bundle.v1";

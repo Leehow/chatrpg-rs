@@ -54,6 +54,7 @@ impl Db {
             include_str!("../../../migrations/0030_domain_events.sql"),
             include_str!("../../../migrations/0031_memory_fact_turn_id.sql"),
             include_str!("../../../migrations/0032_knowledge_edges.sql"),
+            include_str!("../../../migrations/0033_npc_relationships.sql"),
         ];
         for sql in migrations {
             for statement in split_sql_statements(sql) {
@@ -3004,6 +3005,131 @@ impl Db {
     /// secret_terms（不在集内 = 未揭示 = 裁剪）。
     pub async fn list_revealed_facts(&self, session_id: &str) -> Result<Vec<String>> {
         self.list_player_known_fact_ids(session_id).await
+    }
+
+    /// 写穿 durable NPC relationship（TC-NPC-02）：把一个 NPC 对某 target 的有界、
+    /// 证据锚定的态度状态整体落库（独立于 knowledge_edges / memory_facts，是结构化关系态
+    /// 而非自由文本记忆摘要）。fail-closed：`rel.npc_id` 与 `rel.target` 双双经 TC-KNOW-00
+    /// actor-identity 契约校验+规范化后才落库——NpcRelationship 字段/枚举 variant 全 public
+    /// 且可由 serde 构造，故写边界必须重新校验，非法 id → Err 且不写任何行。唯一键
+    /// (session_id, npc_id, target_kind, target_id) on-conflict 更新全通道，重写幂等。
+    pub async fn upsert_npc_relationship(&self, rel: &NpcRelationship) -> Result<()> {
+        // 身份门：稳定 NPC holder 校验（kind 通过 ≠ id 合法）。规范化（trim）后落库。
+        let holder = trpg_model::KnowledgeHolder::npc_from_actor_id(&rel.npc_id)
+            .map_err(|u| anyhow::anyhow!("upsert_npc_relationship: {u}"))?;
+        let npc_id = holder.holder_id().expect("npc holder 必有 stable id");
+        // target 身份门：pc/npc/faction 经 kind-specific 契约；非法 target → fail-closed。
+        let target = rel
+            .target
+            .validated()
+            .map_err(|e| anyhow::anyhow!("upsert_npc_relationship target: {e}"))?;
+        let evidence = serde_json::to_value(&rel.evidence_event_ids)?;
+        let stance = serde_json::to_value(rel.stance)?
+            .as_str()
+            .expect("stance serializes to a string token")
+            .to_string();
+        sqlx::query(
+            r#"
+            insert into npc_relationships
+              (session_id, npc_id, target_kind, target_id, trust, respect, affection, debt,
+               fear, suspicion, hostility, leverage, talkativeness, interaction_desire, stance,
+               last_interaction_turn_id, evidence_event_ids)
+            values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+            on conflict (session_id, npc_id, target_kind, target_id)
+            do update set
+              trust = excluded.trust,
+              respect = excluded.respect,
+              affection = excluded.affection,
+              debt = excluded.debt,
+              fear = excluded.fear,
+              suspicion = excluded.suspicion,
+              hostility = excluded.hostility,
+              leverage = excluded.leverage,
+              talkativeness = excluded.talkativeness,
+              interaction_desire = excluded.interaction_desire,
+              stance = excluded.stance,
+              last_interaction_turn_id = excluded.last_interaction_turn_id,
+              evidence_event_ids = excluded.evidence_event_ids,
+              updated_at = now()
+            "#,
+        )
+        .bind(&rel.session_id)
+        .bind(npc_id)
+        .bind(target.kind_token())
+        .bind(target.target_id())
+        .bind(rel.trust)
+        .bind(rel.respect)
+        .bind(rel.affection)
+        .bind(rel.debt)
+        .bind(rel.fear)
+        .bind(rel.suspicion)
+        .bind(rel.hostility)
+        .bind(rel.leverage)
+        .bind(rel.talkativeness)
+        .bind(rel.interaction_desire)
+        .bind(&stance)
+        .bind(rel.last_interaction_turn_id.as_deref())
+        .bind(&evidence)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// 读回 durable NPC relationship（TC-NPC-02）。无行返回 None（首次互动）。
+    /// `npc_id` 同样经 actor-identity 契约规范化后查询，跨 raw 空白稳定命中。
+    pub async fn load_npc_relationship(
+        &self,
+        session_id: &str,
+        npc_id: &str,
+        target_kind: &str,
+        target_id: &str,
+    ) -> Result<Option<NpcRelationship>> {
+        let holder = trpg_model::KnowledgeHolder::npc_from_actor_id(npc_id)
+            .map_err(|u| anyhow::anyhow!("load_npc_relationship: {u}"))?;
+        let npc_id = holder.holder_id().expect("npc holder 必有 stable id");
+        let row = sqlx::query(
+            r#"
+            select target_kind, target_id, trust, respect, affection, debt, fear, suspicion,
+                   hostility, leverage, talkativeness, interaction_desire, stance,
+                   last_interaction_turn_id, evidence_event_ids
+            from npc_relationships
+            where session_id = $1 and npc_id = $2 and target_kind = $3 and target_id = $4
+            "#,
+        )
+        .bind(session_id)
+        .bind(npc_id)
+        .bind(target_kind)
+        .bind(target_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(r) = row else { return Ok(None) };
+        let target = NpcRelationshipTarget::from_parts(
+            &r.get::<String, _>("target_kind"),
+            &r.get::<String, _>("target_id"),
+        )
+        .map_err(|e| anyhow::anyhow!("load_npc_relationship: {e}"))?;
+        let stance: RelationshipStance =
+            serde_json::from_value(serde_json::Value::String(r.get::<String, _>("stance")))?;
+        let evidence_event_ids: Vec<String> =
+            serde_json::from_value(r.get::<serde_json::Value, _>("evidence_event_ids"))?;
+        Ok(Some(NpcRelationship {
+            session_id: session_id.to_string(),
+            npc_id: npc_id.to_string(),
+            target,
+            trust: r.get("trust"),
+            respect: r.get("respect"),
+            affection: r.get("affection"),
+            debt: r.get("debt"),
+            fear: r.get("fear"),
+            suspicion: r.get("suspicion"),
+            hostility: r.get("hostility"),
+            leverage: r.get("leverage"),
+            talkativeness: r.get("talkativeness"),
+            interaction_desire: r.get("interaction_desire"),
+            stance,
+            last_interaction_turn_id: r.get("last_interaction_turn_id"),
+            evidence_event_ids,
+        }))
     }
 
     pub async fn list_world_events_since(&self, session_id: &str, since_tick: i64, since_event_seq: i64, limit: i64) -> Result<Vec<WorldEvent>> {

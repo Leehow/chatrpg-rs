@@ -55,6 +55,15 @@ pub use entity_need_resolver::{EntityNeedResolver, encode_entity_hint};
 
 pub mod npc_synth;
 
+pub mod npc_profile;
+pub use npc_profile::persona_from_profile;
+pub mod npc_relationship;
+pub use npc_relationship::{apply_npc_relationship_delta, next_relationship};
+pub mod npc_mind;
+pub use npc_mind::assemble_npc_mind_view;
+pub mod npc_behavior;
+pub use npc_behavior::{derive_npc_behavior_plan, viewer_behavior_context};
+
 mod scene_projection;
 pub use scene_projection::{module_entry_scene_id, contract_is_opposed, stamp_opposed_check};
 use scene_projection::{resolve_turn_scene_id, map_check_param_need};
