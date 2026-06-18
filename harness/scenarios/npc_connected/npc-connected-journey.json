@@ -1,0 +1,28 @@
+{
+  "scenario_id": "npc-connected-journey",
+  "scenario_version": "1",
+  "evidence_schema_version": "tc-jrny-02.evidence.v1",
+  "ruleset_id": "cyberpunk_red",
+  "setup": {
+    "character": {
+      "auto": true,
+      "require_persisted": true,
+      "require_session_binding": true
+    },
+    "npc": {
+      "actor_id": "npc_mara",
+      "display_name": "Mara"
+    }
+  },
+  "turns": [
+    {
+      "user_input": "我走到摊位前，问 Mara 发电机为什么一直在抖。"
+    },
+    {
+      "user_input": "我蹲下来重新接好松掉的地线，把火花压下去。"
+    },
+    {
+      "user_input": "我等她缓过来后，再问她愿不愿意告诉我市场里谁在盯着我们。"
+    }
+  ]
+}

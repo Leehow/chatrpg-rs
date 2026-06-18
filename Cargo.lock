@@ -3533,6 +3533,8 @@ dependencies = [
  "serde_json",
  "sqlx",
  "tokio",
+ "trpg-model",
+ "trpg-runtime",
 ]
 
 [[package]]
