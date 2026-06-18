@@ -1,0 +1,48 @@
+version: 1
+run_policy: continuous_until_terminal
+
+wip:
+  writer_wip_min: 4
+  writer_wip_max: 6
+  verification_wip_min: 1
+  verification_wip_max: 2
+  integration_wip: 1
+
+git:
+  worktree_required_for_code: true
+  commit_policy: scoped_commit
+  create_local_branches: true
+  create_local_worktrees: true
+  trial_cherry_pick: true
+  integration_fast_forward: true
+  push: false
+  merge_main: false
+  deploy: false
+  history_rewrite: false
+
+integration:
+  branch_pattern: "codex/{work_id}-integration"
+  worktree_pattern: ".worktrees/{work_id}/integration"
+  rolling: true
+  human_dirty_worktree_is_blocker: false
+
+worker:
+  default_backend: cc-print
+  code_model_tier: opus
+  verification_model_tier: sonnet
+  continuation_policy: repair_until_acceptance_or_human_blocker
+
+hotspots:
+  - workspace-cargo
+  - crate-facades
+  - migrations
+  - plugin-registry
+  - generated-contracts
+  - acceptance-ledger
+  - workgraph
+
+environment_isolation:
+  cargo_target_dir: ".target/team-lead/{task_id}"
+  log_dir: ".tmp/team-lead/logs/{task_id}"
+  cassette_dir: ".tmp/team-lead/cassettes/{task_id}"
+  database_suffix: "{work_id}_{task_id}"

@@ -1,0 +1,115 @@
+version: 1
+work_id: knowledge-runtime-p0
+run_policy: continuous_until_terminal
+acceptance_ledger: docs/team-lead/AcceptanceLedger.md
+
+integration:
+  branch: codex/knowledge-runtime-p0-integration
+  worktree: .worktrees/knowledge-runtime-p0/integration
+  head: null
+  state: needs_bootstrap
+
+wip:
+  writer_wip_min: 4
+  writer_wip_max: 6
+  verification_wip_min: 1
+  verification_wip_max: 2
+
+tasks:
+  - id: integrate-model-source-primitives
+    kind: integration
+    state: accepted_not_integrated
+    commits:
+      - de97b05f31e746e0a1206e3198951e75cc84a960
+    depends_on: []
+    write_set: []
+    hotspot_leases: [crate-facades]
+    validation_profile: model-plus-downstream-check
+
+  - id: integrate-model-visibility-primitives
+    kind: integration
+    state: accepted_not_integrated
+    commits:
+      - d32ccac488dafc84d4bf233ffd8f969613c3643a
+    depends_on: [integrate-model-source-primitives]
+    write_set: []
+    hotspot_leases: [crate-facades]
+    validation_profile: model-plus-downstream-check
+
+  - id: model-block-scope-context-split
+    kind: implementation
+    state: blocked_by_dependency
+    depends_on: [integrate-model-visibility-primitives]
+    read_set:
+      - crates/trpg-model/src/lib.rs
+    write_set:
+      - crates/trpg-model/src/lib.rs
+      - crates/trpg-model/src/block.rs
+      - crates/trpg-model/src/scope.rs
+      - crates/trpg-model/src/context_block.rs
+    hotspot_leases: [crate-facades]
+    validation_profile: trpg-model-contract
+
+  - id: db-knowledge-repositories
+    kind: implementation
+    state: ready
+    depends_on: []
+    read_set:
+      - crates/trpg-model/src/knowledge/**
+    write_set:
+      - crates/trpg-db/src/repos/knowledge/**
+      - crates/trpg-db/src/projectors/knowledge/**
+    hotspot_leases: []
+    validation_profile: knowledge-db
+
+  - id: runtime-knowledge-boundary
+    kind: implementation
+    state: ready
+    depends_on: []
+    read_set:
+      - crates/trpg-model/src/knowledge/**
+    write_set:
+      - crates/trpg-runtime/src/knowledge/**
+      - crates/trpg-runtime/src/context/knowledge_projection.rs
+    hotspot_leases: []
+    validation_profile: runtime-knowledge
+
+  - id: journey-prelude-character-session
+    kind: implementation
+    state: ready
+    depends_on: []
+    read_set:
+      - crates/trpg-cli/**
+      - crates/trpg-api/**
+    write_set:
+      - crates/trpg-harness/**
+      - harness/scenarios/prelude/**
+    hotspot_leases: []
+    validation_profile: journey-prelude
+
+  - id: no-spoiler-adversarial-spec
+    kind: verification
+    state: ready
+    depends_on: []
+    read_set:
+      - crates/trpg-runtime/src/spoiler_guard.rs
+      - crates/trpg-gm/src/plugin/**
+    write_set:
+      - harness/scenarios/no_spoiler/**
+      - docs/team-lead/evidence/no_spoiler/**
+    hotspot_leases: []
+    validation_profile: no-spoiler-adversarial
+
+  - id: npc-vertical-slice
+    kind: implementation
+    state: running
+    external_worker: worker-tc-vs-npc-01
+    depends_on: []
+    read_set:
+      - crates/trpg-model/src/npc/**
+      - crates/trpg-runtime/src/npc/**
+    write_set:
+      - crates/trpg-runtime/src/npc/**
+      - crates/trpg-gm/src/npc/**
+    hotspot_leases: []
+    validation_profile: npc-connected-journey
