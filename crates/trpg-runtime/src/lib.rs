@@ -1853,14 +1853,41 @@ fn fail_on_missing_source_backed_parameters() -> bool {
         Ok(Some(synth.value))
     }
 
-    /// §Task5 Pre-resolution: resolve THIS turn's check NPC into an NpcPersona by
-    /// re-personaing the single Phase-1 `npc.opposition` slot for the CURRENT scene's
-    /// NPC. Loads the module graph (single source of truth: the module bundle row,
-    /// mirroring `module_scene_blocks_for_turn`), picks the active scene (explicit
-    /// `state.scene_id` else first DeepExtracted), takes the FIRST `referenced_npc_ids`
-    /// entry, and resolves it against `graph.npcs` (name + body|summary, mirroring
-    /// `scene_node_to_blocks`). fail-closed: no module / no scene / no NPC → None.
-    /// (Per-NPC actor ids are Phase 2; here we reuse `npc.opposition`.)
+    /// §NPC-holder-id-gate slice 1: resolve one scene-referenced NPC id against
+    /// `graph.npcs` into an NpcPersona. The persona carries the NPC's **real
+    /// module-graph id** as `actor_id` (never the `npc.opposition` placeholder),
+    /// with name + body|summary mirroring `scene_node_to_blocks`. Shared by the
+    /// contest path (`current_check_npc_persona`) and the Phase-3 list
+    /// (`scene_npc_personas`) so both id-spaces stay unified. fail-closed: id
+    /// absent from `graph.npcs`, or both name and prose empty → None (never an
+    /// invented id, never an empty persona for the judge to fill).
+    fn persona_from_scene_npc(npcs: &[serde_json::Value], npc_id: &str) -> Option<npc_synth::NpcPersona> {
+        let v = npcs
+            .iter()
+            .find(|v| v.get("id").and_then(|x| x.as_str()) == Some(npc_id))?;
+        let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let prose = v
+            .get("body")
+            .or_else(|| v.get("summary"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        if name.trim().is_empty() && prose.trim().is_empty() {
+            return None;
+        }
+        Some(npc_synth::NpcPersona { actor_id: npc_id.to_string(), name, prose })
+    }
+
+    /// §Task5 Pre-resolution: resolve THIS turn's check NPC into an NpcPersona for
+    /// the CURRENT scene's first referenced NPC. Loads the module graph (single
+    /// source of truth: the module bundle row, mirroring
+    /// `module_scene_blocks_for_turn`), picks the active scene (explicit
+    /// `state.scene_id` else first DeepExtracted), takes the FIRST
+    /// `referenced_npc_ids` entry, and resolves it against `graph.npcs` via the
+    /// shared `persona_from_scene_npc` helper. The persona carries the NPC's
+    /// **real module-graph id** as `actor_id` — matching `scene_npc_personas`,
+    /// never the `npc.opposition` placeholder (治 spec §6③ actor-id 串台坑).
+    /// fail-closed: no module / no scene / no NPC / empty persona → None.
     pub async fn current_check_npc_persona(
         &self,
         request: &ContextRequest,
@@ -1880,24 +1907,10 @@ fn fail_on_missing_source_backed_parameters() -> bool {
                     .iter()
                     .find(|s| s.extraction_status == SceneExtractionStatus::DeepExtracted)
             })?;
-        // FIRST referenced NPC of the scene, resolved against graph.npcs by id
-        // (mirror scene_node_to_blocks: name + body|summary).
+        // FIRST referenced NPC of the scene, resolved against graph.npcs via the
+        // shared helper (real graph id as actor_id; name + body|summary).
         let npc_id = node.referenced_npc_ids.first()?;
-        let v = graph
-            .npcs
-            .iter()
-            .find(|v| v.get("id").and_then(|x| x.as_str()) == Some(npc_id.as_str()))?;
-        let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let prose = v
-            .get("body")
-            .or_else(|| v.get("summary"))
-            .and_then(|x| x.as_str())
-            .unwrap_or("")
-            .to_string();
-        if name.trim().is_empty() && prose.trim().is_empty() {
-            return None;
-        }
-        Some(npc_synth::NpcPersona { actor_id: "npc.opposition".to_string(), name, prose })
+        Self::persona_from_scene_npc(&graph.npcs, npc_id)
     }
 
     /// §Phase3 §4.1 对抗预 pass 物料：当前场景在场的全部 NPC 作为 persona 列表，
@@ -1920,14 +1933,9 @@ fn fail_on_missing_source_backed_parameters() -> bool {
         let Some(node) = node else { return Vec::new() };
         node.referenced_npc_ids
             .iter()
-            .filter_map(|npc_id| {
-                let v = graph.npcs.iter().find(|v| v.get("id").and_then(|x| x.as_str()) == Some(npc_id.as_str()))?;
-                let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                let prose = v.get("body").or_else(|| v.get("summary")).and_then(|x| x.as_str()).unwrap_or("").to_string();
-                if name.trim().is_empty() && prose.trim().is_empty() { return None; }
-                // 真实 graph id 作 actor_id（per-NPC 卡，治占位符串台）。
-                Some(npc_synth::NpcPersona { actor_id: npc_id.clone(), name, prose })
-            })
+            // 真实 graph id 作 actor_id（per-NPC 卡，治占位符串台），与 contest 路径
+            // `current_check_npc_persona` 共用同一解析助手。
+            .filter_map(|npc_id| Self::persona_from_scene_npc(&graph.npcs, npc_id))
             .collect()
     }
 
@@ -3141,5 +3149,42 @@ mod apply_context_filter_tests {
         assert_eq!(compiled.dynamic_hash, before.dynamic_hash);
         assert_eq!(compiled.prefix_text, before.prefix_text);
         assert_eq!(compiled.prefix_hash, before.prefix_hash);
+    }
+}
+
+#[cfg(test)]
+mod current_check_npc_persona_tests {
+    //! §NPC-holder-id-gate slice 1: the contest-path persona must carry the NPC's
+    //! real module-graph id as `actor_id`, matching `scene_npc_personas` — never
+    //! the `npc.opposition` placeholder (spec §6③ 串台坑). These tests exercise the
+    //! pure resolver shared by `current_check_npc_persona` and `scene_npc_personas`
+    //! so the id contract is provable without a live module-graph DB.
+    use super::*;
+    use serde_json::json;
+
+    fn npcs() -> Vec<serde_json::Value> {
+        vec![
+            json!({"id": "npc.lars", "name": "拉斯", "summary": "加油站老板", "body": "沉默寡言的退伍兵。"}),
+            json!({"id": "npc.ghost", "name": "", "summary": "", "body": ""}),
+        ]
+    }
+
+    #[test]
+    fn current_check_npc_persona_carries_real_graph_id_not_placeholder() {
+        let persona = RuntimeEngine::persona_from_scene_npc(&npcs(), "npc.lars").expect("resolves existing npc");
+        // The whole point of slice 1: stable per-NPC id, NOT the collide-prone
+        // `npc.opposition` placeholder the old code returned.
+        assert_eq!(persona.actor_id, "npc.lars");
+        assert_ne!(persona.actor_id, "npc.opposition");
+        assert_eq!(persona.name, "拉斯");
+        assert_eq!(persona.prose, "沉默寡言的退伍兵。"); // body wins over summary
+    }
+
+    #[test]
+    fn current_check_npc_persona_fail_closed_on_empty_and_missing() {
+        // both name and prose empty -> None (no empty persona for the judge to fill)
+        assert!(RuntimeEngine::persona_from_scene_npc(&npcs(), "npc.ghost").is_none());
+        // id absent from graph.npcs -> None (never invents an id)
+        assert!(RuntimeEngine::persona_from_scene_npc(&npcs(), "npc.nobody").is_none());
     }
 }
