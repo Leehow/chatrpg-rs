@@ -10,6 +10,7 @@ pub mod opposed_prepass;
 pub mod packet;
 pub mod plugin;
 pub mod plugins;
+pub mod ports;
 pub mod presentation_gate;
 pub mod prompts;
 pub mod scene_policy;
@@ -44,6 +45,11 @@ pub use opposed_prepass::{detect_attack_target, opposed_prepass_enabled, Opposed
 pub use packet::{AdjudicationPacket, MechanicalFact, MechanicalFactKind, NarrationPacket};
 pub use plugin::*;
 pub use plugins::{load_gm_skill_with_plugins, load_plugins};
+pub use ports::{
+    DirectorAdapter, DirectorPort, EngineKernelAdapter, EngineRulesAdapter, EngineWorldAdapter,
+    GmLoopNarratorAdapter, KernelPort, NarratorPort, PolicyPort, PresentationPolicyAdapter,
+    RulesPort, WorldPort,
+};
 pub use presentation_gate::{presentation_gate_decision, PresentationGate, BLOCKING_KINDS};
 pub use prompts::{
     load_gm_skill, load_gm_skill_with_mode, validate_compiled_budget, DynamicTailInput,
