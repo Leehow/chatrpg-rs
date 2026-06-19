@@ -124,6 +124,12 @@ pub use relationship_extraction::{
     relationship_gate_should_run, resolve_entity_refs, text_has_social_signal, EntityRef,
 };
 
+pub mod knowledge_extraction;
+pub use knowledge_extraction::{
+    build_atomic_knowledge_pair, grade_knowledge_state, knowledge_gate_should_run,
+    KnowledgeLearningMode, KnowledgePairInput,
+};
+
 pub mod memory_proposal;
 pub use memory_proposal::{
     proposals_from_json, relationship_facts_to_proposals, review_and_commit_proposals,
