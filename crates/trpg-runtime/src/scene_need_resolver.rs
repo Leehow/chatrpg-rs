@@ -126,6 +126,11 @@ mod tests {
     /// resolver 是"包同一逻辑"非新算法，此测试是函数级回归护栏。
     #[test]
     fn scene_resolver_pure_path_byte_equal_to_scene_node_to_blocks() {
+        // 这两次调用都读进程级 env TRPG_SCENE_DEEP_BLOCK_CACHE_ZONE；与 scene_projection
+        // 的 env 写测试共用同一把锁，保证 expected/actual 两次读到的 env 一致（防并行竞争）。
+        let _env_guard = crate::scene_projection::N3_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut n = ScenarioNode::default();
         n.node_id = "loc1".into();
         n.title = "加油站".into();
@@ -167,6 +172,10 @@ mod tests {
 
     #[test]
     fn scene_resolver_skeleton_byte_equal() {
+        // 同上：env 稳定性靠共享锁保证，避免与 scene_projection env 写测试并发竞争。
+        let _env_guard = crate::scene_projection::N3_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut n = ScenarioNode::default();
         n.node_id = "sk1".into();
         n.title = "未深抽场景".into();
