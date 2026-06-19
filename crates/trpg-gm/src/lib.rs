@@ -6,6 +6,7 @@ pub mod mode;
 pub mod mode_catalog;
 pub mod obligations;
 pub mod opposed_prepass;
+pub mod packet;
 pub mod plugin;
 pub mod plugins;
 pub mod prompts;
@@ -38,6 +39,7 @@ pub use mode::{
 pub use mode_catalog::{mode_catalog_section, MODE_CATALOG_HEADER};
 pub use obligations::{ModeExitObligation, ObligationLedger, WaiveScope};
 pub use opposed_prepass::{detect_attack_target, opposed_prepass_enabled, OpposedBinding};
+pub use packet::{AdjudicationPacket, MechanicalFact, MechanicalFactKind, NarrationPacket};
 pub use plugin::*;
 pub use plugins::{load_gm_skill_with_plugins, load_plugins};
 pub use prompts::{
