@@ -537,7 +537,11 @@ mod tests {
     // EXPLICIT binding to the resolved module-graph id when one exists, and stay
     // explicitly non-persistent (no fabricated id) when none does.
     fn npc(actor_id: &str) -> ActorRef {
-        ActorRef { actor_id: actor_id.into(), actor_kind: ActorKind::Npc, display_name: None }
+        ActorRef {
+            actor_id: actor_id.into(),
+            actor_kind: ActorKind::Npc,
+            display_name: None,
+        }
     }
 
     #[test]
@@ -548,13 +552,23 @@ mod tests {
             Some("npc.scav_boss".to_string())
         );
         // the single-slot placeholder is NEVER a persistent holder id
-        assert_eq!(persistent_opposition_graph_id(Some(&npc("npc.opposition"))), None);
-        assert_eq!(persistent_opposition_graph_id(Some(&npc("  npc.opposition  "))), None);
+        assert_eq!(
+            persistent_opposition_graph_id(Some(&npc("npc.opposition"))),
+            None
+        );
+        assert_eq!(
+            persistent_opposition_graph_id(Some(&npc("  npc.opposition  "))),
+            None
+        );
         // empty / None never fabricate an id
         assert_eq!(persistent_opposition_graph_id(Some(&npc(""))), None);
         assert_eq!(persistent_opposition_graph_id(None), None);
         // a non-NPC actor is not an opposition holder
-        let pc = ActorRef { actor_id: "pc.current".into(), actor_kind: ActorKind::PlayerCharacter, display_name: None };
+        let pc = ActorRef {
+            actor_id: "pc.current".into(),
+            actor_kind: ActorKind::PlayerCharacter,
+            display_name: None,
+        };
         assert_eq!(persistent_opposition_graph_id(Some(&pc)), None);
     }
 

@@ -85,15 +85,23 @@ async fn load_npc_mind_and_behavior_from_durable_edges() {
         .await
         .unwrap();
     assert!(
-        plan.facts_will_withhold.iter().any(|f| f == "alices_own_secret"),
+        plan.facts_will_withhold
+            .iter()
+            .any(|f| f == "alices_own_secret"),
         "NPC-known fact the party lacks becomes a withheld secret"
     );
     assert!(
-        !plan.facts_will_withhold.iter().any(|f| f == "hidden_passage"),
+        !plan
+            .facts_will_withhold
+            .iter()
+            .any(|f| f == "hidden_passage"),
         "fact the party already knows is not withheld"
     );
     assert!(
-        !plan.facts_will_withhold.iter().any(|f| f == "rumor_about_lord"),
+        !plan
+            .facts_will_withhold
+            .iter()
+            .any(|f| f == "rumor_about_lord"),
         "a mere belief is never a secret"
     );
 

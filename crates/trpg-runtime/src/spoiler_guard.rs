@@ -249,16 +249,32 @@ mod tests {
         // 未揭示：渲染后节点级 secret("传送门") 与实体级 secret("莫里亚蒂教授") 都被裁。
         let none = HashSet::new();
         let (hn, hnpcs) = guard_scene(&n, &npcs, &none);
-        let hidden = scene_node_to_blocks("mod1", &hn, &hnpcs, &[])[0].content.render_text();
-        assert!(!hidden.contains("传送门"), "未揭示 → 节点级 secret 必被裁: {hidden}");
-        assert!(!hidden.contains("莫里亚蒂教授"), "未揭示 → 实体级 secret 必被裁: {hidden}");
+        let hidden = scene_node_to_blocks("mod1", &hn, &hnpcs, &[])[0]
+            .content
+            .render_text();
+        assert!(
+            !hidden.contains("传送门"),
+            "未揭示 → 节点级 secret 必被裁: {hidden}"
+        );
+        assert!(
+            !hidden.contains("莫里亚蒂教授"),
+            "未揭示 → 实体级 secret 必被裁: {hidden}"
+        );
 
         // revealed 账本同时带 node_id(sc01) 与 entity_id(npc_butler) → 两者都放行。
         let revealed = HashSet::from(["sc01".to_string(), "npc_butler".to_string()]);
         let (on, onpcs) = guard_scene(&n, &npcs, &revealed);
-        let open = scene_node_to_blocks("mod1", &on, &onpcs, &[])[0].content.render_text();
-        assert!(open.contains("传送门"), "node_id 揭示后 → 节点级 secret 放行: {open}");
-        assert!(open.contains("莫里亚蒂教授"), "entity_id 揭示后 → 实体级 secret 放行: {open}");
+        let open = scene_node_to_blocks("mod1", &on, &onpcs, &[])[0]
+            .content
+            .render_text();
+        assert!(
+            open.contains("传送门"),
+            "node_id 揭示后 → 节点级 secret 放行: {open}"
+        );
+        assert!(
+            open.contains("莫里亚蒂教授"),
+            "entity_id 揭示后 → 实体级 secret 放行: {open}"
+        );
     }
 
     /// 别太严回归：整张 npcs 都无 spoiler 时，guard_scene 产出与原 npcs 字节等价，

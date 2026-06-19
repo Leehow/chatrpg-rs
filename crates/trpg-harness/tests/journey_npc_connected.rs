@@ -12,8 +12,8 @@ use trpg_harness::{
 };
 use trpg_model::{
     KnowledgeState, NpcBehaviorContext, NpcKnowledgeEntry, NpcMindView, NpcProfile,
-    NpcRelationship, NpcRelationshipDelta, NpcRelationshipTarget, NpcSecret,
-    RelationshipStance, SpeechStyle, Visibility,
+    NpcRelationship, NpcRelationshipDelta, NpcRelationshipTarget, NpcSecret, RelationshipStance,
+    SpeechStyle, Visibility,
 };
 use trpg_runtime::derive_npc_behavior_plan;
 
@@ -105,7 +105,10 @@ fn journey_npc_connected_reaches_provider_free_pass() {
 
     for input in &turn_inputs {
         let findings = human_player_input_findings(input, false);
-        assert!(findings.is_empty(), "unnatural input `{input}`: {findings:?}");
+        assert!(
+            findings.is_empty(),
+            "unnatural input `{input}`: {findings:?}"
+        );
     }
 
     let npc = &replay_value["npc_journey"];
@@ -141,9 +144,14 @@ fn journey_npc_connected_reaches_provider_free_pass() {
 
     let baseline_rel =
         NpcRelationship::new(session_id, npc_id, NpcRelationshipTarget::PlayerParty).unwrap();
-    let baseline_view =
-        NpcMindView::build(session_id, npc_id, &profile, &[baseline_rel.clone()], &entries)
-            .unwrap();
+    let baseline_view = NpcMindView::build(
+        session_id,
+        npc_id,
+        &profile,
+        &[baseline_rel.clone()],
+        &entries,
+    )
+    .unwrap();
     let baseline_plan = derive_npc_behavior_plan(
         &baseline_view,
         &NpcBehaviorContext {
@@ -165,9 +173,14 @@ fn journey_npc_connected_reaches_provider_free_pass() {
     };
     updated_rel.apply_delta(&delta).unwrap();
 
-    let updated_view =
-        NpcMindView::build(session_id, npc_id, &profile, &[updated_rel.clone()], &entries)
-            .unwrap();
+    let updated_view = NpcMindView::build(
+        session_id,
+        npc_id,
+        &profile,
+        &[updated_rel.clone()],
+        &entries,
+    )
+    .unwrap();
     let updated_plan = derive_npc_behavior_plan(
         &updated_view,
         &NpcBehaviorContext {
@@ -186,7 +199,10 @@ fn journey_npc_connected_reaches_provider_free_pass() {
     assert!(updated_rel.interaction_desire > baseline_rel.interaction_desire);
     assert_eq!(updated_rel.evidence_event_ids, evidence_event_ids);
     assert!(updated_plan.willingness_to_help > baseline_plan.willingness_to_help);
-    assert_ne!(updated_plan.dialogue_guidance, baseline_plan.dialogue_guidance);
+    assert_ne!(
+        updated_plan.dialogue_guidance,
+        baseline_plan.dialogue_guidance
+    );
     assert_eq!(updated_plan.source_event_ids, evidence_event_ids);
 
     assert!(contains(&updated_plan.facts_can_reveal, known_fact));
@@ -213,5 +229,8 @@ fn journey_npc_connected_reaches_provider_free_pass() {
         string_array(&npc["reload"]["relationship_evidence_event_ids"]),
         updated_rel.evidence_event_ids
     );
-    assert!(contains(&string_array(&npc["reload"]["known_fact_ids"]), known_fact));
+    assert!(contains(
+        &string_array(&npc["reload"]["known_fact_ids"]),
+        known_fact
+    ));
 }
