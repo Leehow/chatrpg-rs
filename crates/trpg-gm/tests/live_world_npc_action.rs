@@ -264,6 +264,53 @@ async fn world_attack_intent_reaches_real_roll_check() {
             .unwrap();
     assert_eq!(landed, 1, "a real check_result row must land for the NPC attack");
 
+    // ── P6.3: NpcActionResolved domain event write-through ───────────────────────────
+    // Emit the typed event from the SAME outcomes the turn loop folds (the emit seam used
+    // by turn_loop.rs). The row must exist, and parsing its `data` back to typed fields
+    // must equal the WorldAttackOutcome (success/blocked match the d100 resolution above).
+    trpg_gm::npc_action::emit_npc_action_resolved(&db, &outcomes, &session, turn_id).await;
+    let de_id = format!("de_npcaction_{check_id}");
+    let de_row: Option<(String, serde_json::Value)> = sqlx::query_as(
+        "select kind, data from domain_events where event_id = $1 and session_id = $2",
+    )
+    .bind(&de_id)
+    .bind(&session)
+    .fetch_optional(&db.pool)
+    .await
+    .unwrap();
+    let (de_kind, de_data) = de_row.expect("NpcActionResolved domain_events row must exist");
+    assert_eq!(de_kind, "NpcActionResolved", "domain event kind token");
+    // Typed parse-back: data fields == the typed WorldAttackOutcome (NOT a string scrape).
+    assert_eq!(de_data["npc_id"].as_str(), Some(npc_id), "npc_id round-trips");
+    assert_eq!(
+        de_data["check_id"].as_str(),
+        Some(check_id.as_str()),
+        "check_id round-trips"
+    );
+    assert_eq!(
+        de_data["blocked"].as_bool(),
+        Some(o.blocked),
+        "blocked matches the typed outcome (a real, non-blocked resolution)"
+    );
+    assert_eq!(
+        de_data["success"].as_bool(),
+        o.success,
+        "success matches the d100 hit/miss verdict from the typed outcome"
+    );
+    eprintln!(
+        "LIVE NpcActionResolved row: event_id={de_id} data={}",
+        serde_json::to_string(&de_data).unwrap_or_default()
+    );
+    // Idempotent replay: re-emitting the same resolution folds to ONE row (deterministic key).
+    trpg_gm::npc_action::emit_npc_action_resolved(&db, &outcomes, &session, turn_id).await;
+    let de_count: i64 =
+        sqlx::query_scalar("select count(*) from domain_events where event_id = $1")
+            .bind(&de_id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(de_count, 1, "NpcActionResolved replay must fold to one row (de_npcaction_{{check_id}})");
+
     // ── Gap 3: §24-#3 negative-pool counter-example. A NON-active / unloaded NPC (no
     // profile passed in the pool) must NOT leak a reaction candidate. We pass an id that
     // is not in the active set we built profiles for: empty pool ⇒ empty set.
@@ -310,8 +357,116 @@ async fn world_attack_intent_reaches_real_roll_check() {
         .bind(&check_id)
         .execute(&db.pool)
         .await;
+    let _ = sqlx::query("delete from domain_events where session_id = $1")
+        .bind(&session)
+        .execute(&db.pool)
+        .await;
 }
 
 fn profile_slice(p: &NpcProfile) -> Vec<NpcProfile> {
     vec![p.clone()]
+}
+
+/// P6.3 (codex#3): ClockAdvanced idempotency. The runtime keys the event on the RESULTING
+/// clock state (`de_clock_{session}_{clock_id}_{new_value}`), so APPLYING THE SAME TICK
+/// TWICE folds to ONE row (a retry-advance to the same value is idempotent), while a real
+/// advance to a NEW value lands a second row. This mirrors the exact event the apply site
+/// (`insert_clock_tick` loop in trpg-runtime) builds — keyed on clock state, not a uuid.
+fn clock_advanced_event(
+    session: &str,
+    turn: &str,
+    tick: &trpg_model::ClockTick,
+) -> trpg_model::DomainEvent {
+    trpg_model::DomainEvent::new(
+        format!("de_clock_{}_{}_{}", session, tick.clock_id, tick.current),
+        session,
+        turn,
+        trpg_model::DomainEventKind::ClockAdvanced,
+        serde_json::json!({
+            "clock_id": tick.clock_id,
+            "new_value": tick.current,
+            "delta": tick.current - tick.previous,
+        }),
+    )
+}
+
+#[tokio::test]
+async fn clock_advanced_is_idempotent_per_resulting_state() {
+    let url = match std::env::var("DATABASE_URL") {
+        Ok(u) => u,
+        Err(_) => {
+            eprintln!("SKIP: DATABASE_URL unset");
+            return;
+        }
+    };
+    let db = match Db::connect(&url).await {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("SKIP: connect failed: {e}");
+            return;
+        }
+    };
+    if db.migrate().await.is_err() {
+        eprintln!("SKIP: migrate failed");
+        return;
+    }
+    let session = format!("sess_p63_clock_{}", uuid::Uuid::new_v4().simple());
+    let turn = "turn_p63_clock";
+    let tick = trpg_model::ClockTick {
+        clock_id: "clock.scene_pressure".into(),
+        label: "局势压力".into(),
+        previous: 0,
+        current: 1,
+        max: 4,
+        reason: "stall".into(),
+        visible_to_players: true,
+    };
+
+    // Apply the SAME tick twice ⇒ one row (deterministic key on clock_id + new_value).
+    db.append_domain_event(&clock_advanced_event(&session, turn, &tick))
+        .await
+        .unwrap();
+    db.append_domain_event(&clock_advanced_event(&session, turn, &tick))
+        .await
+        .unwrap();
+    let id_v1 = format!("de_clock_{session}_clock.scene_pressure_1");
+    let count_v1: i64 =
+        sqlx::query_scalar("select count(*) from domain_events where event_id = $1")
+            .bind(&id_v1)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(count_v1, 1, "applying the same tick twice ⇒ one ClockAdvanced row");
+
+    // A real advance to a NEW value (current=2) lands a SECOND, distinct row.
+    let tick2 = trpg_model::ClockTick {
+        previous: 1,
+        current: 2,
+        ..tick.clone()
+    };
+    db.append_domain_event(&clock_advanced_event(&session, turn, &tick2))
+        .await
+        .unwrap();
+    let total: i64 =
+        sqlx::query_scalar("select count(*) from domain_events where session_id = $1 and kind = 'ClockAdvanced'")
+            .bind(&session)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(total, 2, "advance to a new value lands a distinct row (2 total)");
+    // delta is carried in data (current - previous).
+    let data_v2: serde_json::Value = sqlx::query_scalar(
+        "select data from domain_events where event_id = $1",
+    )
+    .bind(format!("de_clock_{session}_clock.scene_pressure_2"))
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(data_v2["new_value"].as_i64(), Some(2));
+    assert_eq!(data_v2["delta"].as_i64(), Some(1));
+
+    let _ = sqlx::query("delete from domain_events where session_id = $1")
+        .bind(&session)
+        .execute(&db.pool)
+        .await;
 }

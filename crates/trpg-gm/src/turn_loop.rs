@@ -1616,9 +1616,11 @@ impl GmLoop {
         // the slice load-bearing; and (b) emitted as a `npc_action_resolved` Flight Recorder
         // trace so the resolution is asserted in the persisted `TurnTrace`.
         //
-        // P6.x TODO: fold the full NpcActionResolved event into a ResolutionCommit (typed
-        // mechanical state-patch back into the turn ledger) rather than only the advisory
-        // gate-fact + trace surfaced here. The check_results row already lands in Rules.
+        // P6.3: the resolved attack is now folded THREE ways — (a) advisory gate-fact,
+        // (b) Flight Recorder trace, and (c) a typed NpcActionResolved domain_events row
+        // (the structured event log, written from the typed WorldAttackOutcome struct
+        // fields — never from the to_gate_fact() display string). The check_results row
+        // already lands in Rules; this adds the durable domain-event account.
         if crate::npc_action::world_npc_action_enabled() {
             trpg_runtime::world::derive_attack_intents(&plans, &mut reaction_set);
             let outcomes = crate::npc_action::resolve_world_attack_intents(
@@ -1641,6 +1643,15 @@ impl GmLoop {
                         o.npc_id, o.blocked, o.success, o.success_tier, o.check_id
                     )));
             }
+            // (c) durable: append one NpcActionResolved domain event per resolved attack,
+            //     fail-soft (append failure only warns; never reaches control flow).
+            crate::npc_action::emit_npc_action_resolved(
+                &self.engine.db,
+                &outcomes,
+                session_id,
+                &input.request.turn_id,
+            )
+            .await;
         }
         // P5.6: build the GM-only Director brief packet from the ALREADY-LOADED World
         // candidate pool (`reaction_set.reactions`) — no NPC re-load. Flag `TRPG_DIRECTOR_PACKET`

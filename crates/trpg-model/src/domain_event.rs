@@ -73,6 +73,22 @@ pub enum DomainEventKind {
     /// visibility) 的内容哈希作判别——**真不同的变更产不同 event_id**（两次不同 transition
     /// 落两行），**同一 transition 的重放仍幂等**（on conflict do nothing 折叠）。
     ResourceChanged,
+    /// P6.3：World 层 NPC 攻击在 Rules 侧结算后写穿的领域事件（gated by
+    /// `TRPG_WORLD_NPC_ACTION`）。data 从 typed [`crate::WorldAttackOutcome`] 的结构字段
+    /// 取摘要（npc_id / check_id / success / success_tier / blocked）——**绝不**从
+    /// `to_gate_fact()` 的字符串里反解。
+    ///
+    /// 幂等键：`de_npcaction_{check_id}`。`check_id` 是 Rules 侧确定性 `check_results`
+    /// 行 id（`npc_attack:{turn}:{npc}`），故同一结算的重放仍幂等（on conflict do nothing）。
+    NpcActionResolved,
+    /// P6.3 (codex#3)：一个 [`crate::ClockTick`] 被应用到 clock 状态（`insert_clock_tick`
+    /// 写穿点）后记的领域事件。data 带 clock_id / new_value（应用后的 `current`）/ delta
+    /// （`current - previous`）。
+    ///
+    /// 幂等键 codex#3：键在**结算后的 clock 状态**上——`de_clock_{session}_{clock_id}_{new_value}`。
+    /// 这样「retry-advance 到同一 value」幂等（同一 clock_id+value 折叠成一行），而真正推进
+    /// 到不同 value 落新行。**不**用 uuid、**不**镜像 world_event_{uuid}（那不会让重试推进幂等）。
+    ClockAdvanced,
 }
 
 impl DomainEventKind {
@@ -97,6 +113,8 @@ impl DomainEventKind {
             DomainEventKind::FactRevealed => "FactRevealed",
             DomainEventKind::RelationshipChanged => "RelationshipChanged",
             DomainEventKind::ResourceChanged => "ResourceChanged",
+            DomainEventKind::NpcActionResolved => "NpcActionResolved",
+            DomainEventKind::ClockAdvanced => "ClockAdvanced",
         }
     }
 
@@ -119,6 +137,8 @@ impl DomainEventKind {
             "FactRevealed" => DomainEventKind::FactRevealed,
             "RelationshipChanged" => DomainEventKind::RelationshipChanged,
             "ResourceChanged" => DomainEventKind::ResourceChanged,
+            "NpcActionResolved" => DomainEventKind::NpcActionResolved,
+            "ClockAdvanced" => DomainEventKind::ClockAdvanced,
             _ => DomainEventKind::TurnStarted,
         }
     }
@@ -376,6 +396,57 @@ mod tests {
         ] {
             assert_ne!(k.as_str(), existing, "ResourceChanged token 必与既有 14 个不同");
         }
+        // fail-closed 未知回退不受影响。
+        assert_eq!(
+            DomainEventKind::from_str_token("Bogus"),
+            DomainEventKind::TurnStarted
+        );
+    }
+
+    #[test]
+    fn npc_action_and_clock_advanced_kinds_token_and_serde_roundtrip() {
+        // P6.3：NpcActionResolved + ClockAdvanced 写穿事件。token 稳定契约 + serde 闭环 +
+        // 与既有 15 variant 区分（不碰旧 token——上方 round-trip 守卫锁死它们）。
+        for k in [
+            DomainEventKind::NpcActionResolved,
+            DomainEventKind::ClockAdvanced,
+        ] {
+            assert_eq!(DomainEventKind::from_str_token(k.as_str()), k);
+            let v = serde_json::to_value(k).unwrap();
+            assert_eq!(v.as_str(), Some(k.as_str()), "serde token 必与 as_str 一致");
+            let back: DomainEventKind = serde_json::from_value(v).unwrap();
+            assert_eq!(back, k);
+        }
+        assert_eq!(
+            DomainEventKind::NpcActionResolved.as_str(),
+            "NpcActionResolved"
+        );
+        assert_eq!(DomainEventKind::ClockAdvanced.as_str(), "ClockAdvanced");
+        // 两个新 token 必与既有 15 个全部不相交。
+        for existing in [
+            "TurnStarted",
+            "TurnFinalized",
+            "TurnFailed",
+            "SceneTransitioned",
+            "DiceRolled",
+            "CheckResolved",
+            "EntitySurfaced",
+            "ContextSurfaced",
+            "PlayerExposed",
+            "PlayerLearnedFact",
+            "NpcLearnedFact",
+            "ClientDisconnected",
+            "FactRevealed",
+            "RelationshipChanged",
+            "ResourceChanged",
+        ] {
+            assert_ne!(DomainEventKind::NpcActionResolved.as_str(), existing);
+            assert_ne!(DomainEventKind::ClockAdvanced.as_str(), existing);
+        }
+        assert_ne!(
+            DomainEventKind::NpcActionResolved,
+            DomainEventKind::ClockAdvanced
+        );
         // fail-closed 未知回退不受影响。
         assert_eq!(
             DomainEventKind::from_str_token("Bogus"),

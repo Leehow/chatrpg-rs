@@ -25,9 +25,9 @@
 //! opposed defender binding is a documented follow-up (it would re-use the same
 //! `attack_defense_param` + NeedBus defender synth the player path already has).
 use trpg_model::{
-    ActorKind, ActorRef, CheckContract, CheckStakes, CheckTargetModel, OppositionModel,
-    RollAuthority, RollDisclosurePolicy, RollVisibility, RulingConfidence, RulingStatus,
-    WorldReactionSet,
+    ActorKind, ActorRef, CheckContract, CheckStakes, CheckTargetModel, DomainEvent,
+    DomainEventKind, OppositionModel, RollAuthority, RollDisclosurePolicy, RollVisibility,
+    RulingConfidence, RulingStatus, WorldReactionSet,
 };
 use trpg_runtime::RuntimeEngine;
 
@@ -131,6 +131,52 @@ impl WorldAttackOutcome {
     }
 }
 
+/// P6.3 PURE constructor: typed [`WorldAttackOutcome`] → [`DomainEvent`] of kind
+/// [`DomainEventKind::NpcActionResolved`]. The data digest is read **directly from the
+/// struct fields** (npc_id / check_id / success / success_tier / blocked) — NEVER parsed
+/// back out of [`WorldAttackOutcome::to_gate_fact`]'s display string.
+///
+/// `event_id = de_npcaction_{check_id}`. `check_id` is the deterministic `check_results`
+/// row id (`npc_attack:{turn}:{npc}`), so a replay of the same resolution folds to one row
+/// (`append_domain_event` is `on conflict (event_id) do nothing`).
+pub fn npc_action_resolved_event(
+    o: &WorldAttackOutcome,
+    session_id: &str,
+    turn_id: &str,
+) -> DomainEvent {
+    DomainEvent::new(
+        format!("de_npcaction_{}", o.check_id),
+        session_id,
+        turn_id,
+        DomainEventKind::NpcActionResolved,
+        serde_json::json!({
+            "npc_id": o.npc_id,
+            "check_id": o.check_id,
+            "success": o.success,
+            "success_tier": o.success_tier,
+            "blocked": o.blocked,
+        }),
+    )
+}
+
+/// P6.3 emit seam: append one [`DomainEventKind::NpcActionResolved`] per resolved attack,
+/// fail-soft. Append failure only warns — the narration/turn already proceeded, the event
+/// log is advisory and must never reach back into control flow. Used by the turn loop's
+/// outcome-fold AND by the live test (so the ON-path row is directly assertable).
+pub async fn emit_npc_action_resolved(
+    db: &trpg_db::Db,
+    outcomes: &[WorldAttackOutcome],
+    session_id: &str,
+    turn_id: &str,
+) {
+    for o in outcomes {
+        let ev = npc_action_resolved_event(o, session_id, turn_id);
+        if let Err(e) = db.append_domain_event(&ev).await {
+            tracing::warn!(error = %e, check_id = %o.check_id, "append NpcActionResolved domain event failed (non-fatal)");
+        }
+    }
+}
+
 /// Route every World-emitted Attack intent in `set` through Rules mechanical resolution.
 ///
 /// For each candidate carrying an `Attack` intent: build the NPC-attack contract and call
@@ -221,6 +267,43 @@ mod tests {
         assert!(matches!(c.target, CheckTargetModel::UnknownUntilLookup));
         assert!(matches!(c.ruling_status, RulingStatus::Provisional));
         assert!(c.source_refs.is_empty());
+    }
+
+    #[test]
+    fn npc_action_resolved_event_is_typed_digest_not_string_scrape() {
+        // P6.3: the domain event's data must read the typed struct fields directly — NOT a
+        // parse of to_gate_fact()'s display string. event_id is keyed on check_id (replay-
+        // idempotent, since check_id is the deterministic check_results row id).
+        let o = WorldAttackOutcome {
+            npc_id: "npc_lars".into(),
+            check_id: "npc_attack:t1:npc_lars".into(),
+            success: Some(false),
+            success_tier: Some("失败".into()),
+            blocked: false,
+            outcome: serde_json::json!({"success": false}),
+        };
+        let ev = npc_action_resolved_event(&o, "sess_a", "t1");
+        assert_eq!(ev.event_id, "de_npcaction_npc_attack:t1:npc_lars");
+        assert_eq!(ev.kind, DomainEventKind::NpcActionResolved);
+        assert_eq!(ev.session_id, "sess_a");
+        assert_eq!(ev.turn_id, "t1");
+        // Typed fields, not a string scrape.
+        assert_eq!(ev.data["npc_id"].as_str(), Some("npc_lars"));
+        assert_eq!(ev.data["check_id"].as_str(), Some("npc_attack:t1:npc_lars"));
+        assert_eq!(ev.data["success"].as_bool(), Some(false));
+        assert_eq!(ev.data["success_tier"].as_str(), Some("失败"));
+        assert_eq!(ev.data["blocked"].as_bool(), Some(false));
+        // None success ⇒ JSON null (typed Option propagation, no string fallback).
+        let o2 = WorldAttackOutcome {
+            success: None,
+            success_tier: None,
+            ..o.clone()
+        };
+        let ev2 = npc_action_resolved_event(&o2, "sess_a", "t1");
+        assert!(ev2.data["success"].is_null());
+        assert!(ev2.data["success_tier"].is_null());
+        // Same check_id ⇒ same idempotent event_id (replay folds to one row in db).
+        assert_eq!(ev.event_id, ev2.event_id);
     }
 
     #[test]

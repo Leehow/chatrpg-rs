@@ -1814,6 +1814,28 @@ impl RuntimeEngine {
                 .insert_clock_tick(&request.session_id, &request.turn_id, tick)
                 .await
                 .ok();
+            // P6.3 (codex#3): write-through a ClockAdvanced domain event keyed on the
+            // RESULTING clock state (clock_id + the applied `current` value) — so a
+            // retry-advance to the same value folds to one row, while a real advance to a
+            // new value lands a new row. Additive + fail-soft: the clock state write above
+            // is unchanged; only the domain_events row is new (OFF==baseline mechanically).
+            let ev = DomainEvent::new(
+                format!(
+                    "de_clock_{}_{}_{}",
+                    request.session_id, tick.clock_id, tick.current
+                ),
+                request.session_id.clone(),
+                request.turn_id.clone(),
+                DomainEventKind::ClockAdvanced,
+                serde_json::json!({
+                    "clock_id": tick.clock_id,
+                    "new_value": tick.current,
+                    "delta": tick.current - tick.previous,
+                }),
+            );
+            if let Err(err) = self.db.append_domain_event(&ev).await {
+                tracing::warn!(error = %err, event_id = %ev.event_id, "append ClockAdvanced domain event failed (non-fatal)");
+            }
         }
         for spotlight in &result.spotlight {
             self.db
