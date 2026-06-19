@@ -37,6 +37,13 @@
 //! `&StoryState` + `&[rejected]` as arguments, so the wiring proof stays testable without a
 //! live Postgres. Director only proposes; the runtime-owned commit path is
 //! [`apply_story_proposals`] (设计4补充 §二-④).
+//!
+//! ## Story WRITE loop — P6.8a (flag `TRPG_STORY_WRITE_LOOP`, default OFF)
+//! [`commit_story_writes`] is the production caller that closes the read/write asymmetry
+//! (P5⑤#3). OFF ⇒ no story_state writes (byte-identical baseline). ON ⇒ it persists player
+//! thread-REJECTION proposals (§二十四-#13 commit half) and StoryThreadOpened status floors,
+//! routed through [`apply_story_proposals`]. The pure derivations live in
+//! [`crate::story_write`]; advancement semantics (P6.8b) are deliberately NOT implemented.
 
 use trpg_db::Db;
 use trpg_director::{
@@ -127,11 +134,12 @@ pub fn rejected_thread_ids(story: &StoryState) -> Vec<String> {
 /// idempotent upsert (same packet replay ⇒ same single row). Returns the DB error untouched
 /// so the caller's turn-commit path decides fatality (story persistence is non-blocking).
 ///
-/// TODO(P6): wire the production thread-extraction caller for `apply_story_proposals`.
-/// P5 wires the READ side only (`load_story_state` in `prepare_director_brief` is the
-/// load-bearing path). This write loop has NO P5 production caller by the honest narrowing;
-/// it is exercised only by round-trip tests today. Keep it (do not remove) — P6's thread
-/// extraction will be its first real caller — but it is not yet load-bearing in production.
+/// P6.8a: this now HAS a production caller — [`commit_story_writes`] (gated by
+/// `TRPG_STORY_WRITE_LOOP`, default OFF) loads the story, applies the pure
+/// rejection-persist + StoryThreadOpened derivations ([`crate::story_write`]), and commits
+/// through here. The READ side ([`prepare_director_brief`] → `load_story_state`) was already
+/// load-bearing in P5; the WRITE side is now closed too (P5⑤#3 read/write asymmetry resolved).
+/// Round-trip tests still exercise it directly; it is no longer write-only-by-tests.
 pub async fn apply_story_proposals(
     db: &Db,
     session_id: &str,
@@ -139,7 +147,58 @@ pub async fn apply_story_proposals(
     updated_turn: &str,
 ) -> Result<(), anyhow::Error> {
     let story = proposed.validated();
-    db.upsert_story_state(session_id, &story, updated_turn).await
+    db.upsert_story_state(session_id, &story, updated_turn)
+        .await
+}
+
+/// P6.8a production caller for [`apply_story_proposals`] — the deterministic story_state WRITE
+/// loop. Flag-gated by `TRPG_STORY_WRITE_LOOP` (default OFF ⇒ this returns `Ok(())` IMMEDIATELY
+/// with zero DB reads/writes, so the P5 baseline is byte-identical and `prepare_director_brief`
+/// is unaffected). ON ⇒ it:
+///
+/// 1. loads the persisted [`StoryState`] (fail-soft ⇒ empty story);
+/// 2. folds in the player thread-REJECTION proposals
+///    ([`crate::story_write::merge_rejections`]) — the §宪法④ commit half of §二十四-#13: the
+///    LLM/Director PROPOSES a `PlayerInterestSignal { rejected: true }`; the Kernel persists it
+///    so next turn the P5.3 selector (which reads persisted `player_interests`) drops it;
+/// 3. applies StoryThreadOpened ([`crate::story_write::apply_thread_opened`]) for every fact in
+///    `newly_known_fact_ids` (a thread's `related_fact_ids` first receiving a `PlayerLearnedFact`
+///    floors that thread `Dormant → Introduced` — a status FLOOR, never advancement; P6.8b is
+///    OutOfScope);
+/// 4. commits the merged snapshot via [`apply_story_proposals`] iff something actually changed
+///    (skips the upsert on a pure no-op so a quiet turn writes nothing).
+///
+/// Non-blocking: the DB error is returned untouched for the caller's turn-commit path to decide
+/// fatality — story persistence must never reverse a delivered narration.
+pub async fn commit_story_writes(
+    db: &Db,
+    session_id: &str,
+    rejection_proposals: &[trpg_model::PlayerInterestSignal],
+    newly_known_fact_ids: &[String],
+    updated_turn: &str,
+) -> Result<(), anyhow::Error> {
+    // Flag gate FIRST: OFF ⇒ no reads, no writes, byte-identical baseline.
+    if !crate::story_write::story_write_loop_enabled() {
+        return Ok(());
+    }
+    let before = db
+        .load_story_state(session_id)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+
+    let after = crate::story_write::merge_rejections(before.clone(), rejection_proposals);
+    let (after, opened_changed) =
+        crate::story_write::apply_thread_opened(after, newly_known_fact_ids);
+
+    // Skip the upsert on a pure no-op (a quiet turn must not churn the row). `validated()`
+    // is idempotent, so compare the would-be-committed snapshot against the loaded one.
+    let merged_changed = after != before;
+    if !merged_changed && !opened_changed {
+        return Ok(());
+    }
+    apply_story_proposals(db, session_id, after, updated_turn).await
 }
 
 /// Pure (DB-free) core of [`prepare_director_brief`]: given the resolved knowledge `Option`s,

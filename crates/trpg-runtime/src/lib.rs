@@ -78,12 +78,18 @@ pub use npc_behavior::{
 };
 pub mod director_brief;
 pub mod knowledge_leak_verifier;
+pub mod story_write;
 pub mod world;
-pub use director_brief::{build_director_block, prepare_director_brief};
+pub use director_brief::{
+    apply_story_proposals, build_director_block, commit_story_writes, prepare_director_brief,
+};
 pub use knowledge_leak_verifier::{
     behavior_finding_to_verifier_finding, to_verifier_finding, to_verifier_findings,
     verify_npc_asserted_facts, verify_npc_behavior_consistency, verify_npc_disclosure,
     verify_player_narration_leak,
+};
+pub use story_write::{
+    apply_thread_opened, merge_rejections, rejection_proposal, story_write_loop_enabled,
 };
 
 pub mod verifier_private_view;

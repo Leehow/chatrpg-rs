@@ -1,0 +1,245 @@
+//! P6.8a — PURE (DB-free) story_state WRITE-loop derivations.
+//!
+//! This module owns the deterministic transforms that the runtime (System Kernel) commits
+//! into the persisted [`StoryState`]. It is the deliverable half of the §宪法④ discipline:
+//! the LLM/Director **proposes** (e.g. classifies a player utterance as a rejection, or the
+//! engine emits a `PlayerLearnedFact`); the Kernel **commits** the resulting state delta.
+//! Everything here is pure — no DB handle, no I/O — so the full §二十四-#13 chain
+//! (reject → persist → not-selected) is provable without a live Postgres.
+//!
+//! Two transforms, both additive and order-stable:
+//!
+//! 1. [`merge_rejections`] — fold a set of rejection PROPOSALS
+//!    ([`PlayerInterestSignal`] with `rejected: true`) into `story.player_interests`. The
+//!    persisted `rejected` flag is exactly what the P5.3 selector reads to drop a thread
+//!    (`rejected_thread_ids` → dominating railroad penalty). This is the WRITE side that
+//!    closes the read/write asymmetry (P5⑤#3): P5 only LOADED `rejected`; nothing produced
+//!    it. A proposal whose `thread_id` already has a signal is upgraded in place to
+//!    `rejected: true` (idempotent — replaying the same rejection yields the same row).
+//!
+//! 2. [`apply_thread_opened`] — when a fact first becomes player-known (a `PlayerLearnedFact`
+//!    edge), every [`StoryThread`] whose `related_fact_ids` contains that fact gets its
+//!    status FLOORED from `Dormant` to `Introduced`. This is a status FLOOR keyed on the
+//!    event, NOT advancement: a thread already `Introduced`/`Active`/… is left untouched, and
+//!    we never invent a transition rule (P6.8b advancement is OutOfScope — blueprint-undefined).
+//!
+//! The async committer that loads the story, applies these, and calls `apply_story_proposals`
+//! lives in [`crate::director_brief`]; it is gated by `TRPG_STORY_WRITE_LOOP` (default OFF).
+
+use trpg_model::{PlayerInterestSignal, StoryState, StoryThreadStatus};
+
+/// Flag gate for the whole story_state WRITE loop. Default OFF ⇒ NO story_state writes from
+/// the P6.8a path (byte-identical to the P5 baseline, whose LOAD side is untouched). ON ⇒ the
+/// rejection-persist + StoryThreadOpened commits run. Mirrors the `env_bool` semantics used by
+/// the Director packet flag (`1`/`true`/`yes`/`on`, case-insensitive).
+pub fn story_write_loop_enabled() -> bool {
+    std::env::var("TRPG_STORY_WRITE_LOOP")
+        .ok()
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+/// Fold rejection PROPOSALS into a loaded story's `player_interests`, returning the updated
+/// story. For each proposal flagged `rejected` with a non-empty `thread_id`:
+///
+/// - if a signal for that `thread_id` already exists, set its `rejected = true` in place
+///   (preserving the other fields — we only assert the rejection, never overwrite strength);
+/// - otherwise append the proposal verbatim.
+///
+/// Empty `thread_id` or `rejected == false` proposals are ignored (an un-addressable or
+/// non-rejection signal must never gate a thread). Idempotent + order-stable: replaying the
+/// same proposal set yields the same `player_interests`. Pure — mutates only the moved `story`.
+pub fn merge_rejections(mut story: StoryState, proposals: &[PlayerInterestSignal]) -> StoryState {
+    for p in proposals {
+        if !p.rejected || p.thread_id.is_empty() {
+            continue;
+        }
+        if let Some(existing) = story
+            .player_interests
+            .iter_mut()
+            .find(|s| s.thread_id == p.thread_id)
+        {
+            existing.rejected = true;
+        } else {
+            story.player_interests.push(p.clone());
+        }
+    }
+    story
+}
+
+/// Floor every thread whose `related_fact_ids` intersects `newly_known_fact_ids` from
+/// `Dormant` to `Introduced` (StoryThreadOpened). Returns the updated story and whether any
+/// thread actually changed (so the committer can skip a no-op upsert).
+///
+/// STATUS FLOOR, not advancement: only `Dormant → Introduced` is applied. A thread already at
+/// `Introduced` or beyond is left exactly as-is — we never run a transition rule or invent a
+/// higher status (P6.8b advancement = OutOfScope). Idempotent: re-running with the same facts
+/// after the floor has been applied changes nothing and reports `false`.
+pub fn apply_thread_opened(
+    mut story: StoryState,
+    newly_known_fact_ids: &[String],
+) -> (StoryState, bool) {
+    if newly_known_fact_ids.is_empty() {
+        return (story, false);
+    }
+    let known: std::collections::HashSet<&str> =
+        newly_known_fact_ids.iter().map(String::as_str).collect();
+    let mut changed = false;
+    for t in &mut story.active_threads {
+        if t.status != StoryThreadStatus::Dormant {
+            continue; // floor only lifts Dormant; never advances an already-open thread
+        }
+        if t.related_fact_ids
+            .iter()
+            .any(|f| known.contains(f.as_str()))
+        {
+            t.status = StoryThreadStatus::Introduced;
+            changed = true;
+        }
+    }
+    (story, changed)
+}
+
+/// Convenience constructor for a structured rejection proposal: the typed signal the
+/// GM/Director PRODUCES once it has classified a player utterance as a thread refusal. The
+/// natural-language → proposal step is LLM-mediated (propose-only); this is just the typed
+/// carrier the deterministic commit path consumes.
+pub fn rejection_proposal(thread_id: impl Into<String>) -> PlayerInterestSignal {
+    PlayerInterestSignal {
+        thread_id: thread_id.into(),
+        rejected: true,
+        ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use trpg_model::{InterestSignal, StoryThread};
+
+    fn thread(id: &str, status: StoryThreadStatus, facts: &[&str]) -> StoryThread {
+        StoryThread {
+            thread_id: id.into(),
+            status,
+            related_fact_ids: facts.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    // A fresh rejection proposal for a thread with no prior signal appends a rejected signal.
+    #[test]
+    fn merge_rejections_appends_new_signal() {
+        let story = StoryState::default();
+        let out = merge_rejections(story, &[rejection_proposal("thr_x")]);
+        assert_eq!(out.player_interests.len(), 1);
+        assert!(out.player_interests[0].rejected);
+        assert_eq!(out.player_interests[0].thread_id, "thr_x");
+    }
+
+    // An existing non-rejected signal for the thread is upgraded in place (not duplicated),
+    // preserving its other fields (here `signal`/`strength`).
+    #[test]
+    fn merge_rejections_upgrades_existing_in_place() {
+        let story = StoryState {
+            player_interests: vec![PlayerInterestSignal {
+                thread_id: "thr_x".into(),
+                signal: InterestSignal::Engaged,
+                strength: 0.7,
+                rejected: false,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let out = merge_rejections(story, &[rejection_proposal("thr_x")]);
+        assert_eq!(out.player_interests.len(), 1, "no duplicate signal");
+        assert!(out.player_interests[0].rejected, "upgraded to rejected");
+        assert_eq!(
+            out.player_interests[0].signal,
+            InterestSignal::Engaged,
+            "other fields preserved"
+        );
+        assert_eq!(out.player_interests[0].strength, 0.7);
+    }
+
+    // Idempotent: replaying the same rejection yields the same single rejected signal.
+    #[test]
+    fn merge_rejections_is_idempotent() {
+        let p = [rejection_proposal("thr_x")];
+        let once = merge_rejections(StoryState::default(), &p);
+        let twice = merge_rejections(once.clone(), &p);
+        assert_eq!(once, twice);
+        assert_eq!(twice.player_interests.len(), 1);
+    }
+
+    // Empty thread_id or non-rejection proposals are ignored (never gate a thread).
+    #[test]
+    fn merge_rejections_ignores_empty_and_non_rejection() {
+        let proposals = vec![
+            PlayerInterestSignal {
+                thread_id: String::new(),
+                rejected: true,
+                ..Default::default()
+            },
+            PlayerInterestSignal {
+                thread_id: "thr_engaged".into(),
+                rejected: false,
+                ..Default::default()
+            },
+        ];
+        let out = merge_rejections(StoryState::default(), &proposals);
+        assert!(out.player_interests.is_empty());
+    }
+
+    // StoryThreadOpened: a Dormant thread whose related fact becomes player-known floors to
+    // Introduced; an unrelated Dormant thread and an already-open thread are untouched.
+    #[test]
+    fn apply_thread_opened_floors_only_matching_dormant() {
+        let story = StoryState {
+            active_threads: vec![
+                thread("thr_match", StoryThreadStatus::Dormant, &["fact_1"]),
+                thread("thr_other", StoryThreadStatus::Dormant, &["fact_9"]),
+                thread("thr_active", StoryThreadStatus::Active, &["fact_1"]),
+            ],
+            ..Default::default()
+        };
+        let (out, changed) = apply_thread_opened(story, &["fact_1".to_string()]);
+        assert!(changed);
+        assert_eq!(out.active_threads[0].status, StoryThreadStatus::Introduced);
+        assert_eq!(
+            out.active_threads[1].status,
+            StoryThreadStatus::Dormant,
+            "unrelated thread untouched"
+        );
+        assert_eq!(
+            out.active_threads[2].status,
+            StoryThreadStatus::Active,
+            "already-open thread is NOT advanced (P6.8b OutOfScope)"
+        );
+    }
+
+    // Idempotent + no-op reporting: re-running after the floor reports no change.
+    #[test]
+    fn apply_thread_opened_idempotent_no_change() {
+        let story = StoryState {
+            active_threads: vec![thread("thr_match", StoryThreadStatus::Dormant, &["fact_1"])],
+            ..Default::default()
+        };
+        let (out, changed1) = apply_thread_opened(story, &["fact_1".to_string()]);
+        assert!(changed1);
+        let (out2, changed2) = apply_thread_opened(out.clone(), &["fact_1".to_string()]);
+        assert!(!changed2, "second run is a no-op");
+        assert_eq!(out, out2);
+    }
+
+    // No newly-known facts ⇒ no change.
+    #[test]
+    fn apply_thread_opened_empty_facts_no_change() {
+        let story = StoryState {
+            active_threads: vec![thread("thr_match", StoryThreadStatus::Dormant, &["fact_1"])],
+            ..Default::default()
+        };
+        let (out, changed) = apply_thread_opened(story.clone(), &[]);
+        assert!(!changed);
+        assert_eq!(out, story);
+    }
+}
