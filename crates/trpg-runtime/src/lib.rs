@@ -78,7 +78,8 @@ pub use npc_behavior::{
 };
 pub mod knowledge_leak_verifier;
 pub use knowledge_leak_verifier::{
-    to_verifier_finding, to_verifier_findings, verify_npc_asserted_facts, verify_npc_disclosure,
+    behavior_finding_to_verifier_finding, to_verifier_finding, to_verifier_findings,
+    verify_npc_asserted_facts, verify_npc_behavior_consistency, verify_npc_disclosure,
     verify_player_narration_leak,
 };
 

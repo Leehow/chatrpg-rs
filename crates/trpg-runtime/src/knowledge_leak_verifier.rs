@@ -22,6 +22,9 @@ use trpg_model::knowledge_leak_verifier::{
     scan_npc_asserted_facts, scan_npc_disclosure, scan_player_visible_leak, FactSurfaceMarker,
     KnowledgeLeakFinding, KnowledgeLeakKind, LeakSeverity,
 };
+use trpg_model::npc_behavior_consistency::{
+    scan_npc_behavior_consistency, BehaviorConsistencyFinding, BehaviorSurfaceMarker,
+};
 
 use crate::knowledge_projection::{NpcOwnedProjection, PlayerNarrationProjection};
 
@@ -95,6 +98,37 @@ pub fn verify_npc_asserted_facts(
         &projection.mind,
         asserted_as_known_fact_ids,
     ))
+}
+
+/// Map a model-level [`BehaviorConsistencyFinding`] to the existing
+/// [`trpg_agent::VerifierFinding`]. A behavior contradiction (NPC exhibited a
+/// `forbidden_actions` action) is the closest "acted in a way not grounded in its plan"
+/// semantic, so it bridges to [`VerifierFindingKind::InventedEffect`] at `Warning`
+/// severity (advisory), matching how the NPC asserted-fact consistency check bridges.
+/// Pure and deterministic; copies the already-redacted `detail` verbatim (it references
+/// the npc_id + action label only, never the matched narration substring).
+pub fn behavior_finding_to_verifier_finding(finding: &BehaviorConsistencyFinding) -> VerifierFinding {
+    VerifierFinding {
+        kind: VerifierFindingKind::InventedEffect,
+        severity: VerifierSeverity::Warning,
+        detail: finding.detail.clone(),
+    }
+}
+
+/// NPC behavior-consistency check via an NPC speech/action projection: each
+/// [`BehaviorSurfaceMarker`] whose `action_label` is a genuine `forbidden_actions` entry
+/// of the NPC's plan and whose terms appear in `narration` is flagged. Bridged to
+/// `VerifierFinding::InventedEffect` (Warning). Empty markers / no forbidden actions →
+/// no findings (fail-soft).
+pub fn verify_npc_behavior_consistency(
+    projection: &NpcOwnedProjection,
+    narration: &str,
+    markers: &[BehaviorSurfaceMarker],
+) -> Vec<VerifierFinding> {
+    scan_npc_behavior_consistency(&projection.plan, narration, markers)
+        .iter()
+        .map(behavior_finding_to_verifier_finding)
+        .collect()
 }
 
 #[cfg(test)]
@@ -205,6 +239,39 @@ mod tests {
         // Empty inputs fail-soft.
         assert!(verify_npc_disclosure(&proj.0, &[]).is_empty());
         assert!(verify_npc_asserted_facts(&proj.0, &[]).is_empty());
+    }
+
+    /// behavior-consistency bridge: a forbidden action exhibited in narration →
+    /// InventedEffect Warning; the bridged detail references the action label only.
+    #[test]
+    fn behavior_contradiction_bridges_to_invented_effect_warning() {
+        let profile = NpcProfile {
+            actor_id: "npc_lars".into(),
+            name: "Lars".into(),
+            behavioral_boundaries: vec!["never harm a child".into()],
+            ..Default::default()
+        };
+        let mind = NpcMindView::build("s", "npc_lars", &profile, &[], &[]).unwrap();
+        let proj = npc_speech_projection_from_mind(mind, &[]);
+        assert!(proj
+            .0
+            .plan
+            .forbidden_actions
+            .iter()
+            .any(|a| a == "never harm a child"));
+        let markers = vec![BehaviorSurfaceMarker::new(
+            "never harm a child",
+            vec!["strikes the child".into()],
+        )];
+        let out =
+            verify_npc_behavior_consistency(&proj.0, "Lars strikes the child.", &markers);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].kind, VerifierFindingKind::InventedEffect);
+        assert_eq!(out[0].severity, VerifierSeverity::Warning);
+        assert!(out[0].detail.contains("never harm a child"));
+        assert!(!out[0].detail.contains("strikes the child"));
+        // No markers → fail-soft empty.
+        assert!(verify_npc_behavior_consistency(&proj.0, "Lars strikes the child.", &[]).is_empty());
     }
 
     #[test]

@@ -36,6 +36,8 @@ pub mod npc_behavior;
 pub use npc_behavior::*;
 pub mod knowledge_leak_verifier;
 pub use knowledge_leak_verifier::*;
+pub mod npc_behavior_consistency;
+pub use npc_behavior_consistency::*;
 
 pub const PROJECT_SCHEMA_VERSION: &str = "chatrpg.project_bundle.v1";
 pub const RULE_SCHEMA_VERSION: &str = "chatrpg.rule_bundle.v1";

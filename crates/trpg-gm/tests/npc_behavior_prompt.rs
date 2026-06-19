@@ -279,6 +279,86 @@ mod npc_behavior {
         );
     }
 
+    // ============ 设计3 §13-P3: NPC behavior-consistency after-stream pass ============
+    //
+    // The behavioral sibling of the knowledge consistency pass: narration that exhibits
+    // an action the speaking NPC's own plan `forbidden_actions` prohibits → an advisory
+    // (Warning / InventedEffect) finding. Markers are derived deterministically from the
+    // plan's forbidden actions; taboo-topic forbiddens bind to the concrete topic term.
+
+    use trpg_gm::turn_loop::npc_behavior_consistency_findings;
+    use trpg_model::SpeechStyle;
+
+    /// Build a speech projection for an NPC whose persona declares a taboo topic, so the
+    /// derived plan forbids "raise taboo topic: <term>".
+    fn taboo_speech_proj(taboo: &str) -> NpcSpeechProjection {
+        let p = NpcProfile {
+            actor_id: "npc_lars".into(),
+            name: "Lars".into(),
+            speech_style: SpeechStyle {
+                taboo_topics: vec![taboo.into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let v = view(&p, rel(0, 0, 0), &[]);
+        npc_speech_projection_from_mind(v, &[])
+    }
+
+    /// NPC narration that raises its own forbidden taboo topic → advisory behavior finding
+    /// that references the action label, never echoing the matched narration substring.
+    #[test]
+    fn active_npc_forbidden_behavior_is_flagged_advisory() {
+        const TABOO: &str = "the duke's downfall";
+        let proj = taboo_speech_proj(TABOO);
+        assert!(
+            proj.0
+                .plan
+                .forbidden_actions
+                .iter()
+                .any(|a| a == &format!("raise taboo topic: {TABOO}")),
+            "precondition: plan forbids the taboo topic"
+        );
+        let npcs = vec![("Lars".to_string(), proj)];
+        let narration = format!("Lars loudly brings up {TABOO} in front of everyone.");
+        let out = npc_behavior_consistency_findings(&narration, &npcs, &[]);
+        assert_eq!(out.len(), 1, "forbidden behavior exhibited → one finding: {out:?}");
+        assert_eq!(out[0].kind, VerifierFindingKind::InventedEffect);
+        assert!(
+            out[0].detail.contains("npc_lars"),
+            "finding references the speaking NPC: {}",
+            out[0].detail
+        );
+        assert!(
+            !out[0].detail.contains(TABOO) || out[0].detail.contains("raise taboo topic"),
+            "detail references the action label, not a bare narration echo: {}",
+            out[0].detail
+        );
+    }
+
+    /// Consistent narration (no forbidden action surfaced) → no finding; and a narration
+    /// that does not name the NPC is skipped by the visibility gate.
+    #[test]
+    fn active_npc_consistent_behavior_and_visibility_gate_pass() {
+        const TABOO: &str = "the duke's downfall";
+        let proj = taboo_speech_proj(TABOO);
+        let npcs = vec![("Lars".to_string(), proj)];
+        // Names Lars but never raises the taboo topic → no contradiction.
+        let ok = npc_behavior_consistency_findings(
+            "Lars greets the party and offers them tea.",
+            &npcs,
+            &[],
+        );
+        assert!(ok.is_empty(), "consistent behavior must pass: {ok:?}");
+        // Surfaces the taboo term but does not name the NPC → visibility gate skips it.
+        let unrelated =
+            format!("Somewhere, a rumor about {TABOO} spreads on its own.");
+        assert!(
+            npc_behavior_consistency_findings(&unrelated, &npcs, &[]).is_empty(),
+            "narration not naming the NPC → skipped"
+        );
+    }
+
     /// A fact the PLAYER already knows (so the player projection leak check allows it) but
     /// the speaking NPC does NOT hold still yields an NPC consistency finding — the NPC is
     /// the speaker, and it cannot honestly state a fact it does not know.

@@ -1662,7 +1662,11 @@ impl GmLoop {
                 }
             }
         }
-        npc_consistency_findings(visible_text, &npcs, secret_terms, existing)
+        // 知识一致性（既有）+ 行为一致性（设计3 §13-P3，新增 advisory）同口径折叠返回。
+        // 行为检查与知识检查共用已载入的 `npcs`（纯加性：不新增 DB 读、不改既有知识 findings）。
+        let mut findings = npc_consistency_findings(visible_text, &npcs, secret_terms, existing);
+        findings.extend(npc_behavior_consistency_findings(visible_text, &npcs, existing));
+        findings
     }
 
     /// 采集本会话模组的私有泄漏术语表（生产源，TC-D3-00）。无 module_id（自由场景）或图谱
@@ -2201,6 +2205,72 @@ pub fn npc_consistency_findings(
         }
     }
     out
+}
+
+/// 设计3 §13-P3：活动 NPC **行为一致性**校验的纯函数内核（确定性、无 IO、advisory、fail-soft）。
+///
+/// 与 [`npc_consistency_findings`]（守"NPC 知道什么/能说什么"）正交：本检查守"NPC 被允许怎么行动"
+/// ——念白是否呈现了该 NPC 自身行为计划 `forbidden_actions` 里禁止的行为。对每个活动 NPC：
+/// 1. **可见性门**（同知识检查的保守子串启发）：念白未 plausibly 点到该 NPC ⇒ 跳过（降误报）。
+/// 2. **确定性 marker 派生**：从该 NPC 计划的 `forbidden_actions` 派生 [`BehaviorSurfaceMarker`]——
+///    `raise taboo topic: X` 形态绑到具体禁忌词 `X`，其余禁止项绑到其自身文本（保守、低误报）。
+/// 3. 交纯函数 [`trpg_runtime::verify_npc_behavior_consistency`] 出 advisory（Warning）findings，
+///    detail 仅引 npc_id + 行为标签，绝不回显念白匹配子串。
+/// 4. 跨 NPC 按 (npc_id, action_label) 去重；与 `existing` 不混（行为标签 ≠ fact_id 键空间）。
+///
+/// 无活动 NPC / 空念白 → 空（fail-soft，旧行为零变更）。
+pub fn npc_behavior_consistency_findings(
+    narration: &str,
+    npcs: &[(String, trpg_runtime::NpcSpeechProjection)],
+    _existing: &[trpg_agent::VerifierFinding],
+) -> Vec<trpg_agent::VerifierFinding> {
+    if narration.is_empty() || npcs.is_empty() {
+        return Vec::new();
+    }
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for (name, proj) in npcs {
+        // 可见性门（v1）：念白未 plausibly 点到该 NPC ⇒ 跳过（降低误报）。
+        let involves = narration.contains(proj.npc_id.as_str())
+            || (!name.is_empty() && narration.contains(name.as_str()));
+        if !involves {
+            continue;
+        }
+        let markers = behavior_markers_from_plan(&proj.0.plan);
+        if markers.is_empty() {
+            continue;
+        }
+        for f in trpg_runtime::verify_npc_behavior_consistency(&proj.0, narration, &markers) {
+            // 末对单引号内的 token = action_label（finding detail 末对引号即行为标签）。
+            let key = match npc_finding_fact_key(&f.detail) {
+                Some(k) => format!("{}::{}", proj.npc_id, k),
+                None => format!("{}::{}", proj.npc_id, out.len()),
+            };
+            if seen.insert(key) {
+                out.push(f);
+            }
+        }
+    }
+    out
+}
+
+/// 从一个 NPC 行为计划的 `forbidden_actions` 确定性派生行为面 marker（无 IO、无 NLP）。
+/// `raise taboo topic: X` 形态绑到具体禁忌词 `X`（念白真提该禁忌话题即穿帮）；其余禁止项绑到
+/// 其自身文本（保守，几乎只在念白逐字复述该指令时命中，低误报）。
+fn behavior_markers_from_plan(
+    plan: &trpg_model::NpcBehaviorPlan,
+) -> Vec<trpg_model::BehaviorSurfaceMarker> {
+    const TABOO_PREFIX: &str = "raise taboo topic: ";
+    plan.forbidden_actions
+        .iter()
+        .map(|fa| {
+            let term = fa
+                .strip_prefix(TABOO_PREFIX)
+                .map(str::to_string)
+                .unwrap_or_else(|| fa.clone());
+            trpg_model::BehaviorSurfaceMarker::new(fa.clone(), vec![term])
+        })
+        .collect()
 }
 
 /// 从一条 verifier finding 的 detail 抽稳定 fact-key：取**末**对单引号内的 token。NPC finding 的
