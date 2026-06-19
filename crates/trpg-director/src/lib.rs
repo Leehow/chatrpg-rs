@@ -7,7 +7,9 @@ use uuid::Uuid;
 
 mod clock;
 mod spotlight;
+mod story;
 pub use spotlight::SpotlightParticipant;
+pub use story::{build_director_brief_packet, fallback_beat_plan, pick_spotlight_target};
 
 #[cfg(test)]
 mod dehardcode_tests;
