@@ -255,6 +255,7 @@ async fn enter_mode_rejects_nesting_and_unknown_mode() {
         data_dir: Some(&dir),
         current_mode: Some("combat"),
         opposed_binding: None,
+        nominated_reveals: None,
     };
     let err = typed_err(
         EnterModeTool
@@ -282,6 +283,7 @@ async fn enter_mode_rejects_nesting_and_unknown_mode() {
         data_dir: Some(&dir),
         current_mode: None,
         opposed_binding: None,
+        nominated_reveals: None,
     };
     let err = typed_err(
         EnterModeTool
@@ -318,6 +320,7 @@ async fn exit_mode_without_active_mode_is_no_active_mode() {
         data_dir: Some(&dir),
         current_mode: None,
         opposed_binding: None,
+        nominated_reveals: None,
     };
     let err = typed_err(
         ExitModeTool
@@ -392,6 +395,7 @@ async fn exit_mode_blocked_by_obligations_then_waive_releases() {
         data_dir: Some(&dir),
         current_mode: Some("combat"),
         opposed_binding: None,
+        nominated_reveals: None,
     };
     // 外部债务未清 → exit 被拦（waive 通道照常可用——hint 指路）。
     let err = typed_err(

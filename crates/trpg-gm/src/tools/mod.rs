@@ -55,6 +55,20 @@ pub struct ToolCtx<'a> {
     /// `args.opposed` 缺失时注入它（GM 漏填对抗形态的兜底）。None = 本回合无攻击
     /// 意图 / 预 pass 关 / 现搓不成（fail-closed，不注入）。
     pub opposed_binding: Option<&'a crate::opposed_prepass::OpposedBinding>,
+    /// P6.7 reveal-gating 提名通道（TRPG_REVEAL_GATING ON 时由 turn_loop 注入）：
+    /// `reveal_fact` 不再即时落库，而是把一条 RevealNomination 推进此互斥单元，
+    /// 由 PresentationCommit 边界在终审 Allow 后统一提交。dispatch 链上 ToolCtx 是
+    /// 共享引用，故复用 obligations 同款 `&Mutex` 内点改模式。
+    /// None = flag OFF / 单测未挂 ⇒ reveal_fact 回退即时落库（F13 字节级基线）。
+    pub nominated_reveals: Option<&'a Mutex<Vec<RevealNomination>>>,
+}
+
+/// P6.7：一条「玩家认知事实」提名。reveal_fact 在 gating ON 时产出，
+/// PresentationCommit 边界在终审 Allow 后按 fact_id 排序逐条提交（replay parity）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevealNomination {
+    pub fact_id: String,
+    pub reason: Option<String>,
 }
 
 /// 工具单次执行的产物。
@@ -430,6 +444,7 @@ mod tests {
             data_dir: None,
             current_mode: None,
             opposed_binding: None,
+            nominated_reveals: None,
         };
         let mut ledger = TurnLedger::new();
         let outcome = registry
@@ -469,6 +484,7 @@ mod tests {
             data_dir: None,
             current_mode: None,
             opposed_binding: None,
+            nominated_reveals: None,
         };
         let mut ledger = TurnLedger::new();
         let outcome = registry

@@ -1340,3 +1340,284 @@ fn finalize_save_and_heavy_memory_are_separable() {
     let _bridge = GmLoop::phase_finalize_heavy_memory;
     let _ = (_save, _heavy, _bridge);
 }
+
+// ======================== P6.7 reveal_fact gating + 两 commit 边界 ========================
+
+use crate::presentation_gate::PresentationGate;
+use crate::tools::RevealNomination;
+use trpg_agent::{VerifierFinding, VerifierFindingKind, VerifierSeverity};
+
+/// DB-gated 真库装配（DATABASE_URL 缺失 ⇒ None ⇒ 调用方 SKIP，绝不伪 PASS）。
+async fn real_gm(session: &str) -> Option<(GmLoop, ContextRequest)> {
+    let url = std::env::var("DATABASE_URL").ok()?;
+    let db = trpg_db::Db::connect(&url).await.ok()?;
+    db.migrate().await.ok()?;
+    let engine = RuntimeEngine::new(db);
+    let llm = Arc::new(MockLlm {
+        scripts: Mutex::new(Vec::new()),
+        choices: Mutex::new(Vec::new()),
+        requests: Mutex::new(Vec::new()),
+    });
+    let data_dir = std::env::temp_dir().join(format!(
+        "gm_reveal_test_{}_{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let gm = GmLoop::new(
+        engine,
+        llm,
+        ToolRegistry::standard(),
+        LoopConfig::default(),
+        data_dir,
+    );
+    let request = ContextRequest {
+        ruleset_id: "rs".to_string(),
+        module_id: None,
+        session_id: session.to_string(),
+        turn_id: "t_reveal".to_string(),
+        viewer: VisibilityProfile::gm(),
+        token_budget: TokenBudget::default(),
+    };
+    Some((gm, request))
+}
+
+fn block_gate() -> PresentationGate {
+    PresentationGate::Block(vec![VerifierFinding {
+        kind: VerifierFindingKind::SecretLeak,
+        severity: VerifierSeverity::Blocker,
+        detail: "leak".into(),
+    }])
+}
+
+/// OFF==baseline：gating flag 未设 ⇒ reveal_fact 工具仍即时落库（F13 字节级基线）。
+/// 经真 ToolRegistry::standard() dispatch（nominated_reveals 通道未挂）。
+#[tokio::test]
+async fn reveal_gating_off_is_immediate_baseline() {
+    std::env::remove_var("TRPG_REVEAL_GATING");
+    let session = format!("s_off_{}", uuid::Uuid::new_v4().simple());
+    let Some((gm, request)) = real_gm(&session).await else {
+        eprintln!("SKIP: DATABASE_URL unset");
+        return;
+    };
+    let state = RuntimeState::default();
+    let ctx = ToolCtx {
+        engine: &gm.engine,
+        request: &request,
+        state: &state,
+        scene_extractor: None,
+        obligations: None,
+        data_dir: None,
+        current_mode: None,
+        opposed_binding: None,
+        nominated_reveals: None, // OFF / 未挂 ⇒ 即时落库
+    };
+    let registry = ToolRegistry::standard();
+    let mut ledger = TurnLedger::new();
+    let out = registry
+        .dispatch(
+            &ctx,
+            &mut ledger,
+            &AggregatedToolCall {
+                id: "c1".into(),
+                name: "reveal_fact".into(),
+                arguments: json!({"fact_id":"npc_butler","reason":"r"}).to_string(),
+            },
+        )
+        .await;
+    let v: Value = serde_json::from_str(&out.content).unwrap();
+    assert_eq!(v.pointer("/revealed").and_then(Value::as_bool), Some(true));
+    // 行已即时落库（与今日基线逐字节等价）。
+    assert_eq!(
+        gm.engine.db.list_revealed_facts(&session).await.unwrap(),
+        vec!["npc_butler".to_string()]
+    );
+}
+
+/// ON gating：reveal_fact 工具仅提名、本轮不写 DB（PlayerLearnedFact 行尚未存在）。
+#[tokio::test]
+async fn reveal_gating_on_nominates_without_immediate_write() {
+    let session = format!("s_on_nom_{}", uuid::Uuid::new_v4().simple());
+    let Some((gm, request)) = real_gm(&session).await else {
+        eprintln!("SKIP: DATABASE_URL unset");
+        return;
+    };
+    let state = RuntimeState::default();
+    let cell: Mutex<Vec<RevealNomination>> = Mutex::new(Vec::new());
+    let ctx = ToolCtx {
+        engine: &gm.engine,
+        request: &request,
+        state: &state,
+        scene_extractor: None,
+        obligations: None,
+        data_dir: None,
+        current_mode: None,
+        opposed_binding: None,
+        nominated_reveals: Some(&cell), // ON ⇒ 提名通道在位
+    };
+    let registry = ToolRegistry::standard();
+    let mut ledger = TurnLedger::new();
+    let out = registry
+        .dispatch(
+            &ctx,
+            &mut ledger,
+            &AggregatedToolCall {
+                id: "c1".into(),
+                name: "reveal_fact".into(),
+                arguments: json!({"fact_id":"npc_butler"}).to_string(),
+            },
+        )
+        .await;
+    let v: Value = serde_json::from_str(&out.content).unwrap();
+    assert_eq!(v.pointer("/nominated").and_then(Value::as_bool), Some(true));
+    assert_eq!(v.pointer("/revealed").and_then(Value::as_bool), Some(false));
+    // 提名进 cell，但 DB 未写。
+    assert_eq!(cell.lock().unwrap().len(), 1);
+    assert!(gm
+        .engine
+        .db
+        .list_revealed_facts(&session)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+/// PresentationCommit + 终审 Block ⇒ 提名全部丢弃，零 PlayerLearnedFact 行。
+#[tokio::test]
+async fn presentation_commit_block_drops_nominations() {
+    let session = format!("s_block_{}", uuid::Uuid::new_v4().simple());
+    let Some((mut gm, request)) = real_gm(&session).await else {
+        eprintln!("SKIP: DATABASE_URL unset");
+        return;
+    };
+    let mut ctx = TurnContext::new();
+    ctx.nominated_reveals = vec![
+        RevealNomination {
+            fact_id: "npc_butler".into(),
+            reason: None,
+        },
+        RevealNomination {
+            fact_id: "sc_cellar".into(),
+            reason: None,
+        },
+    ];
+    ctx.presentation_gate = block_gate(); // 终审 Block
+    gm.presentation_commit_boundary(&mut ctx, &request).await;
+    assert!(
+        gm.engine
+            .db
+            .list_revealed_facts(&session)
+            .await
+            .unwrap()
+            .is_empty(),
+        "Block ⇒ 提名不提交，零行"
+    );
+}
+
+/// PresentationCommit + 终审 Allow ⇒ 按 fact_id 排序逐条提交（replay parity）。
+#[tokio::test]
+async fn presentation_commit_allow_commits_sorted() {
+    let session = format!("s_allow_{}", uuid::Uuid::new_v4().simple());
+    let Some((mut gm, request)) = real_gm(&session).await else {
+        eprintln!("SKIP: DATABASE_URL unset");
+        return;
+    };
+    let mut ctx = TurnContext::new();
+    // 故意乱序提名，断言提交后按 fact_id 排序。
+    ctx.nominated_reveals = vec![
+        RevealNomination {
+            fact_id: "sc_cellar".into(),
+            reason: Some("found".into()),
+        },
+        RevealNomination {
+            fact_id: "npc_butler".into(),
+            reason: None,
+        },
+    ];
+    ctx.presentation_gate = PresentationGate::Allow; // 终审 Allow
+    gm.presentation_commit_boundary(&mut ctx, &request).await;
+    let mut got = gm.engine.db.list_revealed_facts(&session).await.unwrap();
+    got.sort();
+    assert_eq!(got, vec!["npc_butler".to_string(), "sc_cellar".to_string()]);
+}
+
+/// Block-then-Allow（codex#6）：repair ladder 把终审从 Block 修复成 Allow ⇒ 必须提交。
+/// 这里直接以「commit 边界在 repair 之后跑、读最终 gate」建模：把 gate 设为修复后的 Allow。
+#[tokio::test]
+async fn commit_after_repair_block_then_allow_commits() {
+    let session = format!("s_repair_{}", uuid::Uuid::new_v4().simple());
+    let Some((gm, request)) = real_gm(&session).await else {
+        eprintln!("SKIP: DATABASE_URL unset");
+        return;
+    };
+    // 先 Block（不提交），后 Allow（提交）——两次调用 commit primitive 模拟终审单点。
+    let noms = vec![RevealNomination {
+        fact_id: "npc_butler".into(),
+        reason: None,
+    }];
+    gm.commit_nominated_reveals(&request, noms.clone(), false)
+        .await; // 初判 Block
+    assert!(
+        gm.engine
+            .db
+            .list_revealed_facts(&session)
+            .await
+            .unwrap()
+            .is_empty(),
+        "first Block ⇒ 未提交"
+    );
+    gm.commit_nominated_reveals(&request, noms, true).await; // 修复后 Allow
+    assert_eq!(
+        gm.engine.db.list_revealed_facts(&session).await.unwrap(),
+        vec!["npc_butler".to_string()],
+        "repair→Allow ⇒ 提交"
+    );
+}
+
+/// 钩子重定位结构断言（不依赖 DB）：BeforeNarration 已从 run_narrator_phase（split-only）
+/// 移到 presentation_commit_boundary；BeforeCommit 已从 phase_finalize（save_turn 前）
+/// 移到 resolution_commit_boundary。grep 生产源（对 rustfmt 自拆鲁棒：只看方法体含钩子名）。
+#[test]
+fn p37_hooks_relocated_to_commit_boundaries() {
+    let src = include_str!("turn_loop.rs");
+    fn body_between<'a>(src: &'a str, start: &str, next: &str) -> &'a str {
+        let s = src.find(start).unwrap_or_else(|| panic!("missing {start}"));
+        let rest = &src[s..];
+        let e = rest.find(next).unwrap_or(rest.len());
+        &rest[..e]
+    }
+    // BeforeNarration 出现在 presentation_commit_boundary 体内。
+    let pcb = body_between(
+        src,
+        "async fn presentation_commit_boundary",
+        "async fn commit_nominated_reveals",
+    );
+    assert!(
+        pcb.contains("PluginHook::BeforeNarration"),
+        "BeforeNarration 必须在 presentation_commit_boundary 触发"
+    );
+    // BeforeCommit 出现在 resolution_commit_boundary 体内。
+    let rcb = body_between(
+        src,
+        "async fn resolution_commit_boundary",
+        "async fn presentation_commit_boundary",
+    );
+    assert!(
+        rcb.contains("PluginHook::BeforeCommit"),
+        "BeforeCommit 必须在 resolution_commit_boundary 触发"
+    );
+    // 旧站点不再触发：run_narrator_phase 体内无 BeforeNarration 触发；phase_finalize 体内无 BeforeCommit。
+    let narrator = body_between(src, "async fn run_narrator_phase", "async fn run_narrator");
+    assert!(
+        !narrator.contains("PluginHook::BeforeNarration"),
+        "run_narrator_phase 不应再触发 BeforeNarration（已重定位）"
+    );
+    let finalize = body_between(
+        src,
+        "async fn phase_finalize",
+        "async fn phase_finalize_heavy",
+    );
+    assert!(
+        !finalize.contains("PluginHook::BeforeCommit"),
+        "phase_finalize 不应再触发 BeforeCommit（已重定位）"
+    );
+}

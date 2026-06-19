@@ -1,5 +1,5 @@
 use crate::ledger::TurnLedger;
-use crate::tools::{GmTool, ToolCtx, ToolError, ToolOutput, ToolSpec};
+use crate::tools::{GmTool, RevealNomination, ToolCtx, ToolError, ToolOutput, ToolSpec};
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
@@ -412,6 +412,26 @@ impl GmTool for RevealFactTool {
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty());
+        // P6.7：gating ON 且提名通道在位 ⇒ 仅提名（本工具轮不写 DB），由 PresentationCommit
+        // 边界在终审 Allow 后统一提交。OFF / 通道未挂 ⇒ 即时落库（F13 字节级基线，与今日等价）。
+        if let Some(cell) = ctx.nominated_reveals {
+            let mut nominations = cell.lock().unwrap_or_else(|p| p.into_inner());
+            // 同一 fact_id 在同回合多次 reveal_fact ⇒ 去重（commit primitive 本身幂等，
+            // 但提名去重让排序/计数确定）；保留首次 reason。
+            if !nominations.iter().any(|n| n.fact_id == fact_id) {
+                nominations.push(RevealNomination {
+                    fact_id: fact_id.clone(),
+                    reason: reason.map(str::to_string),
+                });
+            }
+            return Ok(ToolOutput::ok(json!({
+                "fact_id": fact_id,
+                "revealed": false,
+                "nominated": true,
+                "scope": "player_party",
+                "reason": reason,
+            })));
+        }
         ctx.engine
             .reveal_fact(
                 &ctx.request.session_id,

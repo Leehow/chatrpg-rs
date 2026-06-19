@@ -96,6 +96,7 @@ async fn open_combat_frame_validates_arguments() {
         data_dir: Some(&dir),
         current_mode: None,
         opposed_binding: None,
+        nominated_reveals: None,
     };
     // participants 缺失 / 空数组 / stakes 缺失 → invalid_arguments（不打 db）。
     let err = typed_err(
@@ -130,6 +131,7 @@ async fn open_combat_frame_validates_arguments() {
         data_dir: Some(&dir),
         current_mode: Some("downtime"),
         opposed_binding: None,
+        nominated_reveals: None,
     };
     let err = typed_err(
         OpenCombatFrameTool
@@ -158,6 +160,7 @@ async fn open_combat_frame_creates_live_combat_frame_with_bp3_projection() {
         data_dir: Some(&dir),
         current_mode: None,
         opposed_binding: None,
+        nominated_reveals: None,
     };
     let output = OpenCombatFrameTool
         .call(
@@ -231,6 +234,7 @@ async fn open_combat_frame_enriches_existing_mode_frame_instead_of_duplicating()
         data_dir: Some(&dir),
         current_mode: None,
         opposed_binding: None,
+        nominated_reveals: None,
     };
     crate::mode::EnterModeTool
         .call(
@@ -299,6 +303,7 @@ async fn close_frame_without_live_frame_is_frame_not_found() {
         data_dir: Some(&dir),
         current_mode: None,
         opposed_binding: None,
+        nominated_reveals: None,
     };
     let err = typed_err(
         CloseFrameTool
@@ -337,6 +342,7 @@ async fn close_frame_compacts_closes_and_settles_exit_obligations() {
         data_dir: Some(&dir),
         current_mode: Some("combat"),
         opposed_binding: None,
+        nominated_reveals: None,
     };
     OpenCombatFrameTool
         .call(

@@ -51,8 +51,8 @@ pub use prompts::{
 };
 pub use stream::RedactingBuffer;
 pub use tools::{
-    AwaitingPlayerRoll, GmTool, SceneDeepExtractFn, ToolCapability, ToolCtx, ToolDispatchOutcome,
-    ToolError, ToolOutput, ToolRegistry, ToolSpec,
+    AwaitingPlayerRoll, GmTool, RevealNomination, SceneDeepExtractFn, ToolCapability, ToolCtx,
+    ToolDispatchOutcome, ToolError, ToolOutput, ToolRegistry, ToolSpec,
 };
 pub use turn_event::TurnEvent;
 pub use turn_loop::{CtxProviderFn, GmLoop, GmTurnInput, LoopConfig, TurnOutcome};

@@ -236,6 +236,11 @@ async fn run_pipeline(
             return;
         }
 
+        // —— 2a-bis. P6.7 ResolutionCommit（逻辑/审计边界，非 phase）——
+        // AgentLoop 已结束、机械状态已由循环内工具落库（codex#7）。此命名边界触发重定位后的
+        // BeforeCommit advisory hook（trace-only，不阻断）。仅非取消路径进入（取消已在上方短路）。
+        gm.resolution_commit_boundary(&mut ctx, &req.request).await;
+
         // —— 2b. P1 Narrator phase（TRPG_NARRATOR_SPLIT ON 且 Narration 终态）——
         // 仅 Narration 终态跑：AwaitingPlayerRoll（桌面骰 prompt_public）走确定性文本、
         // 已在 agent loop 内流出，不经 Narrator（ON/OFF 行为一致）。run_narrator_phase 内
@@ -289,6 +294,13 @@ async fn run_pipeline(
                             })
                             .await;
                     }
+                    // —— P6.7 PresentationCommit（逻辑边界，非 phase）——
+                    // 终审 gate（repair ladder 已沉降）后、Finalize/save_turn 前：触发重定位后的
+                    // BeforeNarration advisory hook（split/非split 一致），并在终审 Allow 时按 fact_id
+                    // 排序提交 reveal 提名（Block ⇒ 丢弃）。提交在 repair 之后 ⇒ 先 Block 后修复成
+                    // Allow 的回合会提交（codex#6）。
+                    gm.presentation_commit_boundary(&mut ctx, &req.request)
+                        .await;
                 }
                 PhaseId::Finalize => {
                     phases_run.push(format!("{:?}", PhaseId::Finalize));

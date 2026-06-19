@@ -219,6 +219,9 @@ pub(crate) struct TurnContext {
     // `TRPG_DIRECTOR_PACKET` 默认 OFF ⇒ 恒 None ⇒ 不写块 ⇒ 字节等价基线。仅入 [gm] BP3，
     // 绝不入玩家可见 narration。
     director_packet_block: Option<String>,
+    // P6.7 reveal-gating 提名（agent_loop 内 reveal_fact 在 TRPG_REVEAL_GATING ON 时填，
+    // PresentationCommit 边界在终审 Allow 后排序提交）。OFF ⇒ 恒空（reveal_fact 即时落库，基线）。
+    nominated_reveals: Vec<crate::tools::RevealNomination>,
 }
 impl TurnContext {
     pub(crate) fn new() -> Self {
@@ -245,6 +248,7 @@ impl TurnContext {
             visible_text: String::new(),
             awaiting_gate: None,
             director_packet_block: None,
+            nominated_reveals: Vec::new(),
         }
     }
 
@@ -410,6 +414,10 @@ impl GmLoop {
         // B6：obligations 暂入互斥单元——dispatch 链上 ToolCtx 是共享引用，
         // waive_obligation 需要点改清单；块结束取回持久字段。
         let obligations_cell = std::sync::Mutex::new(std::mem::take(&mut self.obligations));
+        // P6.7：reveal 提名互斥单元（legacy 路径同款；commit 在下方 verify 后做）。
+        let reveal_gating = reveal_gating_enabled();
+        let reveals_cell: std::sync::Mutex<Vec<crate::tools::RevealNomination>> =
+            std::sync::Mutex::new(Vec::new());
         {
             let tools = mode_tools.as_ref().unwrap_or(&self.tools);
             let ctx = ToolCtx {
@@ -421,6 +429,7 @@ impl GmLoop {
                 data_dir: Some(&self.data_dir),
                 current_mode: mode_id.as_deref(),
                 opposed_binding: opposed_binding.as_ref(),
+                nominated_reveals: reveal_gating.then_some(&reveals_cell),
             };
             // R1 follow-up: run_agent_loop (execute.rs) duplicates this loop; dedupe when run_gm_turn is retired.
             'rounds: for round in 0..max_tool_rounds {
@@ -603,14 +612,18 @@ impl GmLoop {
         self.obligations = obligations_cell
             .into_inner()
             .unwrap_or_else(|p| p.into_inner());
+        // P6.7：legacy 路径 reveal 提名（gating ON 时非空）。此路径无 repair ladder/gate 保留，
+        // commit 决策直接取下方 verify_after_stream 的 gate（Block⇒丢弃；Allow⇒排序提交）。
+        let legacy_reveals = reveals_cell.into_inner().unwrap_or_else(|p| p.into_inner());
         // —— 终态 A：request_player_roll gate ——
         if let Some(gate) = awaiting {
             // 流后校验是 loop 之后的无条件阶段（spec §4）：awaiting 终态前可能已
             // 流出含可见掷骰结果的叙事，仅在 visible_text 非空时跑（空文本无可对账内容）。
+            let mut allow = true;
             if !visible_text.trim().is_empty() {
                 // R1 legacy 路径不组装 TurnTrace，丢弃返回的 plugin trace 记录（execute.rs 默认路径
                 // 经 phase_verify_after_stream 收集）。
-                let _ = self
+                let outcome = self
                     .verify_after_stream(
                         input.request,
                         &ledger,
@@ -618,7 +631,10 @@ impl GmLoop {
                         &input.state.active_npc_ids,
                     )
                     .await;
+                allow = !outcome.gate.is_block();
             }
+            self.commit_nominated_reveals(input.request, legacy_reveals, allow)
+                .await;
             let assistant_output = if visible_text.trim().is_empty() {
                 gate.prompt_public.clone()
             } else {
@@ -667,13 +683,16 @@ impl GmLoop {
             }
         }
         // —— 5. 流后校验（不阻塞交付：叙事已全部流出）——
-        let _ = self
+        let outcome = self
             .verify_after_stream(
                 input.request,
                 &ledger,
                 &visible_text,
                 &input.state.active_npc_ids,
             )
+            .await;
+        // P6.7：legacy narration 终态 reveal 提交（终审 Allow only，排序）。
+        self.commit_nominated_reveals(input.request, legacy_reveals, !outcome.gate.is_block())
             .await;
         // —— 6. 确定性收尾 ——
         self.finalize_turn(
@@ -735,6 +754,11 @@ impl GmLoop {
         // B6：obligations 暂入互斥单元——与 run_gm_turn 同款（dispatch 链上 ToolCtx
         // 是共享引用，waive_obligation 需点改清单；块结束取回持久字段）。
         let obligations_cell = std::sync::Mutex::new(std::mem::take(&mut self.obligations));
+        // P6.7：reveal 提名互斥单元（gating ON 时 reveal_fact 点改）；块结束取回进
+        // ctx.nominated_reveals 供 PresentationCommit 边界提交。OFF/未挂 ⇒ 始终空。
+        let reveal_gating = reveal_gating_enabled();
+        let reveals_cell: std::sync::Mutex<Vec<crate::tools::RevealNomination>> =
+            std::sync::Mutex::new(std::mem::take(&mut ctx.nominated_reveals));
         {
             let tools = ctx.mode_tools.as_ref().unwrap_or(&self.tools);
             let tool_ctx = ToolCtx {
@@ -746,6 +770,7 @@ impl GmLoop {
                 data_dir: Some(&self.data_dir),
                 current_mode: mode_id.as_deref(),
                 opposed_binding: opposed_binding.as_ref(),
+                nominated_reveals: reveal_gating.then_some(&reveals_cell),
             };
             'rounds: for round in 0..max_tool_rounds {
                 // P1-3 follow-up：本轮起点先查取消——已 fire 则连 LLM 请求都不发（最省 token）。
@@ -936,6 +961,8 @@ impl GmLoop {
         self.obligations = obligations_cell
             .into_inner()
             .unwrap_or_else(|p| p.into_inner());
+        // P6.7：取回本回合 reveal 提名（gating ON 时非空）供 PresentationCommit 提交。
+        ctx.nominated_reveals = reveals_cell.into_inner().unwrap_or_else(|p| p.into_inner());
         // —— 终态 A：request_player_roll gate ——
         if let Some(gate) = awaiting {
             ctx.visible_text = visible_text;
@@ -1010,15 +1037,8 @@ impl GmLoop {
     ) {
         // buffer 模式下，adjudicator 自由文本已（私骰已 redact）累积在 ctx.visible_text。
         let adjudicator_prose = ctx.visible_text.clone();
-        // P3.7 BeforeNarration（advisory/trace-only）：Narrator-split 路径的干净切点——玩家
-        // 散文产出前。仅 trace，不阻断任何行为。非 split 路径无干净切点 → 不接（见 §P3.7）。
-        self.run_advisory_trace_hook(
-            ctx,
-            input.request,
-            crate::plugin::PluginHook::BeforeNarration,
-            Some(&adjudicator_prose),
-        )
-        .await;
+        // P6.7：BeforeNarration 已从此 split-only 切点重定位到 PresentationCommit 边界
+        //（presentation_commit_boundary，对 split / 非 split 路径一致触发）——此处不再触发。
         let adj = crate::packet::AdjudicationPacket::project(
             input.user_input,
             ctx.ledger.snapshot(),
@@ -2207,6 +2227,81 @@ impl GmLoop {
         ctx.visible_text = deterministic_committed_facts_narration(&narration);
     }
 
+    /// P6.7 ResolutionCommit（**逻辑/审计边界**，非新 phase、非落库前门）：AgentLoop 结束点。
+    /// 机械状态已由循环内工具落库（codex#7）——本边界只是 post-mechanical-resolution 的
+    /// 命名审计标记，在此触发**重定位**后的 BeforeCommit advisory hook（trace-only，绝不阻断）。
+    /// execute.rs 在 run_agent_loop 返回后调（非取消路径）；run_gm_turn 内联调。
+    pub(crate) async fn resolution_commit_boundary(
+        &mut self,
+        ctx: &mut TurnContext,
+        request: &ContextRequest,
+    ) {
+        // P3.7 BeforeCommit 重定位：从 save_turn 前迁到 AgentLoop 结束这一真正的
+        // 机械结算后检查点（advisory/trace-only，本期不阻断）。
+        self.run_advisory_trace_hook(ctx, request, crate::plugin::PluginHook::BeforeCommit, None)
+            .await;
+    }
+
+    /// P6.7 PresentationCommit（**逻辑边界**，非新 phase）：VerifyAfterStream 产出终审结果
+    /// （repair ladder 已沉降）后、Finalize/save_turn 前。两件事：
+    /// (1) 触发**重定位**后的 BeforeNarration advisory hook —— 现对 split 与非 split 路径都触发
+    ///     （真正的「玩家可见前」切点；trace-only，不阻断）。
+    /// (2) 玩家认知事实提交：终审 gate 为 Allow ⇒ 按 fact_id 排序逐条 commit 提名；Block ⇒ 全丢弃。
+    ///     commit 发生在 repair ladder 之后 ⇒ 先 Block 后修复成 Allow 的回合会提交（codex#6）。
+    pub(crate) async fn presentation_commit_boundary(
+        &mut self,
+        ctx: &mut TurnContext,
+        request: &ContextRequest,
+    ) {
+        // (1) BeforeNarration 重定位：玩家可见前的干净切点，split / 非 split 一致触发。
+        let narration = ctx.visible_text.clone();
+        self.run_advisory_trace_hook(
+            ctx,
+            request,
+            crate::plugin::PluginHook::BeforeNarration,
+            Some(&narration),
+        )
+        .await;
+        // (2) reveal 提名提交（终审 Allow only）。
+        let allow = !ctx.presentation_gate.is_block();
+        let nominations = std::mem::take(&mut ctx.nominated_reveals);
+        self.commit_nominated_reveals(request, nominations, allow)
+            .await;
+    }
+
+    /// P6.7 commit primitive 包装：终审 Allow 时按 fact_id 排序逐条 engine.reveal_fact
+    /// （= 既有即时写，现成提交步骤；replay parity 靠排序）；Block ⇒ 全部丢弃、零落库。
+    /// engine.reveal_fact / db.record_revealed_fact 内部不变（幂等）。失败只 warn。
+    async fn commit_nominated_reveals(
+        &self,
+        request: &ContextRequest,
+        mut nominations: Vec<crate::tools::RevealNomination>,
+        allow: bool,
+    ) {
+        if !allow || nominations.is_empty() {
+            return;
+        }
+        nominations.sort_by(|a, b| a.fact_id.cmp(&b.fact_id));
+        for n in &nominations {
+            if let Err(err) = self
+                .engine
+                .reveal_fact(
+                    &request.session_id,
+                    &request.turn_id,
+                    &n.fact_id,
+                    n.reason.as_deref(),
+                )
+                .await
+            {
+                tracing::warn!(
+                    error = %err,
+                    fact_id = %n.fact_id,
+                    "PresentationCommit reveal commit failed"
+                );
+            }
+        }
+    }
+
     /// PhaseId::Finalize（R5 critical）— 只持久化回合记录 + status（save_turn）。
     /// memory/audit 由 phase_finalize_heavy_memory 在 heavy 段后台跑。awaiting 终态用
     /// gate prompt_public 兜底空 visible_text（与 run_gm_turn assistant_output 选择一致）。
@@ -2217,15 +2312,8 @@ impl GmLoop {
         status: &str,
     ) {
         let assistant_output = ctx.heavy_assistant_output();
-        // P3.7 BeforeCommit（advisory/trace-only）：紧贴 save_turn 前的检查点。仅 trace，
-        // 绝不阻断落账（真正的 mechanics-commit 门控推迟到 P6）。
-        self.run_advisory_trace_hook(
-            ctx,
-            input.request,
-            crate::plugin::PluginHook::BeforeCommit,
-            None,
-        )
-        .await;
+        // P3.7 BeforeCommit 已重定位到 resolution_commit_boundary（AgentLoop 结束点）——
+        // 此处不再触发，save_turn 不再附挂 advisory hook。
         self.finalize_save_turn(
             input.request,
             &ctx.compiled,
@@ -2474,6 +2562,15 @@ fn drain_redactor(
 /// 在位时真正生效（调用方再加 buffer 前置守卫）。
 pub(crate) fn presentation_gate_enabled() -> bool {
     std::env::var("TRPG_PRESENTATION_GATE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// P6.7：reveal_fact 提名门控开关（默认 OFF = 字节级基线）。ON ⇒ reveal_fact 不再
+/// 即时落库，而是提名到 ctx.nominated_reveals，由 PresentationCommit 边界在终审
+/// Allow 后统一提交；OFF ⇒ reveal_fact 即时落库（F13 与今日行为逐字节等价）。
+pub(crate) fn reveal_gating_enabled() -> bool {
+    std::env::var("TRPG_REVEAL_GATING")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 }
