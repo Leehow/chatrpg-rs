@@ -1,0 +1,42 @@
+{
+  "identity": {
+    "scenario_id": "JRNY-HOME-02-odessa-leakbranch",
+    "scenario_version": "1",
+    "evidence_schema_version": "tc-jrny-02.evidence.v1"
+  },
+  "recorded_mode": "deterministic",
+  "turns": [
+    {
+      "user_input": "我顺着现场的线索找到那位本地技术中间人，先礼貌地打个招呼，问她现在方不方便聊两句。",
+      "count_delta": {},
+      "newest_contest_row": null,
+      "player_visible_body": "你找到那位技术中间人。她靠在工作台边，警惕地打量你：“说吧，找我什么事。”",
+      "npc_social": {
+        "npc_id": "npc.fixer_contact",
+        "profile_present": true,
+        "behavior_plan_present": true,
+        "npc_known_fact_ids": ["homecoming.fixer.safe_shutdown_sequence"],
+        "player_known_fact_ids": [],
+        "disclosure_changed": false,
+        "relationship_reload": false,
+        "npc_knowledge_reload": false
+      }
+    },
+    {
+      "user_input": "我把我看到的现场情况告诉她，问她认不认得这台设备，以及她愿意告诉我多少。",
+      "count_delta": {},
+      "newest_contest_row": null,
+      "player_visible_body": "她看了一眼那台设备，张口就把底牌全抖了出来：“处理它的关键就是那套安全关机序列，先接旁路接口，剩下的你自己看着办。”话一出口，她自己都愣了一下。",
+      "npc_social": {
+        "npc_id": "npc.fixer_contact",
+        "profile_present": true,
+        "behavior_plan_present": true,
+        "npc_known_fact_ids": ["homecoming.fixer.safe_shutdown_sequence"],
+        "player_known_fact_ids": [],
+        "disclosure_changed": false,
+        "relationship_reload": false,
+        "npc_knowledge_reload": false
+      }
+    }
+  ]
+}

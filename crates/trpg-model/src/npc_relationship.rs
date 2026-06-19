@@ -164,7 +164,10 @@ impl std::fmt::Display for RelationshipError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RelationshipError::MissingEvidence => {
-                write!(f, "relationship delta requires non-empty evidence_event_ids")
+                write!(
+                    f,
+                    "relationship delta requires non-empty evidence_event_ids"
+                )
             }
             RelationshipError::UnstableId(why) => write!(f, "unstable relationship id: {why}"),
             RelationshipError::UnknownTargetKind(k) => {
@@ -511,8 +514,8 @@ mod tests {
 
     #[test]
     fn target_round_trips_through_serde() {
-        let mut r = NpcRelationship::new("s", "npc_a", NpcRelationshipTarget::Npc("npc_b".into()))
-            .unwrap();
+        let mut r =
+            NpcRelationship::new("s", "npc_a", NpcRelationshipTarget::Npc("npc_b".into())).unwrap();
         NpcRelationshipDelta::help(vec!["e1".into()])
             .apply_to(&mut r)
             .unwrap();

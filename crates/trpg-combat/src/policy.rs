@@ -75,12 +75,15 @@ pub fn opposition_identity_binding(resolved: Option<&ActorRef>) -> Value {
 /// Replaces `infer_combat_mode_from_intent`'s ruleset_id.contains branches:
 /// first matching rule wins (action AND evidence gated), else the policy
 /// fallback_mode. None policy → GENERIC_COMBAT_MODE_POLICY (→ TheaterOfMind).
-pub fn combat_mode_from_policy(policy: Option<&CombatModePolicy>, intent: &ConflictIntent) -> CombatMode {
+pub fn combat_mode_from_policy(
+    policy: Option<&CombatModePolicy>,
+    intent: &ConflictIntent,
+) -> CombatMode {
     let pol = policy.unwrap_or(&GENERIC_COMBAT_MODE_POLICY);
     let action = intent.action_kind.as_str();
     for rule in &pol.rules {
-        let action_ok = rule.when_action_kinds.is_empty()
-            || rule.when_action_kinds.iter().any(|a| a == action);
+        let action_ok =
+            rule.when_action_kinds.is_empty() || rule.when_action_kinds.iter().any(|a| a == action);
         let evidence_ok = rule.when_evidence_contains.is_empty()
             || rule
                 .when_evidence_contains
@@ -102,13 +105,19 @@ pub fn check_label_for(policy: Option<&CheckLabelPolicy>, action: SituationActio
         return label.clone();
     }
     match action {
-        SituationActionKind::Hack | SituationActionKind::DisableDevice => "appropriate technical conflict check",
+        SituationActionKind::Hack | SituationActionKind::DisableDevice => {
+            "appropriate technical conflict check"
+        }
         SituationActionKind::Attack => "appropriate attack/conflict check",
         SituationActionKind::UnderAttack
         | SituationActionKind::EnemyInitiatedConflict
         | SituationActionKind::SceneEntersConflict => "appropriate defense/reaction check",
-        SituationActionKind::Defend | SituationActionKind::Dodge => "appropriate defense/evasion check",
-        SituationActionKind::InvestigateDuringConflict => "appropriate perception/investigation-under-pressure check",
+        SituationActionKind::Defend | SituationActionKind::Dodge => {
+            "appropriate defense/evasion check"
+        }
+        SituationActionKind::InvestigateDuringConflict => {
+            "appropriate perception/investigation-under-pressure check"
+        }
         SituationActionKind::Intimidate => "appropriate intimidation/social pressure check",
         _ => "appropriate situation check",
     }
@@ -156,11 +165,17 @@ pub fn actor_for_combat_input(
         .and_then(|c| {
             c.npc_actor_bindings
                 .iter()
-                .find(|b| b.matcher.iter().any(|k| lower.contains(&k.to_ascii_lowercase())))
+                .find(|b| {
+                    b.matcher
+                        .iter()
+                        .any(|k| lower.contains(&k.to_ascii_lowercase()))
+                })
                 .map(|b| {
                     (
                         b.actor_id.clone(),
-                        b.display_name.clone().unwrap_or_else(|| "opposition".to_string()),
+                        b.display_name
+                            .clone()
+                            .unwrap_or_else(|| "opposition".to_string()),
                     )
                 })
         })
@@ -180,7 +195,11 @@ pub fn tech_dv_from_config(cfg: Option<&ModuleConfig>, input: &str) -> Option<i3
     cfg?.technical_option_table
         .as_ref()?
         .iter()
-        .find(|t| t.matcher.iter().any(|k| lower.contains(&k.to_ascii_lowercase())))
+        .find(|t| {
+            t.matcher
+                .iter()
+                .any(|k| lower.contains(&k.to_ascii_lowercase()))
+        })
         .map(|t| t.dv)
 }
 
@@ -194,7 +213,10 @@ pub fn investigate_opens_frame_relation(investigate_opens: bool, investigate_sco
 /// Whether a Low-confidence intent may still start a frame.
 /// Replaces `should_start_frame`'s `contains("triangle")` gate: driven by the
 /// profile's `low_confidence_frame_start` flag (false == old non-triangle).
-pub fn low_confidence_frame_start_ok(low_confidence_ok: bool, confidence: trpg_model::RulingConfidence) -> bool {
+pub fn low_confidence_frame_start_ok(
+    low_confidence_ok: bool,
+    confidence: trpg_model::RulingConfidence,
+) -> bool {
     confidence != trpg_model::RulingConfidence::Low || low_confidence_ok
 }
 
@@ -204,7 +226,10 @@ pub fn low_confidence_frame_start_ok(low_confidence_ok: bool, confidence: trpg_m
 /// (the engine's neutral generic profile) shows through. `reaction_windows` and
 /// `search_recipes` are per-element deserialized from their serialized shapes.
 /// None kernel profile → the base unchanged (== GENERIC behavior).
-pub fn overlay_combat_profile(mut base: RulesetCombatProfile, kp: Option<&CombatProfile>) -> RulesetCombatProfile {
+pub fn overlay_combat_profile(
+    mut base: RulesetCombatProfile,
+    kp: Option<&CombatProfile>,
+) -> RulesetCombatProfile {
     let Some(kp) = kp else { return base };
     if !kp.profile_id.is_empty() {
         base.profile_id = kp.profile_id.clone();
@@ -294,51 +319,119 @@ mod tests {
     fn combat_mode_uses_kernel_policy_then_generic() {
         let cp = cyberpunk_mode_policy();
         // cyberpunk: hack -> netrun, attack -> firefight (== legacy)
-        assert_eq!(combat_mode_from_policy(Some(&cp), &intent_with(SituationActionKind::Hack, &[])), CombatMode::Netrun);
-        assert_eq!(combat_mode_from_policy(Some(&cp), &intent_with(SituationActionKind::DisableDevice, &[])), CombatMode::Netrun);
-        assert_eq!(combat_mode_from_policy(Some(&cp), &intent_with(SituationActionKind::Attack, &[])), CombatMode::Firefight);
+        assert_eq!(
+            combat_mode_from_policy(Some(&cp), &intent_with(SituationActionKind::Hack, &[])),
+            CombatMode::Netrun
+        );
+        assert_eq!(
+            combat_mode_from_policy(
+                Some(&cp),
+                &intent_with(SituationActionKind::DisableDevice, &[])
+            ),
+            CombatMode::Netrun
+        );
+        assert_eq!(
+            combat_mode_from_policy(Some(&cp), &intent_with(SituationActionKind::Attack, &[])),
+            CombatMode::Firefight
+        );
         // absent policy -> GENERIC default (theater_of_mind), no ruleset branch
-        assert_eq!(combat_mode_from_policy(None, &intent_with(SituationActionKind::Attack, &[])), CombatMode::TheaterOfMind);
+        assert_eq!(
+            combat_mode_from_policy(None, &intent_with(SituationActionKind::Attack, &[])),
+            CombatMode::TheaterOfMind
+        );
     }
 
     #[test]
     fn combat_mode_coc_dnd_triangle_match_legacy_defaults() {
-        let coc = CombatModePolicy { rules: vec![], fallback_mode: CombatMode::HorrorEncounter };
-        assert_eq!(combat_mode_from_policy(Some(&coc), &intent_with(SituationActionKind::Attack, &[])), CombatMode::HorrorEncounter);
-        let dnd = CombatModePolicy { rules: vec![], fallback_mode: CombatMode::TacticalCombat };
-        assert_eq!(combat_mode_from_policy(Some(&dnd), &intent_with(SituationActionKind::Attack, &[])), CombatMode::TacticalCombat);
+        let coc = CombatModePolicy {
+            rules: vec![],
+            fallback_mode: CombatMode::HorrorEncounter,
+        };
+        assert_eq!(
+            combat_mode_from_policy(Some(&coc), &intent_with(SituationActionKind::Attack, &[])),
+            CombatMode::HorrorEncounter
+        );
+        let dnd = CombatModePolicy {
+            rules: vec![],
+            fallback_mode: CombatMode::TacticalCombat,
+        };
+        assert_eq!(
+            combat_mode_from_policy(Some(&dnd), &intent_with(SituationActionKind::Attack, &[])),
+            CombatMode::TacticalCombat
+        );
         // triangle: always anomaly_encounter (legacy: contains("triangle") => anomaly)
         let tri = CombatModePolicy {
-            rules: vec![CombatModeRule { mode: CombatMode::AnomalyEncounter, when_action_kinds: vec!["disable_device".into()], when_evidence_contains: vec!["anomaly".into()] }],
+            rules: vec![CombatModeRule {
+                mode: CombatMode::AnomalyEncounter,
+                when_action_kinds: vec!["disable_device".into()],
+                when_evidence_contains: vec!["anomaly".into()],
+            }],
             fallback_mode: CombatMode::AnomalyEncounter,
         };
-        assert_eq!(combat_mode_from_policy(Some(&tri), &intent_with(SituationActionKind::Attack, &[])), CombatMode::AnomalyEncounter);
-        assert_eq!(combat_mode_from_policy(Some(&tri), &intent_with(SituationActionKind::DisableDevice, &["anomaly:0.6"])), CombatMode::AnomalyEncounter);
+        assert_eq!(
+            combat_mode_from_policy(Some(&tri), &intent_with(SituationActionKind::Attack, &[])),
+            CombatMode::AnomalyEncounter
+        );
+        assert_eq!(
+            combat_mode_from_policy(
+                Some(&tri),
+                &intent_with(SituationActionKind::DisableDevice, &["anomaly:0.6"])
+            ),
+            CombatMode::AnomalyEncounter
+        );
     }
 
     // 2C: check label + bare dice
     #[test]
     fn check_label_from_kernel_then_generic_fallback() {
         let pol = CheckLabelPolicy {
-            labels: [("hack".to_string(), "appropriate TECH / Interface / Basic Tech check".to_string())]
-                .into_iter()
-                .collect(),
+            labels: [(
+                "hack".to_string(),
+                "appropriate TECH / Interface / Basic Tech check".to_string(),
+            )]
+            .into_iter()
+            .collect(),
         };
-        assert_eq!(check_label_for(Some(&pol), SituationActionKind::Hack), "appropriate TECH / Interface / Basic Tech check");
+        assert_eq!(
+            check_label_for(Some(&pol), SituationActionKind::Hack),
+            "appropriate TECH / Interface / Basic Tech check"
+        );
         // no policy entry -> neutral generic technical label (NOT a ruleset branch)
-        assert_eq!(check_label_for(None, SituationActionKind::Hack), "appropriate technical conflict check");
-        assert_eq!(check_label_for(None, SituationActionKind::Attack), "appropriate attack/conflict check");
-        assert_eq!(check_label_for(None, SituationActionKind::Defend), "appropriate defense/evasion check");
-        assert_eq!(check_label_for(None, SituationActionKind::Intimidate), "appropriate intimidation/social pressure check");
+        assert_eq!(
+            check_label_for(None, SituationActionKind::Hack),
+            "appropriate technical conflict check"
+        );
+        assert_eq!(
+            check_label_for(None, SituationActionKind::Attack),
+            "appropriate attack/conflict check"
+        );
+        assert_eq!(
+            check_label_for(None, SituationActionKind::Defend),
+            "appropriate defense/evasion check"
+        );
+        assert_eq!(
+            check_label_for(None, SituationActionKind::Intimidate),
+            "appropriate intimidation/social pressure check"
+        );
     }
 
     #[test]
     fn bare_dice_qualified_from_policy() {
-        let q = DiceQualification { bare_dice_template: "{dice}+0".into() };
-        assert_eq!(qualify_bare_dice(Some(&q), "1d10"), Some("1d10+0".to_string()));
-        assert_eq!(qualify_bare_dice(Some(&q), " 1d10 "), Some("1d10+0".to_string()));
+        let q = DiceQualification {
+            bare_dice_template: "{dice}+0".into(),
+        };
+        assert_eq!(
+            qualify_bare_dice(Some(&q), "1d10"),
+            Some("1d10+0".to_string())
+        );
+        assert_eq!(
+            qualify_bare_dice(Some(&q), " 1d10 "),
+            Some("1d10+0".to_string())
+        );
         // empty template -> no qualification
-        let empty = DiceQualification { bare_dice_template: "".into() };
+        let empty = DiceQualification {
+            bare_dice_template: "".into(),
+        };
         assert_eq!(qualify_bare_dice(Some(&empty), "1d10"), None);
         // None -> GENERIC ("{dice}+0") still qualifies (caller gates by is_some())
         assert_eq!(qualify_bare_dice(None, "1d10"), Some("1d10+0".to_string()));
@@ -348,12 +441,57 @@ mod tests {
     fn homecoming_cfg() -> ModuleConfig {
         ModuleConfig {
             npc_actor_bindings: vec![
-                NpcActorBinding { matcher: vec!["scav_boss".into(), "boss".into(), "shotgun".into(), "霰弹".into(), "头目".into(), "首领".into(), "scav 老大".into(), "scav leader".into()], actor_id: "npc.scav_boss".into(), display_name: Some("shotgun boss".into()) },
-                NpcActorBinding { matcher: vec!["drone".into(), "无人机".into(), "athena".into(), "雅典娜".into()], actor_id: "npc.athena_drone".into(), display_name: Some("rogue drone".into()) },
+                NpcActorBinding {
+                    matcher: vec![
+                        "scav_boss".into(),
+                        "boss".into(),
+                        "shotgun".into(),
+                        "霰弹".into(),
+                        "头目".into(),
+                        "首领".into(),
+                        "scav 老大".into(),
+                        "scav leader".into(),
+                    ],
+                    actor_id: "npc.scav_boss".into(),
+                    display_name: Some("shotgun boss".into()),
+                },
+                NpcActorBinding {
+                    matcher: vec![
+                        "drone".into(),
+                        "无人机".into(),
+                        "athena".into(),
+                        "雅典娜".into(),
+                    ],
+                    actor_id: "npc.athena_drone".into(),
+                    display_name: Some("rogue drone".into()),
+                },
             ],
             technical_option_table: Some(vec![
-                TechOption { matcher: vec!["basic tech".into(), "cut off".into(), "power".into(), "cable".into(), "线缆".into(), "切断".into(), "供电".into()], dv: 14 },
-                TechOption { matcher: vec!["hack".into(), "interface".into(), "net".into(), "server".into(), "athena".into(), "黑入".into(), "服务器".into(), "无人机".into()], dv: 12 },
+                TechOption {
+                    matcher: vec![
+                        "basic tech".into(),
+                        "cut off".into(),
+                        "power".into(),
+                        "cable".into(),
+                        "线缆".into(),
+                        "切断".into(),
+                        "供电".into(),
+                    ],
+                    dv: 14,
+                },
+                TechOption {
+                    matcher: vec![
+                        "hack".into(),
+                        "interface".into(),
+                        "net".into(),
+                        "server".into(),
+                        "athena".into(),
+                        "黑入".into(),
+                        "服务器".into(),
+                        "无人机".into(),
+                    ],
+                    dv: 12,
+                },
             ]),
             scene_entity_aliases: vec![],
             module_search_profile: None,
@@ -364,15 +502,33 @@ mod tests {
     #[test]
     fn npc_binding_from_module_config_then_generic() {
         let cfg = homecoming_cfg();
-        let atk = ConflictIntent { action_kind: SituationActionKind::Attack, ..base_intent() };
-        assert_eq!(actor_for_combat_input(Some(&cfg), "shoot the shotgun boss", &atk).map(|a| a.actor_id), Some("npc.scav_boss".into()));
-        assert_eq!(actor_for_combat_input(Some(&cfg), "攻击无人机", &atk).map(|a| a.actor_id), Some("npc.athena_drone".into()));
+        let atk = ConflictIntent {
+            action_kind: SituationActionKind::Attack,
+            ..base_intent()
+        };
+        assert_eq!(
+            actor_for_combat_input(Some(&cfg), "shoot the shotgun boss", &atk).map(|a| a.actor_id),
+            Some("npc.scav_boss".into())
+        );
+        assert_eq!(
+            actor_for_combat_input(Some(&cfg), "攻击无人机", &atk).map(|a| a.actor_id),
+            Some("npc.athena_drone".into())
+        );
         // unmatched -> generic opposition (NOT a hardcoded module npc)
-        assert_eq!(actor_for_combat_input(Some(&cfg), "attack the thing", &atk).map(|a| a.actor_id), Some("npc.opposition".into()));
+        assert_eq!(
+            actor_for_combat_input(Some(&cfg), "attack the thing", &atk).map(|a| a.actor_id),
+            Some("npc.opposition".into())
+        );
         // no module config -> generic opposition fallback
-        assert_eq!(actor_for_combat_input(None, "shoot the boss", &atk).map(|a| a.actor_id), Some("npc.opposition".into()));
+        assert_eq!(
+            actor_for_combat_input(None, "shoot the boss", &atk).map(|a| a.actor_id),
+            Some("npc.opposition".into())
+        );
         // non-attack intent -> None (unchanged)
-        let inv = ConflictIntent { action_kind: SituationActionKind::InvestigateDuringConflict, ..base_intent() };
+        let inv = ConflictIntent {
+            action_kind: SituationActionKind::InvestigateDuringConflict,
+            ..base_intent()
+        };
         assert!(actor_for_combat_input(Some(&cfg), "look around", &inv).is_none());
     }
 
@@ -427,7 +583,10 @@ mod tests {
     #[test]
     fn tech_dv_from_module_config() {
         let cfg = homecoming_cfg();
-        assert_eq!(tech_dv_from_config(Some(&cfg), "cut off the cable"), Some(14));
+        assert_eq!(
+            tech_dv_from_config(Some(&cfg), "cut off the cable"),
+            Some(14)
+        );
         assert_eq!(tech_dv_from_config(Some(&cfg), "hack the server"), Some(12));
         assert_eq!(tech_dv_from_config(Some(&cfg), "open the door"), None);
         assert_eq!(tech_dv_from_config(None, "cut off the cable"), None); // no module -> None
@@ -440,11 +599,14 @@ mod tests {
         assert!(investigate_opens_frame_relation(true, 0.45));
         assert!(!investigate_opens_frame_relation(false, 0.45));
         assert!(!investigate_opens_frame_relation(true, 0.30)); // below 0.42
-        // low-confidence frame start gated by profile flag (was contains("triangle"))
+                                                                // low-confidence frame start gated by profile flag (was contains("triangle"))
         assert!(low_confidence_frame_start_ok(true, RulingConfidence::Low));
         assert!(!low_confidence_frame_start_ok(false, RulingConfidence::Low));
         // non-low confidence always passes regardless of flag
-        assert!(low_confidence_frame_start_ok(false, RulingConfidence::Medium));
+        assert!(low_confidence_frame_start_ok(
+            false,
+            RulingConfidence::Medium
+        ));
         assert!(low_confidence_frame_start_ok(false, RulingConfidence::High));
     }
 
@@ -453,7 +615,23 @@ mod tests {
     // The legacy *_profile() bodies are kept here ONLY as the equivalence
     // baseline (#[cfg(test)]); the engine no longer hardcodes them.
     // -------------------------------------------------------------------
-    fn legacy_cyberpunk() -> RulesetCombatProfile { RulesetCombatProfile { profile_id: "cyberpunk_red.firefight.v1_3".into(), ruleset_id: "cyberpunk_red".into(), applies_to_modes: vec!["firefight".into(), "netrun".into(), "chase".into()], default_mode: "firefight".into(), action_economy: json!({"turn_slots":[{"slot_id":"move_action","count":1},{"slot_id":"action","count":1}],"notes":"Combat Time uses 1 Move Action + 1 Action; exact rules should be loaded as packets."}), initiative: json!({"kind":"formula","expression":"REF + 1d10"}), reaction_windows: vec![crate::generic_required_defense()], frame_exit_policy: json!({"allow_disengage":true,"allow_deescalation":true,"objective_driven":true,"stalemate_after_non_decisive_turns":3}), npc_drive_policy: json!({"mook_morale":45,"self_interest":70,"break_actions":["flee","surrender","call_backup","negotiate"]}), search_recipes: vec![json!({"query":"Friday Night Firefight Actions Ranged Combat Melee Combat Before You Take Damage Mooks and Grunts Encounters"})], ..Default::default() } }
+    fn legacy_cyberpunk() -> RulesetCombatProfile {
+        RulesetCombatProfile {
+            profile_id: "cyberpunk_red.firefight.v1_3".into(),
+            ruleset_id: "cyberpunk_red".into(),
+            applies_to_modes: vec!["firefight".into(), "netrun".into(), "chase".into()],
+            default_mode: "firefight".into(),
+            action_economy: json!({"turn_slots":[{"slot_id":"move_action","count":1},{"slot_id":"action","count":1}],"notes":"Combat Time uses 1 Move Action + 1 Action; exact rules should be loaded as packets."}),
+            initiative: json!({"kind":"formula","expression":"REF + 1d10"}),
+            reaction_windows: vec![crate::generic_required_defense()],
+            frame_exit_policy: json!({"allow_disengage":true,"allow_deescalation":true,"objective_driven":true,"stalemate_after_non_decisive_turns":3}),
+            npc_drive_policy: json!({"mook_morale":45,"self_interest":70,"break_actions":["flee","surrender","call_backup","negotiate"]}),
+            search_recipes: vec![
+                json!({"query":"Friday Night Firefight Actions Ranged Combat Melee Combat Before You Take Damage Mooks and Grunts Encounters"}),
+            ],
+            ..Default::default()
+        }
+    }
 
     /// Build the Value-shaped kernel CombatProfile that, overlaid on the generic
     /// base, must reproduce legacy_cyberpunk()'s mirrored strategy blocks.
@@ -468,23 +646,41 @@ mod tests {
             frame_exit_policy: json!({"allow_disengage":true,"allow_deescalation":true,"objective_driven":true,"stalemate_after_non_decisive_turns":3}),
             stalemate_policy: serde_json::Value::Null,
             npc_drive_policy: json!({"mook_morale":45,"self_interest":70,"break_actions":["flee","surrender","call_backup","negotiate"]}),
-            search_recipes: vec![json!({"query":"Friday Night Firefight Actions Ranged Combat Melee Combat Before You Take Damage Mooks and Grunts Encounters"})],
+            search_recipes: vec![
+                json!({"query":"Friday Night Firefight Actions Ranged Combat Melee Combat Before You Take Damage Mooks and Grunts Encounters"}),
+            ],
         }
     }
 
     #[test]
     fn overlay_combat_profile_reproduces_legacy_mirrored_blocks() {
         let legacy = legacy_cyberpunk();
-        let overlaid = overlay_combat_profile(default_generic_profile(), Some(&cyberpunk_kernel_profile()));
+        let overlaid =
+            overlay_combat_profile(default_generic_profile(), Some(&cyberpunk_kernel_profile()));
         // Mirrored strategy blocks must byte-match the legacy Rust values.
         assert_eq!(overlaid.profile_id, legacy.profile_id, "profile_id");
         assert_eq!(overlaid.default_mode, legacy.default_mode, "default_mode");
-        assert_eq!(overlaid.applies_to_modes, legacy.applies_to_modes, "applies_to_modes");
-        assert_eq!(overlaid.action_economy, legacy.action_economy, "action_economy");
+        assert_eq!(
+            overlaid.applies_to_modes, legacy.applies_to_modes,
+            "applies_to_modes"
+        );
+        assert_eq!(
+            overlaid.action_economy, legacy.action_economy,
+            "action_economy"
+        );
         assert_eq!(overlaid.initiative, legacy.initiative, "initiative");
-        assert_eq!(overlaid.frame_exit_policy, legacy.frame_exit_policy, "frame_exit_policy");
-        assert_eq!(overlaid.npc_drive_policy, legacy.npc_drive_policy, "npc_drive_policy");
-        assert_eq!(overlaid.search_recipes, legacy.search_recipes, "search_recipes");
+        assert_eq!(
+            overlaid.frame_exit_policy, legacy.frame_exit_policy,
+            "frame_exit_policy"
+        );
+        assert_eq!(
+            overlaid.npc_drive_policy, legacy.npc_drive_policy,
+            "npc_drive_policy"
+        );
+        assert_eq!(
+            overlaid.search_recipes, legacy.search_recipes,
+            "search_recipes"
+        );
         // reaction_windows round-trip (serialized ReactionAdvice -> typed)
         let lhs = serde_json::to_value(&overlaid.reaction_windows).unwrap();
         let rhs = serde_json::to_value(&legacy.reaction_windows).unwrap();

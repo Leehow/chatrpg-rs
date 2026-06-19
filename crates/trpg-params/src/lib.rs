@@ -26,25 +26,59 @@ pub struct RuntimeActorParameters {
 }
 
 #[derive(Clone)]
-pub struct RuntimeParameterService { pub db: Db }
+pub struct RuntimeParameterService {
+    pub db: Db,
+}
 
 impl RuntimeParameterService {
-    pub fn new(db: Db) -> Self { Self { db } }
+    pub fn new(db: Db) -> Self {
+        Self { db }
+    }
 
-    pub async fn ensure_actor_parameters(&self, session_id: &str, ruleset_id: &str, actor_id: &str, actor_kind: ActorKind, world_tick: i64) -> Result<RuntimeActorParameters> {
-        if let Some(existing) = self.load_actor_parameters(session_id, actor_id).await? { return Ok(existing); }
-        let template = self.db.load_character_template(ruleset_id).await.ok().flatten();
+    pub async fn ensure_actor_parameters(
+        &self,
+        session_id: &str,
+        ruleset_id: &str,
+        actor_id: &str,
+        actor_kind: ActorKind,
+        world_tick: i64,
+    ) -> Result<RuntimeActorParameters> {
+        if let Some(existing) = self.load_actor_parameters(session_id, actor_id).await? {
+            return Ok(existing);
+        }
+        let template = self
+            .db
+            .load_character_template(ruleset_id)
+            .await
+            .ok()
+            .flatten();
         let template_id = template.as_ref().map(|t| t.template_id.clone());
         let kernel = self.db.load_rule_kernel(ruleset_id).await.ok().flatten();
-        let mut params = seed_actor_parameters(session_id, ruleset_id, actor_id, actor_kind, template.as_ref(), kernel.as_ref(), world_tick);
+        let mut params = seed_actor_parameters(
+            session_id,
+            ruleset_id,
+            actor_id,
+            actor_kind,
+            template.as_ref(),
+            kernel.as_ref(),
+            world_tick,
+        );
         params.template_id = template_id;
         self.upsert_actor_parameters(&params).await?;
-        let hydration_status = if params.source_kind.contains("unresolved") { "unresolved_source_required" } else { "hydrated" };
+        let hydration_status = if params.source_kind.contains("unresolved") {
+            "unresolved_source_required"
+        } else {
+            "hydrated"
+        };
         self.insert_hydration_event(session_id, None, None, Some(actor_id), None, ruleset_id, "actor_parameters", hydration_status, None, json!({"actor_id": actor_id, "actor_kind": actor_kind, "template_id": params.template_id, "profile": params.mechanical_profile, "source_kind": params.source_kind}), world_tick).await.ok();
         Ok(params)
     }
 
-    pub async fn load_actor_parameters(&self, session_id: &str, actor_id: &str) -> Result<Option<RuntimeActorParameters>> {
+    pub async fn load_actor_parameters(
+        &self,
+        session_id: &str,
+        actor_id: &str,
+    ) -> Result<Option<RuntimeActorParameters>> {
         let row = sqlx::query(r#"
             select actor_param_id, session_id, actor_id, actor_kind, ruleset_id, source_kind, template_id, display_name,
                    sheet_json, mechanical_profile, status_json, visibility, created_at_tick, updated_at_tick
@@ -56,7 +90,10 @@ impl RuntimeParameterService {
     /// All player-character actor rows for a session, the de-facto roster source
     /// (there is no session→PC table; this per-session actor surface IS the
     /// roster). Used by the director's spotlight tracker. Deterministic order.
-    pub async fn list_player_actor_parameters(&self, session_id: &str) -> Result<Vec<RuntimeActorParameters>> {
+    pub async fn list_player_actor_parameters(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<RuntimeActorParameters>> {
         let rows = sqlx::query(r#"
             select actor_param_id, session_id, actor_id, actor_kind, ruleset_id, source_kind, template_id, display_name,
                    sheet_json, mechanical_profile, status_json, visibility, created_at_tick, updated_at_tick
@@ -106,13 +143,18 @@ impl RuntimeParameterService {
         Ok(())
     }
 
-    pub async fn actor_parameters_context_block(&self, session_id: &str, world_tick: i64) -> Result<ContextBlock> {
+    pub async fn actor_parameters_context_block(
+        &self,
+        session_id: &str,
+        world_tick: i64,
+    ) -> Result<ContextBlock> {
         let rows = sqlx::query(r#"
             select actor_param_id, session_id, actor_id, actor_kind, ruleset_id, source_kind, template_id, display_name,
                    sheet_json, mechanical_profile, status_json, visibility, created_at_tick, updated_at_tick
             from runtime_actor_parameters where session_id=$1 order by updated_at desc limit 20
         "#).bind(session_id).fetch_all(&self.db.pool).await?;
-        let params: Vec<RuntimeActorParameters> = rows.into_iter().filter_map(row_to_params).collect();
+        let params: Vec<RuntimeActorParameters> =
+            rows.into_iter().filter_map(row_to_params).collect();
         let mut block = ContextBlock::new(
             format!("runtime.actor_parameters.{}", session_id),
             BlockKind::NpcStatic,
@@ -125,14 +167,34 @@ impl RuntimeParameterService {
             Visibility::GmOnly,
             Stability::TurnDynamic,
             CacheZone::DynamicTail,
-            Scope { scope_type: ScopeType::Session, scope_id: session_id.to_string() },
+            Scope {
+                scope_type: ScopeType::Session,
+                scope_id: session_id.to_string(),
+            },
             147,
         );
-        block.tags = vec!["actor_parameters".into(), "bp3".into(), "runtime_hydration".into()];
+        block.tags = vec![
+            "actor_parameters".into(),
+            "bp3".into(),
+            "runtime_hydration".into(),
+        ];
         Ok(block)
     }
 
-    pub async fn insert_hydration_event(&self, session_id: &str, turn_id: Option<&str>, frame_id: Option<&str>, actor_id: Option<&str>, object_id: Option<&str>, ruleset_id: &str, material_kind: &str, status: &str, query_text: Option<&str>, result_json: Value, world_tick: i64) -> Result<()> {
+    pub async fn insert_hydration_event(
+        &self,
+        session_id: &str,
+        turn_id: Option<&str>,
+        frame_id: Option<&str>,
+        actor_id: Option<&str>,
+        object_id: Option<&str>,
+        ruleset_id: &str,
+        material_kind: &str,
+        status: &str,
+        query_text: Option<&str>,
+        result_json: Value,
+        world_tick: i64,
+    ) -> Result<()> {
         sqlx::query(r#"
             insert into material_hydration_events
               (id, event_id, session_id, turn_id, frame_id, actor_id, object_id, ruleset_id, material_kind, hydration_status, query_text, result_json, world_tick)
@@ -161,7 +223,7 @@ fn row_to_params(row: sqlx::postgres::PgRow) -> Option<RuntimeActorParameters> {
         actor_param_id: row.get("actor_param_id"),
         session_id: row.get("session_id"),
         actor_id: row.get("actor_id"),
-        actor_kind: actor_kind_from_str(&row.get::<String,_>("actor_kind")),
+        actor_kind: actor_kind_from_str(&row.get::<String, _>("actor_kind")),
         ruleset_id: row.get("ruleset_id"),
         source_kind: row.get("source_kind"),
         template_id: row.get("template_id"),
@@ -169,29 +231,50 @@ fn row_to_params(row: sqlx::postgres::PgRow) -> Option<RuntimeActorParameters> {
         sheet_json: row.get("sheet_json"),
         mechanical_profile: row.get("mechanical_profile"),
         status_json: row.get("status_json"),
-        visibility: visibility_from_str(&row.get::<String,_>("visibility")),
+        visibility: visibility_from_str(&row.get::<String, _>("visibility")),
         created_at_tick: row.get("created_at_tick"),
         updated_at_tick: row.get("updated_at_tick"),
     })
 }
 
-fn seed_actor_parameters(session_id: &str, ruleset_id: &str, actor_id: &str, actor_kind: ActorKind, template: Option<&CharacterTemplate>, kernel: Option<&RuleKernel>, world_tick: i64) -> RuntimeActorParameters {
+fn seed_actor_parameters(
+    session_id: &str,
+    ruleset_id: &str,
+    actor_id: &str,
+    actor_kind: ActorKind,
+    template: Option<&CharacterTemplate>,
+    kernel: Option<&RuleKernel>,
+    world_tick: i64,
+) -> RuntimeActorParameters {
     let is_pc = matches!(actor_kind, ActorKind::PlayerCharacter);
-    let synthetic_allowed = if is_pc { allow_synthetic_actor_seeds() } else { allow_synthetic_actor_seeds() || allow_synthetic_npc_seeds() };
+    let synthetic_allowed = if is_pc {
+        allow_synthetic_actor_seeds()
+    } else {
+        allow_synthetic_actor_seeds() || allow_synthetic_npc_seeds()
+    };
     if !synthetic_allowed {
-        return unresolved_actor_parameters(session_id, ruleset_id, actor_id, actor_kind, template, world_tick);
+        return unresolved_actor_parameters(
+            session_id, ruleset_id, actor_id, actor_kind, template, world_tick,
+        );
     }
     // De-hardcoded: ONE generic synthetic seed (debug scaffolding only). Resource
     // tracks come from the parsed kernel; no per-ruleset stat blocks. Real
     // mechanical values come from create-character, not this placeholder path.
-    let (sheet_json, mut mechanical_profile, mut status_json) = synthetic_seed(actor_id, is_pc, template, ruleset_id, kernel);
+    let (sheet_json, mut mechanical_profile, mut status_json) =
+        synthetic_seed(actor_id, is_pc, template, ruleset_id, kernel);
     if let Some(obj) = mechanical_profile.as_object_mut() {
-        obj.insert("source_quality".into(), json!("placeholder_not_source_backed"));
+        obj.insert(
+            "source_quality".into(),
+            json!("placeholder_not_source_backed"),
+        );
         obj.insert("requires_source_backed_materialization".into(), json!(true));
         obj.insert("notes".into(), json!("Seeded placeholder values exist only to keep lifecycle/state tables shaped; mechanical resolution must not consume them unless explicitly enabled."));
     }
     if let Some(obj) = status_json.as_object_mut() {
-        obj.insert("source_quality".into(), json!("placeholder_not_source_backed"));
+        obj.insert(
+            "source_quality".into(),
+            json!("placeholder_not_source_backed"),
+        );
         obj.insert("requires_source_backed_materialization".into(), json!(true));
     }
     RuntimeActorParameters {
@@ -212,7 +295,14 @@ fn seed_actor_parameters(session_id: &str, ruleset_id: &str, actor_id: &str, act
     }
 }
 
-fn unresolved_actor_parameters(session_id: &str, ruleset_id: &str, actor_id: &str, actor_kind: ActorKind, template: Option<&CharacterTemplate>, world_tick: i64) -> RuntimeActorParameters {
+fn unresolved_actor_parameters(
+    session_id: &str,
+    ruleset_id: &str,
+    actor_id: &str,
+    actor_kind: ActorKind,
+    template: Option<&CharacterTemplate>,
+    world_tick: i64,
+) -> RuntimeActorParameters {
     RuntimeActorParameters {
         actor_param_id: format!("actor_params.{}.{}", safe_id(session_id), safe_id(actor_id)),
         session_id: session_id.into(),
@@ -256,7 +346,13 @@ fn unresolved_actor_parameters(session_id: &str, ruleset_id: &str, actor_id: &st
 /// resource tracks (incl. their initial values) come from the parsed kernel;
 /// HP/conditions get neutral placeholders just to keep the state tables shaped.
 /// Real mechanical values arrive via create-character, not this path.
-fn synthetic_seed(actor_id: &str, is_pc: bool, template: Option<&CharacterTemplate>, ruleset_id: &str, kernel: Option<&RuleKernel>) -> (Value, Value, Value) {
+fn synthetic_seed(
+    actor_id: &str,
+    is_pc: bool,
+    template: Option<&CharacterTemplate>,
+    ruleset_id: &str,
+    kernel: Option<&RuleKernel>,
+) -> (Value, Value, Value) {
     let hp = if is_pc { 12 } else { 10 };
     let mut status = serde_json::Map::new();
     status.insert("hp_current".into(), json!(hp));
@@ -268,8 +364,14 @@ fn synthetic_seed(actor_id: &str, is_pc: bool, template: Option<&CharacterTempla
     // Seed each kernel resource track at its declared initial value (data-driven).
     if let Some(k) = kernel {
         for t in &k.resource_tracks {
-            if let Some(id) = t.get("id").and_then(|v| v.as_str()).or_else(|| t.get("name").and_then(|v| v.as_str())) {
-                if id.trim().is_empty() { continue; }
+            if let Some(id) = t
+                .get("id")
+                .and_then(|v| v.as_str())
+                .or_else(|| t.get("name").and_then(|v| v.as_str()))
+            {
+                if id.trim().is_empty() {
+                    continue;
+                }
                 let init = t.get("initial").and_then(|v| v.as_i64()).unwrap_or(0);
                 status.insert(id.trim().to_string(), json!(init));
             }
@@ -280,9 +382,38 @@ fn synthetic_seed(actor_id: &str, is_pc: bool, template: Option<&CharacterTempla
     (sheet, mech, Value::Object(status))
 }
 
-fn actor_kind_from_str(s: &str) -> ActorKind { match s { "player_character" => ActorKind::PlayerCharacter, "npc" => ActorKind::Npc, "environment" => ActorKind::Environment, "hazard" => ActorKind::Hazard, _ => ActorKind::System } }
-fn visibility_from_str(s: &str) -> Visibility { match s { "public" => Visibility::Public, "player_visible" => Visibility::PlayerVisible, "npc_private" => Visibility::NpcPrivate, "system_only" => Visibility::SystemOnly, _ => Visibility::GmOnly } }
-fn safe_id(s: &str) -> String { s.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect() }
-fn allow_synthetic_actor_seeds() -> bool { env_bool("TRPG_ALLOW_SYNTHETIC_ACTOR_SEEDS", false) }
-fn allow_synthetic_npc_seeds() -> bool { env_bool("TRPG_RUNTIME_PARAM_ALLOW_SYNTHETIC_NPC_SEEDS", false) }
-fn env_bool(key: &str, default: bool) -> bool { std::env::var(key).ok().map(|v| matches!(v.to_ascii_lowercase().as_str(), "1"|"true"|"yes"|"on")).unwrap_or(default) }
+fn actor_kind_from_str(s: &str) -> ActorKind {
+    match s {
+        "player_character" => ActorKind::PlayerCharacter,
+        "npc" => ActorKind::Npc,
+        "environment" => ActorKind::Environment,
+        "hazard" => ActorKind::Hazard,
+        _ => ActorKind::System,
+    }
+}
+fn visibility_from_str(s: &str) -> Visibility {
+    match s {
+        "public" => Visibility::Public,
+        "player_visible" => Visibility::PlayerVisible,
+        "npc_private" => Visibility::NpcPrivate,
+        "system_only" => Visibility::SystemOnly,
+        _ => Visibility::GmOnly,
+    }
+}
+fn safe_id(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
+}
+fn allow_synthetic_actor_seeds() -> bool {
+    env_bool("TRPG_ALLOW_SYNTHETIC_ACTOR_SEEDS", false)
+}
+fn allow_synthetic_npc_seeds() -> bool {
+    env_bool("TRPG_RUNTIME_PARAM_ALLOW_SYNTHETIC_NPC_SEEDS", false)
+}
+fn env_bool(key: &str, default: bool) -> bool {
+    std::env::var(key)
+        .ok()
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(default)
+}

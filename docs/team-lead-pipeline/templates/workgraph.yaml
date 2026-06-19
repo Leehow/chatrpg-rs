@@ -1,0 +1,18 @@
+version: 1
+work_id: <work-id>
+run_policy: continuous_until_terminal
+integration_branch: codex/<work-id>-integration
+integration_head: <sha>
+local_git_authorization:
+  worker_scoped_commit: true
+  trial_cherry_pick: true
+  integration_fast_forward: true
+  push: false
+  main_merge: false
+wip:
+  contract_writers: 1
+  implementation_writers: 4
+  verification_lanes: 2
+  integration_lanes: 1
+hotspots: {}
+tasks: []

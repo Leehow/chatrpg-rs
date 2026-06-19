@@ -17,8 +17,8 @@ use trpg_gm::plugin::{
 };
 use trpg_gm::NoSpoilerGuard;
 use trpg_model::{
-    BlockContent, BlockKind, CacheZone, ContextBlock, ModuleGraph, ScenarioNode, Scope,
-    SceneExtractionStatus, SpoilerMeta, Stability, Visibility,
+    BlockContent, BlockKind, CacheZone, ContextBlock, ModuleGraph, ScenarioNode,
+    SceneExtractionStatus, Scope, SpoilerMeta, Stability, Visibility,
 };
 
 /// 含场景级（地窖 sc_cellar）与实体级（管家 npc_butler）剧透的生产形态模组图谱。
@@ -89,7 +89,11 @@ async fn no_spoiler_context_filter_uses_production_fact_metadata() {
     let view = derive_scene_block_view(&cellar_block, &graph, Some("sc_hall"))
         .expect("地窖含场景级 SpoilerMeta → 应派生私有视图");
     assert!(view.secret, "源派生：非活动 spoiler 场景应标 secret");
-    assert_eq!(view.fact_id.as_deref(), Some("sc_cellar"), "fact_id 绑场景 node_id");
+    assert_eq!(
+        view.fact_id.as_deref(),
+        Some("sc_cellar"),
+        "fact_id 绑场景 node_id"
+    );
 
     let mut ctx = PluginContext {
         module_id: Some("mod_manor".into()),
@@ -112,8 +116,8 @@ async fn no_spoiler_context_filter_uses_production_fact_metadata() {
 async fn no_spoiler_context_filter_allows_player_known_fact() {
     let graph = butler_graph();
     let cellar_block = scene_block("mod_manor", "sc_cellar");
-    let view = derive_scene_block_view(&cellar_block, &graph, Some("sc_hall"))
-        .expect("应派生私有视图");
+    let view =
+        derive_scene_block_view(&cellar_block, &graph, Some("sc_hall")).expect("应派生私有视图");
 
     let mut ctx = PluginContext {
         module_id: Some("mod_manor".into()),

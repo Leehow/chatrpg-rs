@@ -37,9 +37,23 @@ pub struct ReaderResult {
 }
 
 /// Single-loop reader (full run-kit in one ReAct loop). Fallback / baseline.
-pub async fn run_reader(client: &dyn LlmClient, units: &[Unit], ruleset: &str, max_tools: usize) -> Result<ReaderResult> {
+pub async fn run_reader(
+    client: &dyn LlmClient,
+    units: &[Unit],
+    ruleset: &str,
+    max_tools: usize,
+) -> Result<ReaderResult> {
     let seed = format!("The rulebook is \"{ruleset}\". Learn to run it. Start with get_toc.");
-    run_loop(client, units, SYSTEM, &seed, &tools::tool_schemas(), max_tools, true).await
+    run_loop(
+        client,
+        units,
+        SYSTEM,
+        &seed,
+        &tools::tool_schemas(),
+        max_tools,
+        true,
+    )
+    .await
 }
 
 /// The shared ReAct loop. Terminates on any tool whose name starts with
@@ -63,12 +77,27 @@ pub(crate) async fn run_loop(
     let mut trace = Vec::new();
 
     for _ in 0..(max_tools + 8) {
-        let resp = client.complete_with_tools(msgs.clone(), tool_schemas.clone()).await?;
+        let resp = client
+            .complete_with_tools(msgs.clone(), tool_schemas.clone())
+            .await?;
         llm_calls += 1;
-        pt += resp.pointer("/usage/prompt_tokens").and_then(Value::as_u64).unwrap_or(0);
-        ct += resp.pointer("/usage/completion_tokens").and_then(Value::as_u64).unwrap_or(0);
-        let message = resp.pointer("/choices/0/message").cloned().unwrap_or_else(|| json!({}));
-        let tcs = message.get("tool_calls").and_then(Value::as_array).cloned().unwrap_or_default();
+        pt += resp
+            .pointer("/usage/prompt_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        ct += resp
+            .pointer("/usage/completion_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let message = resp
+            .pointer("/choices/0/message")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let tcs = message
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
 
         if tcs.is_empty() {
             msgs.push(message);
@@ -78,7 +107,10 @@ pub(crate) async fn run_loop(
         msgs.push(message);
         let mut rejected = false;
         for tc in &tcs {
-            let name = tc.pointer("/function/name").and_then(Value::as_str).unwrap_or("");
+            let name = tc
+                .pointer("/function/name")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             let args: Value = tc
                 .pointer("/function/arguments")
                 .and_then(Value::as_str)
@@ -93,7 +125,14 @@ pub(crate) async fn run_loop(
                     rejected = true;
                     break;
                 }
-                return Ok(ReaderResult { run_kit, tool_calls, llm_calls, prompt_tokens: pt, completion_tokens: ct, trace });
+                return Ok(ReaderResult {
+                    run_kit,
+                    tool_calls,
+                    llm_calls,
+                    prompt_tokens: pt,
+                    completion_tokens: ct,
+                    trace,
+                });
             }
             tool_calls += 1;
             let out = dispatch(units, name, &args);
@@ -104,7 +143,9 @@ pub(crate) async fn run_loop(
             msgs.push(json!({"role": "user", "content": "Read budget reached. Call the submit tool NOW with what you have; fill any thin field from the pages you already read."}));
         }
     }
-    Err(anyhow!("reader hit max tool calls ({max_tools}) without submitting"))
+    Err(anyhow!(
+        "reader hit max tool calls ({max_tools}) without submitting"
+    ))
 }
 
 fn dispatch(units: &[Unit], name: &str, args: &Value) -> String {
@@ -114,17 +155,31 @@ fn dispatch(units: &[Unit], name: &str, args: &Value) -> String {
             let kws: Vec<String> = args
                 .get("keywords")
                 .and_then(Value::as_array)
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
             cap(tools::search(units, &kws, 8), 2800)
         }
-        "read" => cap(tools::read(units, args.get("pages").and_then(Value::as_str).unwrap_or("")), 2800),
+        "read" => cap(
+            tools::read(
+                units,
+                args.get("pages").and_then(Value::as_str).unwrap_or(""),
+            ),
+            2800,
+        ),
         _ => format!("unknown tool {name}"),
     }
 }
 
 fn cap(s: String, n: usize) -> String {
-    if s.len() <= n { s } else { s.chars().take(n).collect() }
+    if s.len() <= n {
+        s
+    } else {
+        s.chars().take(n).collect()
+    }
 }
 
 /// True when the resolution core is vague/unknown — require both a concrete
@@ -133,12 +188,41 @@ fn core_unresolved(rk: &GmRunKit) -> bool {
     let cr = rk.core_resolution.to_lowercase();
     let dice = rk.core.dice.trim().to_lowercase();
     let bad_dice = dice.is_empty()
-        || ["unknown", "unclear", "n/a", "na", "?", "tbd", "none", "not confirmed", "various", "see rules", "multiple"].contains(&dice.as_str());
-    let vague = ["not present", "not available", "unclear", "could not", "not found", "not in the pages", "is not present", "unknown", "unable to", "no explicit", "not confirmed"];
+        || [
+            "unknown",
+            "unclear",
+            "n/a",
+            "na",
+            "?",
+            "tbd",
+            "none",
+            "not confirmed",
+            "various",
+            "see rules",
+            "multiple",
+        ]
+        .contains(&dice.as_str());
+    let vague = [
+        "not present",
+        "not available",
+        "unclear",
+        "could not",
+        "not found",
+        "not in the pages",
+        "is not present",
+        "unknown",
+        "unable to",
+        "no explicit",
+        "not confirmed",
+    ];
     bad_dice
         || cr.len() < 30
         || vague.iter().any(|v| cr.contains(v))
-        || rk.core.success_rule.to_lowercase().contains("not confirmed")
+        || rk
+            .core
+            .success_rule
+            .to_lowercase()
+            .contains("not confirmed")
 }
 
 #[cfg(test)]
@@ -149,6 +233,9 @@ mod tests {
         // vocabulary (trpg-model AMOUNT_RESOLVABLE); drift re-teaches the
         // extractor to invent dead outcome fields.
         let vocab = trpg_model::outcome_fields::AMOUNT_RESOLVABLE.join(", ");
-        assert!(super::SYSTEM.contains(vocab.as_str()), "SYSTEM must list the outcome vocabulary: {vocab}");
+        assert!(
+            super::SYSTEM.contains(vocab.as_str()),
+            "SYSTEM must list the outcome vocabulary: {vocab}"
+        );
     }
 }

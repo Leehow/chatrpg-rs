@@ -1,0 +1,35 @@
+{
+  "name": "jrny_home_04_flight_recorder_provenance",
+  "scenario_id": "JRNY-HOME-04-flight-recorder-provenance",
+  "scenario_version": "1",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "session_id": null,
+  "_derived_from": "TC-PIPE-03 production flight-recorder / provenance. One observation turn whose recorded evidence is the production-shaped TurnTrace.plugin_contributions artifact (knowledge/NPC view loads recorded before plugin contributions; context_filter + verifier_finding categories; ledger event linked by turn_id) plus the domain_events kinds for the same turn. The harness FlightRecorderCheckpoint consumes that artifact (the SAME PluginContributionTrace type the GM persists) and fails closed on a missing category, a view-order violation, an unlinked ledger, or a secret term in any trace summary (DA-SPOIL-03 / DA-PIPE-01 / DA-PIPE-03). The forbidden secret terms follow the Homecoming no-spoiler vocabulary (harness/cases/homecoming_no_spoiler_golden.json).",
+  "setup": {
+    "character": {
+      "preferences": "技术型 Cyberpunk RED 角色，擅长观察，可立即开始第一幕。",
+      "auto_complete": true,
+      "require_persisted": true,
+      "require_session_binding": true
+    }
+  },
+  "stream_format": "jsonl",
+  "turns": [
+    {
+      "user_input": "我先站在巷口的安全距离观察现场，看看无人机、警察和仓库门口分别是什么情况。",
+      "notes": "trace turn: the production flight recorder must record knowledge/NPC view loads BEFORE the context-policy plugin contributions, cover context_filter + verifier_finding, link a ledger event by turn_id, and never echo a secret term in any trace summary.",
+      "forbid_player_text": ["Athena", "内鬼", "double-cross", "回收指令"],
+      "flight_recorder": {
+        "require_view_load_before_plugins": true,
+        "require_categories": ["view_load", "context_filter", "verifier_finding"],
+        "require_ledger_link": true,
+        "forbid_secret_terms_in_trace": ["Athena", "内鬼", "double-cross", "回收指令", "传送门"]
+      }
+    }
+  ],
+  "forbidden_player_text": [],
+  "allow_debug_directives": false,
+  "allow_nonhuman_player_input": false,
+  "allow_manual_roll_input": false
+}

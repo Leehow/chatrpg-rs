@@ -36,8 +36,10 @@ pub(crate) fn maybe_tick_clocks(input: DirectorInput<'_>) -> Vec<ClockTick> {
 /// Consumes the semantic router's classification; extend with new non-advancing
 /// categories here — never with literal-string checks.
 fn is_world_pressure_intent(intent: &ConflictIntent) -> bool {
-    matches!(intent.relation_to_active_frame, FrameRelation::PauseAndObserve)
-        || matches!(intent.action_kind, SituationActionKind::WaitOrHoldAction)
+    matches!(
+        intent.relation_to_active_frame,
+        FrameRelation::PauseAndObserve
+    ) || matches!(intent.action_kind, SituationActionKind::WaitOrHoldAction)
 }
 
 #[cfg(test)]
@@ -52,8 +54,19 @@ mod tests {
     // The literal list the OLD detector matched. The semantic detector must not
     // depend on any of these strings.
     const OLD_KEYWORDS: &[&str] = &[
-        "继续等", "继续讨论", "不行动", "犹豫", "等着", "继续开火", "继续攻击", "还是打",
-        "wait", "keep discussing", "do nothing", "keep firing", "continue attacking",
+        "继续等",
+        "继续讨论",
+        "不行动",
+        "犹豫",
+        "等着",
+        "继续开火",
+        "继续攻击",
+        "还是打",
+        "wait",
+        "keep discussing",
+        "do nothing",
+        "keep firing",
+        "continue attacking",
     ];
 
     fn req() -> ContextRequest {
@@ -66,14 +79,28 @@ mod tests {
             token_budget: TokenBudget::default(),
         }
     }
-    fn state() -> RuntimeState { RuntimeState { ruleset_id: "coc".into(), ..Default::default() } }
-    fn compiled() -> CompiledContext { CompiledContext::default() }
+    fn state() -> RuntimeState {
+        RuntimeState {
+            ruleset_id: "coc".into(),
+            ..Default::default()
+        }
+    }
+    fn compiled() -> CompiledContext {
+        CompiledContext::default()
+    }
 
     fn intent(rel: FrameRelation, act: SituationActionKind) -> ConflictIntent {
-        ConflictIntent { relation_to_active_frame: rel, action_kind: act, ..Default::default() }
+        ConflictIntent {
+            relation_to_active_frame: rel,
+            action_kind: act,
+            ..Default::default()
+        }
     }
     fn conflict_with(intent: ConflictIntent) -> ConflictTurnResult {
-        ConflictTurnResult { intent: Some(intent), ..Default::default() }
+        ConflictTurnResult {
+            intent: Some(intent),
+            ..Default::default()
+        }
     }
 
     fn input<'a>(
@@ -100,13 +127,23 @@ mod tests {
     #[test]
     fn fires_on_semantic_stall_paraphrase_old_list_would_miss() {
         let paraphrase = "我们暂时按兵不动，先摸清楚周围的情况";
-        assert!(!OLD_KEYWORDS.iter().any(|k| paraphrase.contains(k)), "paraphrase must evade the old keyword list");
+        assert!(
+            !OLD_KEYWORDS.iter().any(|k| paraphrase.contains(k)),
+            "paraphrase must evade the old keyword list"
+        );
         let r = req();
         let s = state();
         let c = compiled();
-        let conflict = conflict_with(intent(FrameRelation::PauseAndObserve, SituationActionKind::InvestigateDuringConflict));
+        let conflict = conflict_with(intent(
+            FrameRelation::PauseAndObserve,
+            SituationActionKind::InvestigateDuringConflict,
+        ));
         let ticks = maybe_tick_clocks(input(&r, &s, &c, paraphrase, Some(&conflict)));
-        assert_eq!(ticks.len(), 1, "semantic stall must tick even though no keyword matched");
+        assert_eq!(
+            ticks.len(),
+            1,
+            "semantic stall must tick even though no keyword matched"
+        );
         assert_eq!(ticks[0].clock_id, "clock.scene_pressure");
     }
 
@@ -116,9 +153,22 @@ mod tests {
         let r = req();
         let s = state();
         let c = compiled();
-        let conflict = conflict_with(intent(FrameRelation::InsideFrameAction, SituationActionKind::WaitOrHoldAction));
-        let ticks = maybe_tick_clocks(input(&r, &s, &c, "（任意措辞，不含旧关键词）", Some(&conflict)));
-        assert_eq!(ticks.len(), 1, "semantic wait/hold must tick world pressure");
+        let conflict = conflict_with(intent(
+            FrameRelation::InsideFrameAction,
+            SituationActionKind::WaitOrHoldAction,
+        ));
+        let ticks = maybe_tick_clocks(input(
+            &r,
+            &s,
+            &c,
+            "（任意措辞，不含旧关键词）",
+            Some(&conflict),
+        ));
+        assert_eq!(
+            ticks.len(),
+            1,
+            "semantic wait/hold must tick world pressure"
+        );
     }
 
     // The keyword list is gone: a bare old keyword with NO semantic signal must
@@ -129,7 +179,10 @@ mod tests {
         let s = state();
         let c = compiled();
         let ticks = maybe_tick_clocks(input(&r, &s, &c, "继续等", None));
-        assert!(ticks.is_empty(), "no semantic signal → fail-closed, no keyword fallback");
+        assert!(
+            ticks.is_empty(),
+            "no semantic signal → fail-closed, no keyword fallback"
+        );
     }
 
     // Advancing the frame (attack) is not stalling → no world-pressure tick.
@@ -138,8 +191,14 @@ mod tests {
         let r = req();
         let s = state();
         let c = compiled();
-        let conflict = conflict_with(intent(FrameRelation::InsideFrameAction, SituationActionKind::Attack));
+        let conflict = conflict_with(intent(
+            FrameRelation::InsideFrameAction,
+            SituationActionKind::Attack,
+        ));
         let ticks = maybe_tick_clocks(input(&r, &s, &c, "我开枪还击", Some(&conflict)));
-        assert!(ticks.is_empty(), "advancing the frame is not world-pressure stalling");
+        assert!(
+            ticks.is_empty(),
+            "advancing the frame is not world-pressure stalling"
+        );
     }
 }

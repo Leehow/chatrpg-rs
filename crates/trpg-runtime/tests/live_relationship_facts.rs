@@ -31,7 +31,10 @@ struct CountingLlm {
 }
 impl CountingLlm {
     fn new(reply: Value) -> Self {
-        Self { reply, calls: AtomicUsize::new(0) }
+        Self {
+            reply,
+            calls: AtomicUsize::new(0),
+        }
     }
     fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
@@ -124,10 +127,15 @@ async fn relationship_triple_written_and_gated_by_new_surface() {
         surfaced_event(&session, "turn_rel_1", "raul", "npc"),
         surfaced_event(&session, "turn_rel_1", "letter", "clue"),
     ] {
-        db.append_domain_event(&ev).await.expect("seed EntitySurfaced");
+        db.append_domain_event(&ev)
+            .await
+            .expect("seed EntitySurfaced");
     }
 
-    let engine = RuntimeEngine { db: db.clone(), search: None };
+    let engine = RuntimeEngine {
+        db: db.clone(),
+        search: None,
+    };
     // stub 回一条 valid 0.9 + 一条低置信 0.2（fail-closed 丢弃后净写 1 条）。
     let llm = CountingLlm::new(json!({"triples":[
         {"subject":"raul","predicate":"wrote","object":"letter",
@@ -144,22 +152,46 @@ async fn relationship_triple_written_and_gated_by_new_surface() {
             "turn_rel_1",
             Some(&module_id),
             "Raul slid the bloody letter across the counter, hand trembling.",
+            // 本测专测「新实体 surface」成本闸：社交信号置空，确保只由 surfaced_new 驱动。
+            &[],
+            "",
         )
         .await;
-    assert_eq!(written, 1, "high-confidence triple persists (low-conf dropped, fail-closed)");
-    assert_eq!(llm.calls(), 1, "turn surfacing a new entity DOES invoke the LLM once");
+    assert_eq!(
+        written, 1,
+        "high-confidence triple persists (low-conf dropped, fail-closed)"
+    );
+    assert_eq!(
+        llm.calls(),
+        1,
+        "turn surfacing a new entity DOES invoke the LLM once"
+    );
 
     // —— 3. 落库校验（list_memory_facts）——
-    let facts = db.list_memory_facts(&session, 50).await.expect("list facts");
-    let rel: Vec<_> = facts.iter().filter(|f| f.tags.iter().any(|t| t == "relationship")).collect();
+    let facts = db
+        .list_memory_facts(&session, 50)
+        .await
+        .expect("list facts");
+    let rel: Vec<_> = facts
+        .iter()
+        .filter(|f| f.tags.iter().any(|t| t == "relationship"))
+        .collect();
     assert_eq!(rel.len(), 1, "one relationship fact in memory_facts");
     let f = rel[0];
     assert_eq!(f.subject, "raul");
     assert_eq!(f.predicate, "wrote");
     assert_eq!(f.object, json!("letter"));
-    assert_eq!(f.turn_id.as_deref(), Some("turn_rel_1"), "turn provenance round-trips");
-    assert!(f.source_event_ids.contains(&format!("de_surfaced_{session}_raul")));
-    assert!(f.source_event_ids.contains(&format!("de_surfaced_{session}_letter")));
+    assert_eq!(
+        f.turn_id.as_deref(),
+        Some("turn_rel_1"),
+        "turn provenance round-trips"
+    );
+    assert!(f
+        .source_event_ids
+        .contains(&format!("de_surfaced_{session}_raul")));
+    assert!(f
+        .source_event_ids
+        .contains(&format!("de_surfaced_{session}_letter")));
     assert!((f.confidence - 0.9).abs() < 1e-5);
 
     // —— 4. 后续回合召回（retrieve_memory，模拟 context assembly 读取 facts）——
@@ -177,17 +209,34 @@ async fn relationship_triple_written_and_gated_by_new_surface() {
     };
     let retrieved = db.retrieve_memory(&query).await.expect("retrieve");
     assert!(
-        retrieved.facts.iter().any(|rf| rf.predicate == "wrote" && rf.turn_id.as_deref() == Some("turn_rel_1")),
+        retrieved
+            .facts
+            .iter()
+            .any(|rf| rf.predicate == "wrote" && rf.turn_id.as_deref() == Some("turn_rel_1")),
         "relationship triple retrievable for a subsequent turn"
     );
 
     // —— 5. 成本闸：turn_rel_2 **没 surface 新实体**（已知实体集没变）→ 跳过、一次 LLM 都不调 ——
     let written_no_new = engine
-        .extract_relationship_facts(&llm, &session, "turn_rel_2", Some(&module_id),
-            "Raul slid the bloody letter across the counter, hand trembling.")
+        .extract_relationship_facts(
+            &llm,
+            &session,
+            "turn_rel_2",
+            Some(&module_id),
+            "Raul slid the bloody letter across the counter, hand trembling.",
+            &[],
+            "",
+        )
         .await;
-    assert_eq!(written_no_new, 0, "no new entity this turn → extraction skipped, nothing written");
-    assert_eq!(llm.calls(), 1, "no new entity surfaced → LLM NOT invoked again (cost saved)");
+    assert_eq!(
+        written_no_new, 0,
+        "no new entity this turn → extraction skipped, nothing written"
+    );
+    assert_eq!(
+        llm.calls(),
+        1,
+        "no new entity surfaced → LLM NOT invoked again (cost saved)"
+    );
     let rel_after_skip = db
         .list_memory_facts(&session, 50)
         .await
@@ -195,18 +244,35 @@ async fn relationship_triple_written_and_gated_by_new_surface() {
         .iter()
         .filter(|f| f.tags.iter().any(|t| t == "relationship"))
         .count();
-    assert_eq!(rel_after_skip, 1, "still exactly one relationship fact (skip wrote nothing)");
+    assert_eq!(
+        rel_after_skip, 1,
+        "still exactly one relationship fact (skip wrote nothing)"
+    );
 
     // —— 6. 再 surface 一个新实体（knife@turn_rel_3）→ 闸重新打开、LLM 再调一次、upsert 幂等 ——
     db.append_domain_event(&surfaced_event(&session, "turn_rel_3", "knife", "clue"))
         .await
         .expect("seed new EntitySurfaced");
     let written_reopen = engine
-        .extract_relationship_facts(&llm, &session, "turn_rel_3", Some(&module_id),
-            "Raul slid the bloody letter across the counter, hand trembling.")
+        .extract_relationship_facts(
+            &llm,
+            &session,
+            "turn_rel_3",
+            Some(&module_id),
+            "Raul slid the bloody letter across the counter, hand trembling.",
+            &[],
+            "",
+        )
         .await;
-    assert_eq!(written_reopen, 1, "gate re-opens; same triple upserted (stable fact_id, no dup)");
-    assert_eq!(llm.calls(), 2, "a genuinely new entity re-opens the gate → LLM invoked again");
+    assert_eq!(
+        written_reopen, 1,
+        "gate re-opens; same triple upserted (stable fact_id, no dup)"
+    );
+    assert_eq!(
+        llm.calls(),
+        2,
+        "a genuinely new entity re-opens the gate → LLM invoked again"
+    );
     let rel_final = db
         .list_memory_facts(&session, 50)
         .await
@@ -214,5 +280,8 @@ async fn relationship_triple_written_and_gated_by_new_surface() {
         .iter()
         .filter(|f| f.tags.iter().any(|t| t == "relationship"))
         .count();
-    assert_eq!(rel_final, 1, "still exactly one relationship fact after re-run (idempotent upsert)");
+    assert_eq!(
+        rel_final, 1,
+        "still exactly one relationship fact after re-run (idempotent upsert)"
+    );
 }

@@ -1,0 +1,36 @@
+{
+  "identity": {
+    "scenario_id": "JRNY-HOME-04-flight-recorder-failbranch",
+    "scenario_version": "1",
+    "evidence_schema_version": "tc-jrny-02.evidence.v1"
+  },
+  "recorded_mode": "deterministic",
+  "turns": [
+    {
+      "user_input": "我先站在巷口的安全距离观察现场，看看无人机和警察的情况。",
+      "count_delta": {},
+      "newest_contest_row": null,
+      "player_visible_body": "你站在巷口观察现场。",
+      "flight_recorder": {
+        "contributions": [
+          { "plugin_id": "core.no_spoiler_guard", "hook": "context_assembly", "kind": "context_filter", "summary": "drop 1 block(s)" },
+          { "plugin_id": "core.view_loader", "hook": "context_assembly", "kind": "view_load", "summary": "player_knowledge_view: 0 player-known fact(s)" }
+        ],
+        "ledger_event_kinds": ["TurnFinalized"]
+      }
+    },
+    {
+      "user_input": "我再仔细看看仓库门口那束裸露的电缆。",
+      "count_delta": {},
+      "newest_contest_row": null,
+      "player_visible_body": "你打量那束电缆。",
+      "flight_recorder": {
+        "contributions": [
+          { "plugin_id": "core.view_loader", "hook": "context_assembly", "kind": "view_load", "summary": "player_knowledge_view: 0 player-known fact(s)" },
+          { "plugin_id": "core.no_spoiler_guard", "hook": "after_llm_stream", "kind": "verifier_finding", "summary": "leaked Athena 回收指令 into narration" }
+        ],
+        "ledger_event_kinds": ["TurnFinalized"]
+      }
+    }
+  ]
+}

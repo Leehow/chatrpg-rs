@@ -86,32 +86,48 @@ fn roll(total: i64) -> DiceRollRecord {
 async fn opposed_check_produces_a_verdict_when_both_values_present() {
     let url = match std::env::var("DATABASE_URL") {
         Ok(u) => u,
-        Err(_) => { eprintln!("SKIP: DATABASE_URL unset"); return; }
+        Err(_) => {
+            eprintln!("SKIP: DATABASE_URL unset");
+            return;
+        }
     };
     let db = match Db::connect(&url).await {
         Ok(d) => d,
-        Err(e) => { eprintln!("SKIP: connect failed: {e}"); return; }
+        Err(e) => {
+            eprintln!("SKIP: connect failed: {e}");
+            return;
+        }
     };
 
     // 检查 pc.current 有 Stealth 技能
     let pc_params = trpg_params::RuntimeParameterService::new(db.clone())
-        .load_actor_parameters(SESSION, "pc.current").await.ok().flatten();
+        .load_actor_parameters(SESSION, "pc.current")
+        .await
+        .ok()
+        .flatten();
     let npc_params = trpg_params::RuntimeParameterService::new(db.clone())
-        .load_actor_parameters(SESSION, "npc.opposition").await.ok().flatten();
+        .load_actor_parameters(SESSION, "npc.opposition")
+        .await
+        .ok()
+        .flatten();
 
-    let pc_has_stealth = pc_params.as_ref()
+    let pc_has_stealth = pc_params
+        .as_ref()
         .and_then(|p| p.mechanical_profile.get("skills"))
         .and_then(|s| s.get("Stealth"))
         .is_some();
-    let npc_has_perception = npc_params.as_ref()
+    let npc_has_perception = npc_params
+        .as_ref()
         .and_then(|p| p.mechanical_profile.get("skills"))
         .and_then(|s| {
             // 接受 Spot Hidden 或 perception/Perception
             s.as_object().and_then(|m| {
-                m.keys().find(|k| {
-                    let kl = k.to_ascii_lowercase();
-                    kl == "spot hidden" || kl == "perception"
-                }).map(|_| &serde_json::Value::Null)
+                m.keys()
+                    .find(|k| {
+                        let kl = k.to_ascii_lowercase();
+                        kl == "spot hidden" || kl == "perception"
+                    })
+                    .map(|_| &serde_json::Value::Null)
             })
         })
         .is_some();
@@ -126,15 +142,20 @@ async fn opposed_check_produces_a_verdict_when_both_values_present() {
     let def_roll = roll(95); // 防御方掷 95(高失败)
     let atk_roll = roll(10); // 攻击方掷 10(低成功)
 
-    let out = svc.resolve_outcome(&opposed_contract(), &atk_roll, Some(&def_roll))
-        .await.expect("resolve_outcome must not error");
+    let out = svc
+        .resolve_outcome(&opposed_contract(), &atk_roll, Some(&def_roll))
+        .await
+        .expect("resolve_outcome must not error");
 
     let success = out.get("success").and_then(|v| v.as_bool());
     let opposed = out.get("opposed");
     println!("[opposed] atk=10 def=95 success={:?}", success);
     println!("[opposed] outcome.opposed={:?}", opposed);
 
-    assert!(success.is_some(), "对抗结算必须给出胜负 (success != null)，而非 Provisional-null");
+    assert!(
+        success.is_some(),
+        "对抗结算必须给出胜负 (success != null)，而非 Provisional-null"
+    );
     assert!(
         opposed.and_then(|o| o.get("defender_value")).is_some(),
         "outcome 必须富化 opposed.defender_value (消费了 NPC 卡的值)"

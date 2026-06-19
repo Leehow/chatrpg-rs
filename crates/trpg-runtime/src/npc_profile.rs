@@ -16,11 +16,18 @@ pub fn persona_from_profile(profile: &NpcProfile) -> NpcPersona {
     if let Some(role) = profile.role.as_deref().filter(|s| !s.trim().is_empty()) {
         parts.push(format!("Role: {role}"));
     }
-    if let Some(arch) = profile.archetype.as_deref().filter(|s| !s.trim().is_empty()) {
+    if let Some(arch) = profile
+        .archetype
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    {
         parts.push(format!("Archetype: {arch}"));
     }
     if !profile.personality_traits.is_empty() {
-        parts.push(format!("Personality: {}", profile.personality_traits.join(", ")));
+        parts.push(format!(
+            "Personality: {}",
+            profile.personality_traits.join(", ")
+        ));
     }
     if !profile.values.is_empty() {
         parts.push(format!("Values: {}", profile.values.join(", ")));

@@ -117,7 +117,9 @@ mod tests {
         // 未揭示：裁剪后投影含别名、不含任何 secret_term。
         let none: HashSet<String> = HashSet::new();
         let (gn, gnpcs) = guard_scene(&n, &npcs, &none);
-        let text = scene_node_to_blocks("mod1", &gn, &gnpcs, &[])[0].content.render_text();
+        let text = scene_node_to_blocks("mod1", &gn, &gnpcs, &[])[0]
+            .content
+            .render_text();
         assert!(text.contains("管家詹姆斯"), "公开别名应在: {text}");
         assert!(!text.contains("连环杀手"), "secret_term 必被裁: {text}");
         assert!(!text.contains("莫里亚蒂教授"), "secret_term 必被裁: {text}");
@@ -125,9 +127,14 @@ mod tests {
         // 揭示后（账本含 npc_butler）：secret 原文出现。
         let revealed = HashSet::from(["npc_butler".to_string()]);
         let (gn2, gnpcs2) = guard_scene(&n, &npcs, &revealed);
-        let text2 = scene_node_to_blocks("mod1", &gn2, &gnpcs2, &[])[0].content.render_text();
+        let text2 = scene_node_to_blocks("mod1", &gn2, &gnpcs2, &[])[0]
+            .content
+            .render_text();
         assert!(text2.contains("连环杀手"), "揭示后 secret 应出现: {text2}");
-        assert!(text2.contains("莫里亚蒂教授"), "揭示后 secret 应出现: {text2}");
+        assert!(
+            text2.contains("莫里亚蒂教授"),
+            "揭示后 secret 应出现: {text2}"
+        );
     }
 
     /// 别太严：实体无 spoiler → guard 字节原样透传（绝不裁可玩内容）。
@@ -156,15 +163,70 @@ mod tests {
 
         let none: HashSet<String> = HashSet::new();
         let (gn, _) = guard_scene(&n, &[], &none);
-        let text = scene_node_to_blocks("mod1", &gn, &[], &[])[0].content.render_text();
+        let text = scene_node_to_blocks("mod1", &gn, &[], &[])[0]
+            .content
+            .render_text();
         assert!(!text.contains("传送门"), "场景级 secret 必被裁: {text}");
         assert!(!text.contains("异界"), "场景级 secret 必被裁: {text}");
         assert!(text.contains("墙后藏着"), "非剧透 gm_notes 保留: {text}");
 
         let revealed = HashSet::from(["sc_cellar".to_string()]);
         let (gn2, _) = guard_scene(&n, &[], &revealed);
-        let text2 = scene_node_to_blocks("mod1", &gn2, &[], &[])[0].content.render_text();
-        assert!(text2.contains("传送门"), "节点揭示后 secret 应出现: {text2}");
+        let text2 = scene_node_to_blocks("mod1", &gn2, &[], &[])[0]
+            .content
+            .render_text();
+        assert!(
+            text2.contains("传送门"),
+            "节点揭示后 secret 应出现: {text2}"
+        );
+    }
+
+    /// Knowledge P0a 回归：一个场景里**同时**含节点级剧透与实体级剧透时，
+    /// revealed 账本里同时带 node_id 与 entity_id → 两者都不再被裁（揭示放行）；
+    /// 账本为空 → 两者都被裁（未揭示裁剪）。证明 reveal_fact 落账的 node/entity id
+    /// 经 guard_scene 后确实不被 redact（enforcement 半的放行语义）。
+    ///
+    /// 断言走渲染路（scene_node_to_blocks().render_text()）而非裸 JSON to_string()：
+    /// guard_entity 只裁 body/summary/name，**有意保留** spoiler 元数据块（secret_terms
+    /// 数组本身仍在 JSON 里），裸 to_string 会恒含 secret_term → 假失败。渲染路是
+    /// 实际进 GM context 的文本，与既有两条 spoiler_guard 测试同口径。
+    #[test]
+    fn revealed_node_and_entity_are_not_redacted() {
+        // 节点级 secret 选 "传送门"：避开 butler npc 的 reveal_conditions("在地窖发现
+        // 尸体后") 词汇——否则该条件文案只按 npc secret_terms 裁，节点词会经 GM hint 漏出。
+        let (mut n, npcs) = butler_scene();
+        n.spoiler.secret_terms = vec!["传送门".to_string()];
+        n.gm_notes = Some("阁楼藏着传送门。".to_string());
+
+        // 未揭示：渲染后节点级 secret("传送门") 与实体级 secret("莫里亚蒂教授") 都被裁。
+        let none = HashSet::new();
+        let (hn, hnpcs) = guard_scene(&n, &npcs, &none);
+        let hidden = scene_node_to_blocks("mod1", &hn, &hnpcs, &[])[0]
+            .content
+            .render_text();
+        assert!(
+            !hidden.contains("传送门"),
+            "未揭示 → 节点级 secret 必被裁: {hidden}"
+        );
+        assert!(
+            !hidden.contains("莫里亚蒂教授"),
+            "未揭示 → 实体级 secret 必被裁: {hidden}"
+        );
+
+        // revealed 账本同时带 node_id(sc01) 与 entity_id(npc_butler) → 两者都放行。
+        let revealed = HashSet::from(["sc01".to_string(), "npc_butler".to_string()]);
+        let (on, onpcs) = guard_scene(&n, &npcs, &revealed);
+        let open = scene_node_to_blocks("mod1", &on, &onpcs, &[])[0]
+            .content
+            .render_text();
+        assert!(
+            open.contains("传送门"),
+            "node_id 揭示后 → 节点级 secret 放行: {open}"
+        );
+        assert!(
+            open.contains("莫里亚蒂教授"),
+            "entity_id 揭示后 → 实体级 secret 放行: {open}"
+        );
     }
 
     /// Knowledge P0a 回归：一个场景里**同时**含节点级剧透与实体级剧透时，
@@ -210,7 +272,11 @@ mod tests {
         n.extraction_status = SceneExtractionStatus::DeepExtracted;
         let npcs = vec![json!({"id": "npc1", "name": "拉斯", "summary": "老板"})];
         let (gn, gnpcs) = guard_scene(&n, &npcs, &HashSet::new());
-        assert_eq!(serde_json::to_value(&gn).unwrap(), serde_json::to_value(&n).unwrap(), "node 字节不变");
+        assert_eq!(
+            serde_json::to_value(&gn).unwrap(),
+            serde_json::to_value(&n).unwrap(),
+            "node 字节不变"
+        );
         assert_eq!(gnpcs, npcs, "npcs 字节不变");
     }
 }

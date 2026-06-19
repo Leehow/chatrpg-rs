@@ -101,12 +101,17 @@ pub struct NeedBus {
 }
 
 impl Default for NeedBus {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl NeedBus {
     pub fn new() -> Self {
-        Self { resolvers: Vec::new(), pending: Vec::new() }
+        Self {
+            resolvers: Vec::new(),
+            pending: Vec::new(),
+        }
     }
 
     pub fn register(&mut self, r: Box<dyn NeedResolver>) {
@@ -126,7 +131,10 @@ impl NeedBus {
         for need in &needs {
             let want = need.kind();
             let Some(resolver) = self.resolvers.iter().find(|r| r.kind() == want) else {
-                tracing::warn!(?want, "no NeedResolver claims this need kind; skipping (fail-closed)");
+                tracing::warn!(
+                    ?want,
+                    "no NeedResolver claims this need kind; skipping (fail-closed)"
+                );
                 continue;
             };
             match resolver.resolve(need).await {

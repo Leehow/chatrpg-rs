@@ -51,7 +51,10 @@ fn known(field: &str) -> bool {
 /// wrapper (the tool-doc `=<field>` placeholder copied verbatim) + lowercase.
 fn normalize(raw: &str) -> String {
     let t = raw.trim();
-    let t = t.strip_prefix('<').and_then(|s| s.strip_suffix('>')).unwrap_or(t);
+    let t = t
+        .strip_prefix('<')
+        .and_then(|s| s.strip_suffix('>'))
+        .unwrap_or(t);
     t.trim().to_ascii_lowercase()
 }
 
@@ -83,7 +86,10 @@ fn audit_rule(rule: &mut Value, track_id: &str, msgs: &mut Vec<ValidationMessage
 
     // amount branch: "=value" reads the `when` field; "=field" reads
     // outcome.field; dice/int/max_of:/garbage are not vocabulary questions.
-    let amount = rule.get("amount").and_then(Value::as_str).map(str::to_string);
+    let amount = rule
+        .get("amount")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     let amount_live: Option<bool> = amount.as_deref().map(|a| {
         let e = a.trim();
         if e == "=value" {
@@ -117,7 +123,10 @@ fn audit_rule(rule: &mut Value, track_id: &str, msgs: &mut Vec<ValidationMessage
     // and plain ints here — a `=field` delta is unsupported even for a legal
     // field, so a legal one is repaired into the amount slot when it is free;
     // otherwise the runtime falls back to the `when` field (else amount 0).
-    let delta = rule.get("delta").and_then(Value::as_str).map(str::to_string);
+    let delta = rule
+        .get("delta")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     let delta_live: Option<bool> = delta.as_deref().map(|d| {
         let e = d.trim();
         if e == "=value" {
@@ -188,9 +197,17 @@ fn audit_rule(rule: &mut Value, track_id: &str, msgs: &mut Vec<ValidationMessage
 }
 
 fn repaired(track_id: &str, what: String) -> ValidationMessage {
-    vmsg("on_outcome_repaired_outcome_field", track_id, format!("deterministic repair: {what}"))
+    vmsg(
+        "on_outcome_repaired_outcome_field",
+        track_id,
+        format!("deterministic repair: {what}"),
+    )
 }
 
 fn vmsg(code: &str, track_id: &str, message: String) -> ValidationMessage {
-    ValidationMessage { code: code.into(), message, target: Some(track_id.to_string()) }
+    ValidationMessage {
+        code: code.into(),
+        message,
+        target: Some(track_id.to_string()),
+    }
 }

@@ -15,8 +15,16 @@ const SESSION: &str = "sess_revealed_facts_ledger";
 /// 清掉本会话两边账本（domain_events 写穿源 + knowledge_edges 投影源），
 /// 保证空会话基线，避免上次运行残留行污染断言。
 async fn reset_session(db: &Db) {
-    sqlx::query("delete from domain_events where session_id=$1").bind(SESSION).execute(&db.pool).await.unwrap();
-    sqlx::query("delete from knowledge_edges where session_id=$1").bind(SESSION).execute(&db.pool).await.unwrap();
+    sqlx::query("delete from domain_events where session_id=$1")
+        .bind(SESSION)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("delete from knowledge_edges where session_id=$1")
+        .bind(SESSION)
+        .execute(&db.pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -43,14 +51,23 @@ async fn record_and_list_revealed_facts_distinct_idempotent() {
     reset_session(&db).await;
 
     // 空会话 → 空账本。
-    assert!(db.list_revealed_facts(SESSION).await.unwrap().is_empty(), "空会话 → 无揭示事实");
+    assert!(
+        db.list_revealed_facts(SESSION).await.unwrap().is_empty(),
+        "空会话 → 无揭示事实"
+    );
 
     // 揭示两条事实（NPC 真身 + 场景节点级秘密）。
-    db.record_revealed_fact(SESSION, "turn3", "npc_butler", Some("玩家在书房发现日记")).await.unwrap();
-    db.record_revealed_fact(SESSION, "turn5", "sc_cellar", None).await.unwrap();
+    db.record_revealed_fact(SESSION, "turn3", "npc_butler", Some("玩家在书房发现日记"))
+        .await
+        .unwrap();
+    db.record_revealed_fact(SESSION, "turn5", "sc_cellar", None)
+        .await
+        .unwrap();
 
     // 同 (session,fact) 重放 → 幂等 no-op（不产生重复）。
-    db.record_revealed_fact(SESSION, "turn9", "npc_butler", Some("不同回合再次揭示")).await.unwrap();
+    db.record_revealed_fact(SESSION, "turn9", "npc_butler", Some("不同回合再次揭示"))
+        .await
+        .unwrap();
 
     // 噪声：EntitySurfaced（surfaced ≠ revealed）绝不混进账本。
     db.append_domain_event(&DomainEvent {

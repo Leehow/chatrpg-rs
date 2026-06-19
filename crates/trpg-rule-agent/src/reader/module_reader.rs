@@ -13,7 +13,9 @@ use super::units::Unit;
 use serde_json::{json, Value};
 use std::time::Instant;
 use trpg_llm::LlmClient;
-use trpg_model::{DirectorModuleConfig, LinkType, ScenarioLink, ScenarioNode, SceneExtractionStatus};
+use trpg_model::{
+    DirectorModuleConfig, LinkType, ScenarioLink, ScenarioNode, SceneExtractionStatus,
+};
 
 // ---- Context + readout ----
 
@@ -71,21 +73,44 @@ pub fn dependency_closure(entry: &ScenarioNode) -> Vec<String> {
 /// 把 reader 提交的一条 skeleton stub（JSON）转成 SkeletonOnly 的 ScenarioNode。
 /// 缺字段一律取空/默认，绝不编造 read_aloud（保持 None）。
 pub fn stub_to_node(v: &Value) -> Option<ScenarioNode> {
-    let node_id = v.get("node_id").and_then(|x| x.as_str())?.trim().to_string();
+    let node_id = v
+        .get("node_id")
+        .and_then(|x| x.as_str())?
+        .trim()
+        .to_string();
     if node_id.is_empty() {
         return None;
     }
     let mut n = ScenarioNode::default();
     n.node_id = node_id;
-    n.title = v.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string();
-    n.node_type = v.get("kind").and_then(|x| x.as_str()).unwrap_or("scene").to_string();
-    n.summary = v.get("summary").and_then(|x| x.as_str()).unwrap_or("").to_string();
-    n.page_start = v.get("page_start").and_then(|x| x.as_u64()).map(|p| p as u32);
+    n.title = v
+        .get("title")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    n.node_type = v
+        .get("kind")
+        .and_then(|x| x.as_str())
+        .unwrap_or("scene")
+        .to_string();
+    n.summary = v
+        .get("summary")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    n.page_start = v
+        .get("page_start")
+        .and_then(|x| x.as_u64())
+        .map(|p| p as u32);
     n.page_end = v.get("page_end").and_then(|x| x.as_u64()).map(|p| p as u32);
     let ids = |k: &str| {
         v.get(k)
             .and_then(|x| x.as_array())
-            .map(|a| a.iter().filter_map(|e| e.as_str().map(str::to_string)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|e| e.as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default()
     };
     n.referenced_npc_ids = ids("referenced_npc_ids");
@@ -114,15 +139,18 @@ pub(super) fn apply_deep_to_node(node: &mut ScenarioNode, deep: &Value) {
     // 新 target 追加。绝不因深抽 source_anchor 严格过滤后交空数组就把骨架边冲掉
     // （sandbox 模组正文常无字面出口锚 → 深抽 links 为空，但骨架边仍有效）。
     if let Some(links) = scene.get("links").and_then(|x| x.as_array()) {
-        let deep: Vec<ScenarioLink> =
-            links.iter().filter_map(|l| serde_json::from_value(l.clone()).ok()).collect();
+        let deep: Vec<ScenarioLink> = links
+            .iter()
+            .filter_map(|l| serde_json::from_value(l.clone()).ok())
+            .collect();
         merge_links(&mut node.links, deep);
     }
     let ids = |k: &str| {
-        scene
-            .get(k)
-            .and_then(|x| x.as_array())
-            .map(|a| a.iter().filter_map(|e| e.as_str().map(str::to_string)).collect::<Vec<_>>())
+        scene.get(k).and_then(|x| x.as_array()).map(|a| {
+            a.iter()
+                .filter_map(|e| e.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
     };
     if let Some(v) = ids("referenced_npc_ids") {
         node.referenced_npc_ids = v;
@@ -176,8 +204,12 @@ pub(super) fn merge_links(base: &mut Vec<ScenarioLink>, incoming: Vec<ScenarioLi
         if inc.to_node_id.trim().is_empty() {
             continue;
         }
-        let has_anchor =
-            inc.source_anchor.as_deref().map(str::trim).map(|s| !s.is_empty()).unwrap_or(false);
+        let has_anchor = inc
+            .source_anchor
+            .as_deref()
+            .map(str::trim)
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
         if let Some(slot) = base.iter_mut().find(|l| l.to_node_id == inc.to_node_id) {
             if has_anchor {
                 *slot = inc; // 深抽带非空锚 → 升级为更精确的出口
@@ -192,7 +224,11 @@ pub(super) fn merge_links(base: &mut Vec<ScenarioLink>, incoming: Vec<ScenarioLi
 /// （Sequential，source_anchor=None）保证图从入口可进入。已有出边/入口不存在/无下一场景 → 不动。
 /// 返回是否补了边。确定、纯、fail-closed。
 fn ensure_entry_connected(scenes: &mut [ScenarioNode], entry_idx: usize) -> bool {
-    if scenes.get(entry_idx).map(|s| !s.links.is_empty()).unwrap_or(true) {
+    if scenes
+        .get(entry_idx)
+        .map(|s| !s.links.is_empty())
+        .unwrap_or(true)
+    {
         return false; // 已有出边，或入口越界
     }
     let Some(next_id) = scenes.get(entry_idx + 1).map(|s| s.node_id.clone()) else {
@@ -211,17 +247,27 @@ fn ensure_entry_connected(scenes: &mut [ScenarioNode], entry_idx: usize) -> bool
 /// 把 Pass B 提交里的闭包实体（按 kind 路由）并入 readout 的对应 vec。去重 by id。
 pub(super) fn merge_deep_entities(out: &mut ModuleReadout, deep: &Value) {
     let push = |vec: &mut Vec<Value>, e: &Value| {
-        let id = e.get("id").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+        let id = e
+            .get("id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
         if id.is_empty() {
             return;
         }
-        if let Some(slot) = vec.iter_mut().find(|x| x.get("id").and_then(|v| v.as_str()) == Some(id.as_str())) {
+        if let Some(slot) = vec
+            .iter_mut()
+            .find(|x| x.get("id").and_then(|v| v.as_str()) == Some(id.as_str()))
+        {
             *slot = e.clone(); // 深抽详情覆盖骨架索引
         } else {
             vec.push(e.clone());
         }
     };
-    let Some(entities) = deep.get("entities").and_then(|x| x.as_array()) else { return };
+    let Some(entities) = deep.get("entities").and_then(|x| x.as_array()) else {
+        return;
+    };
     for e in entities {
         match e.get("kind").and_then(|x| x.as_str()).unwrap_or("") {
             "npc" => push(&mut out.npcs, e),
@@ -296,7 +342,17 @@ pub async fn run_module_reader(
         &["scenes", "entry_node_id"],
     );
     let skeleton_seed = "读这本模组的目录与前言，产出全书有序场景骨架 + 实体索引 + 自定义规则清单，最后 submit_skeleton。".to_string();
-    let skeleton = match run_module_loop(client, SKELETON_SYS, &skeleton_seed, &ctx, budget, submit_skeleton, "submit_skeleton").await {
+    let skeleton = match run_module_loop(
+        client,
+        SKELETON_SYS,
+        &skeleton_seed,
+        &ctx,
+        budget,
+        submit_skeleton,
+        "submit_skeleton",
+    )
+    .await
+    {
         Some(v) => v,
         // fail-closed：Pass A 没拿到任何提交 → 返回空 readout，调用方回退。
         None => {
@@ -306,7 +362,13 @@ pub async fn run_module_reader(
     };
 
     out.spine = skeleton.get("spine").cloned().unwrap_or(Value::Null);
-    let collect = |k: &str| skeleton.get(k).and_then(|x| x.as_array()).cloned().unwrap_or_default();
+    let collect = |k: &str| {
+        skeleton
+            .get(k)
+            .and_then(|x| x.as_array())
+            .cloned()
+            .unwrap_or_default()
+    };
     // RW3：前台不再 gleaning（移后台 stub-only job）。Pass A = 单遍骨架直接装配。
     out.scenes = collect("scenes").iter().filter_map(stub_to_node).collect();
     // RW3.2：用 units 页码兜底没拿到 page_start 的场景 → 让入口一次性切页深抽生效
@@ -318,9 +380,16 @@ pub async fn run_module_reader(
     // RW3 可选前台 gleaning（env 门控，默认关）：env `TRPG_MODULE_GLEANING` 真值时对照 TOC 补漏，
     // 用同一 client；补全后再 resolve_scene_pages 一次给新场景补页码。默认不跑（移后台 job）。
     if env_truthy("TRPG_MODULE_GLEANING") {
-        let added = super::module_reader_loop::complete_skeleton_stubs(client, &ctx, &mut out.scenes, budget).await;
+        let added = super::module_reader_loop::complete_skeleton_stubs(
+            client,
+            &ctx,
+            &mut out.scenes,
+            budget,
+        )
+        .await;
         if added > 0 {
-            let repaged = super::module_graph_edges::resolve_scene_pages(&mut out.scenes, ctx.units);
+            let repaged =
+                super::module_graph_edges::resolve_scene_pages(&mut out.scenes, ctx.units);
             tracing::info!(target: "module_reader", phase = "gleaning", added = added, repaged = repaged, total = out.scenes.len(), "front-stage gleaning filled missing scenes");
         }
     }
@@ -337,7 +406,10 @@ pub async fn run_module_reader(
 
     // RW7：图谱装配只 dedup 实体 + validate 诊断（log 连通度）；全局边/补漏门已删
     //（出口在 deep_extract per-scene 局部算，gleaning 移后台）。entry_id/空图跳过在 wrapper 内。
-    super::module_graph_build::build_graph_with_quality_gate(client, &ctx, &mut out, &skeleton, budget).await;
+    super::module_graph_build::build_graph_with_quality_gate(
+        client, &ctx, &mut out, &skeleton, budget,
+    )
+    .await;
     // ---- Pass B：深抽入口场景 + 依赖闭包 ----（语义优先用 reader 的 entry_node_id；缺/失效则确定性兜底）
     let entry_node_id = skeleton.get("entry_node_id").and_then(|x| x.as_str());
     let Some(entry_idx) = resolve_entry_index(&out.scenes, entry_node_id) else {
@@ -346,7 +418,10 @@ pub async fn run_module_reader(
         return Ok(out);
     };
     // 复用单场景深抽一刀（与 background-continue job 续抽剩余场景同源）。
-    super::module_reader_loop::deep_extract_scene_in_place(client, &ctx, &mut out, entry_idx, budget).await;
+    super::module_reader_loop::deep_extract_scene_in_place(
+        client, &ctx, &mut out, entry_idx, budget,
+    )
+    .await;
     // 入口深抽后再补一遍实体桥接边：入口此刻有了 deep referenced_*_ids，可桥到共享实体的场景
     //（零 LLM、幂等、按 to_node_id 去重，不与既有边重复）。
     let bridges = super::module_graph_edges::apply_bridge_edges(&mut out.scenes);

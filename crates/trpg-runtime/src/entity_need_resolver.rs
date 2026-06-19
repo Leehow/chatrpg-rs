@@ -39,16 +39,24 @@ pub(crate) fn decode_entity_hint(hint: Option<&str>) -> Option<(String, String, 
     }
     let parts: Vec<&str> = hint.splitn(4, '|').collect();
     match parts.as_slice() {
-        [aid, bkt, prm, ctx] if !aid.is_empty() => {
-            Some((aid.to_string(), bkt.to_string(), prm.to_string(), ctx.to_string()))
-        }
+        [aid, bkt, prm, ctx] if !aid.is_empty() => Some((
+            aid.to_string(),
+            bkt.to_string(),
+            prm.to_string(),
+            ctx.to_string(),
+        )),
         _ => None,
     }
 }
 
 /// Encode the four synthesis fields into the `entity_hint` wire format. Kept next to
 /// the decoder so encode/decode stay in lock-step (the emit site uses this).
-pub fn encode_entity_hint(actor_id: &str, bucket: &str, param: &str, check_context: &str) -> String {
+pub fn encode_entity_hint(
+    actor_id: &str,
+    bucket: &str,
+    param: &str,
+    check_context: &str,
+) -> String {
     format!("{actor_id}|{bucket}|{param}|{check_context}")
 }
 
@@ -99,7 +107,14 @@ impl NeedResolver for EntityNeedResolver {
         // Err → warn + empty.
         match self
             .engine
-            .ensure_npc_parameter(&e.scopes.session_id, &e.scopes.ruleset_id, &persona, &bucket, &param, &check_ctx)
+            .ensure_npc_parameter(
+                &e.scopes.session_id,
+                &e.scopes.ruleset_id,
+                &persona,
+                &bucket,
+                &param,
+                &check_ctx,
+            )
             .await
         {
             Ok(Some(_)) => {
@@ -155,7 +170,8 @@ mod tests {
     #[test]
     fn hint_pipe_in_ctx_survives_splitn4() {
         // check_context itself contains '|' → 4th segment keeps the whole tail.
-        let (_, _, _, c) = decode_entity_hint(Some("npc.x|stats|defense|context with | pipe inside")).unwrap();
+        let (_, _, _, c) =
+            decode_entity_hint(Some("npc.x|stats|defense|context with | pipe inside")).unwrap();
         assert_eq!(c, "context with | pipe inside");
     }
 
@@ -163,8 +179,14 @@ mod tests {
     fn hint_fail_closed_on_missing_or_short() {
         assert!(decode_entity_hint(None).is_none(), "absent hint → None");
         assert!(decode_entity_hint(Some("")).is_none(), "empty hint → None");
-        assert!(decode_entity_hint(Some("npc.x|stats|defense")).is_none(), "3 segments → None");
-        assert!(decode_entity_hint(Some("|stats|defense|ctx")).is_none(), "empty actor_id → None");
+        assert!(
+            decode_entity_hint(Some("npc.x|stats|defense")).is_none(),
+            "3 segments → None"
+        );
+        assert!(
+            decode_entity_hint(Some("|stats|defense|ctx")).is_none(),
+            "empty actor_id → None"
+        );
     }
 
     // ---- bus routing + side-effect semantics (stub resolver, no DB/LLM) ----
@@ -193,7 +215,9 @@ mod tests {
     #[tokio::test]
     async fn entity_resolver_returns_empty_blocks_side_effect_is_counted() {
         let calls = Arc::new(AtomicUsize::new(0));
-        let resolver = CountingEntityResolver { calls: calls.clone() };
+        let resolver = CountingEntityResolver {
+            calls: calls.clone(),
+        };
         assert_eq!(resolver.kind(), NeedKind::Entity, "must claim Entity kind");
         let mut bus = NeedBus::new();
         bus.register(Box::new(resolver));
@@ -203,8 +227,15 @@ mod tests {
         }));
         let outcomes = bus.resolve_all().await;
         assert_eq!(outcomes.len(), 1);
-        assert!(outcomes[0].blocks.is_empty(), "EntityNeedResolver must return empty blocks");
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "resolve() must be called once per emit");
+        assert!(
+            outcomes[0].blocks.is_empty(),
+            "EntityNeedResolver must return empty blocks"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "resolve() must be called once per emit"
+        );
     }
 
     #[tokio::test]
@@ -234,6 +265,9 @@ mod tests {
         // fail-closed: bus does not panic; returns a (single) empty outcome.
         let outcomes = bus.resolve_all().await;
         assert_eq!(outcomes.len(), 1);
-        assert!(outcomes[0].blocks.is_empty(), "failed resolver must yield empty outcome");
+        assert!(
+            outcomes[0].blocks.is_empty(),
+            "failed resolver must yield empty outcome"
+        );
     }
 }

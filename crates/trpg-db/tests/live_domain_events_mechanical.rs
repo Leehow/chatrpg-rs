@@ -19,16 +19,21 @@ const CHECK_ID: &str = "check_eventlog_mech_1";
 async fn ensure_schema(db: &Db) {
     for stmt in include_str!("../../../migrations/0030_domain_events.sql").split(';') {
         let s = stmt.trim();
-        if s.is_empty() { continue; }
+        if s.is_empty() {
+            continue;
+        }
         if let Err(e) = sqlx::query(s).execute(&db.pool).await {
             let msg = e.to_string();
-            let dup = msg.contains("already exists") || msg.contains("23505") || msg.contains("42P07");
+            let dup =
+                msg.contains("already exists") || msg.contains("23505") || msg.contains("42P07");
             assert!(dup, "0030 statement must apply: {e}");
         }
     }
 }
 
-fn fixed_ts() -> DateTime<Utc> { DateTime::<Utc>::from_timestamp(0, 0).unwrap() }
+fn fixed_ts() -> DateTime<Utc> {
+    DateTime::<Utc>::from_timestamp(0, 0).unwrap()
+}
 
 fn sample_roll() -> DiceRollRecord {
     DiceRollRecord {
@@ -49,14 +54,38 @@ fn sample_roll() -> DiceRollRecord {
 
 #[tokio::test]
 async fn dice_roll_and_check_result_emit_domain_events_idempotent() {
-    let url = match std::env::var("DATABASE_URL") { Ok(u) => u, Err(_) => { eprintln!("SKIP: DATABASE_URL unset"); return; } };
-    let db = match Db::connect(&url).await { Ok(d) => d, Err(e) => { eprintln!("SKIP: connect: {e}"); return; } };
+    let url = match std::env::var("DATABASE_URL") {
+        Ok(u) => u,
+        Err(_) => {
+            eprintln!("SKIP: DATABASE_URL unset");
+            return;
+        }
+    };
+    let db = match Db::connect(&url).await {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("SKIP: connect: {e}");
+            return;
+        }
+    };
     ensure_schema(&db).await;
 
     // 清场：删 domain_events + 本测涉及的 dice_rolls / check_results 行（避免上一次残留）。
-    sqlx::query("delete from domain_events where session_id=$1").bind(SESSION).execute(&db.pool).await.unwrap();
-    sqlx::query("delete from dice_rolls where roll_id=$1").bind(ROLL_ID).execute(&db.pool).await.unwrap();
-    sqlx::query("delete from check_results where check_id=$1").bind(CHECK_ID).execute(&db.pool).await.unwrap();
+    sqlx::query("delete from domain_events where session_id=$1")
+        .bind(SESSION)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("delete from dice_rolls where roll_id=$1")
+        .bind(ROLL_ID)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("delete from check_results where check_id=$1")
+        .bind(CHECK_ID)
+        .execute(&db.pool)
+        .await
+        .unwrap();
 
     // 1) insert_dice_roll → 主插成功 + write-through 一条 DiceRolled。
     let roll = sample_roll();
@@ -75,25 +104,47 @@ async fn dice_roll_and_check_result_emit_domain_events_idempotent() {
 
     // 按回合取，应含一条 DiceRolled(de_roll_*) + 一条 CheckResolved(de_check_*)。
     let evs = db.list_domain_events_for_turn(TURN).await.unwrap();
-    let dice: Vec<_> = evs.iter().filter(|e| e.kind == DomainEventKind::DiceRolled).collect();
-    let checks: Vec<_> = evs.iter().filter(|e| e.kind == DomainEventKind::CheckResolved).collect();
+    let dice: Vec<_> = evs
+        .iter()
+        .filter(|e| e.kind == DomainEventKind::DiceRolled)
+        .collect();
+    let checks: Vec<_> = evs
+        .iter()
+        .filter(|e| e.kind == DomainEventKind::CheckResolved)
+        .collect();
     assert_eq!(dice.len(), 1, "应有 1 条 DiceRolled");
     assert_eq!(checks.len(), 1, "应有 1 条 CheckResolved");
 
     let d = dice[0];
-    assert_eq!(d.event_id, format!("de_roll_{ROLL_ID}"), "DiceRolled 幂等键");
+    assert_eq!(
+        d.event_id,
+        format!("de_roll_{ROLL_ID}"),
+        "DiceRolled 幂等键"
+    );
     assert_eq!(d.session_id, SESSION);
     assert_eq!(d.turn_id, TURN);
     assert_eq!(d.data["check_id"], json!(CHECK_ID), "data 带 check_id");
     assert_eq!(d.data["expression"], json!("1d100"), "data 带 expression");
-    assert_eq!(d.data["visibility"], json!("public_gm_roll"), "data 带 visibility token");
+    assert_eq!(
+        d.data["visibility"],
+        json!("public_gm_roll"),
+        "data 带 visibility token"
+    );
 
     let c = checks[0];
-    assert_eq!(c.event_id, format!("de_check_{CHECK_ID}"), "CheckResolved 幂等键");
+    assert_eq!(
+        c.event_id,
+        format!("de_check_{CHECK_ID}"),
+        "CheckResolved 幂等键"
+    );
     assert_eq!(c.session_id, SESSION, "session 取自 result.roll");
     assert_eq!(c.turn_id, TURN, "turn 取自 result.roll");
     assert_eq!(c.data["check_id"], json!(CHECK_ID));
-    assert_eq!(c.data["outcome"]["success"], json!(true), "outcome json 内嵌");
+    assert_eq!(
+        c.data["outcome"]["success"],
+        json!(true),
+        "outcome json 内嵌"
+    );
 
     // 3) 幂等：重放同 roll_id / check_id → domain_events 不新增（on conflict do nothing）。
     db.insert_dice_roll(&sample_roll()).await.unwrap();
@@ -103,15 +154,38 @@ async fn dice_roll_and_check_result_emit_domain_events_idempotent() {
         outcome: json!({"success": true}),
         committed_patches: Vec::new(),
         created_at: fixed_ts(),
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     let re = db.list_domain_events_for_turn(TURN).await.unwrap();
-    let re_dice = re.iter().filter(|e| e.kind == DomainEventKind::DiceRolled).count();
-    let re_checks = re.iter().filter(|e| e.kind == DomainEventKind::CheckResolved).count();
+    let re_dice = re
+        .iter()
+        .filter(|e| e.kind == DomainEventKind::DiceRolled)
+        .count();
+    let re_checks = re
+        .iter()
+        .filter(|e| e.kind == DomainEventKind::CheckResolved)
+        .count();
     assert_eq!(re_dice, 1, "重放同 roll_id 不得新增 DiceRolled（幂等）");
-    assert_eq!(re_checks, 1, "重放同 check_id 不得新增 CheckResolved（幂等）");
+    assert_eq!(
+        re_checks, 1,
+        "重放同 check_id 不得新增 CheckResolved（幂等）"
+    );
 
     // 清场。
-    sqlx::query("delete from domain_events where session_id=$1").bind(SESSION).execute(&db.pool).await.unwrap();
-    sqlx::query("delete from dice_rolls where roll_id=$1").bind(ROLL_ID).execute(&db.pool).await.unwrap();
-    sqlx::query("delete from check_results where check_id=$1").bind(CHECK_ID).execute(&db.pool).await.unwrap();
+    sqlx::query("delete from domain_events where session_id=$1")
+        .bind(SESSION)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("delete from dice_rolls where roll_id=$1")
+        .bind(ROLL_ID)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("delete from check_results where check_id=$1")
+        .bind(CHECK_ID)
+        .execute(&db.pool)
+        .await
+        .unwrap();
 }

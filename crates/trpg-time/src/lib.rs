@@ -11,9 +11,15 @@ pub struct WorldTimeService {
 }
 
 impl WorldTimeService {
-    pub fn new(db: Db) -> Self { Self { db } }
+    pub fn new(db: Db) -> Self {
+        Self { db }
+    }
 
-    pub async fn ensure_session_time(&self, session_id: &str, campaign_id: Option<&str>) -> Result<WorldTimeState> {
+    pub async fn ensure_session_time(
+        &self,
+        session_id: &str,
+        campaign_id: Option<&str>,
+    ) -> Result<WorldTimeState> {
         if let Some(state) = self.db.get_world_time_state(session_id).await? {
             return Ok(state);
         }
@@ -77,8 +83,13 @@ impl WorldTimeService {
     }
 
     pub async fn advance(&self, req: TimeAdvanceRequest) -> Result<TimeAdvanceResult> {
-        let from = self.ensure_session_time(&req.session_id, req.campaign_id.as_deref()).await?;
-        if matches!(req.mutation_kind, TimeMutationKind::NoAdvance | TimeMutationKind::FlashbackFrame) {
+        let from = self
+            .ensure_session_time(&req.session_id, req.campaign_id.as_deref())
+            .await?;
+        if matches!(
+            req.mutation_kind,
+            TimeMutationKind::NoAdvance | TimeMutationKind::FlashbackFrame
+        ) {
             let event = self.record_event(
                 &req.session_id,
                 req.caused_by_turn_id.as_deref(),
@@ -87,7 +98,14 @@ impl WorldTimeService {
                 json!({"mutation_kind": req.mutation_kind.as_str(), "reason": req.reason, "advance_seconds": 0}),
                 req.visibility,
             ).await?;
-            return Ok(TimeAdvanceResult { from: from.clone(), to: from, advance_event: Some(event), triggered_events: vec![], scheduled_events_due: vec![], expired_effect_ids: vec![] });
+            return Ok(TimeAdvanceResult {
+                from: from.clone(),
+                to: from,
+                advance_event: Some(event),
+                triggered_events: vec![],
+                scheduled_events_due: vec![],
+                expired_effect_ids: vec![],
+            });
         }
         let delta_seconds = req.amount.total_seconds().max(0);
         let delta_ticks = delta_seconds.max(1);
@@ -95,7 +113,9 @@ impl WorldTimeService {
         to.world_tick += delta_ticks;
         to.absolute_seconds += delta_seconds;
         to.time_scale = req.scale;
-        if let Some(epoch) = req.scene_epoch.clone() { to.scene_epoch = Some(epoch); }
+        if let Some(epoch) = req.scene_epoch.clone() {
+            to.scene_epoch = Some(epoch);
+        }
         to.event_seq += 1;
         to.updated_at = Utc::now();
         to.display_time = format_display_time(to.absolute_seconds, to.time_scale);
@@ -128,9 +148,15 @@ impl WorldTimeService {
             created_at: Utc::now(),
         };
         self.db.insert_world_event(&advance_event).await?;
-        self.db.insert_world_time_advance(&from, &to, &advance_event).await.ok();
+        self.db
+            .insert_world_time_advance(&from, &to, &advance_event)
+            .await
+            .ok();
 
-        let due = self.db.list_due_scheduled_events(&to.session_id, to.world_tick).await?;
+        let due = self
+            .db
+            .list_due_scheduled_events(&to.session_id, to.world_tick)
+            .await?;
         let mut triggered_events = Vec::new();
         for scheduled in &due {
             let ev = WorldEvent {
@@ -150,7 +176,13 @@ impl WorldTimeService {
                 created_at: Utc::now(),
             };
             self.db.insert_world_event(&ev).await.ok();
-            self.db.update_scheduled_event_status(&scheduled.scheduled_event_id, ScheduledEventStatus::Due).await.ok();
+            self.db
+                .update_scheduled_event_status(
+                    &scheduled.scheduled_event_id,
+                    ScheduledEventStatus::Due,
+                )
+                .await
+                .ok();
             triggered_events.push(ev);
         }
         if !triggered_events.is_empty() {
@@ -159,10 +191,25 @@ impl WorldTimeService {
             final_state.updated_at = Utc::now();
             self.db.upsert_world_time_state(&final_state).await.ok();
         }
-        Ok(TimeAdvanceResult { from, to, advance_event: Some(advance_event), triggered_events, scheduled_events_due: due, expired_effect_ids: vec![] })
+        Ok(TimeAdvanceResult {
+            from,
+            to,
+            advance_event: Some(advance_event),
+            triggered_events,
+            scheduled_events_due: due,
+            expired_effect_ids: vec![],
+        })
     }
 
-    pub async fn schedule_in(&self, session_id: &str, amount: TimeAmount, event_kind: WorldEventKind, payload_json: serde_json::Value, visibility: Visibility, created_by_event_id: Option<String>) -> Result<ScheduledEvent> {
+    pub async fn schedule_in(
+        &self,
+        session_id: &str,
+        amount: TimeAmount,
+        event_kind: WorldEventKind,
+        payload_json: serde_json::Value,
+        visibility: Visibility,
+        created_by_event_id: Option<String>,
+    ) -> Result<ScheduledEvent> {
         let state = self.ensure_session_time(session_id, None).await?;
         let due_tick = state.world_tick + amount.total_seconds().max(1);
         let scheduled = ScheduledEvent {
@@ -188,8 +235,10 @@ pub fn default_world_time_state(session_id: &str, campaign_id: &str) -> WorldTim
         session_id: session_id.to_string(),
         world_tick: 0,
         absolute_seconds: 0,
-        calendar_id: std::env::var("TRPG_WORLD_TIME_CALENDAR_ID").unwrap_or_else(|_| "relative_default".into()),
-        display_time: std::env::var("TRPG_WORLD_TIME_START_DISPLAY").unwrap_or_else(|_| "Day 1, 00:00".into()),
+        calendar_id: std::env::var("TRPG_WORLD_TIME_CALENDAR_ID")
+            .unwrap_or_else(|_| "relative_default".into()),
+        display_time: std::env::var("TRPG_WORLD_TIME_START_DISPLAY")
+            .unwrap_or_else(|_| "Day 1, 00:00".into()),
         time_scale: TimeScale::SceneBeat,
         scene_epoch: Some("session_start".into()),
         turn_seq: 0,

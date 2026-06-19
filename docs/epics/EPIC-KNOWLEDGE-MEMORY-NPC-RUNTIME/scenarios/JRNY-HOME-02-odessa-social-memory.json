@@ -1,0 +1,123 @@
+{
+  "name": "jrny_home_02_odessa_social_memory",
+  "scenario_id": "JRNY-HOME-02-odessa-social-memory",
+  "scenario_version": "1",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "session_id": null,
+  "_derived_from": "docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/scenarios/JRNY-HOME-02-odessa-social-memory.yaml. Bounded JSON playtest spec for the deterministic/live/replay harness, preserving the stable scenario identity. The technical NPC is the Homecoming `fixer_contact` (module `npc_actor_bindings`/`director`: a tech/fixer whose goal is 'wants sellable info/tech'); actor_id npc.fixer_contact. WITHHELD secret = the fixer's safe-shutdown method (she knows it, withholds it until the relationship warms): fact_id homecoming.fixer.safe_shutdown_sequence, terms drawn from her technical patter. UNKNOWN fact the fixer must NOT assert = the rogue drone's concealed Athena identity (the HOME-01 hidden fact she has no edge to): fact_id homecoming.athena_drone.hidden_identity, terms per harness/cases/homecoming_no_spoiler_golden.json.",
+  "setup": {
+    "character": {
+      "preferences": "技术型 Cyberpunk RED 角色，擅长观察、电子、维修，愿意谈判但必要时会施压；与本地修理/fixer 圈子有联系，可立即开始第一幕。",
+      "auto_complete": true,
+      "require_persisted": true,
+      "require_session_binding": true
+    }
+  },
+  "stream_format": "jsonl",
+  "turns": [
+    {
+      "user_input": "我顺着现场的线索找到那位本地技术中间人，先礼貌地打个招呼，问她现在方不方便聊两句。",
+      "notes": "reach_npc: reach the stable technical NPC (fixer_contact) through normal play. Her durable profile/identity must be available. No fact she doesn't know may be asserted, and her withheld secret must not leak.",
+      "forbid_player_text": ["Athena", "内鬼", "double-cross", "回收指令", "安全关机序列", "旁路接口", "维修后门"],
+      "npc_social": {
+        "npc_id": "npc.fixer_contact",
+        "require_profile_available": true,
+        "forbid_unknown_fact_assertion": [
+          {
+            "fact_id": "homecoming.athena_drone.hidden_identity",
+            "terms": ["Athena", "内鬼", "double-cross", "回收指令"]
+          }
+        ],
+        "withheld_fact": {
+          "fact_id": "homecoming.fixer.safe_shutdown_sequence",
+          "terms": ["安全关机序列", "旁路接口", "维修后门"]
+        },
+        "forbid_player_text_leak": true
+      }
+    },
+    {
+      "user_input": "我把我看到的现场情况告诉她，问她认不认得这台设备，以及她愿意告诉我多少。",
+      "notes": "baseline_question: establish baseline dialogue. A deterministic NPC behavior plan must exist (persona + reveal/withhold sets). Reply is persona-consistent and mentions the 设备, but she withholds her secret (evasive) and never asserts the unknown Athena fact.",
+      "forbid_player_text": ["Athena", "内鬼", "double-cross", "回收指令", "安全关机序列", "旁路接口", "维修后门"],
+      "npc_social": {
+        "npc_id": "npc.fixer_contact",
+        "require_profile_available": true,
+        "require_behavior_plan": true,
+        "forbid_unknown_fact_assertion": [
+          {
+            "fact_id": "homecoming.athena_drone.hidden_identity",
+            "terms": ["Athena", "内鬼", "double-cross", "回收指令"]
+          }
+        ],
+        "withheld_fact": {
+          "fact_id": "homecoming.fixer.safe_shutdown_sequence",
+          "terms": ["安全关机序列", "旁路接口", "维修后门"]
+        },
+        "require_semantic_any": ["设备"],
+        "forbid_player_text_leak": true
+      }
+    },
+    {
+      "user_input": "我先不逼她。我把现场细节和我愿意帮忙的条件说清楚，答应先帮她处理眼前的风险，问她需要我做什么。",
+      "notes": "relationship_action: a natural, social relationship-changing action (offering help). It must produce an evidence-backed relationship delta (committed via the evidence-gated apply_delta/upsert path), not an unbounded LLM write. Her stance warms.",
+      "forbid_player_text": ["Athena", "内鬼", "double-cross", "回收指令", "安全关机序列", "旁路接口", "维修后门"],
+      "npc_social": {
+        "npc_id": "npc.fixer_contact",
+        "require_relationship_evidence": true,
+        "forbid_unknown_fact_assertion": [
+          {
+            "fact_id": "homecoming.athena_drone.hidden_identity",
+            "terms": ["Athena", "内鬼", "double-cross", "回收指令"]
+          }
+        ],
+        "withheld_fact": {
+          "fact_id": "homecoming.fixer.safe_shutdown_sequence",
+          "terms": ["安全关机序列", "旁路接口", "维修后门"]
+        },
+        "forbid_player_text_leak": true
+      }
+    },
+    {
+      "user_input": "我帮她稳住了眼前的麻烦，然后再问一次：现在你愿意具体告诉我什么？",
+      "notes": "changed_response: after the relationship warmed, she discloses the previously-withheld technical secret. Because the player now legitimately learns it, restating it is no longer a leak (it is a willing disclosure that respects knowledge + willingness). The reply observably changes from the evasive baseline.",
+      "npc_social": {
+        "npc_id": "npc.fixer_contact",
+        "require_response_changed": true,
+        "forbid_unknown_fact_assertion": [
+          {
+            "fact_id": "homecoming.athena_drone.hidden_identity",
+            "terms": ["Athena", "内鬼", "double-cross", "回收指令"]
+          }
+        ],
+        "withheld_fact": {
+          "fact_id": "homecoming.fixer.safe_shutdown_sequence",
+          "terms": ["安全关机序列", "旁路接口", "维修后门"]
+        },
+        "require_semantic_any": ["安全关机序列", "我就直说"],
+        "forbid_player_text_leak": true
+      }
+    },
+    {
+      "user_input": "我们上次谈到这里。她现在对我是什么态度，还愿意继续谈吗？",
+      "notes": "reload_revisit: after a process restart, both the warmed relationship and the NPC's own knowledge must survive and be consumed. Evidence relationship_reload/npc_knowledge_reload=true means the projections came from a fresh post-restart read. The reply shows continuity with the prior interaction.",
+      "npc_social": {
+        "npc_id": "npc.fixer_contact",
+        "require_relationship_reload": true,
+        "require_npc_knowledge_reload": true,
+        "forbid_unknown_fact_assertion": [
+          {
+            "fact_id": "homecoming.athena_drone.hidden_identity",
+            "terms": ["Athena", "内鬼", "double-cross", "回收指令"]
+          }
+        ],
+        "require_semantic_any": ["上次", "人情"],
+        "forbid_player_text_leak": true
+      }
+    }
+  ],
+  "forbidden_player_text": [],
+  "allow_debug_directives": false,
+  "allow_nonhuman_player_input": false,
+  "allow_manual_roll_input": false
+}

@@ -1,0 +1,59 @@
+{
+  "name": "jrny_home_03_committed_memory_reload",
+  "scenario_id": "JRNY-HOME-03-committed-memory-reload",
+  "scenario_version": "1",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "session_id": null,
+  "_derived_from": "TC-VS-MEM-01 Committed Memory and Reload vertical slice. Builds on the accepted HOME-01 knowledge journey and HOME-02 NPC/social journey. The committed memory under test is the relationship triple produced when the player helps the Homecoming technical NPC (`npc.fixer_contact`): a `memory_facts` row id `mf_rel_fixer_owes_player` carrying source_event_ids and committed via the proposal/review pipeline (TC-D3-03). Memory is NOT seeded — it is derived from a committed turn's extraction. The player-unknown Athena fact (homecoming.athena_drone.hidden_identity, terms per harness/cases/homecoming_no_spoiler_golden.json) must never enter the player-facing memory summary (DA-SPOIL-02).",
+  "setup": {
+    "character": {
+      "preferences": "技术型 Cyberpunk RED 角色，擅长观察、电子、维修，愿意与本地修理/fixer 圈子打交道，可立即开始第一幕。",
+      "auto_complete": true,
+      "require_persisted": true,
+      "require_session_binding": true
+    }
+  },
+  "stream_format": "jsonl",
+  "turns": [
+    {
+      "user_input": "我答应先帮那位技术中间人挡住眼前的麻烦，把我能做的条件都跟她讲清楚。",
+      "notes": "commit turn: a natural social/help action on a committed turn drives relationship extraction → a memory PROPOSAL (not a direct write) → a committed memory_facts row carrying source_event_ids. Idempotent by construction (memory_facts.fact_id UNIQUE). The player memory summary must not leak the player-unknown Athena fact. Trace links: player_action → committed_event → memory_proposal.",
+      "forbid_player_text": ["Athena", "内鬼", "double-cross", "回收指令"],
+      "memory": {
+        "memory_fact_id": "mf_rel_fixer_owes_player",
+        "require_proposal_from_committed": true,
+        "forbid_direct_commit": true,
+        "require_evidence_ids": true,
+        "require_idempotent": true,
+        "require_trace_links": ["player_action", "committed_event", "memory_proposal"],
+        "player_unknown_fact": {
+          "fact_id": "homecoming.athena_drone.hidden_identity",
+          "terms": ["Athena", "内鬼", "double-cross", "回收指令"]
+        },
+        "forbid_player_memory_summary_leak": true
+      }
+    },
+    {
+      "user_input": "我们重新坐下来。她还记得我上次帮过她吗，现在愿意怎么对我？",
+      "notes": "reload + consume turn: after a process restart the committed relationship memory is retrieved from durable state and consumed by later NPC behavior (she remembers the favor). Re-extraction on reload does not duplicate (idempotent). Full flight-recorder chain: player_action → committed_event → memory_proposal → projection → later_consumption. The player memory summary still does not leak the Athena fact.",
+      "forbid_player_text": ["Athena", "内鬼", "double-cross", "回收指令"],
+      "memory": {
+        "memory_fact_id": "mf_rel_fixer_owes_player",
+        "require_idempotent": true,
+        "require_reload_retrieval": true,
+        "require_later_consumption": true,
+        "require_trace_links": ["player_action", "committed_event", "memory_proposal", "projection", "later_consumption"],
+        "player_unknown_fact": {
+          "fact_id": "homecoming.athena_drone.hidden_identity",
+          "terms": ["Athena", "内鬼", "double-cross", "回收指令"]
+        },
+        "forbid_player_memory_summary_leak": true
+      }
+    }
+  ],
+  "forbidden_player_text": [],
+  "allow_debug_directives": false,
+  "allow_nonhuman_player_input": false,
+  "allow_manual_roll_input": false
+}

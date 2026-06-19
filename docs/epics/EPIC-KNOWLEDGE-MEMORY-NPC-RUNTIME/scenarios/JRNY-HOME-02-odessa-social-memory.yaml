@@ -1,0 +1,74 @@
+id: JRNY-HOME-02-odessa-social-memory
+version: 1
+acceptance_ids:
+  - DA-NPC-01
+  - DA-NPC-02
+  - DA-NPC-03
+  - DA-NPC-04
+  - DA-NPC-05
+  - DA-MEM-02
+  - DA-MEM-03
+ruleset_id: cyberpunk_red
+module_id: cyberpunk_red.homecoming
+
+setup:
+  database: isolated
+  assets: current_verified_bundle
+  character:
+    create_via: cli
+    preferences: "技术型但不鲁莽，愿意谈判，也会在必要时施压"
+    auto_complete: true
+    require_persisted: true
+    require_session_binding: true
+  session:
+    start_via: created_character_session
+    require_playable_scene: true
+
+player:
+  mode: adaptive_script
+  persona: "先礼貌询问，再根据回应选择帮助、交换信息或施压"
+  knowledge_source: player_view_only
+  max_trigger_attempts: 3
+
+chapters:
+  - id: reach_npc
+    when: session_ready
+    goal: "通过正常场景行动找到并与目标技术 NPC 交谈"
+    assert:
+      state: [stable_npc_identity, npc_profile_available]
+
+  - id: baseline_question
+    when: npc_conversation_open
+    action: "我把我看到的情况告诉她，问她是否认得这台设备，以及她愿意告诉我多少。"
+    assert:
+      state: [npc_behavior_plan_exists]
+      player_text_requires_semantic: [persona_consistent_reply]
+      player_text_forbids: [npc_unknown_or_withheld_secret]
+
+  - id: relationship_action
+    when: baseline_reply_received
+    branch_from_reply:
+      evasive: "我先不逼她。我把现场细节和我愿意帮忙的条件说清楚，问她需要我做什么才愿意合作。"
+      hostile: "我保持距离，指出我掌握的现场证据，要求她至少说明哪些操作会害死人。"
+      cooperative: "我答应先帮她处理眼前风险，但希望她之后把关键技术细节告诉我。"
+    trigger:
+      reachability: [social_interaction_detected]
+      mechanism: [relationship_delta_proposed_or_committed]
+    assert:
+      state: [relationship_delta_has_evidence]
+
+  - id: changed_response
+    when: relationship_delta_committed
+    action: "现在我再问一次：你愿意具体告诉我什么？"
+    assert:
+      player_text_requires_semantic: [response_changed_from_baseline]
+      player_text_forbids: [fact_npc_does_not_know]
+      state: [disclosure_respects_knowledge_and_willingness]
+
+  - id: reload_revisit
+    when: changed_response_passed
+    restart_process: true
+    action: "我们上次谈到这里。她现在对我是什么态度，还愿意继续谈吗？"
+    assert:
+      state: [relationship_survives_reload, npc_knowledge_survives_reload]
+      player_text_requires_semantic: [continuity_with_prior_interaction]

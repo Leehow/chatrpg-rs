@@ -19,7 +19,11 @@ struct FakeSink {
 
 impl FakeSink {
     fn new(alive_for: usize, proactive_close: bool) -> Self {
-        Self { sent: 0, alive_for, proactive_close }
+        Self {
+            sent: 0,
+            alive_for,
+            proactive_close,
+        }
     }
 }
 
@@ -48,7 +52,10 @@ struct FakeMarker {
 
 impl DisconnectMarker for FakeMarker {
     async fn record(&self, turn_id: &str, info: &DisconnectInfo) {
-        self.calls.lock().unwrap().push((turn_id.to_string(), *info));
+        self.calls
+            .lock()
+            .unwrap()
+            .push((turn_id.to_string(), *info));
     }
 }
 
@@ -62,7 +69,9 @@ fn stream_of(events: Vec<TurnEvent>) -> ReceiverStream<TurnEvent> {
 }
 
 fn narration_complete() -> TurnEvent {
-    TurnEvent::TurnComplete { outcome: TurnOutcome::Narration("done".into()) }
+    TurnEvent::TurnComplete {
+        outcome: TurnOutcome::Narration("done".into()),
+    }
 }
 
 // ---- 验收 #1：状态变更前断开 → 取消在途工作、不落半截回合 ----
@@ -91,7 +100,10 @@ async fn disconnect_before_state_mutation_cancels_and_persists_nothing() {
 
     assert_eq!(outcome, DriveOutcome::CancelledBeforeMutation);
     assert!(cancel.is_cancelled(), "应 fire 取消信号");
-    assert!(marker.calls.lock().unwrap().is_empty(), "未落账的回合不记 client_disconnected");
+    assert!(
+        marker.calls.lock().unwrap().is_empty(),
+        "未落账的回合不记 client_disconnected"
+    );
 }
 
 // ---- 验收 #2：状态变更后断开 → 续 critical finalize + 记 client_disconnected ----
@@ -233,7 +245,10 @@ async fn continue_policy_never_cancels_even_pre_mutation() {
     .await;
 
     assert_eq!(outcome, DriveOutcome::ContinuedAfterDisconnect);
-    assert!(!cancel.is_cancelled(), "ContinueAfterStateMutation 绝不取消");
+    assert!(
+        !cancel.is_cancelled(),
+        "ContinueAfterStateMutation 绝不取消"
+    );
     assert_eq!(marker.calls.lock().unwrap().len(), 1);
 }
 
@@ -261,13 +276,19 @@ async fn always_continue_drains_without_marker() {
 
     assert_eq!(outcome, DriveOutcome::ContinuedAfterDisconnect);
     assert!(!cancel.is_cancelled());
-    assert!(marker.calls.lock().unwrap().is_empty(), "AlwaysContinue 不记标记");
+    assert!(
+        marker.calls.lock().unwrap().is_empty(),
+        "AlwaysContinue 不记标记"
+    );
 }
 
 // ---- 配置：默认策略 = 安全省 token 的那个 ----
 #[test]
 fn default_policy_is_cancel_before_state_mutation() {
-    assert_eq!(CancellationPolicy::default(), CancellationPolicy::CancelBeforeStateMutation);
+    assert_eq!(
+        CancellationPolicy::default(),
+        CancellationPolicy::CancelBeforeStateMutation
+    );
 }
 
 // ---- 配置：per-request 可经 JSON snake_case 覆盖 ----
@@ -275,8 +296,7 @@ fn default_policy_is_cancel_before_state_mutation() {
 fn policy_deserializes_from_snake_case() {
     let p: CancellationPolicy = serde_json::from_str("\"always_continue\"").unwrap();
     assert_eq!(p, CancellationPolicy::AlwaysContinue);
-    let p: CancellationPolicy =
-        serde_json::from_str("\"continue_after_state_mutation\"").unwrap();
+    let p: CancellationPolicy = serde_json::from_str("\"continue_after_state_mutation\"").unwrap();
     assert_eq!(p, CancellationPolicy::ContinueAfterStateMutation);
     let p: CancellationPolicy = serde_json::from_str("\"cancel_before_state_mutation\"").unwrap();
     assert_eq!(p, CancellationPolicy::CancelBeforeStateMutation);

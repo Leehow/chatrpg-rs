@@ -58,7 +58,8 @@ async fn reveal_fact_tool_writes_fact_revealed_ledger() {
             &trpg_llm::AggregatedToolCall {
                 id: "call_reveal_1".to_string(),
                 name: "reveal_fact".to_string(),
-                arguments: serde_json::json!({"fact_id":"npc_butler","reason":"玩家读完日记"}).to_string(),
+                arguments: serde_json::json!({"fact_id":"npc_butler","reason":"玩家读完日记"})
+                    .to_string(),
             },
         )
         .await;
@@ -72,5 +73,16 @@ async fn reveal_fact_tool_writes_fact_revealed_ledger() {
     assert_eq!(
         db.list_revealed_facts(&session).await.unwrap(),
         vec!["npc_butler".to_string()]
+    );
+
+    // P0c：reveal_fact 写穿的域事件 kind 是 PlayerLearnedFact（取代旧 FactRevealed）。
+    let kind: String = sqlx::query_scalar("select kind from domain_events where event_id = $1")
+        .bind(format!("de_revealed_{session}_npc_butler"))
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        kind, "PlayerLearnedFact",
+        "reveal_fact 经派发后写 PlayerLearnedFact 域事件"
     );
 }

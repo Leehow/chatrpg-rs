@@ -49,12 +49,12 @@ fn entry(fact_id: &str, state: KnowledgeState) -> NpcKnowledgeEntry {
 
 #[test]
 fn npc_mind_view_excludes_unknown_fact() {
-    // The NPC knows fact_known, but is "unknown" / merely "exposed to" the others.
+    // The NPC knows fact_known, but only "heard about" / is "unknown" of the others.
     // Only knows_true + belief states are projected; weaker/unknown states are excluded.
     let entries = vec![
         entry("fact_known", KnowledgeState::KnowsTrue),
         entry("fact_unknown", KnowledgeState::Unknown),
-        entry("fact_rumor", KnowledgeState::Exposed),
+        entry("fact_rumor", KnowledgeState::HeardAbout),
     ];
     let view = NpcMindView::build(
         "sess1",
@@ -66,8 +66,14 @@ fn npc_mind_view_excludes_unknown_fact() {
     .unwrap();
     let ids: Vec<&str> = view.facts.iter().map(|f| f.fact_id.as_str()).collect();
     assert!(ids.contains(&"fact_known"), "known fact must appear");
-    assert!(!ids.contains(&"fact_unknown"), "unknown fact must be excluded");
-    assert!(!ids.contains(&"fact_rumor"), "weak/heard-about fact must be excluded");
+    assert!(
+        !ids.contains(&"fact_unknown"),
+        "unknown fact must be excluded"
+    );
+    assert!(
+        !ids.contains(&"fact_rumor"),
+        "weak/heard-about fact must be excluded"
+    );
 }
 
 #[test]
@@ -75,9 +81,9 @@ fn npc_mind_view_includes_false_belief_as_belief() {
     let entries = vec![
         entry("fact_true", KnowledgeState::KnowsTrue),
         entry("fact_false", KnowledgeState::BelievesFalse),
+        entry("fact_misinfo", KnowledgeState::Misinformed),
     ];
-    let view =
-        NpcMindView::build("sess1", "npc_alice", &profile(), &[], &entries).unwrap();
+    let view = NpcMindView::build("sess1", "npc_alice", &profile(), &[], &entries).unwrap();
 
     let standing = |id: &str| {
         view.facts
@@ -91,6 +97,7 @@ fn npc_mind_view_includes_false_belief_as_belief() {
         Some(NpcFactStanding::Belief),
         "a false belief must be marked as a belief, not known truth"
     );
+    assert_eq!(standing("fact_misinfo"), Some(NpcFactStanding::Belief));
 
     // The speech context must label beliefs as not-fact and never as known truth.
     let ctx = view.speech_context();
@@ -107,12 +114,20 @@ fn npc_speech_prompt_uses_npc_knowledge_not_gm_truth() {
     // NOT hold is never passed into the mind view, so the prompt built from the view
     // cannot contain it. The GM-only PROFILE secret is also structurally absent.
     let entries = vec![entry("alice_knows", KnowledgeState::KnowsTrue)];
-    let view =
-        NpcMindView::build("sess1", "npc_alice", &profile(), &[relationship()], &entries)
-            .unwrap();
+    let view = NpcMindView::build(
+        "sess1",
+        "npc_alice",
+        &profile(),
+        &[relationship()],
+        &entries,
+    )
+    .unwrap();
     let ctx = view.speech_context();
 
-    assert!(ctx.contains("alice_knows"), "the NPC's own knowledge is present");
+    assert!(
+        ctx.contains("alice_knows"),
+        "the NPC's own knowledge is present"
+    );
     assert!(
         !ctx.contains("gm_secret_fact"),
         "a GM world truth the NPC doesn't know must not appear in the speech prompt"
@@ -126,9 +141,14 @@ fn npc_speech_prompt_uses_npc_knowledge_not_gm_truth() {
 #[test]
 fn npc_mind_view_includes_persona_and_relationship() {
     let entries = vec![entry("fact_a", KnowledgeState::KnowsTrue)];
-    let view =
-        NpcMindView::build("sess1", "npc_alice", &profile(), &[relationship()], &entries)
-            .unwrap();
+    let view = NpcMindView::build(
+        "sess1",
+        "npc_alice",
+        &profile(),
+        &[relationship()],
+        &entries,
+    )
+    .unwrap();
 
     // Persona (safe view) is present in compact form.
     assert_eq!(view.persona.actor_id, "npc_alice");
@@ -141,7 +161,10 @@ fn npc_mind_view_includes_persona_and_relationship() {
     assert_eq!(view.relationships.len(), 1);
     let summary = &view.relationships[0];
     assert_eq!(summary.target_kind, "player_party");
-    assert!(summary.fear > 0, "threat raised fear in the compact summary");
+    assert!(
+        summary.fear > 0,
+        "threat raised fear in the compact summary"
+    );
     assert!(
         ctx.to_lowercase().contains("attitude") || ctx.to_lowercase().contains("toward"),
         "relationship appears in the speech context"
@@ -187,15 +210,30 @@ fn two_npc_mind_views_diverge_on_same_fact() {
     .unwrap();
 
     // Same fact id, divergent standing per holder.
-    assert_eq!(alice.known_fact_ids(), vec![shared], "NPC A knows the fact as true");
-    assert!(alice.belief_fact_ids().is_empty(), "NPC A holds no belief on it");
-    assert_eq!(bob.belief_fact_ids(), vec![shared], "NPC B merely believes (falsely)");
+    assert_eq!(
+        alice.known_fact_ids(),
+        vec![shared],
+        "NPC A knows the fact as true"
+    );
+    assert!(
+        alice.belief_fact_ids().is_empty(),
+        "NPC A holds no belief on it"
+    );
+    assert_eq!(
+        bob.belief_fact_ids(),
+        vec![shared],
+        "NPC B merely believes (falsely)"
+    );
     assert!(
         bob.known_fact_ids().is_empty(),
         "NPC B's false belief must never be reported as known truth"
     );
     // A belief is structurally a Belief standing, not Known — never world truth.
-    let bob_standing = bob.facts.iter().find(|f| f.fact_id == shared).map(|f| f.standing);
+    let bob_standing = bob
+        .facts
+        .iter()
+        .find(|f| f.fact_id == shared)
+        .map(|f| f.standing);
     assert_eq!(bob_standing, Some(NpcFactStanding::Belief));
     // Neither view borrows the other's standing: B's speech context labels the fact as a
     // belief (not fact); A's reports it as known.

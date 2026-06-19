@@ -21,7 +21,7 @@ tokio.workspace = true
 chrono.workspace = true
 dotenvy.workspace = true
 sqlx.workspace = true
-
-[dev-dependencies]
+# Reuse the production knowledge-leak verifier (`scan_player_visible_leak`,
+# `FactSurfaceMarker`) so the harness's deterministic post-output spoiler check is
+# the SAME mechanism the GM's NoSpoiler plugin uses, not a parallel reimplementation.
 trpg-model = { path = "../trpg-model" }
-trpg-runtime = { path = "../trpg-runtime" }

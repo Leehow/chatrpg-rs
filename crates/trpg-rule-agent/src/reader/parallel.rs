@@ -36,17 +36,42 @@ pub async fn plan_phase(client: &dyn LlmClient, ruleset: &str, toc: &str) -> Res
         .await
         .unwrap_or_else(|_| json!({}));
     Ok(Plan {
-        identity: v.get("identity").and_then(Value::as_str).unwrap_or("").into(),
-        hypothesis: v.get("hypothesis").and_then(Value::as_str).unwrap_or("").into(),
-        res_hint: v.pointer("/hints/resolution").and_then(Value::as_str).unwrap_or("").into(),
-        char_hint: v.pointer("/hints/character").and_then(Value::as_str).unwrap_or("").into(),
-        gm_hint: v.pointer("/hints/gm").and_then(Value::as_str).unwrap_or("").into(),
+        identity: v
+            .get("identity")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .into(),
+        hypothesis: v
+            .get("hypothesis")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .into(),
+        res_hint: v
+            .pointer("/hints/resolution")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .into(),
+        char_hint: v
+            .pointer("/hints/character")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .into(),
+        gm_hint: v
+            .pointer("/hints/gm")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .into(),
     })
 }
 
 fn slice_tools(submit_name: &str, props: Value, required: &[&str]) -> Vec<Value> {
     let mut t = tools::nav_tools();
-    t.push(tools::submit_tool(submit_name, "Submit your slice's fields, grounded in pages you read.", props, required));
+    t.push(tools::submit_tool(
+        submit_name,
+        "Submit your slice's fields, grounded in pages you read.",
+        props,
+        required,
+    ));
     t
 }
 
@@ -106,12 +131,37 @@ pub struct CharacterSlice {
     pub source_pages: String,
 }
 
-pub async fn read_character_slice(client: &dyn LlmClient, units: &[Unit], ruleset: &str, plan: &Plan, budget: usize) -> Result<CharacterSlice> {
+pub async fn read_character_slice(
+    client: &dyn LlmClient,
+    units: &[Unit],
+    ruleset: &str,
+    plan: &Plan,
+    budget: usize,
+) -> Result<CharacterSlice> {
     let toc = tools::toc(units, 40);
-    let char_tools = slice_tools("submit_character", char_props(), &["character", "character_template", "source_pages"]);
+    let char_tools = slice_tools(
+        "submit_character",
+        char_props(),
+        &["character", "character_template", "source_pages"],
+    );
     let char_sys = char_sys_prompt();
-    let char_seed = seed(ruleset, &toc, &plan.hypothesis, "character", &plan.char_hint);
-    let c = run_loop(client, units, &char_sys, &char_seed, &char_tools, budget + 6, false).await?;
+    let char_seed = seed(
+        ruleset,
+        &toc,
+        &plan.hypothesis,
+        "character",
+        &plan.char_hint,
+    );
+    let c = run_loop(
+        client,
+        units,
+        &char_sys,
+        &char_seed,
+        &char_tools,
+        budget + 6,
+        false,
+    )
+    .await?;
     Ok(CharacterSlice {
         character: c.run_kit.character,
         character_template: c.run_kit.character_template,
@@ -131,16 +181,49 @@ pub struct ResolutionGm {
     pub source_pages: String,
 }
 
-pub async fn read_resolution_and_gm(client: &dyn LlmClient, units: &[Unit], ruleset: &str, plan: &Plan, budget: usize) -> Result<ResolutionGm> {
+pub async fn read_resolution_and_gm(
+    client: &dyn LlmClient,
+    units: &[Unit],
+    ruleset: &str,
+    plan: &Plan,
+    budget: usize,
+) -> Result<ResolutionGm> {
     let toc = tools::toc(units, 40);
-    let res_tools = slice_tools("submit_resolution", res_props(), &["core_resolution", "core", "source_pages"]);
-    let gm_tools = slice_tools("submit_gm", gm_props(), &["game_identity", "subsystem_map", "gm_procedures", "source_pages"]);
+    let res_tools = slice_tools(
+        "submit_resolution",
+        res_props(),
+        &["core_resolution", "core", "source_pages"],
+    );
+    let gm_tools = slice_tools(
+        "submit_gm",
+        gm_props(),
+        &[
+            "game_identity",
+            "subsystem_map",
+            "gm_procedures",
+            "source_pages",
+        ],
+    );
     let res_sys = res_sys_prompt();
     let gm_sys = gm_sys_prompt();
-    let res_seed = seed(ruleset, &toc, &plan.hypothesis, "resolution", &plan.res_hint);
+    let res_seed = seed(
+        ruleset,
+        &toc,
+        &plan.hypothesis,
+        "resolution",
+        &plan.res_hint,
+    );
     let gm_seed = seed(ruleset, &toc, &plan.hypothesis, "gm+world", &plan.gm_hint);
     let (r, g) = tokio::join!(
-        run_loop(client, units, &res_sys, &res_seed, &res_tools, budget + 5, true),
+        run_loop(
+            client,
+            units,
+            &res_sys,
+            &res_seed,
+            &res_tools,
+            budget + 5,
+            true
+        ),
         run_loop(client, units, &gm_sys, &gm_seed, &gm_tools, budget, false),
     );
     let (r, g) = (r?, g?);
@@ -155,7 +238,12 @@ pub async fn read_resolution_and_gm(client: &dyn LlmClient, units: &[Unit], rule
     })
 }
 
-pub async fn run_reader_parallel(client: &dyn LlmClient, units: &[Unit], ruleset: &str, budget: usize) -> Result<ReaderResult> {
+pub async fn run_reader_parallel(
+    client: &dyn LlmClient,
+    units: &[Unit],
+    ruleset: &str,
+    budget: usize,
+) -> Result<ReaderResult> {
     let toc = tools::toc(units, 40);
     let plan = plan_phase(client, ruleset, &toc).await?;
 
@@ -164,27 +252,78 @@ pub async fn run_reader_parallel(client: &dyn LlmClient, units: &[Unit], ruleset
     // fns) so it can aggregate per-slice telemetry field-for-field, while the
     // public `read_character_slice` / `read_resolution_and_gm` fns expose just the
     // staged orchestrator's needs.
-    let res_tools = slice_tools("submit_resolution", res_props(), &["core_resolution", "core", "source_pages"]);
-    let char_tools = slice_tools("submit_character", char_props(), &["character", "character_template", "source_pages"]);
-    let gm_tools = slice_tools("submit_gm", gm_props(), &["game_identity", "subsystem_map", "gm_procedures", "source_pages"]);
+    let res_tools = slice_tools(
+        "submit_resolution",
+        res_props(),
+        &["core_resolution", "core", "source_pages"],
+    );
+    let char_tools = slice_tools(
+        "submit_character",
+        char_props(),
+        &["character", "character_template", "source_pages"],
+    );
+    let gm_tools = slice_tools(
+        "submit_gm",
+        gm_props(),
+        &[
+            "game_identity",
+            "subsystem_map",
+            "gm_procedures",
+            "source_pages",
+        ],
+    );
 
     let res_sys = res_sys_prompt();
     let char_sys = char_sys_prompt();
     let gm_sys = gm_sys_prompt();
 
-    let res_seed = seed(ruleset, &toc, &plan.hypothesis, "resolution", &plan.res_hint);
-    let char_seed = seed(ruleset, &toc, &plan.hypothesis, "character", &plan.char_hint);
+    let res_seed = seed(
+        ruleset,
+        &toc,
+        &plan.hypothesis,
+        "resolution",
+        &plan.res_hint,
+    );
+    let char_seed = seed(
+        ruleset,
+        &toc,
+        &plan.hypothesis,
+        "character",
+        &plan.char_hint,
+    );
     let gm_seed = seed(ruleset, &toc, &plan.hypothesis, "gm+world", &plan.gm_hint);
     // Resolution must nail the dice; the character branch goes DEEP for a
     // complete buildable sheet -> both get more budget than the lean gm slice.
-    let res_fut = run_loop(client, units, &res_sys, &res_seed, &res_tools, budget + 5, true);
-    let char_fut = run_loop(client, units, &char_sys, &char_seed, &char_tools, budget + 6, false);
+    let res_fut = run_loop(
+        client,
+        units,
+        &res_sys,
+        &res_seed,
+        &res_tools,
+        budget + 5,
+        true,
+    );
+    let char_fut = run_loop(
+        client,
+        units,
+        &char_sys,
+        &char_seed,
+        &char_tools,
+        budget + 6,
+        false,
+    );
     let gm_fut = run_loop(client, units, &gm_sys, &gm_seed, &gm_tools, budget, false);
 
     let (r, c, g) = tokio::join!(res_fut, char_fut, gm_fut);
     let (r, c, g) = (r?, c?, g?);
 
-    let pick = |a: String, b: &str| if a.trim().is_empty() { b.to_string() } else { a };
+    let pick = |a: String, b: &str| {
+        if a.trim().is_empty() {
+            b.to_string()
+        } else {
+            a
+        }
+    };
     let run_kit = GmRunKit {
         game_identity: pick(g.run_kit.game_identity, &plan.identity),
         core_resolution: r.run_kit.core_resolution,
@@ -192,7 +331,12 @@ pub async fn run_reader_parallel(client: &dyn LlmClient, units: &[Unit], ruleset
         character: c.run_kit.character,
         subsystem_map: g.run_kit.subsystem_map,
         gm_procedures: g.run_kit.gm_procedures,
-        source_pages: [r.run_kit.source_pages, c.run_kit.source_pages, g.run_kit.source_pages].join(" ; "),
+        source_pages: [
+            r.run_kit.source_pages,
+            c.run_kit.source_pages,
+            g.run_kit.source_pages,
+        ]
+        .join(" ; "),
         core: r.run_kit.core,
         character_template: c.run_kit.character_template,
         option_catalogs: c.run_kit.option_catalogs,

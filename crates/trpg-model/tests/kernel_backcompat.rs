@@ -45,9 +45,18 @@ fn old_coc_kernel_json_deserializes_unchanged() {
         fixture["character_sheet_schema"],
         "character_sheet_schema survives byte-for-byte"
     );
-    assert_eq!(kernel.kernel_id, fixture["kernel_id"].as_str().unwrap_or_default());
-    assert_eq!(kernel.ruleset_id, fixture["ruleset_id"].as_str().unwrap_or_default());
-    assert_eq!(kernel.version, fixture["version"].as_str().unwrap_or_default());
+    assert_eq!(
+        kernel.kernel_id,
+        fixture["kernel_id"].as_str().unwrap_or_default()
+    );
+    assert_eq!(
+        kernel.ruleset_id,
+        fixture["ruleset_id"].as_str().unwrap_or_default()
+    );
+    assert_eq!(
+        kernel.version,
+        fixture["version"].as_str().unwrap_or_default()
+    );
 
     // Re-serializing the upgraded struct must still not disturb old regions.
     let v2 = serde_json::to_value(&kernel).expect("re-serialize kernel");
@@ -55,13 +64,31 @@ fn old_coc_kernel_json_deserializes_unchanged() {
     assert_eq!(v2["dice_core"], fixture["dice_core"]);
 
     // P0-2 Task 1: new policy fields default to None on a pre-P0-2 kernel.
-    assert!(kernel.combat_profile.is_none(), "missing combat_profile → None");
-    assert!(kernel.combat_mode_policy.is_none(), "missing combat_mode_policy → None");
-    assert!(kernel.check_label_policy.is_none(), "missing check_label_policy → None");
-    assert!(kernel.referee_value_bands.is_none(), "missing referee_value_bands → None");
-    assert!(kernel.dice_qualification.is_none(), "missing dice_qualification → None");
+    assert!(
+        kernel.combat_profile.is_none(),
+        "missing combat_profile → None"
+    );
+    assert!(
+        kernel.combat_mode_policy.is_none(),
+        "missing combat_mode_policy → None"
+    );
+    assert!(
+        kernel.check_label_policy.is_none(),
+        "missing check_label_policy → None"
+    );
+    assert!(
+        kernel.referee_value_bands.is_none(),
+        "missing referee_value_bands → None"
+    );
+    assert!(
+        kernel.dice_qualification.is_none(),
+        "missing dice_qualification → None"
+    );
     // re-serializing a None-policy kernel must not emit the new keys (clean old layout).
-    assert!(v2.get("combat_profile").is_none(), "None policy field must not serialize a key");
+    assert!(
+        v2.get("combat_profile").is_none(),
+        "None policy field must not serialize a key"
+    );
 }
 
 #[test]

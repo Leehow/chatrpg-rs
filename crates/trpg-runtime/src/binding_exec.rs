@@ -26,7 +26,10 @@ pub fn binding_takeover_enabled() -> bool {
 /// 不改写进程级 env 即可单测（并发 set_var/getenv 在 glibc 上是数据竞争，见 lazy_object_schema_policy）。
 fn takeover_flag_from(raw: Option<String>) -> bool {
     match raw {
-        Some(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"),
+        Some(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        ),
         None => true,
     }
 }
@@ -38,7 +41,11 @@ pub fn check_binding_plan(kernel: &RuleKernel) -> BindingPlan {
         .into_iter()
         .filter(|f| f.facet_kind == "check_model")
         .collect();
-    resolve_binding("ruleset_check", &check_facets, &CapabilityRegistry::with_defaults())
+    resolve_binding(
+        "ruleset_check",
+        &check_facets,
+        &CapabilityRegistry::with_defaults(),
+    )
 }
 
 /// 该 plan 是否授权 Rust 机械执行检定：verdict=Exact + tier=ExactExecution + capability 是
@@ -99,7 +106,10 @@ mod tests {
 
     #[test]
     fn takeover_default_on_and_disable_values() {
-        assert!(takeover_flag_from(None), "未设置必须默认开（binding 接管，已等价证明）");
+        assert!(
+            takeover_flag_from(None),
+            "未设置必须默认开（binding 接管，已等价证明）"
+        );
         for off in ["0", "false", "off", "no", "OFF", " No "] {
             assert!(!takeover_flag_from(Some(off.into())), "{off} 应关回原路径");
         }

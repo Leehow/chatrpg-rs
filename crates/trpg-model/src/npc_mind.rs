@@ -12,9 +12,10 @@
 //!   through the TC-KNOW-00 actor-identity contract and refuses display names /
 //!   placeholders / ad-hoc strings, and refuses a profile anchored to a different NPC.
 //! - **Knowledge vs belief is explicit.** `knows_true` projects as
-//!   [`NpcFactStanding::Known`]; the belief state (`believes_false`, P0b's only belief
-//!   token) projects as [`NpcFactStanding::Belief`] and is NEVER reported as known truth
-//!   or GM world truth. Every other state (`unknown` / `exposed`) is excluded.
+//!   [`NpcFactStanding::Known`]; the belief states (`believes_true` / `believes_false`
+//!   / `misinformed`) project as [`NpcFactStanding::Belief`] and are NEVER reported as
+//!   known truth or GM world truth. Every other state (unknown / heard_about / etc.) is
+//!   excluded.
 //! - **No GM truth, no other holders.** The view only ever sees this NPC's own edges
 //!   (the DB query filters by holder); GM-only world truth and player_party/other-NPC
 //!   edges cannot enter. The speech context is built purely from this view, so it
@@ -29,20 +30,20 @@ use crate::KnowledgeHolder;
 use serde::{Deserialize, Serialize};
 
 /// Whether a projected fact is known truth (for this NPC) or a belief. A belief is
-/// never world truth — `believes_false` is an honest mistake the NPC holds, and must be
-/// labeled as such so a prompt never treats it as fact.
+/// never world truth — `believes_false` / `misinformed` are honest mistakes the NPC
+/// holds, and must be labeled as such so a prompt never treats them as fact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NpcFactStanding {
     /// `knows_true`: known truth for this NPC.
     Known,
-    /// `believes_false` (P0b's belief token): a belief, NOT world truth.
+    /// `believes_true` / `believes_false` / `misinformed`: a belief, NOT world truth.
     Belief,
 }
 
 /// One fact in an NPC's mind, with its standing preserved. `state` keeps the exact
-/// underlying [`KnowledgeState`] for fidelity; `standing` is the coarse known-vs-belief
-/// label callers usually branch on.
+/// underlying [`KnowledgeState`] (e.g. `believes_false` vs `misinformed`) for fidelity;
+/// `standing` is the coarse known-vs-belief label callers usually branch on.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NpcMindFact {
     pub fact_id: String,
@@ -264,7 +265,10 @@ impl NpcMindView {
 
         let known = self.known_fact_ids();
         if !known.is_empty() {
-            lines.push(format!("Known facts (true to this NPC): {}", known.join(", ")));
+            lines.push(format!(
+                "Known facts (true to this NPC): {}",
+                known.join(", ")
+            ));
         }
         let beliefs = self.belief_fact_ids();
         if !beliefs.is_empty() {
@@ -293,16 +297,37 @@ mod tests {
 
     #[test]
     fn only_known_and_belief_states_project() {
-        // P0b 4-态：knows_true → Known，believes_false → Belief，unknown/exposed 排除。
         let entries = vec![
-            NpcKnowledgeEntry { fact_id: "k".into(), state: KnowledgeState::KnowsTrue },
-            NpcKnowledgeEntry { fact_id: "bf".into(), state: KnowledgeState::BelievesFalse },
-            NpcKnowledgeEntry { fact_id: "u".into(), state: KnowledgeState::Unknown },
-            NpcKnowledgeEntry { fact_id: "ex".into(), state: KnowledgeState::Exposed },
+            NpcKnowledgeEntry {
+                fact_id: "k".into(),
+                state: KnowledgeState::KnowsTrue,
+            },
+            NpcKnowledgeEntry {
+                fact_id: "bt".into(),
+                state: KnowledgeState::BelievesTrue,
+            },
+            NpcKnowledgeEntry {
+                fact_id: "bf".into(),
+                state: KnowledgeState::BelievesFalse,
+            },
+            NpcKnowledgeEntry {
+                fact_id: "mi".into(),
+                state: KnowledgeState::Misinformed,
+            },
+            NpcKnowledgeEntry {
+                fact_id: "u".into(),
+                state: KnowledgeState::Unknown,
+            },
+            NpcKnowledgeEntry {
+                fact_id: "su".into(),
+                state: KnowledgeState::Suspects,
+            },
         ];
         let v = NpcMindView::build("s", "npc_lars", &profile(), &[], &entries).unwrap();
         assert_eq!(v.known_fact_ids(), vec!["k"]);
-        assert_eq!(v.belief_fact_ids(), vec!["bf"]);
+        let mut beliefs = v.belief_fact_ids();
+        beliefs.sort();
+        assert_eq!(beliefs, vec!["bf", "bt", "mi"]);
     }
 
     #[test]
@@ -312,14 +337,19 @@ mod tests {
         let other =
             NpcRelationship::new("s", "npc_other", NpcRelationshipTarget::PlayerParty).unwrap();
         let v = NpcMindView::build("s", "npc_lars", &profile(), &[mine, other], &[]).unwrap();
-        assert_eq!(v.relationships.len(), 1, "only this NPC's relationship survives");
+        assert_eq!(
+            v.relationships.len(),
+            1,
+            "only this NPC's relationship survives"
+        );
     }
 
     #[test]
     fn summary_reflects_threatened_relationship() {
         let mut rel =
             NpcRelationship::new("s", "npc_lars", NpcRelationshipTarget::PlayerParty).unwrap();
-        rel.apply_delta(&NpcRelationshipDelta::threat(vec!["e".into()])).unwrap();
+        rel.apply_delta(&NpcRelationshipDelta::threat(vec!["e".into()]))
+            .unwrap();
         let s = RelationshipSummary::from_relationship(&rel);
         assert_eq!(s.target_kind, "player_party");
         assert!(s.fear > 0 && s.trust < 0);

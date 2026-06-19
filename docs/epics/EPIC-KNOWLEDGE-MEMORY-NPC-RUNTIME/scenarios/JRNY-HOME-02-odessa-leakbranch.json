@@ -1,0 +1,51 @@
+{
+  "name": "jrny_home_02_odessa_leakbranch",
+  "scenario_id": "JRNY-HOME-02-odessa-leakbranch",
+  "scenario_version": "1",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "session_id": null,
+  "_derived_from": "Negative-control sibling of JRNY-HOME-02-odessa-social-memory. Same technical NPC (npc.fixer_contact) and same withheld secret (homecoming.fixer.safe_shutdown_sequence), but the recorded baseline narration makes the NPC blurt the withheld secret while the player does not yet know it. The harness must FAIL CLOSED with NPC_SOCIAL state WITHHELD_SECRET_LEAKED — proving the NPC-disclosure guard is not advisory.",
+  "setup": {
+    "character": {
+      "preferences": "技术型 Cyberpunk RED 角色，擅长观察、电子、维修，可立即开始第一幕。",
+      "auto_complete": true,
+      "require_persisted": true,
+      "require_session_binding": true
+    }
+  },
+  "stream_format": "jsonl",
+  "turns": [
+    {
+      "user_input": "我顺着现场的线索找到那位本地技术中间人，先礼貌地打个招呼，问她现在方不方便聊两句。",
+      "notes": "reach_npc (control): same as the success scenario — passes.",
+      "npc_social": {
+        "npc_id": "npc.fixer_contact",
+        "require_profile_available": true,
+        "withheld_fact": {
+          "fact_id": "homecoming.fixer.safe_shutdown_sequence",
+          "terms": ["安全关机序列", "旁路接口", "维修后门"]
+        },
+        "forbid_player_text_leak": true
+      }
+    },
+    {
+      "user_input": "我把我看到的现场情况告诉她，问她认不认得这台设备，以及她愿意告诉我多少。",
+      "notes": "baseline_question (control): the recorded narration LEAKS the withheld secret before any relationship change and before the player knows it. Must classify WITHHELD_SECRET_LEAKED.",
+      "npc_social": {
+        "npc_id": "npc.fixer_contact",
+        "require_behavior_plan": true,
+        "withheld_fact": {
+          "fact_id": "homecoming.fixer.safe_shutdown_sequence",
+          "terms": ["安全关机序列", "旁路接口", "维修后门"]
+        },
+        "require_semantic_any": ["设备"],
+        "forbid_player_text_leak": true
+      }
+    }
+  ],
+  "forbidden_player_text": [],
+  "allow_debug_directives": false,
+  "allow_nonhuman_player_input": false,
+  "allow_manual_roll_input": false
+}

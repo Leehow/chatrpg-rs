@@ -1,0 +1,38 @@
+{
+  "name": "tc_jrny_01_cyberpunk_check_dependent",
+  "scenario_id": "JRNY-CYBER-PERCEPTION-FAILCLOSED",
+  "scenario_version": "1",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "session_id": null,
+  "setup": {
+    "character": {
+      "preferences": "Create a playable Cyberpunk RED Solo for a Homecoming one-shot. Prioritize REF, BODY, Handgun, Perception, Evasion, a heavy pistol, armor, and enough HP/defense data for a first scene. The player character should be ready for immediate play.",
+      "auto_complete": true,
+      "require_persisted": true,
+      "require_session_binding": true
+    }
+  },
+  "stream_format": "jsonl",
+  "turns": [
+    {
+      "user_input": "我压低声音靠近公寓门口，先仔细观察有没有埋伏的迹象。",
+      "notes": "Check-dependent action. Under Journey v3 this must reach a real, resolved check. The live engine gap (no source-backed cyberpunk_red target number) makes the contest row provisional, so this checkpoint should classify as TRIGGERED_NO_MECHANISM, NOT a PASS.",
+      "expect_phases": ["done"],
+      "forbid_player_text": ["没有角色卡", "角色卡", "不能合法结算"],
+      "if_not_triggered": "我贴着墙慢慢推开门，认真判断门后是否有人埋伏，并据此决定下一步。",
+      "check": {
+        "label": "scan_for_ambush",
+        "require_dice": true,
+        "require_check_resolution": true,
+        "require_player_visible_effect": true,
+        "player_visible_effect_any": ["发现", "埋伏", "成功", "失败", "察觉", "没有动静"]
+      }
+    }
+  ],
+  "forbidden_player_text": [],
+  "evaluator_instructions": null,
+  "allow_debug_directives": false,
+  "allow_nonhuman_player_input": false,
+  "allow_manual_roll_input": false
+}

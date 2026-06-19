@@ -50,7 +50,12 @@ pub fn resolve_entity_refs(surfaced: &[(String, String)], graph: &ModuleGraph) -
         .iter()
         .filter_map(|(id, kind)| {
             let v = find_entity_value(graph, id)?;
-            let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+            let name = v
+                .get("name")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
             let prose = v
                 .get("body")
                 .or_else(|| v.get("summary"))
@@ -61,7 +66,12 @@ pub fn resolve_entity_refs(surfaced: &[(String, String)], graph: &ModuleGraph) -
             if name.is_empty() && prose.is_empty() {
                 return None;
             }
-            Some(EntityRef { id: id.clone(), kind: kind.clone(), name, prose })
+            Some(EntityRef {
+                id: id.clone(),
+                kind: kind.clone(),
+                name,
+                prose,
+            })
         })
         .collect()
 }
@@ -80,7 +90,12 @@ pub fn build_relationship_messages(narration: &str, entities: &[EntityRef]) -> V
         return {\"triples\":[]}.";
     let entity_lines = entities
         .iter()
-        .map(|e| format!("- id={} kind={} name=\"{}\" :: {}", e.id, e.kind, e.name, e.prose))
+        .map(|e| {
+            format!(
+                "- id={} kind={} name=\"{}\" :: {}",
+                e.id, e.kind, e.name, e.prose
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
     let usr = format!(
@@ -136,11 +151,17 @@ pub fn parse_relationship_triples(
         }
         let summary = {
             let s = str_field("summary");
-            if s.is_empty() { format!("{subject} {predicate} {object}") } else { s.to_string() }
+            if s.is_empty() {
+                format!("{subject} {predicate} {object}")
+            } else {
+                s.to_string()
+            }
         };
         // 稳定身份 = (session, subject, predicate, object) → 跨回合 upsert 幂等、批内去重。
-        let fact_id =
-            format!("mf_rel_{}", &sha256_hex(format!("{session_id}|{subject}|{predicate}|{object}"))[..16]);
+        let fact_id = format!(
+            "mf_rel_{}",
+            &sha256_hex(format!("{session_id}|{subject}|{predicate}|{object}"))[..16]
+        );
         if !seen.insert(fact_id.clone()) {
             continue;
         }
@@ -160,7 +181,10 @@ pub fn parse_relationship_triples(
         out.push(MemoryFact {
             fact_id,
             session_id: session_id.to_string(),
-            scope: Scope { scope_type: ScopeType::Session, scope_id: session_id.to_string() },
+            scope: Scope {
+                scope_type: ScopeType::Session,
+                scope_id: session_id.to_string(),
+            },
             visibility: Visibility::GmOnly,
             subject: subject.to_string(),
             predicate: predicate.to_string(),
@@ -179,10 +203,93 @@ pub fn parse_relationship_triples(
     out
 }
 
+/// TC-D3-04 社交闸（确定性、纯函数、无 IO）：判定本回合是否值得跑关系抽取。
+///
+/// 触发条件（任一为真即跑）：
+/// 1. **本回合 surface 了新实体**（`surfaced_new_this_turn`）——已知实体集变了，原有成本闸。
+/// 2. **至少一个 active NPC 在场，且玩家输入或念白含明确社交互动信号**
+///    （[`text_has_social_signal`]）——威胁/讨价/帮助/欺骗/说服等会改变关系但不 surface
+///    新实体的重复社交。
+///
+/// 成本控制仍确定性：**仅 active NPC 非空并不触发**（环境念白里有 NPC 但无社交意图的普通
+/// 回合照常跳过），必须配一个 source-backed 社交动词信号才在「无新实体」时开闸。
+pub fn relationship_gate_should_run(
+    surfaced_new_this_turn: bool,
+    active_npc_count: usize,
+    player_input: &str,
+    narration: &str,
+) -> bool {
+    if surfaced_new_this_turn {
+        return true;
+    }
+    active_npc_count >= 1
+        && (text_has_social_signal(player_input) || text_has_social_signal(narration))
+}
+
+/// 确定性社交信号扫描（保守、source-backed）：仅在文本出现明确社交意图动词时为真，绝不
+/// 因「有 NPC 在场」这种环境念白就判真。英文按**字母 token 前缀**匹配动词词干（避免
+/// `task`⊅`ask` 这类子串误判，并覆盖时态/派生：asked/asking/threatening…）；中文用**多字**
+/// 词条做子串匹配（避免裸「问/帮」命中「问题/帮派」）。
+///
+/// 刻意不收的（避免误判，见 handoff）：裸英文 `lie`（撞 lieutenant，欺骗已由 deceive/
+/// deception 覆盖）、裸 `beg`（撞 begin/began）；裸中文单字 `问`/`帮`（撞 问题/帮派）。
+pub fn text_has_social_signal(text: &str) -> bool {
+    // 中文多字社交词条（子串匹配，CJK 无词边界）。
+    const ZH_TERMS: &[&str] = &[
+        "询问", "质问", "盘问", "告诉", "威胁", "恐吓", "威逼", "利诱", "谈判", "讨价", "还价",
+        "帮助", "帮忙", "欺骗", "撒谎", "说服", "劝说", "道歉", "指责", "控诉", "交易", "审问",
+        "请求", "恳求", "承诺", "保证", "警告", "贿赂", "侮辱", "背叛", "安慰",
+    ];
+    if ZH_TERMS.iter().any(|kw| text.contains(kw)) {
+        return true;
+    }
+    // 英文动词词干，按 token 前缀匹配（覆盖时态/派生）。
+    const EN_STEMS: &[&str] = &[
+        "ask",
+        "tell",
+        "told",
+        "threat",
+        "bargain",
+        "negotiat",
+        "persuad",
+        "convinc",
+        "apolog",
+        "accus",
+        "interrogat",
+        "bribe",
+        "intimidat",
+        "confess",
+        "betray",
+        "deceiv",
+        "decept",
+        "promis",
+        "warn",
+        "demand",
+        "request",
+        "plead",
+        "implor",
+        "insult",
+        "befriend",
+        "reassur",
+        "consol",
+        "trade",
+        "help",
+        "offer",
+        "scold",
+        "taunt",
+        "flatter",
+    ];
+    let lower = text.to_lowercase();
+    lower
+        .split(|c: char| !c.is_ascii_alphabetic())
+        .filter(|tok| !tok.is_empty())
+        .any(|tok| EN_STEMS.iter().any(|stem| tok.starts_with(stem)))
+}
+
 /// 薄 async 编排：给定已解析实体 + 念白，经注入 LLM 取三元组并解析。无 DB。
-/// fail-closed：`surfaced_new_this_turn` 为 false（本回合没 surface 新实体）/ 实体不足 2 /
-/// 念白空 / LLM 出错 → 空 Vec（绝不 panic、绝不乱写、不调 LLM）。`surfaced_new_this_turn`
-/// 是成本闸：实体集没变化的回合不该重抽同样的三元组（详见 `RuntimeEngine::extract_relationship_facts`）。
+/// fail-closed：`should_run` 为 false（社交闸判定本回合不跑，见 [`relationship_gate_should_run`]）/
+/// 实体不足 2 / 念白空 / LLM 出错 → 空 Vec（绝不 panic、绝不乱写、不调 LLM）。`should_run`
+/// 是成本闸：闸关的回合既不调 LLM 也不写库。
 pub async fn relationship_facts_from_inputs(
     llm: &dyn LlmClient,
     session_id: &str,
@@ -190,11 +297,10 @@ pub async fn relationship_facts_from_inputs(
     entities: &[EntityRef],
     narration: &str,
     min_confidence: f32,
-    surfaced_new_this_turn: bool,
+    should_run: bool,
 ) -> Vec<MemoryFact> {
-    // 成本闸：本回合没 surface 新实体 → 已知实体集没变化，再调 LLM 只会重抽同样的三元组
-    // （稳定 fact_id upsert 幂等、无害但白烧一次 LLM）。直接 fail-closed 返回空、不调 LLM。
-    if !surfaced_new_this_turn || entities.len() < 2 || narration.trim().is_empty() {
+    // 成本闸：闸关（无新实体且无 active-NPC 社交信号）→ 直接 fail-closed 返回空、不调 LLM。
+    if !should_run || entities.len() < 2 || narration.trim().is_empty() {
         return Vec::new();
     }
     let messages = build_relationship_messages(narration, entities);
@@ -212,7 +318,9 @@ pub async fn relationship_facts_from_inputs(
 /// truthgraph 观测层同立场：后台 heavy 段跑、fail-soft，关掉只是不写关系三元组。
 pub fn relationship_extraction_enabled() -> bool {
     !matches!(
-        std::env::var("TRPG_RELATIONSHIP_EXTRACTION").ok().as_deref(),
+        std::env::var("TRPG_RELATIONSHIP_EXTRACTION")
+            .ok()
+            .as_deref(),
         Some("0") | Some("false") | Some("off") | Some("no")
     )
 }

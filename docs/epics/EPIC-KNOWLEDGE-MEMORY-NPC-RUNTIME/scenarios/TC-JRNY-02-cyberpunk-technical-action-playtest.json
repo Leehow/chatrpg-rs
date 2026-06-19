@@ -1,0 +1,38 @@
+{
+  "name": "tc_jrny_02_cyberpunk_technical_action",
+  "scenario_id": "JRNY-CYBER-TECH-PASS",
+  "scenario_version": "1",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "session_id": null,
+  "setup": {
+    "character": {
+      "preferences": "Create a playable Cyberpunk RED Solo/Tech for a Homecoming one-shot. Prioritize REF, TECH, Handgun, Electronics/Security Tech, Evasion, a heavy pistol, armor, and enough HP/defense data for a first scene. The player character should be ready for immediate play.",
+      "auto_complete": true,
+      "require_persisted": true,
+      "require_session_binding": true
+    }
+  },
+  "stream_format": "jsonl",
+  "turns": [
+    {
+      "user_input": "我拆开墙边的接线盒，动手切断公寓外露的供电电缆。",
+      "notes": "Source-backed technical action. This matches the Homecoming technical_option_table (cut/power/cable -> DV 14), so after TC-CHECK-01 the engine binds a source-backed target and the check resolves with real dice, a non-null target/success/degree, and no awaiting_binding. This checkpoint can legitimately PASS through the same check path the perception guard fails closed on.",
+      "expect_phases": ["done"],
+      "forbid_player_text": ["没有角色卡", "角色卡", "不能合法结算"],
+      "if_not_triggered": "我直接剪断那根供电电缆，断掉公寓的电力。",
+      "check": {
+        "label": "cut_power_cable",
+        "require_dice": true,
+        "require_check_resolution": true,
+        "require_player_visible_effect": true,
+        "player_visible_effect_any": ["切断", "供电", "电力", "断电", "瘫痪", "成功", "失败"]
+      }
+    }
+  ],
+  "forbidden_player_text": [],
+  "evaluator_instructions": null,
+  "allow_debug_directives": false,
+  "allow_nonhuman_player_input": false,
+  "allow_manual_roll_input": false
+}

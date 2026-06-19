@@ -27,15 +27,34 @@ fn director_is_empty(d: &DirectorModuleConfig) -> bool {
 /// (不依赖 LLM、不动真实模组),证明 `load_module_graph → merge → ModuleConfig.director` LIVE 链路。
 #[tokio::test]
 async fn extracted_facilitation_served_when_no_sidecar() {
-    let url = match std::env::var("DATABASE_URL") { Ok(u) => u, Err(_) => { eprintln!("SKIP: DATABASE_URL unset"); return; } };
-    let db = match Db::connect(&url).await { Ok(d) => d, Err(e) => { eprintln!("SKIP: connect: {e}"); return; } };
+    let url = match std::env::var("DATABASE_URL") {
+        Ok(u) => u,
+        Err(_) => {
+            eprintln!("SKIP: DATABASE_URL unset");
+            return;
+        }
+    };
+    let db = match Db::connect(&url).await {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("SKIP: connect: {e}");
+            return;
+        }
+    };
     const MID: &str = "ut_facil_live_demo_zzz"; // throwaway:无 sidecar、无 embedded
-    // 用真实 ModuleGraph 序列化(全字段齐全,镜像 parser 写入的形态),只填 director_facilitation。
+                                                // 用真实 ModuleGraph 序列化(全字段齐全,镜像 parser 写入的形态),只填 director_facilitation。
     let graph = ModuleGraph {
         module_id: MID.into(),
         director_facilitation: Some(DirectorModuleConfig {
-            scene_facts: vec![DirectorSceneFact { text: "门半开着".into(), source: "read_aloud".into() }],
-            pressure_items: vec![DirectorPressureItem { text: "夜色渐深".into(), severity: 2, ..Default::default() }],
+            scene_facts: vec![DirectorSceneFact {
+                text: "门半开着".into(),
+                source: "read_aloud".into(),
+            }],
+            pressure_items: vec![DirectorPressureItem {
+                text: "夜色渐深".into(),
+                severity: 2,
+                ..Default::default()
+            }],
             ..Default::default()
         }),
         ..Default::default()
@@ -55,12 +74,25 @@ async fn extracted_facilitation_served_when_no_sidecar() {
 
     let cfg = db.load_module_config(MID).await;
     // cleanup BEFORE asserting so a failure still leaves a clean DB.
-    sqlx::query("delete from parsed_bundles where bundle_id = $1").bind(MID).execute(&db.pool).await.ok();
+    sqlx::query("delete from parsed_bundles where bundle_id = $1")
+        .bind(MID)
+        .execute(&db.pool)
+        .await
+        .ok();
 
-    let director = cfg.and_then(|c| c.director).expect("无 sidecar → director 应来自抽取的 director_facilitation");
+    let director = cfg
+        .and_then(|c| c.director)
+        .expect("无 sidecar → director 应来自抽取的 director_facilitation");
     assert!(!director_is_empty(&director), "extracted director 必须非空");
-    assert_eq!(director.scene_facts.first().map(|f| f.text.as_str()), Some("门半开着"));
-    assert_eq!(director.pressure_items.len(), 1, "pressure 也应从 graph 读到");
+    assert_eq!(
+        director.scene_facts.first().map(|f| f.text.as_str()),
+        Some("门半开着")
+    );
+    assert_eq!(
+        director.pressure_items.len(),
+        1,
+        "pressure 也应从 graph 读到"
+    );
 }
 
 /// §6.5 override 胜:homecoming 有 hand-authored(`{TRPG_DATA_DIR}/modules/...module_config.json`)
@@ -68,12 +100,27 @@ async fn extracted_facilitation_served_when_no_sidecar() {
 /// re-parse 抽取的 director_facilitation(sidecar 整块盖掉 extracted)。
 #[tokio::test]
 async fn override_sidecar_wins_for_homecoming() {
-    let url = match std::env::var("DATABASE_URL") { Ok(u) => u, Err(_) => { eprintln!("SKIP: DATABASE_URL unset"); return; } };
-    let db = match Db::connect(&url).await { Ok(d) => d, Err(e) => { eprintln!("SKIP: connect: {e}"); return; } };
+    let url = match std::env::var("DATABASE_URL") {
+        Ok(u) => u,
+        Err(_) => {
+            eprintln!("SKIP: DATABASE_URL unset");
+            return;
+        }
+    };
+    let db = match Db::connect(&url).await {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("SKIP: connect: {e}");
+            return;
+        }
+    };
     const MID: &str = "cyberpunk_red.homecoming";
     let cfg = match db.load_module_config(MID).await {
         Some(c) => c,
-        None => { eprintln!("SKIP: no {MID} config (need TRPG_DATA_DIR with sidecar, or embedded)"); return; }
+        None => {
+            eprintln!("SKIP: no {MID} config (need TRPG_DATA_DIR with sidecar, or embedded)");
+            return;
+        }
     };
     let director = cfg.director.expect("homecoming 必有 sidecar director");
     // hand-authored homecoming 配置带 scene_facts / npc_advice,非空 → 证明 override 胜出(非空抽取被盖掉)。

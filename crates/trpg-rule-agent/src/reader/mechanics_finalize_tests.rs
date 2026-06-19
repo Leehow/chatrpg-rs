@@ -31,11 +31,15 @@ fn bad_tested_parameter_dropped_and_reported() {
     let mut bad = entry("x.bad");
     bad["tested_parameter"] = json!("nonexistent_xyz");
     let (entries, msgs) = finalize_catalog(vec![bad, entry("x.good")], &kernel_fixture(), &[]);
-    assert!(!entries.iter().any(|e| e.id == "x.bad"), "bad entry must not enter the catalog");
+    assert!(
+        !entries.iter().any(|e| e.id == "x.bad"),
+        "bad entry must not enter the catalog"
+    );
     assert!(entries.iter().any(|e| e.id == "x.good"));
     assert!(
-        msgs.iter().any(|m| m.code == "mechanic_dropped_unknown_parameter"
-            && m.target.as_deref() == Some("x.bad")),
+        msgs.iter()
+            .any(|m| m.code == "mechanic_dropped_unknown_parameter"
+                && m.target.as_deref() == Some("x.bad")),
         "msgs: {msgs:?}"
     );
 }
@@ -78,7 +82,8 @@ fn broken_followup_link_dropped_link_kept_entry() {
     assert_eq!(entries.len(), 1, "entry kept");
     assert!(entries[0].followup_links.is_empty(), "broken link removed");
     assert!(
-        msgs.iter().any(|m| m.code == "followup_link_broken" && m.target.as_deref() == Some("x.a")),
+        msgs.iter()
+            .any(|m| m.code == "followup_link_broken" && m.target.as_deref() == Some("x.a")),
         "msgs: {msgs:?}"
     );
 }
@@ -94,7 +99,10 @@ fn intra_batch_followup_resolves() {
         json!([{"condition":{"kind":"outcome","value":"success"},"procedure_id":"x.a"}]);
     let (entries, msgs) = finalize_catalog(vec![a, b], &kernel_fixture(), &[]);
     assert_eq!(entries.len(), 2, "both kept: {msgs:?}");
-    assert!(entries.iter().all(|e| e.followup_links.len() == 1), "links intact");
+    assert!(
+        entries.iter().all(|e| e.followup_links.len() == 1),
+        "links intact"
+    );
     assert!(msgs.is_empty(), "no messages, got: {msgs:?}");
 }
 
@@ -102,12 +110,14 @@ fn intra_batch_followup_resolves() {
 #[test]
 fn no_source_refs_dropped() {
     let unsourced = json!({"id":"x.invented","name":"Invented","source_refs":[]});
-    let (entries, msgs) = finalize_catalog(vec![unsourced, entry("x.good")], &kernel_fixture(), &[]);
+    let (entries, msgs) =
+        finalize_catalog(vec![unsourced, entry("x.good")], &kernel_fixture(), &[]);
     assert_eq!(entries.len(), 1, "only the sourced entry survives");
     assert_eq!(entries[0].id, "x.good");
     assert!(
-        msgs.iter().any(|m| m.code == "mechanic_dropped_no_source"
-            && m.target.as_deref() == Some("x.invented")),
+        msgs.iter()
+            .any(|m| m.code == "mechanic_dropped_no_source"
+                && m.target.as_deref() == Some("x.invented")),
         "msgs: {msgs:?}"
     );
 }
@@ -122,11 +132,15 @@ fn unknown_hook_stripped_entry_downgraded() {
     assert_eq!(entries.len(), 1, "entry kept");
     assert!(entries[0].hooks.is_empty(), "unknown hook stripped");
     assert!(
-        msgs.iter().any(|m| m.code == "hook_downgraded_no_engine_event"
-            && m.target.as_deref() == Some("x.cosmic")),
+        msgs.iter()
+            .any(|m| m.code == "hook_downgraded_no_engine_event"
+                && m.target.as_deref() == Some("x.cosmic")),
         "msgs: {msgs:?}"
     );
-    assert_eq!(expressiveness_tier(&entries[0]), ExpressivenessTier::Semantic);
+    assert_eq!(
+        expressiveness_tier(&entries[0]),
+        ExpressivenessTier::Semantic
+    );
 }
 
 /// {"step":"weird_custom","foo":1} 入条目后 round-trip 原 JSON 一字不丢
@@ -139,7 +153,10 @@ fn weird_procedure_step_preserved_as_other() {
     let (entries, msgs) = finalize_catalog(vec![e], &kernel_fixture(), &[]);
     assert_eq!(entries.len(), 1, "kept: {msgs:?}");
     assert_eq!(entries[0].procedure.len(), 1);
-    assert!(matches!(entries[0].procedure[0], ProcedureStep::Other(_)), "downgraded into Other");
+    assert!(
+        matches!(entries[0].procedure[0], ProcedureStep::Other(_)),
+        "downgraded into Other"
+    );
     let round_trip = serde_json::to_value(&entries[0].procedure[0]).unwrap();
     assert_eq!(round_trip, weird, "original JSON survives byte-for-byte");
 }
@@ -153,12 +170,22 @@ fn uncoercible_salvaged_as_semantic_or_reported() {
     typo["description"] = json!("desc kept");
     let no_id = json!({"name":"ghost","source_refs":[src_ref()]});
     let (entries, msgs) = finalize_catalog(vec![typo, no_id], &kernel_fixture(), &[]);
-    let salvaged = entries.iter().find(|e| e.id == "x.typo").expect("salvaged as semantic entry");
-    assert!(salvaged.procedure.is_empty(), "semantic rebuild has no procedure");
+    let salvaged = entries
+        .iter()
+        .find(|e| e.id == "x.typo")
+        .expect("salvaged as semantic entry");
+    assert!(
+        salvaged.procedure.is_empty(),
+        "semantic rebuild has no procedure"
+    );
     assert_eq!(salvaged.description, "desc kept");
     assert_eq!(expressiveness_tier(salvaged), ExpressivenessTier::Semantic);
     assert_eq!(entries.len(), 1, "id-less record dropped");
-    assert!(msgs.iter().any(|m| m.code == "mechanic_uncoercible" && m.target.is_none()), "msgs: {msgs:?}");
+    assert!(
+        msgs.iter()
+            .any(|m| m.code == "mechanic_uncoercible" && m.target.is_none()),
+        "msgs: {msgs:?}"
+    );
 }
 
 /// 同 id（大小写变体）重复提交 → 仅后者入目录（与 A2 merge-by-id 语义一致）。
@@ -183,7 +210,10 @@ fn sheet_parameter_keys_union_and_lowercase() {
     }
     let mut bare = RuleKernel::default();
     bare.character_sheet_schema = json!({"title":"fallback"});
-    assert!(sheet_parameter_keys(&bare, &[]).is_empty(), "fallback schema -> empty set");
+    assert!(
+        sheet_parameter_keys(&bare, &[]).is_empty(),
+        "fallback schema -> empty set"
+    );
 }
 
 // ---- on_outcome `=field` 引用守卫（mechanics_outcome_refs）----
@@ -196,25 +226,36 @@ fn kernel_with_rules(track_id: &str, rules: Value) -> RuleKernel {
 }
 
 fn track_rules(k: &RuleKernel) -> Vec<Value> {
-    k.resource_tracks[0]["on_outcome"].as_array().cloned().unwrap_or_default()
+    k.resource_tracks[0]["on_outcome"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// 回归（triangle `=chaos_generated` 类）：发明出来的 outcome 字段引用、又无
 /// default_amount 救援 → 该条规则永不可能触发，丢弃 + 上报；同轨其余规则不受牵连。
 #[test]
 fn invented_outcome_field_rule_dropped_and_reported() {
-    let mut k = kernel_with_rules("chaos", json!([
-        {"trigger":"always","op":"add","amount":"=chaos_generated"},
-        {"trigger":"always","op":"add","amount":"=pool_miss_count"},
-    ]));
+    let mut k = kernel_with_rules(
+        "chaos",
+        json!([
+            {"trigger":"always","op":"add","amount":"=chaos_generated"},
+            {"trigger":"always","op":"add","amount":"=pool_miss_count"},
+        ]),
+    );
     let msgs = apply_on_outcome_ref_guard(&mut k);
     let rules = track_rules(&k);
-    assert_eq!(rules.len(), 1, "invented-field rule dropped, sibling kept: {rules:?}");
+    assert_eq!(
+        rules.len(),
+        1,
+        "invented-field rule dropped, sibling kept: {rules:?}"
+    );
     assert_eq!(rules[0]["amount"], json!("=pool_miss_count"));
     assert!(
-        msgs.iter().any(|m| m.code == "on_outcome_dropped_unknown_outcome_field"
-            && m.target.as_deref() == Some("chaos")
-            && m.message.contains("chaos_generated")),
+        msgs.iter()
+            .any(|m| m.code == "on_outcome_dropped_unknown_outcome_field"
+                && m.target.as_deref() == Some("chaos")
+                && m.message.contains("chaos_generated")),
         "msgs: {msgs:?}"
     );
 }
@@ -223,15 +264,23 @@ fn invented_outcome_field_rule_dropped_and_reported() {
 /// 的 field_id，从不出现在 outcome JSON → 丢弃 + 上报（运行时本就静默 no-op）。
 #[test]
 fn cyberpunk_damage_after_armor_shape_dropped() {
-    let mut k = kernel_with_rules("hit_points", json!([
-        {"op":"subtract","amount":"=damage_after_armor","trigger":"always",
-         "mitigation":"armor.sp","check_match":"damage|attack"},
-    ]));
+    let mut k = kernel_with_rules(
+        "hit_points",
+        json!([
+            {"op":"subtract","amount":"=damage_after_armor","trigger":"always",
+             "mitigation":"armor.sp","check_match":"damage|attack"},
+        ]),
+    );
     let msgs = apply_on_outcome_ref_guard(&mut k);
-    assert!(track_rules(&k).is_empty(), "dead rule dropped: {:?}", track_rules(&k));
     assert!(
-        msgs.iter().any(|m| m.code == "on_outcome_dropped_unknown_outcome_field"
-            && m.target.as_deref() == Some("hit_points")),
+        track_rules(&k).is_empty(),
+        "dead rule dropped: {:?}",
+        track_rules(&k)
+    );
+    assert!(
+        msgs.iter()
+            .any(|m| m.code == "on_outcome_dropped_unknown_outcome_field"
+                && m.target.as_deref() == Some("hit_points")),
         "msgs: {msgs:?}"
     );
 }
@@ -261,18 +310,26 @@ fn valid_refs_and_plain_amounts_untouched() {
 /// （tested 路径靠默认骰仍在工作，丢弃反而破坏现役行为），降档上报、绝不静默。
 #[test]
 fn broken_amount_with_default_kept_and_downgraded() {
-    let mut k = kernel_with_rules("sanity", json!([
-        {"trigger":"on_failure","op":"subtract","amount":"=<sanity_loss>",
-         "default_amount":"1d6","check_match":"Sanity|sanity roll"},
-    ]));
+    let mut k = kernel_with_rules(
+        "sanity",
+        json!([
+            {"trigger":"on_failure","op":"subtract","amount":"=<sanity_loss>",
+             "default_amount":"1d6","check_match":"Sanity|sanity roll"},
+        ]),
+    );
     let msgs = apply_on_outcome_ref_guard(&mut k);
     let rules = track_rules(&k);
     assert_eq!(rules.len(), 1, "rule kept: {msgs:?}");
-    assert_eq!(rules[0]["amount"], json!("=<sanity_loss>"), "amount untouched");
+    assert_eq!(
+        rules[0]["amount"],
+        json!("=<sanity_loss>"),
+        "amount untouched"
+    );
     assert!(
-        msgs.iter().any(|m| m.code == "on_outcome_downgraded_unknown_outcome_field"
-            && m.target.as_deref() == Some("sanity")
-            && m.message.contains("default_amount")),
+        msgs.iter()
+            .any(|m| m.code == "on_outcome_downgraded_unknown_outcome_field"
+                && m.target.as_deref() == Some("sanity")
+                && m.message.contains("default_amount")),
         "msgs: {msgs:?}"
     );
 }
@@ -281,17 +338,22 @@ fn broken_amount_with_default_kept_and_downgraded() {
 /// 内里字段确实合法 → 确定性修复为规范写法，保留 + repair 上报。
 #[test]
 fn placeholder_and_case_variants_repaired() {
-    let mut k = kernel_with_rules("hp", json!([
-        {"trigger":"always","op":"subtract","amount":"=<total>"},
-        {"trigger":"always","op":"add","amount":"=Success_Count"},
-    ]));
+    let mut k = kernel_with_rules(
+        "hp",
+        json!([
+            {"trigger":"always","op":"subtract","amount":"=<total>"},
+            {"trigger":"always","op":"add","amount":"=Success_Count"},
+        ]),
+    );
     let msgs = apply_on_outcome_ref_guard(&mut k);
     let rules = track_rules(&k);
     assert_eq!(rules.len(), 2, "both kept: {msgs:?}");
     assert_eq!(rules[0]["amount"], json!("=total"));
     assert_eq!(rules[1]["amount"], json!("=success_count"));
     assert_eq!(
-        msgs.iter().filter(|m| m.code == "on_outcome_repaired_outcome_field").count(),
+        msgs.iter()
+            .filter(|m| m.code == "on_outcome_repaired_outcome_field")
+            .count(),
         2,
         "msgs: {msgs:?}"
     );
@@ -301,17 +363,26 @@ fn placeholder_and_case_variants_repaired() {
 /// default_amount → 死规则，丢弃；when 经修复后合法 → 保留。
 #[test]
 fn eq_value_requires_known_when_field() {
-    let mut k = kernel_with_rules("hp", json!([
-        {"trigger":"always","op":"add","amount":"=value","when":"damage_dealt"},
-        {"trigger":"always","op":"add","amount":"=value"},
-        {"trigger":"always","op":"add","amount":"=value","when":"Pool_Miss_Count"},
-    ]));
+    let mut k = kernel_with_rules(
+        "hp",
+        json!([
+            {"trigger":"always","op":"add","amount":"=value","when":"damage_dealt"},
+            {"trigger":"always","op":"add","amount":"=value"},
+            {"trigger":"always","op":"add","amount":"=value","when":"Pool_Miss_Count"},
+        ]),
+    );
     let msgs = apply_on_outcome_ref_guard(&mut k);
     let rules = track_rules(&k);
-    assert_eq!(rules.len(), 1, "only the repairable-when rule survives: {rules:?}");
+    assert_eq!(
+        rules.len(),
+        1,
+        "only the repairable-when rule survives: {rules:?}"
+    );
     assert_eq!(rules[0]["when"], json!("pool_miss_count"), "when repaired");
     assert_eq!(
-        msgs.iter().filter(|m| m.code == "on_outcome_dropped_unknown_outcome_field").count(),
+        msgs.iter()
+            .filter(|m| m.code == "on_outcome_dropped_unknown_outcome_field")
+            .count(),
         2,
         "msgs: {msgs:?}"
     );
@@ -321,13 +392,17 @@ fn eq_value_requires_known_when_field() {
 /// 丢弃 + 上报。
 #[test]
 fn when_only_rule_unknown_field_dropped() {
-    let mut k = kernel_with_rules("chaos", json!([
-        {"trigger":"always","op":"add","when":"chaos_generated"},
-    ]));
+    let mut k = kernel_with_rules(
+        "chaos",
+        json!([
+            {"trigger":"always","op":"add","when":"chaos_generated"},
+        ]),
+    );
     let msgs = apply_on_outcome_ref_guard(&mut k);
     assert!(track_rules(&k).is_empty(), "dead when-only rule dropped");
     assert!(
-        msgs.iter().any(|m| m.code == "on_outcome_dropped_unknown_outcome_field"),
+        msgs.iter()
+            .any(|m| m.code == "on_outcome_dropped_unknown_outcome_field"),
         "msgs: {msgs:?}"
     );
 }
@@ -337,14 +412,23 @@ fn when_only_rule_unknown_field_dropped() {
 /// 优先，永不回落到 when）→ 同样 drop。
 #[test]
 fn live_coc_hp_and_sword_world_shapes_dropped() {
-    let mut k = kernel_with_rules("hp", json!([
-        {"op":"subtract","amount":"=<damage>","trigger":"always"},
-        {"when":"success","amount":"=damage","trigger":"always"},
-    ]));
+    let mut k = kernel_with_rules(
+        "hp",
+        json!([
+            {"op":"subtract","amount":"=<damage>","trigger":"always"},
+            {"when":"success","amount":"=damage","trigger":"always"},
+        ]),
+    );
     let msgs = apply_on_outcome_ref_guard(&mut k);
-    assert!(track_rules(&k).is_empty(), "both dead rules dropped: {:?}", track_rules(&k));
+    assert!(
+        track_rules(&k).is_empty(),
+        "both dead rules dropped: {:?}",
+        track_rules(&k)
+    );
     assert_eq!(
-        msgs.iter().filter(|m| m.code == "on_outcome_dropped_unknown_outcome_field").count(),
+        msgs.iter()
+            .filter(|m| m.code == "on_outcome_dropped_unknown_outcome_field")
+            .count(),
         2,
         "msgs: {msgs:?}"
     );
@@ -355,10 +439,13 @@ fn live_coc_hp_and_sword_world_shapes_dropped() {
 #[test]
 fn engine_vocabulary_accepted_wholesale() {
     for f in trpg_model::outcome_fields::AMOUNT_RESOLVABLE {
-        let mut k = kernel_with_rules("t", json!([
-            {"trigger":"always","op":"add","amount": format!("={f}")},
-            {"trigger":"always","op":"add","amount":"=value","when": f},
-        ]));
+        let mut k = kernel_with_rules(
+            "t",
+            json!([
+                {"trigger":"always","op":"add","amount": format!("={f}")},
+                {"trigger":"always","op":"add","amount":"=value","when": f},
+            ]),
+        );
         let msgs = apply_on_outcome_ref_guard(&mut k);
         assert!(msgs.is_empty(), "field `{f}` must be accepted: {msgs:?}");
         assert_eq!(track_rules(&k).len(), 2, "field `{f}` rules kept");

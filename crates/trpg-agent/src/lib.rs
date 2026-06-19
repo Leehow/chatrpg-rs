@@ -40,20 +40,24 @@ pub struct GmAgent {
 
 impl GmAgent {
     pub fn from_env_or_default() -> Self {
-        let dir = std::env::var("TRPG_AGENT_ADVICE_DIR").unwrap_or_else(|_| "./data/agent/advice".to_string());
+        let dir = std::env::var("TRPG_AGENT_ADVICE_DIR")
+            .unwrap_or_else(|_| "./data/agent/advice".to_string());
         match AgentPolicyPack::load_dir(&dir) {
             Ok(policy) if !policy.advice_layers.is_empty() => Self { policy },
             Ok(policy) => {
-                tracing::warn!("agent advice dir loaded but no advice layers were found; using empty policy");
+                tracing::warn!(
+                    "agent advice dir loaded but no advice layers were found; using empty policy"
+                );
                 Self { policy }
             }
             Err(err) => {
                 tracing::warn!(error = %err, "failed to load agent advice dir; using empty policy");
-                Self { policy: AgentPolicyPack::default() }
+                Self {
+                    policy: AgentPolicyPack::default(),
+                }
             }
         }
     }
-
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -68,17 +72,29 @@ impl AgentPolicyPack {
             return Ok(Self::default());
         }
         let mut layers = Vec::new();
-        for entry in fs::read_dir(path).with_context(|| format!("failed to read agent advice dir {}", path.display()))? {
+        for entry in fs::read_dir(path)
+            .with_context(|| format!("failed to read agent advice dir {}", path.display()))?
+        {
             let entry = entry?;
             let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("json") { continue; }
-            let text = fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
-            let mut layer: AgentAdviceLayer = serde_json::from_str(&text).with_context(|| format!("invalid advice JSON {}", path.display()))?;
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            let text = fs::read_to_string(&path)
+                .with_context(|| format!("failed to read {}", path.display()))?;
+            let mut layer: AgentAdviceLayer = serde_json::from_str(&text)
+                .with_context(|| format!("invalid advice JSON {}", path.display()))?;
             layer.source_path = Some(path.to_string_lossy().to_string());
             layers.push(layer);
         }
-        layers.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.layer_id.cmp(&b.layer_id)));
-        Ok(Self { advice_layers: layers })
+        layers.sort_by(|a, b| {
+            a.priority
+                .cmp(&b.priority)
+                .then(a.layer_id.cmp(&b.layer_id))
+        });
+        Ok(Self {
+            advice_layers: layers,
+        })
     }
 }
 
@@ -170,10 +186,20 @@ pub struct MatchConditions {
 pub fn pending_check_prompt(contract: &CheckContract) -> String {
     let target = match &contract.target {
         CheckTargetModel::StaticNumber { label, .. } => format!("难度类型：{}。", label),
-        CheckTargetModel::Opposed { opponent_id, opponent_check } => format!("对抗：{} 的 {}。", opponent_id, opponent_check),
+        CheckTargetModel::Opposed {
+            opponent_id,
+            opponent_check,
+        } => format!("对抗：{} 的 {}。", opponent_id, opponent_check),
         CheckTargetModel::DegreeOnly => "按成功程度结算。".into(),
         CheckTargetModel::SuccessCount { .. } => "按成功数结算。".into(),
-        CheckTargetModel::DicePoolCount { target_face, threshold, .. } => format!("掷骰池：数出显示 {} 的骰子，≥{} 个即成功。", target_face, threshold),
+        CheckTargetModel::DicePoolCount {
+            target_face,
+            threshold,
+            ..
+        } => format!(
+            "掷骰池：数出显示 {} 的骰子，≥{} 个即成功。",
+            target_face, threshold
+        ),
         CheckTargetModel::UnknownUntilLookup => "目标值暂不公开；按当前规则包裁定。".into(),
     };
     format!(
@@ -198,7 +224,11 @@ pub fn is_probably_roll_input(input: &str) -> bool {
 pub enum ParsedRollText {
     DiceExpression(String),
     ReportedTotal(i32),
-    ReportedDieAndComponents { die: i32, components: Vec<i32>, total: i32 },
+    ReportedDieAndComponents {
+        die: i32,
+        components: Vec<i32>,
+        total: i32,
+    },
 }
 
 impl ParsedRollText {
@@ -206,7 +236,11 @@ impl ParsedRollText {
         match self {
             ParsedRollText::DiceExpression(expr) => expr.clone(),
             ParsedRollText::ReportedTotal(total) => total.to_string(),
-            ParsedRollText::ReportedDieAndComponents { die, components, total } => {
+            ParsedRollText::ReportedDieAndComponents {
+                die,
+                components,
+                total,
+            } => {
                 format!("reported die {die} + components {:?} = {total}", components)
             }
         }
@@ -223,23 +257,36 @@ impl ParsedRollText {
 /// - `我 TECH 6，Basic Tech 4，掷 1d10 出来是 8`
 pub fn parse_roll_text(input: &str) -> Option<ParsedRollText> {
     let trimmed = input.trim();
-    if trimmed.is_empty() { return None; }
+    if trimmed.is_empty() {
+        return None;
+    }
     if let Some(rest) = trimmed.strip_prefix("/roll") {
         let expr = rest.trim();
-        if expr.is_empty() { return None; }
+        if expr.is_empty() {
+            return None;
+        }
         return Some(ParsedRollText::DiceExpression(expr.to_string()));
     }
     if Regex::new(r"^\s*\d{1,3}\s*$").ok()?.is_match(trimmed) {
-        return trimmed.parse::<i32>().ok().map(ParsedRollText::ReportedTotal);
+        return trimmed
+            .parse::<i32>()
+            .ok()
+            .map(ParsedRollText::ReportedTotal);
     }
-    if Regex::new(r"(?i)^\s*\d*d\d+([+-]\d+)?\s*$").ok()?.is_match(trimmed) {
+    if Regex::new(r"(?i)^\s*\d*d\d+([+-]\d+)?\s*$")
+        .ok()?
+        .is_match(trimmed)
+    {
         return Some(ParsedRollText::DiceExpression(trimmed.to_string()));
     }
 
     // Common table shorthand: "3d6=11", "3d6 = 11, SP 0". The dice
     // expression identifies the pending effect roll, but the number after '='
     // is the result to commit; do not accidentally pick the SP/armor number.
-    if let Some(cap) = Regex::new(r"(?i)\b\d*d\d+(?:[+-]\d+)?\s*[=＝:]\s*(\d{1,3})").ok()?.captures(trimmed) {
+    if let Some(cap) = Regex::new(r"(?i)\b\d*d\d+(?:[+-]\d+)?\s*[=＝:]\s*(\d{1,3})")
+        .ok()?
+        .captures(trimmed)
+    {
         if let Some(m) = cap.get(1) {
             if let Ok(total) = m.as_str().parse::<i32>() {
                 return Some(ParsedRollText::ReportedTotal(total));
@@ -248,7 +295,10 @@ pub fn parse_roll_text(input: &str) -> Option<ParsedRollText> {
     }
 
     let lower = trimmed.to_lowercase();
-    let roll_words = ["掷", "骰", "投", "roll", "rolled", "result", "total", "结果", "总计", "出来", "出了", "出目", "点数"];
+    let roll_words = [
+        "掷", "骰", "投", "roll", "rolled", "result", "total", "结果", "总计", "出来", "出了",
+        "出目", "点数",
+    ];
     if !roll_words.iter().any(|w| lower.contains(w)) {
         return None;
     }
@@ -256,8 +306,13 @@ pub fn parse_roll_text(input: &str) -> Option<ParsedRollText> {
     let dice_re = Regex::new(r"(?i)(\d*)d(\d+)([+-]\d+)?").ok()?;
     let scrubbed = dice_re.replace_all(trimmed, " ").to_string();
     let num_re = Regex::new(r"-?\d+").ok()?;
-    let nums: Vec<i32> = num_re.find_iter(&scrubbed).filter_map(|m| m.as_str().parse::<i32>().ok()).collect();
-    if nums.is_empty() { return None; }
+    let nums: Vec<i32> = num_re
+        .find_iter(&scrubbed)
+        .filter_map(|m| m.as_str().parse::<i32>().ok())
+        .collect();
+    if nums.is_empty() {
+        return None;
+    }
 
     // If the player reports both stat/skill components and a die result, use the
     // final number as the die and earlier numbers as components. This handles
@@ -266,7 +321,11 @@ pub fn parse_roll_text(input: &str) -> Option<ParsedRollText> {
         let die = *nums.last()?;
         let components = nums[..nums.len() - 1].to_vec();
         let total = components.iter().sum::<i32>() + die;
-        return Some(ParsedRollText::ReportedDieAndComponents { die, components, total });
+        return Some(ParsedRollText::ReportedDieAndComponents {
+            die,
+            components,
+            total,
+        });
     }
 
     nums.last().copied().map(ParsedRollText::ReportedTotal)
@@ -279,8 +338,30 @@ pub fn parse_roll_text(input: &str) -> Option<ParsedRollText> {
 pub fn looks_like_new_action_or_abandon(input: &str) -> bool {
     let lower = input.to_lowercase();
     let terms = [
-        "算了", "不投", "不做", "放弃", "取消", "改", "换", "绕", "离开", "撤", "先", "直接", "继续", "我去", "我想",
-        "instead", "rather", "cancel", "abandon", "never mind", "do something else", "i go", "i move", "i try",
+        "算了",
+        "不投",
+        "不做",
+        "放弃",
+        "取消",
+        "改",
+        "换",
+        "绕",
+        "离开",
+        "撤",
+        "先",
+        "直接",
+        "继续",
+        "我去",
+        "我想",
+        "instead",
+        "rather",
+        "cancel",
+        "abandon",
+        "never mind",
+        "do something else",
+        "i go",
+        "i move",
+        "i try",
     ];
     terms.iter().any(|term| lower.contains(term))
 }
@@ -304,4 +385,6 @@ pub fn make_pending_check(contract: &CheckContract) -> PendingCheck {
     }
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}

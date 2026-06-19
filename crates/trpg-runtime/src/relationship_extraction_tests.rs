@@ -36,7 +36,10 @@ struct CountingLlm {
 }
 impl CountingLlm {
     fn new(reply: Value) -> Self {
-        Self { reply, calls: AtomicUsize::new(0) }
+        Self {
+            reply,
+            calls: AtomicUsize::new(0),
+        }
     }
     fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
@@ -63,8 +66,18 @@ impl LlmClient for CountingLlm {
 
 fn ents() -> Vec<EntityRef> {
     vec![
-        EntityRef { id: "raul".into(), kind: "npc".into(), name: "Raul".into(), prose: "gas station owner".into() },
-        EntityRef { id: "letter".into(), kind: "clue".into(), name: "Bloody Letter".into(), prose: "a torn note".into() },
+        EntityRef {
+            id: "raul".into(),
+            kind: "npc".into(),
+            name: "Raul".into(),
+            prose: "gas station owner".into(),
+        },
+        EntityRef {
+            id: "letter".into(),
+            kind: "clue".into(),
+            name: "Bloody Letter".into(),
+            prose: "a torn note".into(),
+        },
     ]
 }
 
@@ -85,17 +98,31 @@ fn parse_returns_one_wellformed_fact_for_valid_triple() {
     assert_eq!(f.object, json!("letter"));
     assert_eq!(f.summary, "Raul wrote the bloody letter.");
     assert!((f.confidence - 0.92).abs() < 1e-5);
-    assert_eq!(f.turn_id.as_deref(), Some("turn7"), "turn provenance recorded");
+    assert_eq!(
+        f.turn_id.as_deref(),
+        Some("turn7"),
+        "turn provenance recorded"
+    );
     assert_eq!(f.session_id, "sess_a");
     assert_eq!(f.scope.scope_type.as_str(), "session");
     assert_eq!(f.scope.scope_id, "sess_a");
     assert_eq!(f.visibility.as_str(), "gm_only");
     assert_eq!(f.status.as_str(), "active");
-    assert!(f.tags.iter().any(|t| t == "relationship"), "generic relationship tag");
+    assert!(
+        f.tags.iter().any(|t| t == "relationship"),
+        "generic relationship tag"
+    );
     // 溯源连回 EntitySurfaced 观测层键（truthgraph 格式 de_surfaced_{session}_{id}）。
-    assert!(f.source_event_ids.contains(&"de_surfaced_sess_a_raul".to_string()));
-    assert!(f.source_event_ids.contains(&"de_surfaced_sess_a_letter".to_string()));
-    assert!(f.fact_id.starts_with("mf_rel_"), "stable relationship fact id");
+    assert!(f
+        .source_event_ids
+        .contains(&"de_surfaced_sess_a_raul".to_string()));
+    assert!(f
+        .source_event_ids
+        .contains(&"de_surfaced_sess_a_letter".to_string()));
+    assert!(
+        f.fact_id.starts_with("mf_rel_"),
+        "stable relationship fact id"
+    );
 }
 
 #[test]
@@ -140,7 +167,11 @@ fn parse_dedupes_identical_triples() {
         {"subject":"raul","predicate":"owns","object":"letter","summary":"b","confidence":0.8}
     ]});
     let facts = parse_relationship_triples(&raw, "sess_a", "turn1", &ents(), 0.6);
-    assert_eq!(facts.len(), 1, "identical (subject,predicate,object) collapse to one fact_id");
+    assert_eq!(
+        facts.len(),
+        1,
+        "identical (subject,predicate,object) collapse to one fact_id"
+    );
 }
 
 #[test]
@@ -157,8 +188,12 @@ fn resolve_maps_names_and_skips_unknown() {
     ];
     let refs = resolve_entity_refs(&surfaced, &graph);
     assert_eq!(refs.len(), 2, "ghost (not in graph) dropped");
-    assert!(refs.iter().any(|r| r.id == "raul" && r.name == "Raul" && r.kind == "npc"));
-    assert!(refs.iter().any(|r| r.id == "letter" && r.kind == "clue" && r.prose.contains("note")));
+    assert!(refs
+        .iter()
+        .any(|r| r.id == "raul" && r.name == "Raul" && r.kind == "npc"));
+    assert!(refs
+        .iter()
+        .any(|r| r.id == "letter" && r.kind == "clue" && r.prose.contains("note")));
     assert!(!refs.iter().any(|r| r.id == "ghost"));
 }
 
@@ -166,16 +201,31 @@ fn resolve_maps_names_and_skips_unknown() {
 fn build_messages_include_narration_and_entities() {
     let msgs = build_relationship_messages("Raul handed over the letter.", &ents());
     assert!(msgs.len() >= 2, "system + user");
-    let joined = msgs.iter().map(|m| m.content.clone()).collect::<Vec<_>>().join("\n");
-    assert!(joined.contains("Raul handed over the letter."), "narration present");
-    assert!(joined.contains("raul") && joined.contains("letter"), "entity ids present");
-    assert!(joined.to_lowercase().contains("json"), "JSON output contract present");
+    let joined = msgs
+        .iter()
+        .map(|m| m.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        joined.contains("Raul handed over the letter."),
+        "narration present"
+    );
+    assert!(
+        joined.contains("raul") && joined.contains("letter"),
+        "entity ids present"
+    );
+    assert!(
+        joined.to_lowercase().contains("json"),
+        "JSON output contract present"
+    );
 }
 
 #[tokio::test]
 async fn core_extracts_fact_from_related_entities() {
     let llm = StubLlm(one_triple("raul", "owns", "letter", 0.9));
-    let facts = relationship_facts_from_inputs(&llm, "sess_a", "turn1", &ents(), "narration", 0.6, true).await;
+    let facts =
+        relationship_facts_from_inputs(&llm, "sess_a", "turn1", &ents(), "narration", 0.6, true)
+            .await;
     assert_eq!(facts.len(), 1);
     assert_eq!(facts[0].subject, "raul");
 }
@@ -183,8 +233,13 @@ async fn core_extracts_fact_from_related_entities() {
 #[tokio::test]
 async fn core_fail_closed_when_no_relationship() {
     let llm = StubLlm(json!({"triples":[]}));
-    let facts = relationship_facts_from_inputs(&llm, "sess_a", "turn1", &ents(), "narration", 0.6, true).await;
-    assert!(facts.is_empty(), "no relationship → write nothing (fail-closed)");
+    let facts =
+        relationship_facts_from_inputs(&llm, "sess_a", "turn1", &ents(), "narration", 0.6, true)
+            .await;
+    assert!(
+        facts.is_empty(),
+        "no relationship → write nothing (fail-closed)"
+    );
 }
 
 #[tokio::test]
@@ -193,11 +248,24 @@ async fn no_new_surface_this_turn_skips_llm_call() {
     // （旧逻辑会照样调 LLM 重抽同样的三元组），新闸必须**完全不调 LLM**、返回空。
     let llm = CountingLlm::new(one_triple("raul", "owns", "letter", 0.9));
     let facts = relationship_facts_from_inputs(
-        &llm, "sess_a", "turn1", &ents(), "narration", 0.6, /* surfaced_new_this_turn = */ false,
+        &llm,
+        "sess_a",
+        "turn1",
+        &ents(),
+        "narration",
+        0.6,
+        /* should_run = */ false,
     )
     .await;
-    assert!(facts.is_empty(), "no new entity this turn → no triples written");
-    assert_eq!(llm.calls(), 0, "no new entity surfaced → LLM must NOT be invoked (cost saved)");
+    assert!(
+        facts.is_empty(),
+        "no new entity this turn → no triples written"
+    );
+    assert_eq!(
+        llm.calls(),
+        0,
+        "no new entity surfaced → LLM must NOT be invoked (cost saved)"
+    );
 }
 
 #[tokio::test]
@@ -205,9 +273,149 @@ async fn new_surface_this_turn_invokes_llm() {
     // 本回合 surface 了新实体（surfaced_new_this_turn=true）：闸打开，LLM 照常调一次。
     let llm = CountingLlm::new(one_triple("raul", "owns", "letter", 0.9));
     let facts = relationship_facts_from_inputs(
-        &llm, "sess_a", "turn1", &ents(), "narration", 0.6, /* surfaced_new_this_turn = */ true,
+        &llm,
+        "sess_a",
+        "turn1",
+        &ents(),
+        "narration",
+        0.6,
+        /* should_run = */ true,
     )
     .await;
-    assert_eq!(llm.calls(), 1, "new entity surfaced → LLM invoked exactly once");
+    assert_eq!(
+        llm.calls(),
+        1,
+        "new entity surfaced → LLM invoked exactly once"
+    );
     assert_eq!(facts.len(), 1);
+}
+
+// ───────────────────────── TC-D3-04 social gate ──────────────────────────
+
+#[test]
+fn relationship_gate_triggers_on_new_entity() {
+    // A newly surfaced entity opens the gate regardless of social signal / active NPCs —
+    // the existing behavior must keep working.
+    assert!(relationship_gate_should_run(true, 0, "", ""));
+    assert!(relationship_gate_should_run(
+        true,
+        0,
+        "I just walk past the wall",
+        "Dust settles."
+    ));
+}
+
+#[tokio::test]
+async fn relationship_gate_triggers_on_active_npc_social_interaction() {
+    // No new entity, but an active NPC is present and the player clearly interacts socially
+    // (threaten/bargain/…) → the gate opens. With no active NPC the same words do NOT open it.
+    assert!(relationship_gate_should_run(
+        false,
+        1,
+        "I threaten Raul about the letter",
+        ""
+    ));
+    assert!(relationship_gate_should_run(
+        false,
+        1,
+        "",
+        "Raul bargains with the party over the price."
+    ));
+    assert!(
+        !relationship_gate_should_run(false, 0, "I threaten Raul about the letter", ""),
+        "social words but no active NPC in state → no trigger"
+    );
+    // Chinese social verb also opens it.
+    assert!(relationship_gate_should_run(
+        false,
+        1,
+        "我威胁劳尔交出信件",
+        ""
+    ));
+
+    // End-to-end: with the gate open, extraction invokes the LLM exactly once and produces a fact.
+    let should_run = relationship_gate_should_run(false, 1, "I threaten Raul about the letter", "");
+    let llm = CountingLlm::new(one_triple("raul", "threatened_by", "letter", 0.9));
+    let facts = relationship_facts_from_inputs(
+        &llm,
+        "sess_a",
+        "turn5",
+        &ents(),
+        "I threaten Raul about the letter",
+        0.6,
+        should_run,
+    )
+    .await;
+    assert_eq!(
+        llm.calls(),
+        1,
+        "active-NPC social interaction → LLM invoked once"
+    );
+    assert_eq!(facts.len(), 1);
+}
+
+#[tokio::test]
+async fn relationship_gate_skips_non_social_no_new_entity() {
+    // No new entity and only ambient, non-social narration/input (even with active NPCs in
+    // state) → the gate stays closed; no LLM call, nothing written. Cost stays controlled.
+    let player_input = "I examine the cracked wall and walk down the dusty road";
+    let narration = "The wind howls through the empty street as the lamp flickers.";
+    assert!(!relationship_gate_should_run(
+        false,
+        2,
+        player_input,
+        narration
+    ));
+
+    let llm = CountingLlm::new(one_triple("raul", "owns", "letter", 0.9));
+    let should_run = relationship_gate_should_run(false, 2, player_input, narration);
+    let facts = relationship_facts_from_inputs(
+        &llm,
+        "sess_a",
+        "turn5",
+        &ents(),
+        narration,
+        0.6,
+        should_run,
+    )
+    .await;
+    assert!(
+        facts.is_empty(),
+        "non-social no-new-entity turn → nothing extracted"
+    );
+    assert_eq!(llm.calls(), 0, "gate closed → LLM must NOT be invoked");
+}
+
+#[tokio::test]
+async fn relationship_gate_preserves_evidence_refs() {
+    // When the social gate runs extraction, the resulting triples still carry their
+    // EntitySurfaced source refs, and mapping them into inert proposals (TC-D3-03 adapter)
+    // preserves that evidence trail.
+    let should_run =
+        relationship_gate_should_run(false, 1, "I bargain with Raul over the letter", "");
+    let llm = StubLlm(one_triple("raul", "wrote", "letter", 0.9));
+    let facts = relationship_facts_from_inputs(
+        &llm,
+        "sess_a",
+        "turn7",
+        &ents(),
+        "I bargain with Raul over the letter",
+        0.6,
+        should_run,
+    )
+    .await;
+    assert_eq!(facts.len(), 1, "social gate ran extraction");
+    let fact_refs = facts[0].source_event_ids.clone();
+    assert!(fact_refs.contains(&"de_surfaced_sess_a_raul".to_string()));
+    assert!(fact_refs.contains(&"de_surfaced_sess_a_letter".to_string()));
+
+    // Map into proposal form via the existing adapter; evidence/source refs round-trip.
+    let proposals = crate::relationship_facts_to_proposals(&facts);
+    assert_eq!(proposals.len(), 1, "one triple → one proposal");
+    assert_eq!(proposals[0].kind_token(), "memory_fact");
+    assert_eq!(
+        proposals[0].evidence_refs(),
+        fact_refs,
+        "proposal preserves source refs"
+    );
 }

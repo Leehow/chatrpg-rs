@@ -24,7 +24,12 @@ npc_advice 只给确有立场/目的的 NPC 且 not_official_solution=true。最
 /// (对标 trpg-parser `module_reader_enabled` 的默认开形态)。
 pub fn facilitation_enabled() -> bool {
     std::env::var("TRPG_MODULE_FACILITATION")
-        .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"))
+        .map(|v| {
+            !matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "off" | "no"
+            )
+        })
         .unwrap_or(true)
 }
 
@@ -35,13 +40,16 @@ pub async fn extract_facilitation_facts(
     entry_idx: usize,
 ) -> Option<DirectorModuleConfig> {
     let entry = readout.scenes.get(entry_idx)?; // 越界 → 不调 LLM,直接 None
-    // 开场涉及的 NPC(按入口 referenced_npc_ids 过滤),供 npc_advice 偏见人设。
+                                                // 开场涉及的 NPC(按入口 referenced_npc_ids 过滤),供 npc_advice 偏见人设。
     let referenced: Vec<&Value> = entry
         .referenced_npc_ids
         .iter()
         .filter_map(|id| {
             readout.npcs.iter().find(|n| {
-                let key = n.get("id").or_else(|| n.get("npc_id")).and_then(Value::as_str);
+                let key = n
+                    .get("id")
+                    .or_else(|| n.get("npc_id"))
+                    .and_then(Value::as_str);
                 key == Some(id.as_str())
             })
         })
@@ -63,8 +71,13 @@ pub async fn extract_facilitation_facts(
         json!({"role": "system", "content": FACIL_SYS}),
         json!({"role": "user", "content": user}),
     ];
-    let resp = client.complete_with_tools(msgs, vec![submit_facilitation_tool()]).await.ok()?;
-    let tcs = resp.pointer("/choices/0/message/tool_calls").and_then(Value::as_array)?;
+    let resp = client
+        .complete_with_tools(msgs, vec![submit_facilitation_tool()])
+        .await
+        .ok()?;
+    let tcs = resp
+        .pointer("/choices/0/message/tool_calls")
+        .and_then(Value::as_array)?;
     let args = tcs.iter().find_map(|tc| {
         if tc.pointer("/function/name").and_then(Value::as_str) == Some("submit_facilitation") {
             tc.pointer("/function/arguments")

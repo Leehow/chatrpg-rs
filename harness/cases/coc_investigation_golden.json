@@ -1,0 +1,16 @@
+{
+  "name": "coc_investigation_golden",
+  "ruleset_id": "coc7e",
+  "module_id": "coc7e.test",
+  "user_input": "我仔细搜查书房的写字台，翻看抽屉和散落的信纸，寻找线索。",
+  "forbidden_terms": [
+    "凶手是管家",
+    "the butler did it",
+    "真凶"
+  ],
+  "required_events": [
+    "phase:context_compiled",
+    "phase:done"
+  ],
+  "stream_format": "jsonl"
+}

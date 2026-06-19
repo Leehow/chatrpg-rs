@@ -222,7 +222,11 @@ impl NpcBehaviorPlan {
             self.willingness_to_reveal_secret,
             self.risk_tolerance
         ));
-        if let Some(goal) = self.current_goal.as_deref().filter(|s| !s.trim().is_empty()) {
+        if let Some(goal) = self
+            .current_goal
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
             lines.push(format!("Current goal: {goal}"));
         }
         if !self.speech_style_prompt.trim().is_empty() {
@@ -231,10 +235,16 @@ impl NpcBehaviorPlan {
         push_list(&mut lines, "Preferred actions", &self.preferred_actions);
         push_list(&mut lines, "Forbidden actions", &self.forbidden_actions);
         if !self.facts_can_reveal.is_empty() {
-            lines.push(format!("May reveal fact ids: {}", self.facts_can_reveal.join(", ")));
+            lines.push(format!(
+                "May reveal fact ids: {}",
+                self.facts_can_reveal.join(", ")
+            ));
         }
         if !self.facts_will_withhold.is_empty() {
-            lines.push(format!("Withhold fact ids: {}", self.facts_will_withhold.join(", ")));
+            lines.push(format!(
+                "Withhold fact ids: {}",
+                self.facts_will_withhold.join(", ")
+            ));
         }
         lines.push("[/npc_behavior_guidance]".to_string());
         lines.join("\n")

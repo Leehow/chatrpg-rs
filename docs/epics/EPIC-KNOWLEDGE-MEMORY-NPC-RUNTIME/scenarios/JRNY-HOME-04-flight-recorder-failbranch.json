@@ -1,0 +1,41 @@
+{
+  "name": "jrny_home_04_flight_recorder_failbranch",
+  "scenario_id": "JRNY-HOME-04-flight-recorder-failbranch",
+  "scenario_version": "1",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "session_id": null,
+  "_derived_from": "Negative-control sibling of JRNY-HOME-04-flight-recorder-provenance. Turn 1 records a trace where a view_load appears AFTER a plugin contribution → VIEW_ORDER_VIOLATION. Turn 2 records a trace whose summary echoes a secret term → SECRET_IN_TRACE. Proves the flight-recorder checkpoint is not advisory.",
+  "setup": {
+    "character": {
+      "preferences": "技术型 Cyberpunk RED 角色，可立即开始第一幕。",
+      "auto_complete": true,
+      "require_persisted": true,
+      "require_session_binding": true
+    }
+  },
+  "stream_format": "jsonl",
+  "turns": [
+    {
+      "user_input": "我先站在巷口的安全距离观察现场，看看无人机和警察的情况。",
+      "notes": "control (a): a view_load recorded AFTER a plugin contribution → VIEW_ORDER_VIOLATION.",
+      "flight_recorder": {
+        "require_view_load_before_plugins": true,
+        "require_categories": ["view_load", "context_filter"],
+        "forbid_secret_terms_in_trace": ["Athena"]
+      }
+    },
+    {
+      "user_input": "我再仔细看看仓库门口那束裸露的电缆。",
+      "notes": "control (b): a trace summary echoes the secret term Athena → SECRET_IN_TRACE.",
+      "flight_recorder": {
+        "require_categories": ["view_load"],
+        "forbid_secret_terms_in_trace": ["Athena", "回收指令"]
+      }
+    }
+  ],
+  "forbidden_player_text": [],
+  "allow_debug_directives": false,
+  "allow_nonhuman_player_input": false,
+  "allow_manual_roll_input": false
+}

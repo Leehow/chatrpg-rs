@@ -63,7 +63,10 @@ pub fn detect_crossings(
         return out;
     };
     for th in ths {
-        let cons = th.get("consequence").and_then(|v| v.as_str()).unwrap_or("threshold reached");
+        let cons = th
+            .get("consequence")
+            .and_then(|v| v.as_str())
+            .unwrap_or("threshold reached");
         let followup = th
             .get("followup_procedure_id")
             .and_then(|v| v.as_str())
@@ -73,7 +76,11 @@ pub fn detect_crossings(
         // (a) cumulative crossing: value reaches `at` (edge-triggered).
         if let Some(at) = th.get("at").and_then(|v| v.as_i64()).map(|a| a as i32) {
             let below = th.get("direction").and_then(|v| v.as_str()) == Some("at_or_below");
-            let crossed = if below { after <= at && before > at } else { after >= at && before < at };
+            let crossed = if below {
+                after <= at && before > at
+            } else {
+                after >= at && before < at
+            };
             if crossed {
                 out.push(ThresholdCrossing {
                     track_id: id.clone(),
@@ -89,7 +96,11 @@ pub fn detect_crossings(
             }
         }
         // (b) single-application magnitude (lose >= n in one roll).
-        if let Some(n) = th.get("loss_in_one_go").and_then(|v| v.as_i64()).map(|x| x as i32) {
+        if let Some(n) = th
+            .get("loss_in_one_go")
+            .and_then(|v| v.as_i64())
+            .map(|x| x as i32)
+        {
             let lost = before - after;
             if matches!(op, ParameterOperation::Subtract) && lost >= n {
                 out.push(ThresholdCrossing {
@@ -150,10 +161,15 @@ pub fn due_from_crossing(session_id: &str, turn_id: &str, c: &ThresholdCrossing)
 #[derive(Debug, Clone)]
 pub enum HookEvent {
     TurnStart,
-    SceneEnter { scene_id: String },
+    SceneEnter {
+        scene_id: String,
+    },
     Rest,
     /// calendar 跨界检测也在此分支内完成（不发明第二个事件变体）。
-    TimeAdvance { from_tick: i64, to_tick: i64 },
+    TimeAdvance {
+        from_tick: i64,
+        to_tick: i64,
+    },
     SessionEnd,
     DevelopmentPhase,
     CombatStart,
@@ -205,14 +221,18 @@ fn hook_tag(hook: &EngineHook) -> &'static str {
 /// 钩子型 evidence 形状：{"event":…} + 事件携带的结构化上下文。
 fn hook_evidence(hook: &EngineHook, event: &HookEvent) -> serde_json::Value {
     match (hook, event) {
-        (EngineHook::Calendar { granularity }, HookEvent::TimeAdvance { from_tick, to_tick }) => json!({
-            "event": "calendar", "from_tick": from_tick, "to_tick": to_tick,
-            "granularity": serde_json::to_value(granularity).unwrap_or(serde_json::Value::Null),
-        }),
+        (EngineHook::Calendar { granularity }, HookEvent::TimeAdvance { from_tick, to_tick }) => {
+            json!({
+                "event": "calendar", "from_tick": from_tick, "to_tick": to_tick,
+                "granularity": serde_json::to_value(granularity).unwrap_or(serde_json::Value::Null),
+            })
+        }
         (_, HookEvent::TimeAdvance { from_tick, to_tick }) => {
             json!({"event": hook_tag(hook), "from_tick": from_tick, "to_tick": to_tick})
         }
-        (_, HookEvent::SceneEnter { scene_id }) => json!({"event": hook_tag(hook), "scene_id": scene_id}),
+        (_, HookEvent::SceneEnter { scene_id }) => {
+            json!({"event": hook_tag(hook), "scene_id": scene_id})
+        }
         _ => json!({"event": hook_tag(hook)}),
     }
 }
@@ -220,8 +240,18 @@ fn hook_evidence(hook: &EngineHook, event: &HookEvent) -> serde_json::Value {
 /// 单条命中 → MechanicDue（§3.5.1 结构化绑定：mechanic_id=entry.id）。
 /// owner：tested_parameter 非空视为 actor 参数 → actor/pc.current，
 /// 否则 session/{session_id}（开放枚举原值，不强塞 actor）。
-fn due_from_hook(entry: &MechanicEntry, hook: &EngineHook, event: &HookEvent, session_id: &str, turn_id: &str) -> MechanicDue {
-    let desc = if entry.when_to_use.trim().is_empty() { entry.description.clone() } else { entry.when_to_use.clone() };
+fn due_from_hook(
+    entry: &MechanicEntry,
+    hook: &EngineHook,
+    event: &HookEvent,
+    session_id: &str,
+    turn_id: &str,
+) -> MechanicDue {
+    let desc = if entry.when_to_use.trim().is_empty() {
+        entry.description.clone()
+    } else {
+        entry.when_to_use.clone()
+    };
     let (owner_kind, owner_id) = match entry.tested_parameter.as_deref().map(str::trim) {
         Some(p) if !p.is_empty() => ("actor".to_string(), "pc.current".to_string()),
         _ => ("session".to_string(), session_id.to_string()),
@@ -247,14 +277,20 @@ fn due_from_hook(entry: &MechanicEntry, hook: &EngineHook, event: &HookEvent, se
 /// PURE：目录 × 事件 → 候选 due（db 抑制留集成层 `dues_for_hook`）。
 /// Calendar 钩子只在 `TimeAdvance` 分支内经 `calendar_crossed` 闸；
 /// TimeAdvance 钩子同分支直发——同一个事件变体，两种钩子。
-pub fn hook_due_candidates(catalog: &[MechanicEntry], event: &HookEvent, session_id: &str, turn_id: &str) -> Vec<MechanicDue> {
+pub fn hook_due_candidates(
+    catalog: &[MechanicEntry],
+    event: &HookEvent,
+    session_id: &str,
+    turn_id: &str,
+) -> Vec<MechanicDue> {
     let mut out = Vec::new();
     for entry in catalog {
         for hook in &entry.hooks {
             let fired = match (hook, event) {
-                (EngineHook::Calendar { granularity }, HookEvent::TimeAdvance { from_tick, to_tick }) => {
-                    calendar_crossed(granularity, *from_tick, *to_tick)
-                }
+                (
+                    EngineHook::Calendar { granularity },
+                    HookEvent::TimeAdvance { from_tick, to_tick },
+                ) => calendar_crossed(granularity, *from_tick, *to_tick),
                 _ => hook_matches_event(hook, event),
             };
             if fired {
@@ -270,6 +306,33 @@ fn due_key(d: &MechanicDue) -> Option<(String, String)> {
     Some((d.mechanic_id.clone()?, d.hook_event.clone()?))
 }
 
+/// PURE：候选 due 抑制过滤——同 (mechanic_id, hook_event) 键已 open / scene-waived
+/// / resolved 的候选跳过；键缺失（mechanic_id 或 hook_event 为 None，如阈值型 due）
+/// 一律放行（不参与抑制，fail-closed 方向"宁可再催，绝不静默"）。返回放行候选（保序）。
+///
+/// resolved 抑制堵住的复发口子：战斗结算后的余波 due（如 major_wound /
+/// zero_hp_state）在本回合内已 resolved，但 post-combat status query 的 stimulus
+/// pass 会再次看到战斗叙事尾巴、把同键候选重新提名。open/scene-waived 都拦不住
+/// 已结算的键，故此处把 resolved 也并入抑制集（与 scene-waived 同为 session 域）。
+pub fn admit_candidates(
+    candidates: Vec<MechanicDue>,
+    open_keys: &HashSet<(String, String)>,
+    scene_waived: &HashSet<(String, String)>,
+    resolved_keys: &HashSet<(String, String)>,
+) -> Vec<MechanicDue> {
+    candidates
+        .into_iter()
+        .filter(|due| match due_key(due) {
+            Some(key) => {
+                !(open_keys.contains(&key)
+                    || scene_waived.contains(&key)
+                    || resolved_keys.contains(&key))
+            }
+            None => true,
+        })
+        .collect()
+}
+
 impl RefereeCombatService {
     /// EngineHook 事件点查询：遍历 kernel.mechanics_catalog 中挂接该事件的
     /// 条目产 due（检测逻辑单点——所有事件点共用本原语，接线点只构造
@@ -283,7 +346,9 @@ impl RefereeCombatService {
         ruleset_id: &str,
         event: &HookEvent,
     ) -> Result<Vec<MechanicDue>> {
-        let Some(kernel) = self.db.load_rule_kernel(ruleset_id).await? else { return Ok(Vec::new()) };
+        let Some(kernel) = self.db.load_rule_kernel(ruleset_id).await? else {
+            return Ok(Vec::new());
+        };
         if kernel.mechanics_catalog.is_empty() {
             return Ok(Vec::new());
         }
@@ -294,8 +359,10 @@ impl RefereeCombatService {
     /// 抑制+落库共用尾段（hook 事件点与语义触发预 pass 两路共用）：
     /// ① 同 (mechanic_id, hook_event) 已有 open due → 跳过；② waived 且
     /// waive_scope=="scene" → 跳过（场景内豁免有效）；waive_scope=="turn" 不
-    /// 抑制（下回合仍提醒，spec §5.3）。通过者落库（失败 .ok() 吞——主链绝不
-    /// 因 watcher 持久化失败中断）并返回。
+    /// 抑制（下回合仍提醒，spec §5.3）；③ 同键已 resolved → 跳过（已结算的机制
+    /// 不被 stimulus pass 经战斗叙事尾巴重新提名，堵 post-combat status query
+    /// 复发口子，与 scene-waived 同为 session 域）。通过者落库（失败 .ok() 吞
+    /// ——主链绝不因 watcher 持久化失败中断）并返回。
     pub async fn admit_dues(
         &self,
         session_id: &str,
@@ -308,7 +375,10 @@ impl RefereeCombatService {
         let open_keys: HashSet<(String, String)> = open.iter().filter_map(due_key).collect();
         // waive_scope 不在 MechanicDue 模型上（模型已定稿），按行补查；查不到按
         // turn 处理（不抑制——fail-closed 方向是"宁可再催，绝不静默"）。
-        let waived = self.db.list_mechanic_dues_with_status(session_id, "waived").await?;
+        let waived = self
+            .db
+            .list_mechanic_dues_with_status(session_id, "waived")
+            .await?;
         let mut scene_waived: HashSet<(String, String)> = HashSet::new();
         for d in &waived {
             let Some(key) = due_key(d) else { continue };
@@ -325,13 +395,16 @@ impl RefereeCombatService {
                 scene_waived.insert(key);
             }
         }
+        // resolved 同键抑制：已结算的机制不被 stimulus pass 重新提名（与
+        // scene-waived 一样 session 域；§5.3 turn-waive 不抑制不受影响）。
+        let resolved = self
+            .db
+            .list_mechanic_dues_with_status(session_id, "resolved")
+            .await?;
+        let resolved_keys: HashSet<(String, String)> =
+            resolved.iter().filter_map(due_key).collect();
         let mut out = Vec::new();
-        for due in candidates {
-            if let Some(key) = due_key(&due) {
-                if open_keys.contains(&key) || scene_waived.contains(&key) {
-                    continue;
-                }
-            }
+        for due in admit_candidates(candidates, &open_keys, &scene_waived, &resolved_keys) {
             self.db.insert_mechanic_due(&due).await.ok();
             out.push(due);
         }

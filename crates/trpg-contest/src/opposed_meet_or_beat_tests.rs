@@ -36,10 +36,26 @@ fn contract_with_dice(dice: &str) -> CheckContract {
 
 /// 从一个 meet_or_beat 的 OpposedRoll 模型 + 双方掷骰，走 resolve_opposed 拿胜负。
 /// 复刻 resolve_outcome 里的对抗结算尾段（compare-agnostic）。
-fn resolve_meet_or_beat(model: &CheckResolutionModel, atk_total: i64, def_total: i64) -> (Option<bool>, Option<i64>) {
+fn resolve_meet_or_beat(
+    model: &CheckResolutionModel,
+    atk_total: i64,
+    def_total: i64,
+) -> (Option<bool>, Option<i64>) {
     let bands: Vec<Value> = vec![]; // CPR 无 success_bands → tier rank 退化为 0，纯比 margin。
-    if let CheckResolutionModel::OpposedRoll { attacker_value, defender_value, .. } = model {
-        let (_t, s, _d) = resolve_opposed("meet_or_beat", &bands, atk_total, *attacker_value, def_total, *defender_value);
+    if let CheckResolutionModel::OpposedRoll {
+        attacker_value,
+        defender_value,
+        ..
+    } = model
+    {
+        let (_t, s, _d) = resolve_opposed(
+            "meet_or_beat",
+            &bands,
+            atk_total,
+            *attacker_value,
+            def_total,
+            *defender_value,
+        );
         return (s, defender_value.map(|v| v as i64));
     }
     (None, None)
@@ -52,9 +68,17 @@ fn meet_or_beat_opposed_builds_opposed_roll_with_defense_value() {
     let model = build_opposed_model(&contract, "1d10", Some(14), Some(12));
     // 必须建 OpposedRoll 且带防御值（消费了 NPC 卡），而非 StaticTargetNumber/Provisional。
     match &model {
-        CheckResolutionModel::OpposedRoll { defender_value, defender_actor_id, .. } => {
+        CheckResolutionModel::OpposedRoll {
+            defender_value,
+            defender_actor_id,
+            ..
+        } => {
             assert_eq!(*defender_value, Some(12i32), "必须读到防御方 defense=12");
-            assert_eq!(defender_actor_id.as_deref(), Some("npc.boss"), "防御方 actor id 来自 target_actor，非占位符");
+            assert_eq!(
+                defender_actor_id.as_deref(),
+                Some("npc.boss"),
+                "防御方 actor id 来自 target_actor，非占位符"
+            );
         }
         other => panic!("meet_or_beat opposed 必须建 OpposedRoll，得到 {:?}", other),
     }
@@ -68,7 +92,11 @@ fn meet_or_beat_opposed_resolves_to_real_verdict_total_ge_defense() {
     let model = build_opposed_model(&contract, "1d10", Some(12), Some(12));
     // 攻击方 total 18>=12 达成、防御方 total 9<12 未达成 → 攻击方命中。
     let (success, def_v) = resolve_meet_or_beat(&model, 18, 9);
-    assert_eq!(success, Some(true), "攻击方达成、防御方未达成 → 攻击方胜，必须非 null（消费层真结算）");
+    assert_eq!(
+        success,
+        Some(true),
+        "攻击方达成、防御方未达成 → 攻击方胜，必须非 null（消费层真结算）"
+    );
     assert_eq!(def_v, Some(12), "结算消费了 NPC 现搓的 defense");
 
     // 攻击方 total 9<12 未达成、防御方 total 18>=12 达成 → 防御方胜（攻击被挡）。
@@ -83,12 +111,16 @@ fn meet_or_beat_opposed_missing_defense_fails_closed() {
     let contract = contract_with_dice("1d10");
     let model = build_opposed_model(&contract, "1d10", Some(14), None);
     match &model {
-        CheckResolutionModel::OpposedRoll { defender_value, .. } =>
-            assert_eq!(*defender_value, None, "查不到防御值 → 不编造，保持 None"),
+        CheckResolutionModel::OpposedRoll { defender_value, .. } => {
+            assert_eq!(*defender_value, None, "查不到防御值 → 不编造，保持 None")
+        }
         other => panic!("应为 OpposedRoll，得到 {:?}", other),
     }
     let (success, _) = resolve_meet_or_beat(&model, 99, 1);
-    assert_eq!(success, None, "防御值缺 → fail-closed，绝不乱判命中（不是 Some(true)）");
+    assert_eq!(
+        success, None,
+        "防御值缺 → fail-closed，绝不乱判命中（不是 Some(true)）"
+    );
 }
 
 #[test]
@@ -98,7 +130,12 @@ fn roll_under_opposed_construction_unaffected_regression() {
     let contract = contract_with_dice("1d100");
     let model = build_opposed_model(&contract, "1d100", Some(75), Some(60));
     match &model {
-        CheckResolutionModel::OpposedRoll { attacker_value, defender_value, defender_expression, .. } => {
+        CheckResolutionModel::OpposedRoll {
+            attacker_value,
+            defender_value,
+            defender_expression,
+            ..
+        } => {
             assert_eq!(*attacker_value, Some(75));
             assert_eq!(*defender_value, Some(60));
             assert_eq!(defender_expression, "1d100", "防御掷式来自 def_expr 入参");
@@ -108,7 +145,11 @@ fn roll_under_opposed_construction_unaffected_regression() {
     // roll_under 方向：total<=value 成功。
     let bands: Vec<Value> = vec![];
     let (_t, s, _d) = resolve_opposed("roll_under", &bands, 5, Some(75), 96, Some(60));
-    assert_eq!(s, Some(true), "攻击方掷 5<=75 成功、防御方 96>60 失败 → 攻击方胜");
+    assert_eq!(
+        s,
+        Some(true),
+        "攻击方掷 5<=75 成功、防御方 96>60 失败 → 攻击方胜"
+    );
 }
 
 // ─── spec §4.3 / §6⑥：fail-closed 不再静默 miss，给显式 awaiting_binding 信号 ───
@@ -125,7 +166,8 @@ fn opposed_without_defense_value_signals_awaiting_binding_not_silent_miss() {
     let model = build_opposed_model(&contract, "1d10", Some(14), None);
     let (_t, success, _d, awaiting) = resolve_against_model(&model, 18, &[]);
     assert_eq!(success, None, "无防御值仍 fail-closed,不乱判命中");
-    let reason = awaiting.expect("无防御值的 OpposedRoll 必须给出 awaiting_binding 信号,而非默默 None");
+    let reason =
+        awaiting.expect("无防御值的 OpposedRoll 必须给出 awaiting_binding 信号,而非默默 None");
     assert!(!reason.trim().is_empty(), "awaiting_binding 理由不得为空");
 }
 
@@ -133,7 +175,8 @@ fn opposed_without_defense_value_signals_awaiting_binding_not_silent_miss() {
 fn attack_provisional_signals_awaiting_binding() {
     // attack 走到 Provisional(无 source-backed DV)→ 必须 awaiting_binding,非静默 null。
     let model = CheckResolutionModel::Provisional {
-        reason: "attack defense/DV is missing; bind source-backed target defense/AC/evasion/DV".into(),
+        reason: "attack defense/DV is missing; bind source-backed target defense/AC/evasion/DV"
+            .into(),
         suggested_target: None,
     };
     let (_t, success, _d, awaiting) = resolve_against_model(&model, 50, &[]);
@@ -148,12 +191,18 @@ fn attack_provisional_signals_awaiting_binding() {
 #[test]
 fn resolved_models_carry_no_awaiting_binding_signal() {
     // 零回归:已结算模型(命中判定出 success)一律不带 awaiting_binding。
-    let static_m = CheckResolutionModel::StaticTargetNumber { value: 12, label: "dv".into() };
+    let static_m = CheckResolutionModel::StaticTargetNumber {
+        value: 12,
+        label: "dv".into(),
+    };
     let (_t, s, _d, awaiting) = resolve_against_model(&static_m, 18, &[]);
     assert_eq!(s, Some(true));
     assert_eq!(awaiting, None, "已结算的静态目标不得带 awaiting_binding");
 
-    let pct = CheckResolutionModel::PercentileRollUnder { ability_label: "Spot".into(), ability_value: 75 };
+    let pct = CheckResolutionModel::PercentileRollUnder {
+        ability_label: "Spot".into(),
+        ability_value: 75,
+    };
     let (_t, s, _d, awaiting) = resolve_against_model(&pct, 30, &[]);
     assert_eq!(s, Some(true));
     assert_eq!(awaiting, None, "已结算的百分比检定不得带 awaiting_binding");
@@ -162,5 +211,8 @@ fn resolved_models_carry_no_awaiting_binding_signal() {
     let contract = contract_with_dice("1d10");
     let bound = build_opposed_model(&contract, "1d10", Some(14), Some(12));
     let (_t, _s, _d, awaiting) = resolve_against_model(&bound, 18, &[]);
-    assert_eq!(awaiting, None, "防御值齐备的 OpposedRoll 不带 awaiting_binding(交 resolve_opposed 出胜负)");
+    assert_eq!(
+        awaiting, None,
+        "防御值齐备的 OpposedRoll 不带 awaiting_binding(交 resolve_opposed 出胜负)"
+    );
 }

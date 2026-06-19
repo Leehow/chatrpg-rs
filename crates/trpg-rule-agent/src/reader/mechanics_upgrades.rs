@@ -25,8 +25,10 @@ pub fn apply_thresholds_upgrades(
     upgrades: &[Value],
     catalog: &[MechanicEntry],
 ) -> Vec<ValidationMessage> {
-    let ids: std::collections::HashMap<String, &str> =
-        catalog.iter().map(|e| (e.id.trim().to_ascii_lowercase(), e.id.trim())).collect();
+    let ids: std::collections::HashMap<String, &str> = catalog
+        .iter()
+        .map(|e| (e.id.trim().to_ascii_lowercase(), e.id.trim()))
+        .collect();
     let mut msgs = Vec::new();
     for u in upgrades {
         let follow = u
@@ -68,18 +70,31 @@ pub fn apply_thresholds_upgrades(
 /// `threshold_shape_matches`); None when track/thresholds/shape miss.
 fn find_threshold_mut<'a>(tracks: &'a mut [Value], u: &Value) -> Option<&'a mut Value> {
     let want = norm_key(u.get("track_id").and_then(Value::as_str)?)?;
-    let track = tracks
+    let track = tracks.iter_mut().find(|t| {
+        t.get("id")
+            .and_then(Value::as_str)
+            .and_then(norm_key)
+            .as_deref()
+            == Some(&want)
+    })?;
+    track
+        .get_mut("thresholds")?
+        .as_array_mut()?
         .iter_mut()
-        .find(|t| t.get("id").and_then(Value::as_str).and_then(norm_key).as_deref() == Some(&want))?;
-    track.get_mut("thresholds")?.as_array_mut()?.iter_mut().find(|th| threshold_shape_matches(th, u))
+        .find(|th| threshold_shape_matches(th, u))
 }
 
 /// Shape match = `at` numerically equal AND `direction` equal (both absent
 /// counts as equal), OR `loss_in_one_go` numerically equal.
 fn threshold_shape_matches(th: &Value, u: &Value) -> bool {
     let num = |v: &Value, k: &str| v.get(k).and_then(Value::as_f64);
-    let dir = |v: &Value| v.get("direction").and_then(Value::as_str).and_then(norm_key);
-    let at = matches!((num(u, "at"), num(th, "at")), (Some(a), Some(b)) if a == b) && dir(u) == dir(th);
+    let dir = |v: &Value| {
+        v.get("direction")
+            .and_then(Value::as_str)
+            .and_then(norm_key)
+    };
+    let at =
+        matches!((num(u, "at"), num(th, "at")), (Some(a), Some(b)) if a == b) && dir(u) == dir(th);
     let ligo = matches!((num(u, "loss_in_one_go"), num(th, "loss_in_one_go")), (Some(a), Some(b)) if a == b);
     at || ligo
 }
@@ -94,12 +109,15 @@ fn threshold_shape_matches(th: &Value, u: &Value) -> bool {
 /// marker exists, so no deterministic `success_bands_incomplete` warning is
 /// emitted (shape not judgeable -> stay silent; completeness is owned by the
 /// prompt instructions + the A7 batch audit).
-pub fn apply_success_bands_upgrades(kernel: &mut RuleKernel, upgrades: &[Value]) -> Vec<ValidationMessage> {
+pub fn apply_success_bands_upgrades(
+    kernel: &mut RuleKernel,
+    upgrades: &[Value],
+) -> Vec<ValidationMessage> {
     let mut msgs = Vec::new();
     let usable: Vec<(String, &Value)> = upgrades
         .iter()
-        .filter_map(|u| {
-            match u.get("id").and_then(Value::as_str).and_then(norm_key) {
+        .filter_map(
+            |u| match u.get("id").and_then(Value::as_str).and_then(norm_key) {
                 Some(id) => Some((id, u)),
                 None => {
                     msgs.push(warn(
@@ -109,8 +127,8 @@ pub fn apply_success_bands_upgrades(kernel: &mut RuleKernel, upgrades: &[Value])
                     ));
                     None
                 }
-            }
-        })
+            },
+        )
         .collect();
     if usable.is_empty() {
         return msgs; // empty/garbage upgrades: a malformed dice_core stays byte-for-byte untouched
@@ -118,15 +136,29 @@ pub fn apply_success_bands_upgrades(kernel: &mut RuleKernel, upgrades: &[Value])
     if !kernel.dice_core.is_object() {
         kernel.dice_core = Value::Object(Default::default());
     }
-    let obj = kernel.dice_core.as_object_mut().expect("object ensured above");
-    if !obj.get("success_bands").map(Value::is_array).unwrap_or(false) {
+    let obj = kernel
+        .dice_core
+        .as_object_mut()
+        .expect("object ensured above");
+    if !obj
+        .get("success_bands")
+        .map(Value::is_array)
+        .unwrap_or(false)
+    {
         obj.insert("success_bands".into(), Value::Array(Vec::new()));
     }
-    let bands = obj.get_mut("success_bands").and_then(Value::as_array_mut).expect("array ensured above");
+    let bands = obj
+        .get_mut("success_bands")
+        .and_then(Value::as_array_mut)
+        .expect("array ensured above");
     for (id, u) in usable {
-        let existing = bands
-            .iter_mut()
-            .find(|b| b.get("id").and_then(Value::as_str).and_then(norm_key).as_deref() == Some(&id));
+        let existing = bands.iter_mut().find(|b| {
+            b.get("id")
+                .and_then(Value::as_str)
+                .and_then(norm_key)
+                .as_deref()
+                == Some(&id)
+        });
         match existing {
             Some(band) => {
                 if let (Some(bo), Some(uo)) = (band.as_object_mut(), u.as_object()) {
@@ -142,7 +174,8 @@ pub fn apply_success_bands_upgrades(kernel: &mut RuleKernel, upgrades: &[Value])
                 msgs.push(warn(
                     "success_band_completed",
                     Some(&id),
-                    "kernel lacked this success band; whole object appended from the compile pass".into(),
+                    "kernel lacked this success band; whole object appended from the compile pass"
+                        .into(),
                 ));
             }
         }
@@ -157,8 +190,16 @@ pub fn apply_success_bands_upgrades(kernel: &mut RuleKernel, upgrades: &[Value])
 pub fn apply_field_notes(kernel: &mut RuleKernel, notes: &[Value]) -> Vec<ValidationMessage> {
     let mut msgs = Vec::new();
     for n in notes {
-        let fid = n.get("field_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
-        let text = n.get("notes").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
+        let fid = n
+            .get("field_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let text = n
+            .get("notes")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
         let (Some(fid), Some(text)) = (fid, text) else {
             msgs.push(warn(
                 "field_note_unmatched",
@@ -173,14 +214,21 @@ pub fn apply_field_notes(kernel: &mut RuleKernel, notes: &[Value]) -> Vec<Valida
             .get_mut("fields")
             .and_then(Value::as_array_mut)
             .and_then(|a| {
-                a.iter_mut()
-                    .find(|f| f.get("field_id").and_then(Value::as_str).and_then(norm_key).as_deref() == Some(&want))
+                a.iter_mut().find(|f| {
+                    f.get("field_id")
+                        .and_then(Value::as_str)
+                        .and_then(norm_key)
+                        .as_deref()
+                        == Some(&want)
+                })
             });
         match field {
             Some(f) => {
                 let fillable = match f.get("notes") {
                     None => true,
-                    Some(v) => v.is_null() || v.as_str().map(|s| s.trim().is_empty()).unwrap_or(false),
+                    Some(v) => {
+                        v.is_null() || v.as_str().map(|s| s.trim().is_empty()).unwrap_or(false)
+                    }
                 };
                 if fillable {
                     if let Some(o) = f.as_object_mut() {
@@ -204,8 +252,8 @@ pub fn apply_field_notes(kernel: &mut RuleKernel, notes: &[Value]) -> Vec<Valida
 /// Err -> the caller reverts the WHOLE pass (fail-closed integrity).
 pub fn kernel_round_trip_guard(kernel: &RuleKernel) -> Result<(), String> {
     let v = serde_json::to_value(kernel).map_err(|e| format!("kernel to_value failed: {e}"))?;
-    let rt: RuleKernel =
-        serde_json::from_value(v).map_err(|e| format!("kernel from_value round-trip failed: {e}"))?;
+    let rt: RuleKernel = serde_json::from_value(v)
+        .map_err(|e| format!("kernel from_value round-trip failed: {e}"))?;
     let count = |tracks: &[Value]| -> usize {
         trpg_model::normalize_resource_tracks(tracks)
             .iter()

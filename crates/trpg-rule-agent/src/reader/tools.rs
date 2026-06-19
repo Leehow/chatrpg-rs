@@ -23,15 +23,32 @@ pub fn dedup(text: &str) -> String {
 
 /// Section map: heading | pages | size | top categories/mech_tags. The "shape".
 pub fn toc(units: &[Unit], max: usize) -> String {
-    struct Sec { pages: Vec<u32>, chars: usize, n: usize, cats: BTreeMap<String, usize>, tags: BTreeMap<String, usize> }
+    struct Sec {
+        pages: Vec<u32>,
+        chars: usize,
+        n: usize,
+        cats: BTreeMap<String, usize>,
+        tags: BTreeMap<String, usize>,
+    }
     let mut secs: BTreeMap<String, Sec> = BTreeMap::new();
     for u in units {
         if u.is_noise() {
             continue;
         }
-        let key = u.heading_context.first().cloned().filter(|s| !s.is_empty()).unwrap_or_else(|| u.title.clone());
+        let key = u
+            .heading_context
+            .first()
+            .cloned()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| u.title.clone());
         let key = if key.is_empty() { "?".to_string() } else { key };
-        let s = secs.entry(key).or_insert_with(|| Sec { pages: vec![], chars: 0, n: 0, cats: BTreeMap::new(), tags: BTreeMap::new() });
+        let s = secs.entry(key).or_insert_with(|| Sec {
+            pages: vec![],
+            chars: 0,
+            n: 0,
+            cats: BTreeMap::new(),
+            tags: BTreeMap::new(),
+        });
         s.pages.extend(&u.page_numbers);
         s.chars += u.content_text.len();
         s.n += 1;
@@ -46,16 +63,36 @@ pub fn toc(units: &[Unit], max: usize) -> String {
             let mut pp = s.pages.clone();
             pp.sort_unstable();
             pp.dedup();
-            let rng = if pp.is_empty() { "?".into() } else { format!("{}-{}", pp[0], pp[pp.len() - 1]) };
+            let rng = if pp.is_empty() {
+                "?".into()
+            } else {
+                format!("{}-{}", pp[0], pp[pp.len() - 1])
+            };
             let cats = top_n(&s.cats, 2);
             let tags = top_n(&s.tags, 4);
-            (pp.first().copied().unwrap_or(9999), k, rng, s.chars, s.n, cats, tags)
+            (
+                pp.first().copied().unwrap_or(9999),
+                k,
+                rng,
+                s.chars,
+                s.n,
+                cats,
+                tags,
+            )
         })
         .collect();
     rows.sort();
     let mut out = String::from(" pages    chars units  heading | cats | mech_tags\n");
     for (_, k, rng, ch, n, cats, tags) in rows.iter().take(max) {
-        out.push_str(&format!("{:>9}  {:>6} {:>5}  {} | {} | {}\n", rng, ch, n, trunc(k, 46), cats, tags));
+        out.push_str(&format!(
+            "{:>9}  {:>6} {:>5}  {} | {} | {}\n",
+            rng,
+            ch,
+            n,
+            trunc(k, 46),
+            cats,
+            tags
+        ));
     }
     out.push_str(&format!("[{} sections]\n", rows.len()));
     out
@@ -64,26 +101,63 @@ pub fn toc(units: &[Unit], max: usize) -> String {
 fn top_n(m: &BTreeMap<String, usize>, n: usize) -> String {
     let mut v: Vec<(&String, &usize)> = m.iter().collect();
     v.sort_by(|a, b| b.1.cmp(a.1));
-    v.into_iter().take(n).map(|(k, c)| format!("{}:{}", k, c)).collect::<Vec<_>>().join(",")
+    v.into_iter()
+        .take(n)
+        .map(|(k, c)| format!("{}:{}", k, c))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 fn trunc(s: &str, n: usize) -> String {
-    if s.chars().count() <= n { s.to_string() } else { s.chars().take(n).collect() }
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        s.chars().take(n).collect()
+    }
 }
 
 fn score(u: &Unit, kws: &[String]) -> f64 {
     let hay = u.haystack();
-    let hits: usize = kws.iter().map(|k| hay.matches(&k.to_lowercase()).count()).sum();
-    if hits == 0 { 0.0 } else { hits as f64 * (0.5 + u.index_weight()) }
+    let hits: usize = kws
+        .iter()
+        .map(|k| hay.matches(&k.to_lowercase()).count())
+        .sum();
+    if hits == 0 {
+        0.0
+    } else {
+        hits as f64 * (0.5 + u.index_weight())
+    }
 }
 
 /// Ranked hits: page | category | heading | snippet (+unit_id). Use to locate.
 pub fn search(units: &[Unit], keywords: &[String], n: usize) -> String {
-    let mut scored: Vec<(f64, &Unit)> = units.iter().filter(|u| !u.is_noise()).map(|u| (score(u, keywords), u)).filter(|x| x.0 > 0.0).collect();
+    let mut scored: Vec<(f64, &Unit)> = units
+        .iter()
+        .filter(|u| !u.is_noise())
+        .map(|u| (score(u, keywords), u))
+        .filter(|x| x.0 > 0.0)
+        .collect();
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    let mut out = format!("search {:?} -> {} hits (top {}):\n", keywords, scored.len(), n);
+    let mut out = format!(
+        "search {:?} -> {} hits (top {}):\n",
+        keywords,
+        scored.len(),
+        n
+    );
     for (_, u) in scored.iter().take(n) {
-        let snip: String = dedup(&u.content_text).replace('\n', " ").chars().take(140).collect();
-        out.push_str(&format!("  p{:<4} [{:<14}] {:<34} :: {}\n", u.first_page().map(|p| p.to_string()).unwrap_or_else(|| "?".into()), trunc(&u.category, 14), trunc(&u.head_path(), 34), snip));
+        let snip: String = dedup(&u.content_text)
+            .replace('\n', " ")
+            .chars()
+            .take(140)
+            .collect();
+        out.push_str(&format!(
+            "  p{:<4} [{:<14}] {:<34} :: {}\n",
+            u.first_page()
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "?".into()),
+            trunc(&u.category, 14),
+            trunc(&u.head_path(), 34),
+            snip
+        ));
     }
     out
 }
@@ -97,7 +171,13 @@ pub fn read(units: &[Unit], pages: &str) -> String {
         if u.page_numbers.iter().any(|&p| a <= p && p <= b) {
             let body = dedup(&u.content_text);
             total += body.len();
-            out.push_str(&format!("--- p{} [{}] {} ---\n{}\n\n", u.first_page().unwrap_or(0), u.category, u.head_path(), body));
+            out.push_str(&format!(
+                "--- p{} [{}] {} ---\n{}\n\n",
+                u.first_page().unwrap_or(0),
+                u.category,
+                u.head_path(),
+                body
+            ));
         }
     }
     out.push_str(&format!("[read, {} chars]\n", total));
@@ -107,7 +187,10 @@ pub fn read(units: &[Unit], pages: &str) -> String {
 fn parse_range(s: &str) -> (u32, u32) {
     let s = s.trim();
     if let Some((a, b)) = s.split_once('-') {
-        (a.trim().parse().unwrap_or(0), b.trim().parse().unwrap_or(u32::MAX))
+        (
+            a.trim().parse().unwrap_or(0),
+            b.trim().parse().unwrap_or(u32::MAX),
+        )
     } else {
         let p = s.parse().unwrap_or(0);
         (p, p)
@@ -221,12 +304,33 @@ mod tests {
     #[test]
     fn search_ranks_by_keyword_and_weight() {
         let units = vec![
-            unit("u1", "Skill Checks", "add your STAT + Skill + 1d10 vs the Difficulty Value DV", 129, "rule_or_procedure", 0.9),
-            unit("u2", "Lore", "night city is a dangerous place", 5, "lore_or_guidance", 0.3),
+            unit(
+                "u1",
+                "Skill Checks",
+                "add your STAT + Skill + 1d10 vs the Difficulty Value DV",
+                129,
+                "rule_or_procedure",
+                0.9,
+            ),
+            unit(
+                "u2",
+                "Lore",
+                "night city is a dangerous place",
+                5,
+                "lore_or_guidance",
+                0.3,
+            ),
         ];
         let out = search(&units, &["1d10".into(), "DV".into()], 5);
         assert!(out.contains("p129"));
-        assert!(out.find("p129").unwrap() < out.find("hits").map(|_| usize::MAX).unwrap_or(0).min(out.len()));
+        assert!(
+            out.find("p129").unwrap()
+                < out
+                    .find("hits")
+                    .map(|_| usize::MAX)
+                    .unwrap_or(0)
+                    .min(out.len())
+        );
         assert!(!out.contains("p5  ")); // lore not matched
     }
 
@@ -246,7 +350,10 @@ mod tests {
     fn toc_groups_and_drops_noise() {
         let mut n = unit("n", "junk", "noise noise", 1, "noise", 0.1);
         n.signal_class = "noise".into();
-        let units = vec![unit("u1", "Combat", "fight", 100, "rule_or_procedure", 0.6), n];
+        let units = vec![
+            unit("u1", "Combat", "fight", 100, "rule_or_procedure", 0.6),
+            n,
+        ];
         let out = toc(&units, 20);
         assert!(out.contains("Combat"));
         assert!(!out.contains("junk")); // noise dropped

@@ -1,0 +1,55 @@
+{
+  "identity": {
+    "scenario_id": "JRNY-HOME-01-athena-knowledge-failbranch",
+    "scenario_version": "1",
+    "evidence_schema_version": "tc-jrny-02.evidence.v1"
+  },
+  "recorded_mode": "deterministic",
+  "turns": [
+    {
+      "user_input": "我先站在巷口的安全距离观察现场，看看无人机、警察和仓库门口分别是什么情况。",
+      "count_delta": {},
+      "newest_contest_row": null,
+      "player_visible_body": "你站在巷口的安全距离观察：一架无人机悬停在仓库门口，几名警察在外围拉起警戒线，门口有一束裸露在外的电缆。现场气氛紧张，但你还看不出更多门道。",
+      "knowledge": {
+        "player_known_fact_ids": [],
+        "reveal_committed_fact_ids": [],
+        "surfaced_entity_ids": ["npc.athena_drone", "warehouse_door"],
+        "reload": false
+      }
+    },
+    {
+      "user_input": "我拆开无人机背后的护盖，动手切断它外露的供电电缆。",
+      "count_delta": {
+        "roll_plans": 1,
+        "dice_rolls": 1,
+        "contest_resolution_events": 1
+      },
+      "newest_contest_row": {
+        "target_value": 14,
+        "success": false,
+        "degree": "failure",
+        "total": 9,
+        "outcome_json": {
+          "target": 14,
+          "success": false,
+          "degree": "failure",
+          "source_refs": ["module_config:technical_option_table:dv=14"]
+        }
+      },
+      "player_visible_body": "你的手一抖，没能干净地切断电缆，反而触发了护盖的防拆机制——火花一闪，你只好停手。"
+    },
+    {
+      "user_input": "我先停手，不冒险硬拆，去找更懂这套设备的人问问。",
+      "count_delta": {},
+      "newest_contest_row": null,
+      "player_visible_body": "你决定不再冒险硬拆这台无人机，收起工具，打算去找修理圈里更懂这套设备的人问问情况。",
+      "knowledge": {
+        "player_known_fact_ids": [],
+        "reveal_committed_fact_ids": [],
+        "surfaced_entity_ids": ["npc.athena_drone"],
+        "reload": false
+      }
+    }
+  ]
+}

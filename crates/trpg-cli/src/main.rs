@@ -22,7 +22,9 @@ use trpg_model::*;
 use trpg_parser::{ParserConfig, ProjectParseService};
 use trpg_rule_agent::RuleStewardAgent;
 use trpg_runtime::scene_navigation::extract_module_scenes;
-use trpg_runtime::{roll_dice, validate_character_template_sheet, RuntimeEngine};
+use trpg_runtime::{
+    roll_dice, validate_character_template_sheet, EntryGate, EntryGateBlock, RuntimeEngine,
+};
 use trpg_search::{load_search_source_configs, SearchConfig, SearchService};
 
 mod agent_play;
@@ -30,7 +32,11 @@ mod transport_policy;
 use transport_policy::{cli_wait_mode, WaitMode};
 
 #[derive(Debug, Parser)]
-#[command(name = "trpg", version, about = "Rust TRPG rulebook/module parser and terminal runtime")]
+#[command(
+    name = "trpg",
+    version,
+    about = "Rust TRPG rulebook/module parser and terminal runtime"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -75,6 +81,8 @@ enum Commands {
         ruleset: String,
         #[arg(long)]
         module: Option<String>,
+        #[arg(long)]
+        session_id: Option<String>,
     },
     /// Run exactly one GM turn without opening the interactive play shell.
     /// Useful for pipes, regression tests, scripts, and LLM-driven debugging.
@@ -109,17 +117,26 @@ enum Commands {
     /// base stat, then re-derive. Engine only moves the value (A0). e.g.
     /// `trpg grow --session S --actor pc.current --bucket tracks --id fighter --op add --amount 1 --kind class_level`
     Grow {
-        #[arg(long)] session: String,
-        #[arg(long, default_value = "pc.current")] actor: String,
-        #[arg(long, value_parser = ["tracks", "stats", "skills", "field"], default_value = "tracks")] bucket: String,
-        #[arg(long)] id: String,
-        #[arg(long, value_parser = ["set", "add"], default_value = "add")] op: String,
+        #[arg(long)]
+        session: String,
+        #[arg(long, default_value = "pc.current")]
+        actor: String,
+        #[arg(long, value_parser = ["tracks", "stats", "skills", "field"], default_value = "tracks")]
+        bucket: String,
+        #[arg(long)]
+        id: String,
+        #[arg(long, value_parser = ["set", "add"], default_value = "add")]
+        op: String,
         /// Amount to set/add. Negative allowed (e.g. spend a pool): `--amount -60`.
-        #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)] amount: f64,
+        #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
+        amount: f64,
         /// A categorical/string value to SET (e.g. a race/ancestry/class choice). Use instead of --amount for non-numeric inputs.
-        #[arg(long)] value: Option<String>,
-        #[arg(long)] kind: Option<String>,
-        #[arg(long)] category: Option<String>,
+        #[arg(long)]
+        value: Option<String>,
+        #[arg(long)]
+        kind: Option<String>,
+        #[arg(long)]
+        category: Option<String>,
     },
     Search {
         #[command(subcommand)]
@@ -231,36 +248,53 @@ struct TurnArgs {
     stream_format: StreamFormat,
 }
 
-
-
 #[derive(Debug, Subcommand)]
 enum TimeCommand {
     Show {
-        #[arg(long)] session: String,
+        #[arg(long)]
+        session: String,
     },
     Advance {
-        #[arg(long)] session: String,
-        #[arg(long, default_value_t = 0)] seconds: i64,
-        #[arg(long, default_value_t = 0)] minutes: i64,
-        #[arg(long, default_value_t = 0)] hours: i64,
-        #[arg(long, default_value_t = 0)] days: i64,
-        #[arg(long = "rounds", default_value_t = 0)] combat_rounds: i64,
-        #[arg(long = "scene-beats", default_value_t = 0)] scene_beats: i64,
-        #[arg(long, default_value = "scene_beat")] scale: String,
-        #[arg(long, default_value = "manual CLI time advance")] reason: String,
+        #[arg(long)]
+        session: String,
+        #[arg(long, default_value_t = 0)]
+        seconds: i64,
+        #[arg(long, default_value_t = 0)]
+        minutes: i64,
+        #[arg(long, default_value_t = 0)]
+        hours: i64,
+        #[arg(long, default_value_t = 0)]
+        days: i64,
+        #[arg(long = "rounds", default_value_t = 0)]
+        combat_rounds: i64,
+        #[arg(long = "scene-beats", default_value_t = 0)]
+        scene_beats: i64,
+        #[arg(long, default_value = "scene_beat")]
+        scale: String,
+        #[arg(long, default_value = "manual CLI time advance")]
+        reason: String,
     },
     Schedule {
-        #[arg(long)] session: String,
-        #[arg(long = "in-minutes", default_value_t = 0)] in_minutes: i64,
-        #[arg(long = "in-seconds", default_value_t = 0)] in_seconds: i64,
-        #[arg(long, default_value = "system_event")] kind: String,
-        #[arg(long, default_value = "{}")] payload_json: String,
+        #[arg(long)]
+        session: String,
+        #[arg(long = "in-minutes", default_value_t = 0)]
+        in_minutes: i64,
+        #[arg(long = "in-seconds", default_value_t = 0)]
+        in_seconds: i64,
+        #[arg(long, default_value = "system_event")]
+        kind: String,
+        #[arg(long, default_value = "{}")]
+        payload_json: String,
     },
     Events {
-        #[arg(long)] session: String,
-        #[arg(long = "since-tick", default_value_t = 0)] since_tick: i64,
-        #[arg(long = "since-event-seq", default_value_t = 0)] since_event_seq: i64,
-        #[arg(long, default_value_t = 50)] limit: i64,
+        #[arg(long)]
+        session: String,
+        #[arg(long = "since-tick", default_value_t = 0)]
+        since_tick: i64,
+        #[arg(long = "since-event-seq", default_value_t = 0)]
+        since_event_seq: i64,
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
     },
 }
 
@@ -324,7 +358,6 @@ enum SearchCommand {
     },
     Sources,
 }
-
 
 #[derive(Debug, Subcommand)]
 enum RulesCommand {
@@ -405,7 +438,9 @@ impl From<RuleNeedKindArg> for RuleNeedKind {
             RuleNeedKindArg::CharacterCreation => RuleNeedKind::CharacterCreation,
             RuleNeedKindArg::NpcOrMonsterStatBlock => RuleNeedKind::NpcOrMonsterStatBlock,
             RuleNeedKindArg::SceneOrModuleRule => RuleNeedKind::SceneOrModuleRule,
-            RuleNeedKindArg::VisibilityOrSpoilerDecision => RuleNeedKind::VisibilityOrSpoilerDecision,
+            RuleNeedKindArg::VisibilityOrSpoilerDecision => {
+                RuleNeedKind::VisibilityOrSpoilerDecision
+            }
             RuleNeedKindArg::LearningAudit => RuleNeedKind::LearningAudit,
             RuleNeedKindArg::Bp1KernelReview => RuleNeedKind::Bp1KernelReview,
             RuleNeedKindArg::GeneralRuleQuery => RuleNeedKind::GeneralRuleQuery,
@@ -434,7 +469,6 @@ enum LearnCommand {
     },
 }
 
-
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum StreamFormat {
     /// Human-readable text stream. Metadata goes to stderr; deltas go to stdout.
@@ -453,8 +487,14 @@ enum AuthCommand {
 #[derive(Debug, Subcommand)]
 enum InspectCommand {
     Bundles,
-    CharacterTemplate { #[arg(long)] ruleset: String },
-    CharacterOnboarding { #[arg(long)] ruleset: String },
+    CharacterTemplate {
+        #[arg(long)]
+        ruleset: String,
+    },
+    CharacterOnboarding {
+        #[arg(long)]
+        ruleset: String,
+    },
     ProjectJson,
 }
 
@@ -493,14 +533,21 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Init => init_project().await,
-        Commands::Auth { command } => match command { AuthCommand::Set => auth_set().await },
+        Commands::Auth { command } => match command {
+            AuthCommand::Set => auth_set().await,
+        },
         Commands::Migrate => {
             let db = connect_db().await?;
             db.migrate().await?;
             println!("migration complete");
             Ok(())
         }
-        Commands::ParseAll { force, full_parse, pdf_backend, data_dir } => {
+        Commands::ParseAll {
+            force,
+            full_parse,
+            pdf_backend,
+            data_dir,
+        } => {
             let db = connect_db().await?;
             db.migrate().await?;
             let llm = make_llm()?;
@@ -520,17 +567,42 @@ async fn main() -> Result<()> {
             let project = service.parse_all().await?;
             let search = make_search(&db, search_data_dir)?;
             let stats = search.reindex_all().await?;
-            println!("onboarded/indexed: {} ruleset bundle(s), {} module bundle(s)", project.rulesets.len(), project.modules.len());
+            println!(
+                "onboarded/indexed: {} ruleset bundle(s), {} module bundle(s)",
+                project.rulesets.len(),
+                project.modules.len()
+            );
             println!("pdf backend: {}", pdf_backend_label);
             let rule_steward_first_pass = std::env::var("TRPG_RULE_STEWARD_FIRST_PASS")
                 .ok()
                 .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
                 .unwrap_or(true);
-            println!("rule steward first-pass skills: {}", if rule_steward_first_pass { "enabled" } else { "disabled" });
-            if full_parse { println!("full chunk extraction was enabled"); } else { println!("full chunk extraction skipped; cold data will be learned on demand"); }
-            println!("wrote data/parsed/project.bundle.json, context_blocks.jsonl, material_index.jsonl");
-            println!("tantivy search index updated: {} document(s) from {} source config(s)", stats.indexed_documents, stats.source_count);
-            if !stats.errors.is_empty() { eprintln!("search index warnings: {}", serde_json::to_string(&stats.errors)?); }
+            println!(
+                "rule steward first-pass skills: {}",
+                if rule_steward_first_pass {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
+            if full_parse {
+                println!("full chunk extraction was enabled");
+            } else {
+                println!("full chunk extraction skipped; cold data will be learned on demand");
+            }
+            println!(
+                "wrote data/parsed/project.bundle.json, context_blocks.jsonl, material_index.jsonl"
+            );
+            println!(
+                "tantivy search index updated: {} document(s) from {} source config(s)",
+                stats.indexed_documents, stats.source_count
+            );
+            if !stats.errors.is_empty() {
+                eprintln!(
+                    "search index warnings: {}",
+                    serde_json::to_string(&stats.errors)?
+                );
+            }
             Ok(())
         }
         Commands::Api { addr, data_dir } => {
@@ -540,29 +612,65 @@ async fn main() -> Result<()> {
             let parser_config = ParserConfig::new(data_dir.unwrap_or_else(default_data_dir), false);
             let search = make_search(&db, parser_config.data_dir.clone())?;
             let runtime = RuntimeEngine::new(db.clone()).with_search(search.clone());
-            let state = AppState { db, llm, runtime, search, parser_config };
+            let state = AppState {
+                db,
+                llm,
+                runtime,
+                search,
+                parser_config,
+            };
             serve(addr, state).await
         }
         Commands::Inspect { command } => inspect(command).await,
         Commands::CreateCharacter(args) => create_character_cli(args).await,
-        Commands::Play { ruleset, module } => {
-            agent_play::play_cli_agent(&ruleset, module.as_deref()).await
-        }
+        Commands::Play {
+            ruleset,
+            module,
+            session_id,
+        } => agent_play::play_cli_agent(&ruleset, module.as_deref(), session_id.as_deref()).await,
         Commands::Turn(args) => turn_cli(args).await,
         Commands::Explain { session, turn } => explain_cli(&session, &turn).await,
         Commands::Coverage { session } => coverage_cli(&session).await,
         Commands::Rg(args) => search_query_cli(args).await,
-        Commands::GrepTable { query, limit, data_dir } => {
+        Commands::GrepTable {
+            query,
+            limit,
+            data_dir,
+        } => {
             let dir = data_dir.unwrap_or_else(default_data_dir);
             let hits = trpg_search::grep_layout_tables_in(&dir, &query, limit);
             for h in &hits {
-                println!("{}", serde_json::json!({"source_id": h.source_id, "kind": h.source_kind, "page": h.page, "column_score": h.column_score, "context": h.context, "row": h.row}));
+                println!(
+                    "{}",
+                    serde_json::json!({"source_id": h.source_id, "kind": h.source_kind, "page": h.page, "column_score": h.column_score, "context": h.context, "row": h.row})
+                );
             }
             eprintln!("{} hit(s) for {:?}", hits.len(), query);
             Ok(())
         }
-        Commands::Grow { session, actor, bucket, id, op, amount, value, kind, category } => {
-            grow_cli(&session, &actor, &bucket, &id, &op, amount, value.as_deref(), kind.as_deref(), category.as_deref()).await
+        Commands::Grow {
+            session,
+            actor,
+            bucket,
+            id,
+            op,
+            amount,
+            value,
+            kind,
+            category,
+        } => {
+            grow_cli(
+                &session,
+                &actor,
+                &bucket,
+                &id,
+                &op,
+                amount,
+                value.as_deref(),
+                kind.as_deref(),
+                category.as_deref(),
+            )
+            .await
         }
         Commands::Search { command } => search_command_cli(command).await,
         Commands::Rules { command } => rules_command_cli(command).await,
@@ -570,12 +678,19 @@ async fn main() -> Result<()> {
         Commands::Time { command } => time_command_cli(command).await,
         Commands::Roll { expression } => {
             let roll = roll_dice(&expression)?;
-            println!("{} => {:?} {:+} = {}", roll.expression, roll.rolls, roll.modifier, roll.total);
+            println!(
+                "{} => {:?} {:+} = {}",
+                roll.expression, roll.rolls, roll.modifier, roll.total
+            );
             Ok(())
         }
-        Commands::ParseStaged { ruleset, data_dir, stage1_only, json, budget } => {
-            parse_staged_cli(ruleset, data_dir, stage1_only, json, budget).await
-        }
+        Commands::ParseStaged {
+            ruleset,
+            data_dir,
+            stage1_only,
+            json,
+            budget,
+        } => parse_staged_cli(ruleset, data_dir, stage1_only, json, budget).await,
     }
 }
 
@@ -605,13 +720,31 @@ async fn init_project() -> Result<()> {
 
 async fn auth_set() -> Result<()> {
     let providers = vec!["openai", "openai_compatible"];
-    let provider_idx = Select::new().with_prompt("LLM provider").items(&providers).default(0).interact()?;
+    let provider_idx = Select::new()
+        .with_prompt("LLM provider")
+        .items(&providers)
+        .default(0)
+        .interact()?;
     let provider = providers[provider_idx];
-    let default_base = if provider == "openai" { "https://api.openai.com/v1" } else { "http://localhost:8000/v1" };
-    let base_url: String = Input::new().with_prompt("Base URL").default(default_base.to_string()).interact_text()?;
-    let model: String = Input::new().with_prompt("Model").default("gpt-4.1".to_string()).interact_text()?;
-    let api_key = Password::new().with_prompt("API key").allow_empty_password(false).interact()?;
-    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://chatrpg:chatrpg@localhost:54323/chatrpg".to_string());
+    let default_base = if provider == "openai" {
+        "https://api.openai.com/v1"
+    } else {
+        "http://localhost:8000/v1"
+    };
+    let base_url: String = Input::new()
+        .with_prompt("Base URL")
+        .default(default_base.to_string())
+        .interact_text()?;
+    let model: String = Input::new()
+        .with_prompt("Model")
+        .default("gpt-4.1".to_string())
+        .interact_text()?;
+    let api_key = Password::new()
+        .with_prompt("API key")
+        .allow_empty_password(false)
+        .interact()?;
+    let database_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://chatrpg:chatrpg@localhost:54323/chatrpg".to_string());
     let data_dir = std::env::var("TRPG_DATA_DIR").unwrap_or_else(|_| "./data".to_string());
     let env = format!(
         "DATABASE_URL={database_url}\nTRPG_LLM_PROVIDER={provider}\nTRPG_LLM_BASE_URL={base_url}\nTRPG_LLM_API_KEY={api_key}\nTRPG_LLM_MODEL={model}\nTRPG_LLM_SEND_TEMPERATURE=false\nTRPG_DATA_DIR={data_dir}\nTRPG_API_ADDR=127.0.0.1:8787\nTRPG_MEMORY_RETRIEVAL_LIMIT=8\nTRPG_MEMORY_SNAPSHOT_EVERY_TURNS=8\nTRPG_SEARCH_INDEX_DIR=./data/search/tantivy_v3\nTRPG_SEARCH_WRITER_MEMORY_BYTES=96000000\nTRPG_RUNTIME_AUTO_SEARCH=true\nTRPG_RUNTIME_AUTO_SEARCH_LIMIT=5\nTRPG_RUNTIME_AUTO_SEARCH_MAX_SCENE_PINS=1\nTRPG_RUNTIME_AUTOPIN_SCENE_RULES=true\nTRPG_RUNTIME_AUTO_SEARCH_DOMAINS=learned,rules,modules,rulings,source,parsed\nTRPG_PDF_BACKEND=duotext\nTRPG_PDF_ALLOW_PDFTOTEXT_FALLBACK=true\nTRPG_OXIDIZE_CLEAN_MODE=heuristic\nTRPG_OXIDIZE_CHUNK_TARGET_CHARS=4000\nTRPG_OXIDIZE_WRITE_RAW_CHUNKS=true\nTRPG_INGEST_LLM_CLEAN=false\nTRPG_INGEST_LLM_CLEAN_MAX_CHUNKS=8\nTRPG_INGEST_SEMANTIC_UNITS=true\nTRPG_SEMANTIC_UNIT_MAX_CHARS=6000\nTRPG_INGEST_LLM_SEMANTIC_WASH=false\nTRPG_INGEST_LLM_SEMANTIC_WASH_MAX_UNITS=12\nTRPG_LEARNING_AUDIT=true\nTRPG_LEARNING_AUTO_PROMOTE=false\nTRPG_CONFLICT_AGENT_ENABLE_V10=true\nTRPG_SITUATION_ORCHESTRATOR_ENABLE_V11=true\nTRPG_SITUATION_STALEMATE_TURNS=3\nTRPG_ACTIONABLE_DIRECTOR_ENABLE_V12=true\nTRPG_ACTIONABLE_DIRECTOR_ENABLE_V13=true\nTRPG_ACTIONABLE_DIRECTOR_MAX_EXAMPLES=4\nTRPG_ACTIONABLE_DIRECTOR_MENU_COOLDOWN=2\nTRPG_NOVELTY_DIRECTOR_ENABLE_V13=true\nTRPG_NPC_MAX_REPEAT_TACTIC=1\nTRPG_OUTPUT_NO_REPEAT_VALIDATOR=true\nTRPG_DIRECTION_GATE_AUTO_DEFAULT_AFTER_REPROMPTS=2\nTRPG_WORLD_TIME_ENABLE_V14=true\nTRPG_WORLD_TIME_START_DISPLAY=Day 1, 00:00\nTRPG_WORLD_TIME_CALENDAR_ID=relative_default\nTRPG_WORLD_TIME_CONTEXT_EVENT_LIMIT=24\nTRPG_WORLD_TIME_AUTO_ADVANCE_PER_TURN_SECONDS=0\nTRPG_INTERACTION_KERNEL_ENABLE_V15=true\nTRPG_INTERACTION_RECONCILE_EVERY_TURN=true\nTRPG_INTERACTION_CASCADE_CLOSE_FRAME=true\nTRPG_INTERACTION_GENERATION_GUARD=true\nTRPG_RULESET_ADVICE_DIR=./data/ruleset_advice\nTRPG_COMBAT_AUTO_FRAME=true\nTRPG_COMBAT_COMPACTION=true\nTRPG_OBJECT_KERNEL_ENABLE_V16=true\nTRPG_OBJECT_INTERACTION_AUTOCONTRACT=true\nTRPG_OBJECT_CONTEXT_BP3=true\nTRPG_OBJECT_COMPACTION_ENABLE=true\nTRPG_OBJECT_DEFAULT_DISARM_TARGET=15\nTRPG_TURN_ORCHESTRATOR_ENABLE_V17=true\nTRPG_TURN_ORCHESTRATOR_GATE_RELEVANCE=true\nTRPG_TURN_ORCHESTRATOR_FRAME_FIRST=true\nTRPG_TURN_ORCHESTRATOR_OBJECT_AS_CHILD=true\nTRPG_TURN_ORCHESTRATOR_DISABLE_GENERIC_CHECK_FOR_FRAME_ACTION=true\nTRPG_RUNTIME_PARAM_HYDRATION_ENABLE_V18=true\nTRPG_OBJECT_BIND_NARRATION_TO_RULES_V18=true\nTRPG_OBJECT_SESSION_SCOPED_IDS=true\nTRPG_ORCHESTRATOR_OBJECT_SELF_SELECT=false\nTRPG_REQUIRED_REACTION_BLOCKS_OBJECT_INTENT=true\nTRPG_SEMANTIC_PRIMARY=true\nTRPG_SEMANTIC_CLASSIFIER_ENABLE_V19=true\nTRPG_SEMANTIC_EXTRACTOR_ENABLE_V19=true\nTRPG_LEXICAL_FALLBACK_ENABLE=false\nTRPG_LEXICAL_FALLBACK_AUDIT_ONLY=true\nTRPG_ABILITY_KERNEL_ENABLE_V19=true\nTRPG_RULE_BINDING_ENABLE_V19=true\nTRPG_RULE_BINDING_REQUIRE_RUNTIME_WRITEBACK=true\nTRPG_ABILITY_CONTEXT_BP3=true\nTRPG_SEMANTIC_ROUTE_REDUCER_STRICT=true\nTRPG_SEMANTIC_ROUTE_CACHE_ENABLE=true\nTRPG_SEMANTIC_RECORD_REPLAY_ENABLE=false\nTRPG_REAL_MATERIALIZATION_ENABLE_V110=true\nTRPG_REAL_MATERIALIZATION_EXTRACTOR_ENABLE_V110=true\nTRPG_MATERIALIZATION_REQUIRE_SOURCE_OR_PROVISIONAL_REASON=true\nTRPG_MATERIALIZATION_BLOCKING_FOR_MECHANICS=true\nTRPG_MATERIALIZATION_CONTEXT_BP3=true\nTRPG_MATERIALIZATION_PREFER_MODULE_CARDS=true\nTRPG_SIMULATION_GUIDED_HOTFIX_V1101=true\nTRPG_FORCE_TECH_ASSESSMENT_CHECK=true\nTRPG_REACTION_REPROMPT_EMITS_WINDOW=true\nTRPG_PLAYER_VALUE_REFEREE_ENABLE_V1102=true\nTRPG_PLAYER_VALUE_ALLOW_TABLE_OVERRIDE=true\nTRPG_PLAYER_VALUE_REQUIRE_RULE_OR_TABLE_CHECK=true\nTRPG_REFEREE_COMBAT_SLICE_ENABLE_V1102=true\nTRPG_MECHANICAL_LEDGER_CONTEXT_BP3=true\nTRPG_CONTEST_KERNEL_ENABLE_V111=true\n# TRPG_CONTEST_DEFAULT_PERCENTILE_SKILL=50  # optional table override only; default unset\nTRPG_CONTEST_CONTEXT_BP3=true\nTRPG_CONTEST_REQUIRE_MODEL_FOR_CHECK=true\nTRPG_MECHANICS_SEARCH_SKILLS_ENABLE_V112=true\nTRPG_MECHANICS_SEARCH_MULTI_STEP=true\nTRPG_MECHANICS_SEARCH_USE_RULESET_LOCATORS=true\nTRPG_MECHANICS_SEARCH_WRITE_FACETS=true\nTRPG_MECHANICS_SEARCH_CONTEXT_BP3=true\nTRPG_MECHANICS_SEARCH_GREP_CANDIDATES_ONLY=true\nTRPG_UNIFIED_ROLL_EFFECT_EXECUTOR_ENABLE_V1121=true\nTRPG_AGENT_TABLE_DICE_POLICY=system_rolls_visible\nTRPG_EFFECT_CONTEXT_BP3=true\nTRPG_EFFECT_ALLOW_PROVISIONAL_TARGET_PARAMETER=false\nTRPG_STRICT_SOURCE_BACKED_MATERIALIZATION=true\nTRPG_FAIL_ON_MISSING_SOURCE_BACKED_PARAMS=true\nTRPG_ALLOW_SYNTHETIC_ACTOR_SEEDS=false\nTRPG_RUNTIME_PARAM_ALLOW_SYNTHETIC_NPC_SEEDS=false\nTRPG_MATERIALIZATION_WRITE_PARTIAL=false\nTRPG_RULE_STEWARD_ENABLE_V116=true\nTRPG_RULE_STEWARD_AUTO_QUERY=true\nTRPG_CHARACTER_ONBOARDING_REQUIRED=true\nTRPG_PLAYABILITY_GATE_BLOCKING=false\nTRPG_RULE_KERNEL_PATCH_AUTO_APPLY=false\nTRPG_RULE_STEWARD_STRICT_SOURCE_BACKED=true\nTRPG_EFFECT_REQUIRE_PARAMETER_IMPACT=true\nTRPG_ROLL_BINDING_HOTFIX_ENABLE_V1122=true\nTRPG_ROLL_BINDING_USE_LATEST_UNRESOLVED_CHECK=true\nTRPG_DIRECTION_GATE_IS_ADVISORY=true\nTRPG_AUTO_RESOLVE_SYSTEM_EFFECT_ROLLS=true\nTRPG_PARAMETER_FACET_EXECUTOR_ENABLE_V113=true\nTRPG_PARAMETER_FACET_EXECUTOR_USE_BOUND_FACETS_FIRST=true\nTRPG_PARAMETER_FACET_EXECUTOR_USE_RULESET_STARTER_PROFILES=false\nTRPG_PARAMETER_FACET_EXECUTOR_WRITE_GENERIC_STATES=true\nTRPG_PARAMETER_FACET_EXECUTOR_CONTEXT_BP3=true\nTRPG_PARAMETER_FACET_EXECUTOR_AUDIT_PROVISIONAL=true\nTRPG_COMBAT_ROUTE_SOURCE_OBJECTS_AS_ATTACKS=true\nTRPG_COMBAT_COMMIT_FRAME_START_ACTION=true\nTRPG_ORCHESTRATOR_ATTACK_OVER_OBJECT_MATERIALIZATION=true
@@ -648,15 +781,24 @@ async fn inspect(command: InspectCommand) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&bundles)?);
         }
         InspectCommand::CharacterTemplate { ruleset } => {
-            let template = db.load_character_template(&ruleset).await?.ok_or_else(|| anyhow!("template not found for {ruleset}"))?;
+            let template = db
+                .load_character_template(&ruleset)
+                .await?
+                .ok_or_else(|| anyhow!("template not found for {ruleset}"))?;
             println!("{}", serde_json::to_string_pretty(&template)?);
         }
         InspectCommand::CharacterOnboarding { ruleset } => {
-            let pack = db.load_character_onboarding_pack(&ruleset).await?.ok_or_else(|| anyhow!("character onboarding pack not found for {ruleset}"))?;
+            let pack = db
+                .load_character_onboarding_pack(&ruleset)
+                .await?
+                .ok_or_else(|| anyhow!("character onboarding pack not found for {ruleset}"))?;
             println!("{}", serde_json::to_string_pretty(&pack)?);
         }
         InspectCommand::ProjectJson => {
-            let project = db.load_latest_project_bundle().await?.ok_or_else(|| anyhow!("project bundle not found"))?;
+            let project = db
+                .load_latest_project_bundle()
+                .await?
+                .ok_or_else(|| anyhow!("project bundle not found"))?;
             println!("{}", serde_json::to_string_pretty(&project)?);
         }
     }
@@ -665,8 +807,11 @@ async fn inspect(command: InspectCommand) -> Result<()> {
 
 async fn create_character_cli(args: CreateCharacterArgs) -> Result<()> {
     let mut req = if let Some(path) = args.request_json.as_deref() {
-        let text = read_path_or_stdin(path).await.context("failed to read --request-json")?;
-        serde_json::from_str::<CharacterCreateJsonRequest>(&text).context("invalid create-character JSON request")?
+        let text = read_path_or_stdin(path)
+            .await
+            .context("failed to read --request-json")?;
+        serde_json::from_str::<CharacterCreateJsonRequest>(&text)
+            .context("invalid create-character JSON request")?
     } else {
         CharacterCreateJsonRequest::default()
     };
@@ -682,7 +827,9 @@ async fn create_character_cli(args: CreateCharacterArgs) -> Result<()> {
         args.preferences_file,
         args.stdin,
         args.request_json.is_none(),
-    ).await? {
+    )
+    .await?
+    {
         req.user_preferences = preferences;
     } else if args.request_json.is_none() && io::stdin().is_terminal() {
         req.user_preferences = Input::new()
@@ -691,7 +838,9 @@ async fn create_character_cli(args: CreateCharacterArgs) -> Result<()> {
             .interact_text()?;
     }
 
-    let ruleset_id = req.ruleset_id.ok_or_else(|| anyhow!("missing --ruleset or ruleset_id in --request-json"))?;
+    let ruleset_id = req
+        .ruleset_id
+        .ok_or_else(|| anyhow!("missing --ruleset or ruleset_id in --request-json"))?;
 
     let db = connect_db().await?;
     let llm = make_llm()?;
@@ -701,31 +850,56 @@ async fn create_character_cli(args: CreateCharacterArgs) -> Result<()> {
     // onboarding pack, persist it, and bind it into a session so `turn` plays
     // AS it (writes runtime_actor_parameters, not just a markdown draft).
     if args.auto {
-        emit_phase(args.stream_format, "start", json!({"kind":"character_create_auto", "ruleset_id": ruleset_id, "module_id": req.module_id}))?;
+        emit_phase(
+            args.stream_format,
+            "start",
+            json!({"kind":"character_create_auto", "ruleset_id": ruleset_id, "module_id": req.module_id}),
+        )?;
         let created = runtime
-            .create_and_bind_character(&*llm, &ruleset_id, args.session_id.as_deref(), &args.actor_id, &req.user_preferences)
+            .create_and_bind_character(
+                &*llm,
+                &ruleset_id,
+                req.module_id.as_deref(),
+                args.session_id.as_deref(),
+                &args.actor_id,
+                &req.user_preferences,
+            )
             .await?;
-        emit_phase(args.stream_format, "character_created", json!({
-            "character_id": created.character_id,
-            "name": created.name,
-            "status": created.status,
-            "session_id": created.session_id,
-            "actor_id": created.actor_id,
-            "validation": created.validation,
-            "sheet": created.sheet,
-        }))?;
-        emit_phase(args.stream_format, "bound", json!({
-            "session_id": created.session_id,
-            "actor_id": created.actor_id,
-            "play_hint": format!("trpg turn --ruleset {ruleset_id} --session-id {} --input \"...\"", created.session_id),
-        }))?;
+        emit_phase(
+            args.stream_format,
+            "character_created",
+            json!({
+                "character_id": created.character_id,
+                "name": created.name,
+                "status": created.status,
+                "session_id": created.session_id,
+                "actor_id": created.actor_id,
+                "validation": created.validation,
+                "sheet": created.sheet,
+            }),
+        )?;
+        emit_phase(
+            args.stream_format,
+            "bound",
+            json!({
+                "session_id": created.session_id,
+                "actor_id": created.actor_id,
+                "play_hint": format!("trpg turn --ruleset {ruleset_id} --session-id {} --input \"...\"", created.session_id),
+            }),
+        )?;
         emit_phase(args.stream_format, "done", json!({}))?;
         return Ok(());
     }
 
-    let messages = runtime.character_creation_messages(&ruleset_id, req.module_id.as_deref(), &req.user_preferences).await?;
+    let messages = runtime
+        .character_creation_messages(&ruleset_id, req.module_id.as_deref(), &req.user_preferences)
+        .await?;
 
-    emit_phase(args.stream_format, "start", json!({"kind":"character_create", "ruleset_id": ruleset_id, "module_id": req.module_id}))?;
+    emit_phase(
+        args.stream_format,
+        "start",
+        json!({"kind":"character_create", "ruleset_id": ruleset_id, "module_id": req.module_id}),
+    )?;
     emit_phase(args.stream_format, "llm_stream_start", json!({}))?;
 
     let mut stream = match llm.stream_chat(messages, 0.7).await {
@@ -750,30 +924,47 @@ async fn create_character_cli(args: CreateCharacterArgs) -> Result<()> {
     }
 
     if !args.no_save {
-        tokio::fs::create_dir_all("data/exports/characters").await.ok();
-        let path = format!("data/exports/characters/character_draft_{}.md", uuid::Uuid::new_v4().simple());
+        tokio::fs::create_dir_all("data/exports/characters")
+            .await
+            .ok();
+        let path = format!(
+            "data/exports/characters/character_draft_{}.md",
+            uuid::Uuid::new_v4().simple()
+        );
         tokio::fs::write(&path, &full).await?;
         emit_phase(args.stream_format, "draft_saved", json!({"path": path}))?;
 
         let pack = db.load_character_onboarding_pack(&ruleset_id).await?;
         let template = match pack.as_ref() {
             Some(pack) => pack.sheet_template.clone(),
-            None => db.load_character_template(&ruleset_id).await?.ok_or_else(|| anyhow!("template not found for {ruleset_id}"))?,
+            None => db
+                .load_character_template(&ruleset_id)
+                .await?
+                .ok_or_else(|| anyhow!("template not found for {ruleset_id}"))?,
         };
-        let draft = extract_json_cli(&full).unwrap_or_else(|| json!({"raw_response": full.clone()}));
-        let name = draft.get("name")
+        let draft =
+            extract_json_cli(&full).unwrap_or_else(|| json!({"raw_response": full.clone()}));
+        let name = draft
+            .get("name")
             .or_else(|| draft.get("character_name"))
             .and_then(Value::as_str)
             .unwrap_or("Unnamed Character")
             .to_string();
         let validation = validate_character_template_sheet(&template, &draft);
-        let pack_mechanically_ready = pack.as_ref().map(|p| {
-            p.validation_report.status == "ok"
-                && !p.derived_formula_pack.formulas.is_empty()
-                && !p.runtime_bindings.is_empty()
-                && !p.creation_flows.is_empty()
-        }).unwrap_or(false);
-        let status = if validation.status == "ok" && pack_mechanically_ready { "ready" } else { "draft_needs_rules_source" };
+        let pack_mechanically_ready = pack
+            .as_ref()
+            .map(|p| {
+                p.validation_report.status == "ok"
+                    && !p.derived_formula_pack.formulas.is_empty()
+                    && !p.runtime_bindings.is_empty()
+                    && !p.creation_flows.is_empty()
+            })
+            .unwrap_or(false);
+        let status = if validation.status == "ok" && pack_mechanically_ready {
+            "ready"
+        } else {
+            "draft_needs_rules_source"
+        };
         let character = CharacterSheet {
             character_id: format!("character_{}", uuid::Uuid::new_v4().simple()),
             ruleset_id: ruleset_id.clone(),
@@ -783,30 +974,48 @@ async fn create_character_cli(args: CreateCharacterArgs) -> Result<()> {
             validation_report: validation.clone(),
         };
         db.save_character(&character, status).await?;
-        emit_phase(args.stream_format, "character_saved", json!({"character_id": character.character_id, "status": status, "validation": validation, "used_character_onboarding_pack": pack.is_some()}))?;
+        emit_phase(
+            args.stream_format,
+            "character_saved",
+            json!({"character_id": character.character_id, "status": status, "validation": validation, "used_character_onboarding_pack": pack.is_some()}),
+        )?;
     }
     emit_phase(args.stream_format, "done", json!({}))?;
     Ok(())
 }
 
 async fn grow_cli(
-    session: &str, actor: &str, bucket: &str, id: &str, op: &str, amount: f64,
-    text: Option<&str>, kind: Option<&str>, category: Option<&str>,
+    session: &str,
+    actor: &str,
+    bucket: &str,
+    id: &str,
+    op: &str,
+    amount: f64,
+    text: Option<&str>,
+    kind: Option<&str>,
+    category: Option<&str>,
 ) -> anyhow::Result<()> {
     let db = connect_db().await?;
     db.migrate().await?;
     let runtime = RuntimeEngine::new(db.clone());
-    let changed = runtime.apply_track_change(session, actor, bucket, id, op, amount, text, kind, category).await?;
-    println!("{}", serde_json::json!({
-        "ok": changed, "session": session, "actor": actor,
-        "bucket": bucket, "id": id, "op": op, "amount": amount, "value": text
-    }));
+    let changed = runtime
+        .apply_track_change(session, actor, bucket, id, op, amount, text, kind, category)
+        .await?;
+    println!(
+        "{}",
+        serde_json::json!({
+            "ok": changed, "session": session, "actor": actor,
+            "bucket": bucket, "id": id, "op": op, "amount": amount, "value": text
+        })
+    );
     Ok(())
 }
 
 async fn turn_cli(args: TurnArgs) -> Result<()> {
     let mut req = if let Some(path) = args.request_json.as_deref() {
-        let text = read_path_or_stdin(path).await.context("failed to read --request-json")?;
+        let text = read_path_or_stdin(path)
+            .await
+            .context("failed to read --request-json")?;
         serde_json::from_str::<TurnJsonRequest>(&text).context("invalid turn JSON request")?
     } else {
         TurnJsonRequest::default()
@@ -821,36 +1030,88 @@ async fn turn_cli(args: TurnArgs) -> Result<()> {
     if let Some(session_id) = args.session_id {
         req.session_id = Some(session_id);
     }
-    if let Some(input) = resolve_text_input(args.input, args.input_file, args.stdin, args.request_json.is_none()).await? {
+    if let Some(input) = resolve_text_input(
+        args.input,
+        args.input_file,
+        args.stdin,
+        args.request_json.is_none(),
+    )
+    .await?
+    {
         req.user_input = input;
     }
-    if let Some(recent) = resolve_text_input(args.recent_transcript, args.recent_transcript_file, false, false).await? {
+    if let Some(recent) = resolve_text_input(
+        args.recent_transcript,
+        args.recent_transcript_file,
+        false,
+        false,
+    )
+    .await?
+    {
         req.recent_transcript = Some(recent);
     }
 
-    let ruleset_id = req.ruleset_id.ok_or_else(|| anyhow!("missing --ruleset or ruleset_id in --request-json"))?;
+    let ruleset_id = req
+        .ruleset_id
+        .ok_or_else(|| anyhow!("missing --ruleset or ruleset_id in --request-json"))?;
     if req.user_input.trim().is_empty() {
-        return Err(anyhow!("missing --input, --input-file, --stdin, or user_input in --request-json"));
+        return Err(anyhow!(
+            "missing --input, --input-file, --stdin, or user_input in --request-json"
+        ));
     }
 
-    let db = connect_db().await?;
-    db.migrate().await?;
-    let llm = make_llm()?;
-    let data_dir = default_data_dir();
-    let search = make_search(&db, data_dir.clone())?;
-    let runtime = RuntimeEngine::new(db.clone()).with_search(search);
     let module_id = req.module_id.clone();
+    // 角色卡入口锁：锁在门口——missing-session 在 DB connect/migrate 之前就报建卡
+    // 提示，连库都不碰。无 session_id 时绝不自动开 session 充当角色卡——fail-closed。
     let session_id = match req.session_id {
         Some(id) => id,
-        None => runtime.start_session(&ruleset_id, module_id.as_deref()).await?,
+        None => {
+            let block = EntryGateBlock::MissingCharacterCard;
+            emit_phase(
+                args.stream_format,
+                "blocked",
+                json!({"gate":"character_card","code": block.code(),"hint": block.hint()}),
+            )?;
+            return Err(anyhow!("{}", block.hint()));
+        }
     };
+    // 有 session_id 才连库 + 迁移，然后判 gate。gate 评估只需 db
+    // （list_player_actor_parameters），不构造 search/llm。
+    let db = connect_db().await?;
+    db.migrate().await?;
+    let gate_runtime = RuntimeEngine::new(db.clone());
+    if let EntryGate::Blocked(block) = gate_runtime
+        .evaluate_session_entry_gate(&session_id)
+        .await?
+    {
+        emit_phase(
+            args.stream_format,
+            "blocked",
+            json!({"gate":"character_card","code": block.code(),"hint": block.hint()}),
+        )?;
+        return Err(anyhow!("{}", block.hint()));
+    }
 
-    emit_phase(args.stream_format, "session", json!({"session_id": session_id.clone()}))?;
+    emit_phase(
+        args.stream_format,
+        "session",
+        json!({"session_id": session_id.clone()}),
+    )?;
+
+    // gate 通过（Playable）后才构造 LLM/Search/GmLoop——锁在门口，不在房间里。
+    let llm = make_llm()?;
+    let data_dir = default_data_dir();
 
     // 一次性单回合（无交互循环）：建 GmLoop + OwnedTurnRequest → drain execute_turn 流。
     // GmLoop 含不可 Clone 字段，单回合即用即弃；scene_extractor 仅模组在场时装配。
     let engine = RuntimeEngine::new(db.clone()).with_search(make_search(&db, data_dir.clone())?);
-    let mut gm = GmLoop::new(engine, llm.clone(), ToolRegistry::standard(), LoopConfig::default(), data_dir.clone());
+    let mut gm = GmLoop::new(
+        engine,
+        llm.clone(),
+        ToolRegistry::standard(),
+        LoopConfig::default(),
+        data_dir.clone(),
+    );
     if let Some(mid) = module_id.clone() {
         let db2 = db.clone();
         let llm2 = llm.clone();
@@ -863,7 +1124,17 @@ async fn turn_cli(args: TurnArgs) -> Result<()> {
             let rs3 = rs2.clone();
             let dir3 = dir2.clone();
             Box::pin(async move {
-                extract_module_scenes(&db3, llm3.as_ref(), &mid3, None, Some(&rs3), &dir3, 12, Some(&node_id)).await
+                extract_module_scenes(
+                    &db3,
+                    llm3.as_ref(),
+                    &mid3,
+                    None,
+                    Some(&rs3),
+                    &dir3,
+                    12,
+                    Some(&node_id),
+                )
+                .await
             }) as Pin<Box<dyn Future<Output = Result<usize>> + Send>>
         }) as SceneDeepExtractFn);
     }
@@ -902,16 +1173,35 @@ async fn turn_cli(args: TurnArgs) -> Result<()> {
     while let Some(event) = stream.next().await {
         match event {
             TurnEvent::Delta(delta) => emit_delta(args.stream_format, &delta)?,
-            TurnEvent::AwaitingPlayerRoll { check_id, prompt_public } => {
-                emit_phase(args.stream_format, "pending_check_created", json!({"check_id": check_id}))?;
+            TurnEvent::AwaitingPlayerRoll {
+                check_id,
+                prompt_public,
+            } => {
+                emit_phase(
+                    args.stream_format,
+                    "pending_check_created",
+                    json!({"check_id": check_id}),
+                )?;
                 emit_delta(args.stream_format, &prompt_public)?;
-                emit_phase(args.stream_format, "done", json!({"reason":"awaiting_player_roll"}))?;
+                emit_phase(
+                    args.stream_format,
+                    "done",
+                    json!({"reason":"awaiting_player_roll"}),
+                )?;
             }
             TurnEvent::SceneTransition { from, to, reason } => {
-                emit_named_event(args.stream_format, "scene_transition", json!({"from": from, "to": to, "reason": reason}))?;
+                emit_named_event(
+                    args.stream_format,
+                    "scene_transition",
+                    json!({"from": from, "to": to, "reason": reason}),
+                )?;
             }
             TurnEvent::Errata(entry) => {
-                emit_phase(args.stream_format, "errata", serde_json::to_value(&entry).unwrap_or_else(|_| json!({})))?;
+                emit_phase(
+                    args.stream_format,
+                    "errata",
+                    serde_json::to_value(&entry).unwrap_or_else(|_| json!({})),
+                )?;
             }
             TurnEvent::PostprocessScheduled => {
                 emit_phase(args.stream_format, "postprocess_scheduled", json!({}))?;
@@ -923,13 +1213,21 @@ async fn turn_cli(args: TurnArgs) -> Result<()> {
             }
             TurnEvent::TurnFailed { phase, message, .. } => {
                 // 失败终态：透出 error phase（结构化输出可解析）+ 记录，循环后非零退出。
-                emit_phase(args.stream_format, "error", json!({"phase": phase, "message": message}))?;
+                emit_phase(
+                    args.stream_format,
+                    "error",
+                    json!({"phase": phase, "message": message}),
+                )?;
                 eprintln!("turn failed at phase {phase}: {message}");
                 turn_failure = Some((phase, message));
                 break;
             }
             TurnEvent::TurnWarning { phase, message } => {
-                emit_phase(args.stream_format, "warning", json!({"phase": phase, "message": message}))?;
+                emit_phase(
+                    args.stream_format,
+                    "warning",
+                    json!({"phase": phase, "message": message}),
+                )?;
                 eprintln!("turn warning at phase {phase}: {message}");
             }
             TurnEvent::TurnComplete { outcome } => {
@@ -967,7 +1265,10 @@ async fn explain_cli(session: &str, turn: &str) -> Result<()> {
     }
     // domain events（优化2 #6 write-through 的可见化）：附该回合的生命周期事件摘要。
     // fail-soft 读：取不到就当空，不影响 trace 主输出。
-    let evs = db.list_domain_events_for_turn(turn).await.unwrap_or_default();
+    let evs = db
+        .list_domain_events_for_turn(turn)
+        .await
+        .unwrap_or_default();
     print!("{}", format_domain_events(&evs));
     Ok(())
 }
@@ -1000,7 +1301,10 @@ fn short_hash(h: &Option<String>) -> String {
 
 /// 单条 SourceRef 的紧凑人读形式：`source_id:page`（无 page 则 `source_id:-`）。
 fn format_source_ref(r: &SourceRef) -> String {
-    let page = r.page.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string());
+    let page = r
+        .page
+        .map(|p| p.to_string())
+        .unwrap_or_else(|| "-".to_string());
     format!("{}:{}", r.source_id, page)
 }
 
@@ -1030,7 +1334,10 @@ fn format_turn_trace(t: &TurnTrace) -> String {
         t.phases_run.join(" -> ")
     };
     out.push_str(&format!("phases_run: {phases}\n"));
-    out.push_str(&format!("narration_hash: {}\n", short_hash(&t.narration_hash)));
+    out.push_str(&format!(
+        "narration_hash: {}\n",
+        short_hash(&t.narration_hash)
+    ));
     out.push_str("warnings:\n");
     if t.warnings.is_empty() {
         out.push_str("  (none)\n");
@@ -1131,16 +1438,27 @@ fn format_coverage_report(session: &str, traces: &[TurnTrace], events: &[DomainE
     for t in traces {
         if let Some(f) = &t.failure {
             turns_failed += 1;
-            let kind = if f.failure_kind.is_empty() { "unknown" } else { &f.failure_kind };
+            let kind = if f.failure_kind.is_empty() {
+                "unknown"
+            } else {
+                &f.failure_kind
+            };
             tally_push(&mut failure_kinds, kind);
         }
-        let life = if t.pp_lifecycle.is_empty() { "unknown" } else { &t.pp_lifecycle };
+        let life = if t.pp_lifecycle.is_empty() {
+            "unknown"
+        } else {
+            &t.pp_lifecycle
+        };
         tally_push(&mut lifecycle, life);
     }
     out.push_str(&format!(
         "turns: total={turns_total} failed={turns_failed}\n"
     ));
-    out.push_str(&format!("  failure_kind: {}\n", render_tally(&failure_kinds)));
+    out.push_str(&format!(
+        "  failure_kind: {}\n",
+        render_tally(&failure_kinds)
+    ));
     out.push_str(&format!("pp_lifecycle: {}\n", render_tally(&lifecycle)));
 
     // ── 机械活动（from domain_events）─────────────────────────
@@ -1149,15 +1467,24 @@ fn format_coverage_report(session: &str, traces: &[TurnTrace], events: &[DomainE
     let mut degree_dist: Vec<(String, usize)> = Vec::new();
     let mut scene_transitions = 0usize;
     let mut scene_routes: Vec<String> = Vec::new();
-    // TruthGraph 观测（优化2 #5）：玩家已被 surfaced（见过）的实体 distinct 集，按
-    // entity_kind 计数（clue/npc）。event_id 幂等 per-session，但仍按 (kind,id) 去重兜底。
+    // TruthGraph 观测：玩家已暴露/已见过的实体 distinct 集，按 entity_kind
+    // 计数（clue/npc）。P0c 后 `PlayerExposed` 是主语义；旧 `EntitySurfaced`
+    // 仍向后兼容。event_id 幂等 per-session，但仍按 (kind,id) 去重兜底。
     let mut surfaced_seen: Vec<(String, String)> = Vec::new();
     for ev in events {
         match ev.kind {
             DomainEventKind::DiceRolled => dice_rolled += 1,
-            DomainEventKind::EntitySurfaced => {
-                let id = ev.data.get("entity_id").and_then(|v| v.as_str()).unwrap_or("");
-                let kind = ev.data.get("entity_kind").and_then(|v| v.as_str()).unwrap_or("unknown");
+            DomainEventKind::EntitySurfaced | DomainEventKind::PlayerExposed => {
+                let id = ev
+                    .data
+                    .get("entity_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let kind = ev
+                    .data
+                    .get("entity_kind")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
                 let pair = (kind.to_string(), id.to_string());
                 if !id.is_empty() && !surfaced_seen.contains(&pair) {
                     surfaced_seen.push(pair);
@@ -1213,11 +1540,21 @@ fn format_coverage_report(session: &str, traces: &[TurnTrace], events: &[DomainE
     let mut binding: Vec<(String, BindAgg)> = Vec::new();
     for t in traces {
         for b in &t.binding_trace {
-            let nk = if b.need_kind.is_empty() { "unknown" } else { &b.need_kind };
+            let nk = if b.need_kind.is_empty() {
+                "unknown"
+            } else {
+                &b.need_kind
+            };
             let entry = match binding.iter_mut().find(|(k, _)| k == nk) {
                 Some((_, agg)) => agg,
                 None => {
-                    binding.push((nk.to_string(), BindAgg { verdicts: Vec::new(), top_tier: ExecutionTier::SourceOnly }));
+                    binding.push((
+                        nk.to_string(),
+                        BindAgg {
+                            verdicts: Vec::new(),
+                            top_tier: ExecutionTier::SourceOnly,
+                        },
+                    ));
                     &mut binding.last_mut().unwrap().1
                 }
             };
@@ -1337,7 +1674,6 @@ fn emit_delta(format: StreamFormat, delta: &str) -> Result<()> {
     Ok(())
 }
 
-
 fn emit_named_event(format: StreamFormat, event: &str, data: Value) -> Result<()> {
     match format {
         StreamFormat::Text => eprintln!("[event] {} {}", event, serde_json::to_string(&data)?),
@@ -1407,30 +1743,77 @@ async fn time_command_cli(command: TimeCommand) -> Result<()> {
             let state = runtime.current_world_time(&session).await?;
             println!("{}", serde_json::to_string_pretty(&state)?);
         }
-        TimeCommand::Advance { session, seconds, minutes, hours, days, combat_rounds, scene_beats, scale, reason } => {
-            let amount = TimeAmount { seconds, minutes, hours, days, combat_rounds, scene_beats, label: String::new() };
-            let result = runtime.advance_world_time(TimeAdvanceRequest {
-                session_id: session,
-                campaign_id: None,
-                reason,
-                amount,
-                scale: parse_time_scale(&scale),
-                mutation_kind: TimeMutationKind::Advance,
-                visibility: Visibility::PlayerVisible,
-                caused_by_turn_id: None,
-                caused_by_event_id: None,
-                scene_epoch: None,
-            }).await?;
+        TimeCommand::Advance {
+            session,
+            seconds,
+            minutes,
+            hours,
+            days,
+            combat_rounds,
+            scene_beats,
+            scale,
+            reason,
+        } => {
+            let amount = TimeAmount {
+                seconds,
+                minutes,
+                hours,
+                days,
+                combat_rounds,
+                scene_beats,
+                label: String::new(),
+            };
+            let result = runtime
+                .advance_world_time(TimeAdvanceRequest {
+                    session_id: session,
+                    campaign_id: None,
+                    reason,
+                    amount,
+                    scale: parse_time_scale(&scale),
+                    mutation_kind: TimeMutationKind::Advance,
+                    visibility: Visibility::PlayerVisible,
+                    caused_by_turn_id: None,
+                    caused_by_event_id: None,
+                    scene_epoch: None,
+                })
+                .await?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
-        TimeCommand::Schedule { session, in_minutes, in_seconds, kind, payload_json } => {
+        TimeCommand::Schedule {
+            session,
+            in_minutes,
+            in_seconds,
+            kind,
+            payload_json,
+        } => {
             let service = trpg_time::WorldTimeService::new(db.clone());
-            let payload: Value = serde_json::from_str(&payload_json).unwrap_or_else(|_| json!({"raw": payload_json}));
-            let scheduled = service.schedule_in(&session, TimeAmount { seconds: in_seconds, minutes: in_minutes, ..Default::default() }, parse_world_event_kind(&kind), payload, Visibility::GmOnly, None).await?;
+            let payload: Value = serde_json::from_str(&payload_json)
+                .unwrap_or_else(|_| json!({"raw": payload_json}));
+            let scheduled = service
+                .schedule_in(
+                    &session,
+                    TimeAmount {
+                        seconds: in_seconds,
+                        minutes: in_minutes,
+                        ..Default::default()
+                    },
+                    parse_world_event_kind(&kind),
+                    payload,
+                    Visibility::GmOnly,
+                    None,
+                )
+                .await?;
             println!("{}", serde_json::to_string_pretty(&scheduled)?);
         }
-        TimeCommand::Events { session, since_tick, since_event_seq, limit } => {
-            let events = db.list_world_events_since(&session, since_tick, since_event_seq, limit).await?;
+        TimeCommand::Events {
+            session,
+            since_tick,
+            since_event_seq,
+            limit,
+        } => {
+            let events = db
+                .list_world_events_since(&session, since_tick, since_event_seq, limit)
+                .await?;
             println!("{}", serde_json::to_string_pretty(&events)?);
         }
     }
@@ -1468,7 +1851,14 @@ async fn rules_command_cli(command: RulesCommand) -> Result<()> {
     let search = make_search(&db, default_data_dir())?;
     let steward = RuleStewardAgent::new(db.clone(), search, default_data_dir());
     match command {
-        RulesCommand::Query { ruleset, module, query, kind, missing_facets, json: as_json } => {
+        RulesCommand::Query {
+            ruleset,
+            module,
+            query,
+            kind,
+            missing_facets,
+            json: as_json,
+        } => {
             let need = RuleNeed {
                 need_id: format!("cli_need_{}", uuid::Uuid::new_v4().simple()),
                 ruleset_id: ruleset,
@@ -1479,29 +1869,46 @@ async fn rules_command_cli(command: RulesCommand) -> Result<()> {
                 missing_facets,
                 visibility: Visibility::GmOnly,
                 urgency: RuleUrgency::ImmediateTurn,
-                allowed_outputs: vec![RuleAssistOutputKind::ContextBlock, RuleAssistOutputKind::MaterializationPatch, RuleAssistOutputKind::Bp1PatchProposal],
+                allowed_outputs: vec![
+                    RuleAssistOutputKind::ContextBlock,
+                    RuleAssistOutputKind::MaterializationPatch,
+                    RuleAssistOutputKind::Bp1PatchProposal,
+                ],
                 ..Default::default()
             };
             let assist = steward.assist(need).await?;
             if as_json {
                 println!("{}", serde_json::to_string_pretty(&assist)?);
             } else {
-                println!("status: {} confidence: {:.2}", assist.status.as_str(), assist.confidence);
+                println!(
+                    "status: {} confidence: {:.2}",
+                    assist.status.as_str(),
+                    assist.confidence
+                );
                 println!("scope: {:?}", assist.answer_scope);
                 println!("{}", assist.gm_brief);
-                if let Some(summary) = &assist.player_safe_summary { println!("player-safe: {}", summary); }
+                if let Some(summary) = &assist.player_safe_summary {
+                    println!("player-safe: {}", summary);
+                }
                 if assist.source_refs.is_empty() {
                     println!("source refs: none");
                 } else {
                     println!("source refs: {}", assist.source_refs.len());
                     for src in assist.source_refs.iter().take(8) {
-                        println!("- {} page={:?} anchor={:?}", src.source_id, src.page, src.anchor_id);
+                        println!(
+                            "- {} page={:?} anchor={:?}",
+                            src.source_id, src.page, src.anchor_id
+                        );
                     }
                 }
                 if !assist.unresolved_questions.is_empty() {
                     println!("unresolved:");
                     for gap in &assist.unresolved_questions {
-                        println!("- {}{}", gap.description, if gap.blocking { " [blocking]" } else { "" });
+                        println!(
+                            "- {}{}",
+                            gap.description,
+                            if gap.blocking { " [blocking]" } else { "" }
+                        );
                     }
                 }
                 println!("context blocks: {}", assist.context_blocks.len());
@@ -1509,39 +1916,75 @@ async fn rules_command_cli(command: RulesCommand) -> Result<()> {
             Ok(())
         }
         RulesCommand::CharacterPack { ruleset } => {
-            let pack = steward.character_onboarding_pack(&ruleset).await?
-                .ok_or_else(|| anyhow!("character onboarding pack not found for {ruleset}; run parse-all first"))?;
+            let pack = steward
+                .character_onboarding_pack(&ruleset)
+                .await?
+                .ok_or_else(|| {
+                    anyhow!(
+                        "character onboarding pack not found for {ruleset}; run parse-all first"
+                    )
+                })?;
             println!("{}", serde_json::to_string_pretty(&pack)?);
             Ok(())
         }
-        RulesCommand::Playability { ruleset, module, json: as_json } => {
-            let report = steward.playability_gate(&ruleset, module.as_deref()).await?;
+        RulesCommand::Playability {
+            ruleset,
+            module,
+            json: as_json,
+        } => {
+            let report = steward
+                .playability_gate(&ruleset, module.as_deref())
+                .await?;
             if as_json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 println!("ready: {}", report.ready);
                 println!("rule_kernel: {}", report.has_rule_kernel);
-                println!("character_template: {}", report.has_character_sheet_template);
-                println!("character_creation_flow: {}", report.has_character_creation_flow);
+                println!(
+                    "character_template: {}",
+                    report.has_character_sheet_template
+                );
+                println!(
+                    "character_creation_flow: {}",
+                    report.has_character_creation_flow
+                );
                 println!("derived_formula_pack: {}", report.has_derived_formula_pack);
-                println!("starter_character_path: {}", report.has_starter_character_path);
+                println!(
+                    "starter_character_path: {}",
+                    report.has_starter_character_path
+                );
                 println!("first_session_packet: {}", report.has_first_session_packet);
                 if !report.blocking_gaps.is_empty() {
                     println!("blocking gaps:");
                     for gap in &report.blocking_gaps {
-                        println!("- {} ({})", gap.message, gap.repair_skill.as_deref().unwrap_or("no repair skill"));
+                        println!(
+                            "- {} ({})",
+                            gap.message,
+                            gap.repair_skill.as_deref().unwrap_or("no repair skill")
+                        );
                     }
                 }
                 if !report.warnings.is_empty() {
                     println!("warnings:");
-                    for warning in &report.warnings { println!("- {}: {}", warning.code, warning.message); }
+                    for warning in &report.warnings {
+                        println!("- {}: {}", warning.code, warning.message);
+                    }
                 }
             }
             Ok(())
         }
-        RulesCommand::Bp1Patches { ruleset, status, limit } => {
-            let patches = db.list_rule_kernel_patches(&ruleset, status.as_deref(), limit).await?;
-            println!("{}", serde_json::to_string_pretty(&json!({"patches": patches}))?);
+        RulesCommand::Bp1Patches {
+            ruleset,
+            status,
+            limit,
+        } => {
+            let patches = db
+                .list_rule_kernel_patches(&ruleset, status.as_deref(), limit)
+                .await?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({"patches": patches}))?
+            );
             Ok(())
         }
     }
@@ -1549,21 +1992,47 @@ async fn rules_command_cli(command: RulesCommand) -> Result<()> {
 
 async fn learning_command_cli(command: LearnCommand) -> Result<()> {
     match command {
-        LearnCommand::Candidates { ruleset, status, limit } => {
+        LearnCommand::Candidates {
+            ruleset,
+            status,
+            limit,
+        } => {
             let db = connect_db().await?;
             db.migrate().await?;
-            let candidates = db.list_learning_candidates(ruleset.as_deref(), Some(&status), limit).await?;
-            println!("{}", serde_json::to_string_pretty(&json!({"candidates": candidates}))?);
+            let candidates = db
+                .list_learning_candidates(ruleset.as_deref(), Some(&status), limit)
+                .await?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({"candidates": candidates}))?
+            );
             Ok(())
         }
-        LearnCommand::Approve { candidate_id, stage, notes } => {
+        LearnCommand::Approve {
+            candidate_id,
+            stage,
+            notes,
+        } => {
             let db = connect_db().await?;
             db.migrate().await?;
-            let candidate = db.get_learning_candidate(&candidate_id).await?.ok_or_else(|| anyhow!("unknown candidate_id: {candidate_id}"))?;
+            let candidate = db
+                .get_learning_candidate(&candidate_id)
+                .await?
+                .ok_or_else(|| anyhow!("unknown candidate_id: {candidate_id}"))?;
             let packet = candidate.to_learned_packet(parse_learning_stage(&stage)?);
             db.upsert_learned_packet(&packet).await?;
-            db.update_learning_candidate_status(&candidate_id, LearningCandidateStatus::Approved, notes.as_deref()).await?;
-            println!("{}", serde_json::to_string_pretty(&json!({"candidate_id": candidate_id, "learned_packet": packet}))?);
+            db.update_learning_candidate_status(
+                &candidate_id,
+                LearningCandidateStatus::Approved,
+                notes.as_deref(),
+            )
+            .await?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &json!({"candidate_id": candidate_id, "learned_packet": packet})
+                )?
+            );
             Ok(())
         }
     }
@@ -1584,11 +2053,18 @@ fn parse_learning_stage(input: &str) -> Result<LearningStage> {
 async fn search_command_cli(command: SearchCommand) -> Result<()> {
     match command {
         SearchCommand::Query(args) => search_query_cli(args).await,
-        SearchCommand::Reindex { data_dir, incremental } => {
+        SearchCommand::Reindex {
+            data_dir,
+            incremental,
+        } => {
             let db = connect_db().await?;
             db.migrate().await?;
             let search = make_search(&db, data_dir.unwrap_or_else(default_data_dir))?;
-            let stats = if incremental { search.reindex_incremental().await? } else { search.reindex_all().await? };
+            let stats = if incremental {
+                search.reindex_incremental().await?
+            } else {
+                search.reindex_all().await?
+            };
             println!("{}", serde_json::to_string_pretty(&stats)?);
             Ok(())
         }
@@ -1608,11 +2084,18 @@ async fn search_query_cli(args: SearchArgs) -> Result<()> {
     db.migrate().await?;
     let search = make_search(&db, args.data_dir.clone().unwrap_or_else(default_data_dir))?;
     if args.reindex {
-        let stats = if args.incremental_reindex { search.reindex_incremental().await? } else { search.reindex_all().await? };
+        let stats = if args.incremental_reindex {
+            search.reindex_incremental().await?
+        } else {
+            search.reindex_all().await?
+        };
         if jsonl_output {
             println!("{}", json!({"event":"reindex", "stats": stats}));
         } else {
-            eprintln!("search index updated: {} document(s) from {} source config(s)", stats.indexed_documents, stats.source_count);
+            eprintln!(
+                "search index updated: {} document(s) from {} source config(s)",
+                stats.indexed_documents, stats.source_count
+            );
         }
     }
     let request = build_search_request(args)?;
@@ -1627,7 +2110,11 @@ async fn search_query_cli(args: SearchArgs) -> Result<()> {
             query_text: request.query.clone(),
             search_terms: vec![request.query.clone()],
             source_hits: serde_json::to_value(&response.hits)?,
-            result_status: if response.hits.is_empty() { "no_hits".into() } else { "hit".into() },
+            result_status: if response.hits.is_empty() {
+                "no_hits".into()
+            } else {
+                "hit".into()
+            },
             created_at: chrono::Utc::now(),
         };
         db.insert_lookup_event(&event).await.ok();
@@ -1637,7 +2124,10 @@ async fn search_query_cli(args: SearchArgs) -> Result<()> {
     }
     if response.hits.is_empty() {
         if jsonl_output {
-            println!("{}", json!({"event":"done", "hits": 0, "query_id": response.query_id}));
+            println!(
+                "{}",
+                json!({"event":"done", "hits": 0, "query_id": response.query_id})
+            );
         } else {
             println!("no hits");
         }
@@ -1647,14 +2137,30 @@ async fn search_query_cli(args: SearchArgs) -> Result<()> {
         for hit in response.hits {
             println!("{}", json!({"event":"hit", "hit": hit}));
         }
-        println!("{}", json!({"event":"done", "query_id": response.query_id, "considered": response.total_considered}));
+        println!(
+            "{}",
+            json!({"event":"done", "query_id": response.query_id, "considered": response.total_considered})
+        );
     } else {
         for (idx, hit) in response.hits.iter().enumerate() {
-            println!("{}. [{:.3}] {} / {} / {}", idx + 1, hit.score, hit.domain, hit.logical_kind, hit.title);
-            if !hit.scopes.is_empty() { println!("   scopes: {}", serde_json::to_string(&hit.scopes)?); }
-            if !hit.source_refs.is_empty() { println!("   sources: {}", serde_json::to_string(&hit.source_refs)?); }
+            println!(
+                "{}. [{:.3}] {} / {} / {}",
+                idx + 1,
+                hit.score,
+                hit.domain,
+                hit.logical_kind,
+                hit.title
+            );
+            if !hit.scopes.is_empty() {
+                println!("   scopes: {}", serde_json::to_string(&hit.scopes)?);
+            }
+            if !hit.source_refs.is_empty() {
+                println!("   sources: {}", serde_json::to_string(&hit.source_refs)?);
+            }
             println!("   {}", hit.snippet.replace('\n', "\n   "));
-            if request.explain { println!("   explain: {}", serde_json::to_string(&hit.explain)?); }
+            if request.explain {
+                println!("   explain: {}", serde_json::to_string(&hit.explain)?);
+            }
         }
     }
     Ok(())
@@ -1662,10 +2168,18 @@ async fn search_query_cli(args: SearchArgs) -> Result<()> {
 
 fn build_search_request(args: SearchArgs) -> Result<SearchRequest> {
     let mut scopes = BTreeMap::new();
-    if let Some(v) = args.ruleset { scopes.insert("ruleset_id".to_string(), v); }
-    if let Some(v) = args.module { scopes.insert("module_id".to_string(), v); }
-    if let Some(v) = args.session { scopes.insert("session_id".to_string(), v); }
-    if let Some(v) = args.scene { scopes.insert("scene_id".to_string(), v); }
+    if let Some(v) = args.ruleset {
+        scopes.insert("ruleset_id".to_string(), v);
+    }
+    if let Some(v) = args.module {
+        scopes.insert("module_id".to_string(), v);
+    }
+    if let Some(v) = args.session {
+        scopes.insert("session_id".to_string(), v);
+    }
+    if let Some(v) = args.scene {
+        scopes.insert("scene_id".to_string(), v);
+    }
     for raw in args.scopes {
         let (key, value) = split_key_value(&raw)?;
         scopes.insert(key, value);
@@ -1707,9 +2221,9 @@ fn make_search(db: &Db, data_dir: PathBuf) -> Result<SearchService> {
     SearchService::open(db.pool.clone(), config)
 }
 
-
 async fn connect_db() -> Result<Db> {
-    let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://chatrpg:chatrpg@localhost:54323/chatrpg".to_string());
+    let url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://chatrpg:chatrpg@localhost:54323/chatrpg".to_string());
     Db::connect(&url).await
 }
 
@@ -1719,7 +2233,9 @@ fn make_llm() -> Result<Arc<dyn LlmClient>> {
 }
 
 fn default_data_dir() -> PathBuf {
-    std::env::var("TRPG_DATA_DIR").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("./data"))
+    std::env::var("TRPG_DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("./data"))
 }
 
 /// In-process driver for the STAGED ruleset parse — the quick test harness (no
@@ -1728,7 +2244,13 @@ fn default_data_dir() -> PathBuf {
 /// each stage transition (with elapsed time) to stderr. With `--json` it dumps
 /// the raw `JobStatus` snapshot; otherwise it prints the resolved
 /// `character_sheet_schema` from the partial kernel for eyeballing the fast path.
-async fn parse_staged_cli(ruleset: String, data_dir: Option<PathBuf>, stage1_only: bool, json: bool, budget: usize) -> Result<()> {
+async fn parse_staged_cli(
+    ruleset: String,
+    data_dir: Option<PathBuf>,
+    stage1_only: bool,
+    json: bool,
+    budget: usize,
+) -> Result<()> {
     let db = connect_db().await?;
     db.migrate().await?;
     let llm = make_llm()?;
@@ -1736,9 +2258,11 @@ async fn parse_staged_cli(ruleset: String, data_dir: Option<PathBuf>, stage1_onl
     // Locate the rulebook source by picking the largest semantic_units.jsonl.
     let (units_path, source_id) = largest_units_file(&dir.join("parsed/source_units"))?;
     let units = trpg_rule_agent::reader::load_units(&units_path)?;
-    let sidecar = std::fs::read_to_string(dir.join(format!("markdown/rulebooks/{source_id}.md"))).ok();
+    let sidecar =
+        std::fs::read_to_string(dir.join(format!("markdown/rulebooks/{source_id}.md"))).ok();
     let job_id = format!("staged_{}", uuid::Uuid::new_v4().simple());
-    db.insert_background_job(&job_id, "ruleset_parse_staged", json!({"ruleset": ruleset})).await?;
+    db.insert_background_job(&job_id, "ruleset_parse_staged", json!({"ruleset": ruleset}))
+        .await?;
     let sp = trpg_parser::staged::StagedParse {
         db: db.clone(),
         llm,
@@ -1753,14 +2277,20 @@ async fn parse_staged_cli(ruleset: String, data_dir: Option<PathBuf>, stage1_onl
     let t0 = std::time::Instant::now();
     let st = sp.run(budget).await;
     for s in &st.stages {
-        let dur = s.duration_secs().map(|d| format!("{d:>6.1}s")).unwrap_or_else(|| "    -- ".into());
+        let dur = s
+            .duration_secs()
+            .map(|d| format!("{d:>6.1}s"))
+            .unwrap_or_else(|| "    -- ".into());
         eprintln!("[{dur}] {:<10} {:<7} {}", s.name, s.status, s.detail);
     }
     eprintln!("[{:>6.1}s] TOTAL", t0.elapsed().as_secs_f32());
     if json {
         println!("{}", serde_json::to_string_pretty(&st.to_value())?);
     } else if let Some(k) = db.load_rule_kernel(&ruleset).await? {
-        println!("{}", serde_json::to_string_pretty(&k.character_sheet_schema)?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&k.character_sheet_schema)?
+        );
     }
     Ok(())
 }
@@ -1790,11 +2320,17 @@ fn largest_units_file(dir: &std::path::Path) -> Result<(PathBuf, String)> {
         .ok_or_else(|| anyhow!("no *.semantic_units.jsonl under {}", dir.display()))
 }
 
-
-
 fn extract_json_cli(text: &str) -> Option<Value> {
-    if let Some(v) = extract_fenced_cli(text, "json").and_then(|s| serde_json::from_str::<Value>(&s).ok()) { return Some(v); }
-    if let Some(v) = extract_fenced_cli(text, "character_draft").and_then(|s| serde_json::from_str::<Value>(&s).ok()) { return Some(v); }
+    if let Some(v) =
+        extract_fenced_cli(text, "json").and_then(|s| serde_json::from_str::<Value>(&s).ok())
+    {
+        return Some(v);
+    }
+    if let Some(v) = extract_fenced_cli(text, "character_draft")
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+    {
+        return Some(v);
+    }
     serde_json::from_str::<Value>(text).ok()
 }
 
@@ -1857,19 +2393,37 @@ mod tests {
         // 失败行：阶段 + failure_kind + "FAILED" 标记。
         assert!(out.contains("FAILED"), "missing FAILED marker:\n{out}");
         assert!(out.contains("finalize"), "missing failure phase:\n{out}");
-        assert!(out.contains("failed_finalize"), "missing failure_kind:\n{out}");
+        assert!(
+            out.contains("failed_finalize"),
+            "missing failure_kind:\n{out}"
+        );
         // need_trace：need_kind + 来源出处。
         assert!(out.contains("rule"), "missing need_kind:\n{out}");
-        assert!(out.contains("coc_rulebook:42"), "missing source_ref:\n{out}");
+        assert!(
+            out.contains("coc_rulebook:42"),
+            "missing source_ref:\n{out}"
+        );
         // BP hash 短显（前 12 字符）+ None → "-"。
-        assert!(out.contains("sha256:bp1aa"), "missing short bp1 hash:\n{out}");
+        assert!(
+            out.contains("sha256:bp1aa"),
+            "missing short bp1 hash:\n{out}"
+        );
         assert!(out.contains("bp3=-"), "missing dash for None bp3:\n{out}");
         // warnings 渲染。
         assert!(out.contains("audit lag"), "missing warning:\n{out}");
         // binding_trace：影子绑定行（need_kind + verdict + capability）。
-        assert!(out.contains("binding_trace:"), "missing binding_trace header:\n{out}");
-        assert!(out.contains("Exact"), "missing binding verdict Exact:\n{out}");
-        assert!(out.contains("check.roll_under"), "missing binding capability:\n{out}");
+        assert!(
+            out.contains("binding_trace:"),
+            "missing binding_trace header:\n{out}"
+        );
+        assert!(
+            out.contains("Exact"),
+            "missing binding verdict Exact:\n{out}"
+        );
+        assert!(
+            out.contains("check.roll_under"),
+            "missing binding capability:\n{out}"
+        );
     }
 
     #[test]
@@ -1878,13 +2432,25 @@ mod tests {
         trace.signal = "turn_complete".to_string();
         trace.pp_lifecycle = "complete".to_string();
         let out = format_turn_trace(&trace);
-        assert!(!out.contains("FAILED"), "success trace should not show FAILED:\n{out}");
+        assert!(
+            !out.contains("FAILED"),
+            "success trace should not show FAILED:\n{out}"
+        );
         assert!(out.contains("warnings:"), "warnings header missing:\n{out}");
-        assert!(out.contains("(none)"), "empty warnings/phases should print (none):\n{out}");
+        assert!(
+            out.contains("(none)"),
+            "empty warnings/phases should print (none):\n{out}"
+        );
         // 空 binding_trace → header + (none)。
-        assert!(out.contains("binding_trace:"), "binding_trace header missing:\n{out}");
+        assert!(
+            out.contains("binding_trace:"),
+            "binding_trace header missing:\n{out}"
+        );
         // 空 plugin_contributions → header + (none)。
-        assert!(out.contains("plugin_contributions:"), "plugin_contributions header missing:\n{out}");
+        assert!(
+            out.contains("plugin_contributions:"),
+            "plugin_contributions header missing:\n{out}"
+        );
     }
 
     #[test]
@@ -1897,8 +2463,14 @@ mod tests {
             summary: "防剧透（模组叙事守则）".into(),
         }];
         let out = format_turn_trace(&trace);
-        assert!(out.contains("plugin_contributions:"), "header missing:\n{out}");
-        assert!(out.contains("core.no_spoiler_guard"), "plugin_id missing:\n{out}");
+        assert!(
+            out.contains("plugin_contributions:"),
+            "header missing:\n{out}"
+        );
+        assert!(
+            out.contains("core.no_spoiler_guard"),
+            "plugin_id missing:\n{out}"
+        );
         assert!(out.contains("prompt_block"), "kind missing:\n{out}");
         assert!(out.contains("context_assembly"), "hook missing:\n{out}");
     }
@@ -1907,7 +2479,10 @@ mod tests {
     fn format_domain_events_empty_prints_none() {
         let out = format_domain_events(&[]);
         assert!(out.contains("domain_events:"), "missing header:\n{out}");
-        assert!(out.contains("(none)"), "empty list should print (none):\n{out}");
+        assert!(
+            out.contains("(none)"),
+            "empty list should print (none):\n{out}"
+        );
     }
 
     #[test]
@@ -1929,9 +2504,15 @@ mod tests {
             ),
         ];
         let out = format_domain_events(&evs);
-        assert!(out.contains("TurnStarted"), "missing TurnStarted kind:\n{out}");
+        assert!(
+            out.contains("TurnStarted"),
+            "missing TurnStarted kind:\n{out}"
+        );
         assert!(out.contains("coc7e"), "missing compact data:\n{out}");
-        assert!(out.contains("TurnFinalized"), "missing TurnFinalized kind:\n{out}");
+        assert!(
+            out.contains("TurnFinalized"),
+            "missing TurnFinalized kind:\n{out}"
+        );
         assert!(out.contains("Narration"), "missing signal data:\n{out}");
     }
 
@@ -1946,9 +2527,16 @@ mod tests {
             serde_json::json!({ "reason": big }),
         )];
         let out = format_domain_events(&evs);
-        assert!(out.contains('…'), "long data should be truncated with ellipsis:\n{out}");
+        assert!(
+            out.contains('…'),
+            "long data should be truncated with ellipsis:\n{out}"
+        );
         // 截断后每行字符数应远小于原始 data（~120 + 前缀 + kind），不会把 300 字符全打出来。
-        assert!(out.chars().count() < 200, "truncated output too long ({}):\n{out}", out.chars().count());
+        assert!(
+            out.chars().count() < 200,
+            "truncated output too long ({}):\n{out}",
+            out.chars().count()
+        );
     }
 
     // ── coverage 报告聚合器（DB-free）─────────────────────────────────────────
@@ -1993,12 +2581,22 @@ mod tests {
         let traces = vec![t1, t2];
 
         let events = vec![
-            DomainEvent::new("de_t1_DiceRolled", "session-c", "turn-1", DomainEventKind::DiceRolled,
-                serde_json::json!({ "expression": "1d100", "roller_id": "pc" })),
+            DomainEvent::new(
+                "de_t1_DiceRolled",
+                "session-c",
+                "turn-1",
+                DomainEventKind::DiceRolled,
+                serde_json::json!({ "expression": "1d100", "roller_id": "pc" }),
+            ),
             check_event("turn-1", "strong_success"),
             check_event("turn-2", "failure"),
-            DomainEvent::new("de_t2_SceneTransitioned", "session-c", "turn-2", DomainEventKind::SceneTransitioned,
-                serde_json::json!({ "from": "sc01", "to": "sc02", "reason": "moved" })),
+            DomainEvent::new(
+                "de_t2_SceneTransitioned",
+                "session-c",
+                "turn-2",
+                DomainEventKind::SceneTransitioned,
+                serde_json::json!({ "from": "sc01", "to": "sc02", "reason": "moved" }),
+            ),
         ];
 
         let out = format_coverage_report("session-c", &traces, &events);
@@ -2006,7 +2604,10 @@ mod tests {
         // 回合计数 + 失败 kind。
         assert!(out.contains("total=2"), "turn count:\n{out}");
         assert!(out.contains("failed=1"), "failed count:\n{out}");
-        assert!(out.contains("failed_finalize"), "failure_kind tally:\n{out}");
+        assert!(
+            out.contains("failed_finalize"),
+            "failure_kind tally:\n{out}"
+        );
         // pp_lifecycle 健康分布。
         assert!(out.contains("complete=1"), "lifecycle complete:\n{out}");
         assert!(out.contains("failed=1"), "lifecycle failed:\n{out}");
@@ -2016,16 +2617,29 @@ mod tests {
         assert!(out.contains("failure=1"), "degree tally failure:\n{out}");
         assert!(out.contains("sc01->sc02"), "scene route:\n{out}");
         // 绑定覆盖：verdict 计数 + 最高 tier。
-        assert!(out.contains("Exact=1"), "binding verdict Exact count:\n{out}");
-        assert!(out.contains("Partial=1"), "binding verdict Partial count:\n{out}");
-        assert!(out.contains("top_tier=ExactExecution"), "highest tier:\n{out}");
+        assert!(
+            out.contains("Exact=1"),
+            "binding verdict Exact count:\n{out}"
+        );
+        assert!(
+            out.contains("Partial=1"),
+            "binding verdict Partial count:\n{out}"
+        );
+        assert!(
+            out.contains("top_tier=ExactExecution"),
+            "highest tier:\n{out}"
+        );
         // 覆盖等级行：检定 + 掷骰 + 切场景齐全 → L3_combat。
-        assert!(out.contains("coverage level: L3_combat"), "coverage level line:\n{out}");
+        assert!(
+            out.contains("coverage level: L3_combat"),
+            "coverage level line:\n{out}"
+        );
     }
 
     #[test]
     fn format_coverage_report_shows_surfaced_player_knowledge() {
         // TruthGraph 观测：distinct (kind,id) 去重后按 clue/npc 计数；幂等重复不双算。
+        // P0c 后 `PlayerExposed` 是玩家暴露主语义，旧 `EntitySurfaced` 仍向后兼容。
         let surfaced = |id: &str, kind: &str| {
             DomainEvent::new(
                 format!("de_surfaced_session-tg_{id}"),
@@ -2035,17 +2649,27 @@ mod tests {
                 serde_json::json!({ "entity_id": id, "entity_kind": kind, "scene_id": "sc01" }),
             )
         };
+        let exposed = |id: &str, kind: &str| {
+            DomainEvent::new(
+                format!("de_exposed_session-tg_{id}"),
+                "session-tg",
+                "turn-1",
+                DomainEventKind::PlayerExposed,
+                serde_json::json!({ "entity_id": id, "entity_kind": kind, "scene_id": "sc01" }),
+            )
+        };
         let t = TurnTrace::new("turn-1", "session-tg");
         let events = vec![
             surfaced("clue_letter", "clue"),
             surfaced("clue_map", "clue"),
             surfaced("npc_ras", "npc"),
+            exposed("npc_russ_williams", "npc"),
             // 同 (kind,id) 重复（再 surface）→ 不双算。
             surfaced("clue_letter", "clue"),
         ];
         let out = format_coverage_report("session-tg", &[t], &events);
         assert!(
-            out.contains("player_knowledge (surfaced entities): 2 clues, 1 npcs"),
+            out.contains("player_knowledge (surfaced entities): 2 clues, 2 npcs"),
             "surfaced player knowledge line:\n{out}"
         );
     }
@@ -2053,7 +2677,10 @@ mod tests {
     #[test]
     fn format_coverage_report_empty_says_no_turns() {
         let out = format_coverage_report("session-empty", &[], &[]);
-        assert!(out.contains("(no turns)"), "empty session should say (no turns):\n{out}");
+        assert!(
+            out.contains("(no turns)"),
+            "empty session should say (no turns):\n{out}"
+        );
     }
 
     #[test]
@@ -2062,6 +2689,9 @@ mod tests {
         let t = TurnTrace::new("turn-1", "session-l2");
         let events = vec![check_event("turn-1", "success")];
         let out = format_coverage_report("session-l2", &[t], &events);
-        assert!(out.contains("coverage level: L2_checks"), "L2 level:\n{out}");
+        assert!(
+            out.contains("coverage level: L2_checks"),
+            "L2 level:\n{out}"
+        );
     }
 }

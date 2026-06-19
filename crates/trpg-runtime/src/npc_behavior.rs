@@ -2,22 +2,17 @@
 //!
 //! The model ([`trpg_model::npc_behavior`]) owns the pure, deterministic derivation: from
 //! a prompt-safe [`NpcMindView`] + a non-truth [`NpcBehaviorContext`] it produces an
-//! [`NpcBehaviorPlan`] proposal. This adapter exposes the pure derivation plus the helper
-//! that builds the non-truth context from the player party's known facts.
+//! [`NpcBehaviorPlan`] proposal. This adapter only wires it to the existing mind-view load
+//! path so a caller can go from `(session, npc, targets)` to a plan in one step.
 //!
-//! It commits nothing: no DB writes, no events, no relationship mutation.
-//!
-//! Scope note (P1 slice-1): the holder identity gate's id prerequisite is closed, so the
-//! DB-bound [`load_npc_behavior_plan`] is now provided. It loads the DB-bound mind view
-//! ([`crate::load_npc_mind_view`]) and the player party's known fact ids
-//! ([`trpg_db::Db::list_player_known_fact_ids`]), builds the non-truth context via
-//! [`viewer_behavior_context`], and derives the plan. It still commits nothing — read-only,
-//! no writer decides what an NPC learns. The pure [`derive_npc_behavior_plan`] /
-//! [`viewer_behavior_context`] entry points are preserved.
+//! It commits nothing: no DB writes, no events, no relationship mutation. It reads the
+//! NPC's own mind view (read-only) and derives guidance the GM narration path may consume.
 use std::collections::HashSet;
 
 use trpg_db::Db;
-use trpg_model::{NpcBehaviorContext, NpcBehaviorPlan, NpcMindView, NpcProfile};
+use trpg_model::{
+    NpcBehaviorContext, NpcBehaviorPlan, NpcMindView, NpcProfile, NpcRelationshipTarget,
+};
 
 use crate::npc_mind::load_npc_mind_view;
 
@@ -52,30 +47,47 @@ pub fn viewer_behavior_context(
     }
 }
 
-/// DB-bound load-and-plan: assemble this NPC's DB-bound mind view, read the player party's
-/// known fact ids, and derive the behavior plan. Only facts this NPC knows as TRUE that the
-/// party does NOT know become secrets (see [`viewer_behavior_context`]). Read-only and
-/// fail-closed — an unstable/placeholder id is rejected before any query, and nothing is
-/// written, no event emitted.
+/// Read-only load-and-plan for one ACTIVE NPC, secret-gated against the player party.
+///
+/// Loads only this NPC's own prompt-safe mind view (its knowledge + persona safe view +
+/// relationships toward the requested targets — GM world truth never enters), derives the
+/// player-party secret set from `player_known_fact_ids`, and returns the deterministic
+/// plan. Commits nothing. The caller renders [`NpcBehaviorPlan::to_guidance_block`].
+pub async fn load_active_npc_guidance(
+    db: &Db,
+    session_id: &str,
+    npc_actor_id: &str,
+    profile: &NpcProfile,
+    relationship_targets: &[NpcRelationshipTarget],
+    player_known_fact_ids: &[String],
+) -> anyhow::Result<NpcBehaviorPlan> {
+    let view =
+        load_npc_mind_view(db, session_id, npc_actor_id, profile, relationship_targets).await?;
+    let ctx = viewer_behavior_context(&view, player_known_fact_ids);
+    Ok(derive_npc_behavior_plan(&view, &ctx))
+}
+
+/// Read-only load-and-plan: assemble the NPC's prompt-safe mind view (its own knowledge +
+/// persona safe view + relationships toward the requested targets), then derive the plan.
+/// Reads only the NPC's own edges — GM world truth and other holders never enter — and
+/// writes nothing.
 pub async fn load_npc_behavior_plan(
     db: &Db,
     session_id: &str,
     npc_actor_id: &str,
     profile: &NpcProfile,
+    relationship_targets: &[NpcRelationshipTarget],
+    ctx: &NpcBehaviorContext,
 ) -> anyhow::Result<NpcBehaviorPlan> {
-    let view = load_npc_mind_view(db, session_id, npc_actor_id, profile).await?;
-    let player_known = db.list_player_known_fact_ids(session_id).await?;
-    let ctx = viewer_behavior_context(&view, &player_known);
-    Ok(derive_npc_behavior_plan(&view, &ctx))
+    let view =
+        load_npc_mind_view(db, session_id, npc_actor_id, profile, relationship_targets).await?;
+    Ok(derive_npc_behavior_plan(&view, ctx))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use trpg_model::{
-        KnowledgeState, NpcKnowledgeEntry, NpcProfile, NpcRelationship, NpcRelationshipDelta,
-        NpcRelationshipTarget,
-    };
+    use trpg_model::{KnowledgeState, NpcKnowledgeEntry, NpcRelationship, NpcRelationshipDelta};
 
     fn profile() -> NpcProfile {
         NpcProfile {
@@ -113,7 +125,10 @@ mod tests {
     }
 
     fn known(id: &str) -> NpcKnowledgeEntry {
-        NpcKnowledgeEntry { fact_id: id.into(), state: KnowledgeState::KnowsTrue }
+        NpcKnowledgeEntry {
+            fact_id: id.into(),
+            state: KnowledgeState::KnowsTrue,
+        }
     }
 
     #[test]
@@ -137,7 +152,10 @@ mod tests {
         // not invent secrets from facts the NPC does not hold as true.
         let entries = vec![
             known("k"),
-            NpcKnowledgeEntry { fact_id: "rumor".into(), state: KnowledgeState::BelievesFalse },
+            NpcKnowledgeEntry {
+                fact_id: "rumor".into(),
+                state: KnowledgeState::BelievesFalse,
+            },
         ];
         let v = view(hostile_rel(), &entries);
         let ctx = viewer_behavior_context(&v, &[]);

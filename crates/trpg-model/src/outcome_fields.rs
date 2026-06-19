@@ -18,5 +18,11 @@ pub const SUCCESS_TIER_RANK: &str = "success_tier_rank";
 
 /// The legal vocabulary for `=<field>` amounts and `when` fields in
 /// `resource_tracks[*].on_outcome[*]`.
-pub const AMOUNT_RESOLVABLE: &[&str] =
-    &[TOTAL, TARGET, SUCCESS, SUCCESS_COUNT, POOL_MISS_COUNT, SUCCESS_TIER_RANK];
+pub const AMOUNT_RESOLVABLE: &[&str] = &[
+    TOTAL,
+    TARGET,
+    SUCCESS,
+    SUCCESS_COUNT,
+    POOL_MISS_COUNT,
+    SUCCESS_TIER_RANK,
+];

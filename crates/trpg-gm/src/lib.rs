@@ -24,6 +24,7 @@ mod plugin_mechanism_tests;
 
 pub use errata::{ErrataEntry, ErrataMemory};
 pub use execute::{execute_turn, OwnedTurnRequest};
+pub use gate::GateResolverFn;
 pub use ledger::TurnLedger;
 pub use mode::{
     active_mode_manifest, current_mode, load_mode_manifest, CatalogFilter, EnterModeTool,
@@ -40,10 +41,9 @@ pub use prompts::{
 };
 pub use stream::RedactingBuffer;
 pub use tools::{
-    AwaitingPlayerRoll, GmTool, SceneDeepExtractFn, ToolCtx, ToolDispatchOutcome,
-    ToolError, ToolOutput, ToolRegistry, ToolSpec,
+    AwaitingPlayerRoll, GmTool, SceneDeepExtractFn, ToolCtx, ToolDispatchOutcome, ToolError,
+    ToolOutput, ToolRegistry, ToolSpec,
 };
-pub use gate::GateResolverFn;
 pub use turn_event::TurnEvent;
 pub use turn_loop::{CtxProviderFn, GmLoop, GmTurnInput, LoopConfig, TurnOutcome};
 pub use turn_plan::{PhaseId, PhaseKind, TurnPhasePlan, CANONICAL_TURN_PLAN};

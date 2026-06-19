@@ -1,0 +1,498 @@
+version: 1
+work_id: EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME
+run_policy: continuous_until_terminal
+parallel_pipeline: enabled
+acceptance_ledger: docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/AcceptanceLedger.md
+integration_report: docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/IntegrationReport.md
+integration_branch: codex/knowledge-runtime-p0
+integration_head: eb77199b74ff7ed5963099ecb5c02f4c555166b3
+created_from_worktree: /Users/haoli/.config/superpowers/worktrees/chatrpg-rs-v1.20-formula/knowledge-runtime-p0
+
+local_git_authorization:
+  create_task_branches: true
+  create_worktrees: true
+  worker_scoped_commit: true
+  trial_cherry_pick: true
+  cherry_pick_abort: true
+  integration_fast_forward: true
+  push: false
+  main_merge: false
+  deploy: false
+  history_rewrite: false
+  destructive_cleanup: false
+
+wip:
+  contract_writers: 1
+  implementation_writers: 4
+  verification_lanes: 2
+  integration_lanes: 1
+
+hotspots:
+  workspace_manifest: Cargo.toml
+  cargo_lock: Cargo.lock
+  migrations: migrations/**
+  model_facade: crates/trpg-model/src/lib.rs
+  db_facade: crates/trpg-db/src/lib.rs
+  runtime_facade: crates/trpg-runtime/src/lib.rs
+  gm_turn_loop: crates/trpg-gm/src/turn_loop.rs
+  gm_plugin_registry: crates/trpg-gm/src/plugin/mod.rs
+  harness_entrypoint: crates/trpg-harness/src/main.rs
+  acceptance_ledger: docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/AcceptanceLedger.md
+  workgraph: docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/WorkGraph.yaml
+  integration_report: docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/IntegrationReport.md
+
+active_leases: []
+
+tasks:
+  - id: TC-PIPE-00-integration-debt-classification
+    kind: recovery
+    acceptance_ids: []
+    state: integrated
+    depends_on: []
+    base_sha: eb77199b74ff7ed5963099ecb5c02f4c555166b3
+    branch: lead-owned/no-code-commit
+    worktree: /Users/haoli/.config/superpowers/worktrees/chatrpg-rs-v1.20-formula/knowledge-runtime-p0
+    read_set:
+      - .tmp/team-lead/**
+      - docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/**
+      - git status --porcelain
+      - git diff --stat
+      - git diff --name-only
+    write_set:
+      - docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/WorkGraph.yaml
+      - docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/IntegrationReport.md
+      - docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/Documentation.md
+    hotspot_leases:
+      - workgraph
+      - integration_report
+    contract_dependencies: []
+    generated_outputs: []
+    migration_slot: none
+    decision_policy: lead_classify_from_handoffs
+    validation_profile: protocol-recovery
+    scenario_ids: []
+    commit_sha: null
+    integration_sha: eb77199b74ff7ed5963099ecb5c02f4c555166b3
+    notes: >
+      Dirty integration debt has been classified at a coarse slice level:
+      protocol docs, journey/harness evidence, knowledge/no-spoiler runtime,
+      NPC/profile/relationship/mind, memory extraction, and CLI/API entry-gate
+      work. No implementation slice is accepted by this classification alone.
+      New architecture-unlock workers may start from the clean integration head
+      in isolated worktrees, but dirty slices still require handoff review and
+      rolling trial integration before product acceptance.
+
+  - id: ARCH-UNLOCK-01-model-facade-split
+    kind: architecture
+    acceptance_ids: []
+    state: accepted_pending_integration
+    depends_on:
+      - TC-PIPE-00-integration-debt-classification
+    base_sha: eb77199b74ff7ed5963099ecb5c02f4c555166b3
+    branch: claude/arch-unlock/model-facade
+    worktree: /Users/haoli/.config/superpowers/worktrees/chatrpg-rs-v1.20-formula/arch-unlock-model-facade
+    read_set:
+      - crates/trpg-model/src/lib.rs
+      - crates/trpg-model/src/*.rs
+      - crates/trpg-model/tests/**
+      - crates/*/src/**/*.rs
+      - Cargo.toml
+    write_set:
+      - crates/trpg-model/src/lib.rs
+      - crates/trpg-model/src/core/**
+      - crates/trpg-model/src/asset/**
+      - crates/trpg-model/src/turn/**
+      - crates/trpg-model/src/knowledge/**
+      - crates/trpg-model/src/npc/**
+      - crates/trpg-model/src/plugin/**
+      - crates/trpg-model/src/*.rs
+      - crates/trpg-model/tests/**
+    hotspot_leases:
+      - model_facade
+    contract_dependencies: []
+    generated_outputs: []
+    migration_slot: none
+    decision_policy: preserve_public_api_with_facade_reexports
+    validation_profile: model-facade-split
+    scenario_ids: []
+    commit_sha: de97b05f31e746e0a1206e3198951e75cc84a960
+    integration_sha: null
+    notes: >
+      Split trpg-model internals toward stable facade + domain ownership while
+      preserving public API compatibility. Prefer moving cohesive type groups
+      into domain modules and leaving lib.rs as declarations/re-exports. Do
+      not change DB/runtime/gm behavior. If a move would create broad downstream
+      churn, leave a compatibility re-export and document the next split.
+      Accepted from worker branch after lead review: `rustfmt --check` on the
+      three new/owned model files passed, `cargo check -p trpg-model` passed,
+      `cargo test -p trpg-model` passed, and the commit contains only the four
+      declared write_set files. Integration into `codex/knowledge-runtime-p0`
+      is deferred because that worktree still contains pre-existing dirty
+      integration debt.
+
+  - id: ARCH-UNLOCK-02-cache-visibility-split
+    kind: architecture
+    acceptance_ids: []
+    state: accepted_pending_integration
+    depends_on:
+      - ARCH-UNLOCK-01-model-facade-split
+    base_sha: de97b05f31e746e0a1206e3198951e75cc84a960
+    branch: claude/arch-unlock/visibility-primitives
+    worktree: /Users/haoli/.config/superpowers/worktrees/chatrpg-rs-v1.20-formula/arch-unlock-visibility-primitives
+    read_set:
+      - crates/trpg-model/src/lib.rs
+      - crates/trpg-model/src/*.rs
+      - crates/trpg-model/tests/**
+      - crates/*/src/**/*.rs
+      - Cargo.toml
+    write_set:
+      - crates/trpg-model/src/lib.rs
+      - crates/trpg-model/src/visibility.rs
+      - crates/trpg-model/tests/**
+    hotspot_leases:
+      - model_facade
+    contract_dependencies: []
+    generated_outputs: []
+    migration_slot: none
+    decision_policy: preserve_public_api_with_facade_reexports
+    validation_profile: model-facade-split
+    scenario_ids: []
+    commit_sha: d32ccac488dafc84d4bf233ffd8f969613c3643a
+    integration_sha: null
+    notes: >
+      Second safe architecture-unlock slice after ARCH-UNLOCK-01. Move only
+      the low-coupling `CacheZone`, `Visibility`, and `Stability` enums plus
+      their direct helper/default impls into `crates/trpg-model/src/visibility.rs`.
+      Add `pub mod visibility; pub use visibility::*;` in `lib.rs` so
+      downstream root imports remain compatible. Do not move `BlockKind`,
+      `Scope`, `ContextBlock`, `RollVisibility`, `VisibilityProfile`, or any
+      runtime/gm/db/parser call sites in this slice.
+      Accepted from worker branch after lead review: `rustfmt --check
+      crates/trpg-model/src/visibility.rs` passed, `cargo check -p trpg-model`
+      passed, `cargo test -p trpg-model` passed, downstream `cargo check -p
+      trpg-db -p trpg-runtime -p trpg-gm -p trpg-api -p trpg-cli -p trpg-parser
+      -p trpg-material` passed with pre-existing warnings only, and the commit
+      contains only the two declared write_set files. Integration into
+      `codex/knowledge-runtime-p0` remains deferred until a clean integration
+      lane is available.
+
+  - id: TC-VS-KNOW-01-workgraph-split
+    kind: planning
+    acceptance_ids:
+      - DA-KNOW-02
+      - DA-KNOW-04
+      - DA-KNOW-05
+      - DA-SPOIL-01
+      - DA-SPOIL-02
+      - DA-SPOIL-04
+      - DA-PIPE-01
+      - DA-PIPE-02
+    state: integrated
+    depends_on:
+      - TC-PIPE-00-integration-debt-classification
+    base_sha: <latest-integration-head-after-recovery>
+    branch: lead-owned/no-code-commit
+    worktree: /Users/haoli/.config/superpowers/worktrees/chatrpg-rs-v1.20-formula/knowledge-runtime-p0
+    read_set:
+      - docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/TaskCards.md
+      - docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/scenarios/**
+      - crates/trpg-model/src/knowledge.rs
+      - crates/trpg-db/src/lib.rs
+      - crates/trpg-runtime/src/knowledge_projection.rs
+      - crates/trpg-gm/src/plugin/**
+      - crates/trpg-gm/src/turn_loop.rs
+      - crates/trpg-harness/**
+    write_set:
+      - docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/WorkGraph.yaml
+    hotspot_leases:
+      - workgraph
+    contract_dependencies:
+      - TC-JRNY-01
+      - TC-JRNY-02
+    generated_outputs: []
+    migration_slot: none
+    decision_policy: split_vertical_card_into_disjoint_lanes
+    validation_profile: protocol-planning
+    scenario_ids:
+      - JRNY-HOME-01-athena-knowledge-reveal
+    commit_sha: null
+    integration_sha: null
+    notes: >
+      Accepted by lead review as an in-place no_commit dirty-slice vertical:
+      worker `.tmp/team-lead/worker-tc-vs-know-01-homecoming-knowledge-nospoiler-20260618-230016.md`
+      plus lead deterministic/replay/failure-branch playtests, DB live tests,
+      focused no-spoiler/model/runtime tests, and live-with-DB/no-key fail-closed
+      evidence. Full live cassette promotion remains a Milestone 5 follow-up
+      when `TRPG_LLM_API_KEY` is available.
+
+  - id: TC-VS-NPC-01-workgraph-split
+    kind: planning
+    acceptance_ids:
+      - DA-NPC-01
+      - DA-NPC-02
+      - DA-NPC-03
+      - DA-NPC-04
+      - DA-NPC-05
+      - DA-MEM-02
+      - DA-PIPE-02
+    state: integrated
+    depends_on:
+      - TC-PIPE-00-integration-debt-classification
+      - TC-VS-KNOW-01-workgraph-split
+    base_sha: <latest-integration-head-after-knowledge-split>
+    branch: lead-owned/no-code-commit
+    worktree: /Users/haoli/.config/superpowers/worktrees/chatrpg-rs-v1.20-formula/knowledge-runtime-p0
+    read_set:
+      - docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/TaskCards.md
+      - docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/scenarios/**
+      - crates/trpg-model/src/npc_*.rs
+      - crates/trpg-runtime/src/npc_*.rs
+      - crates/trpg-db/src/lib.rs
+      - crates/trpg-gm/**
+    write_set:
+      - docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/WorkGraph.yaml
+    hotspot_leases:
+      - workgraph
+    contract_dependencies:
+      - TC-KNOW-00-actor-identity-contract
+      - TC-KNOW-04-npc-durable-knowledge-edges
+    generated_outputs:
+      - crates/trpg-harness/src/lib.rs
+      - crates/trpg-harness/src/main.rs
+      - docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/scenarios/JRNY-HOME-02-odessa-social-memory.json
+      - docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/scenarios/JRNY-HOME-02-odessa-leakbranch.json
+      - docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/scenarios/fixtures/JRNY-HOME-02-odessa-social-memory.deterministic.json
+      - docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/scenarios/fixtures/JRNY-HOME-02-odessa-social-memory.replay.json
+      - docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/scenarios/fixtures/JRNY-HOME-02-odessa-leakbranch.deterministic.json
+    migration_slot: none
+    decision_policy: split_after_actor_identity_and_knowledge_projection
+    validation_profile: protocol-planning
+    scenario_ids:
+      - JRNY-HOME-02-odessa-social-memory
+    commit_sha: null
+    integration_sha: null
+    notes: >
+      Dispatched as `tc-vs-npc-01-homecoming-npc-social-memory` at
+      20260618-234646 with `backend: tty`, `model_tier: opus`,
+      `subagent_policy: implementation_allowed`, `commit_policy: no_commit`,
+      and handoff
+      `.tmp/team-lead/worker-tc-vs-npc-01-homecoming-npc-social-memory-20260618-234646.md`.
+      TC-KNOW-00 and TC-KNOW-04 prerequisites are satisfied by
+      `docs/agent-loop/epics/EPIC-KNOWLEDGE-NPC-RUNTIME-ledger.md`.
+      Accepted by lead review after revision1:
+      `.tmp/team-lead/worker-tc-vs-npc-01-homecoming-npc-social-memory-revision1-20260619-0001.md`.
+      Lead validation: `cargo test -p trpg-harness`; workspace `cargo check`;
+      focused model/runtime/gm/DB NPC tests; HOME-02 deterministic/replay CLI
+      PASS; leakbranch and replay provenance negative controls fail closed;
+      live-with-DB/no-key BLOCKED with no accepted cassette; `git diff --check`.
+      Revision1 closed two proof gaps: withheld facts now require NPC-owned
+      knowledge and relationship deltas require `observed_this_turn`.
+
+  - id: TC-VS-MEM-01-workgraph-split
+    kind: planning
+    acceptance_ids:
+      - DA-MEM-01
+      - DA-MEM-03
+      - DA-PIPE-03
+    state: integrated
+    depends_on:
+      - TC-PIPE-00-integration-debt-classification
+      - TC-VS-KNOW-01-workgraph-split
+      - TC-VS-NPC-01-workgraph-split
+    base_sha: <latest-integration-head-after-social-split>
+    branch: lead-owned/no-code-commit
+    worktree: /Users/haoli/.config/superpowers/worktrees/chatrpg-rs-v1.20-formula/knowledge-runtime-p0
+    read_set:
+      - docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/TaskCards.md
+      - crates/trpg-runtime/src/memory_proposal.rs
+      - crates/trpg-runtime/src/relationship_extraction.rs
+      - crates/trpg-db/src/lib.rs
+      - crates/trpg-harness/**
+    write_set:
+      - docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/WorkGraph.yaml
+    hotspot_leases:
+      - workgraph
+    contract_dependencies:
+      - accepted_knowledge_and_social_journeys
+    generated_outputs:
+      - crates/trpg-harness/src/lib.rs
+      - crates/trpg-harness/src/main.rs
+      - docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/scenarios/JRNY-HOME-03-committed-memory-reload.json
+      - docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/scenarios/JRNY-HOME-03-memory-failbranch.json
+      - docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/scenarios/fixtures/JRNY-HOME-03-committed-memory-reload.deterministic.json
+      - docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/scenarios/fixtures/JRNY-HOME-03-committed-memory-reload.replay.json
+      - docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/scenarios/fixtures/JRNY-HOME-03-memory-failbranch.deterministic.json
+    migration_slot: none
+    decision_policy: split_after_journey_acceptance
+    validation_profile: protocol-planning
+    scenario_ids:
+      - JRNY-HOME-03-committed-memory-reload
+    commit_sha: null
+    integration_sha: null
+    notes: >
+      Dependencies accepted (TC-VS-KNOW-01 and TC-VS-NPC-01). Dispatch the next
+      worker for committed-memory/reload evidence without editing acceptance
+      docs. Keep DA-MEM-03 Partial until the worker proves idempotent/retry
+      behavior and source/evidence ids across committed memory.
+      Dispatched as `tc-vs-mem-01-committed-memory-reload` at 20260619-0018
+      with `backend: tty`, `model_tier: opus`, `subagent_policy:
+      implementation_allowed`, `commit_policy: no_commit`, and handoff
+      `.tmp/team-lead/worker-tc-vs-mem-01-committed-memory-reload-20260619-0018.md`.
+      Accepted by lead review: worker handoff plus fresh validation
+      `cargo test -p trpg-harness`; workspace `cargo check`; focused
+      model/runtime/DB memory tests and relationship extraction; HOME-03
+      deterministic/replay CLI PASS; failbranch and replay provenance negative
+      controls fail closed; live-with-DB/no-key BLOCKED with no accepted
+      cassette; `git diff --check`. DA-MEM-01 and DA-MEM-03 are Done;
+      DA-SPOIL-02 memory-summary gap is Done; DA-PIPE-03 is only Partial
+      because production flight-recorder coverage remains narrower than the
+      acceptance row.
+
+  - id: TC-PIPE-03-production-flight-recorder-provenance
+    kind: implementation
+    acceptance_ids:
+      - DA-SPOIL-03
+      - DA-PIPE-01
+      - DA-PIPE-03
+    state: integrated
+    depends_on:
+      - TC-PIPE-00-integration-debt-classification
+      - TC-VS-KNOW-01-workgraph-split
+      - TC-VS-NPC-01-workgraph-split
+      - TC-VS-MEM-01-workgraph-split
+    base_sha: <dirty-accepted-vertical-baseline-after-memory-slice>
+    branch: lead-owned/no-code-commit
+    worktree: /Users/haoli/.config/superpowers/worktrees/chatrpg-rs-v1.20-formula/knowledge-runtime-p0
+    read_set:
+      - docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/AcceptanceLedger.md
+      - docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/TaskCards.md
+      - docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/scenarios/**
+      - crates/trpg-gm/src/**
+      - crates/trpg-runtime/src/knowledge_projection.rs
+      - crates/trpg-runtime/src/npc_mind.rs
+      - crates/trpg-model/src/knowledge*.rs
+      - crates/trpg-harness/**
+    write_set:
+      - crates/trpg-gm/src/**
+      - crates/trpg-gm/tests/**
+      - crates/trpg-runtime/src/knowledge_projection.rs
+      - crates/trpg-runtime/src/npc_mind.rs
+      - crates/trpg-runtime/tests/**
+      - crates/trpg-model/src/knowledge*.rs
+      - crates/trpg-model/tests/**
+      - crates/trpg-harness/src/lib.rs
+      - crates/trpg-harness/src/main.rs
+      - crates/trpg-harness/tests/**
+      - docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/scenarios/**
+    hotspot_leases:
+      - gm_turn_loop
+      - gm_plugin_registry
+      - harness_entrypoint
+    contract_dependencies:
+      - accepted_knowledge_social_memory_journeys
+    generated_outputs:
+      - crates/trpg-gm/tests/flight_recorder_provenance.rs
+      - docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/scenarios/JRNY-HOME-04-flight-recorder-provenance.json
+      - docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/scenarios/fixtures/JRNY-HOME-04-flight-recorder-provenance.deterministic.json
+      - docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/scenarios/fixtures/JRNY-HOME-04-flight-recorder-provenance.replay.json
+      - docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/scenarios/JRNY-HOME-04-flight-recorder-failbranch.json
+      - docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/scenarios/fixtures/JRNY-HOME-04-flight-recorder-failbranch.deterministic.json
+    migration_slot: none
+    decision_policy: >
+      Implement the smallest production trace/provenance surface that records
+      view loading, plugin filtering, prompt-visible context, verifier-private
+      inputs/findings, and ledger-impacting events without exposing secrets to
+      the model-visible prompt.
+    validation_profile: production-flight-recorder-provenance
+    scenario_ids:
+      - JRNY-HOME-01-athena-knowledge-reveal
+      - JRNY-HOME-02-odessa-social-memory
+      - JRNY-HOME-03-committed-memory-reload
+      - JRNY-HOME-04-flight-recorder-provenance
+      - JRNY-HOME-04-flight-recorder-failbranch
+    commit_sha: null
+    integration_sha: null
+    notes: >
+      Accepted after recovery worker handoff
+      `.tmp/team-lead/worker-tc-pipe-03-production-flight-recorder-provenance-recovery1-20260619-0108.md`
+      and lead review. Evidence: production `turn_loop` records view-load
+      provenance before policy plugin contributions; GM provenance and
+      NoSpoiler production-source tests pass; `FlightRecorderCheckpoint`
+      consumes production `PluginContributionTrace` plus same-turn
+      `domain_events`; HOME-04 deterministic/replay PASS; failbranch fails
+      closed as `VIEW_ORDER_VIOLATION` + `SECRET_IN_TRACE`; replay provenance
+      mismatch fails closed; live no-key blocks before accepted cassette.
+      Lead used isolated target dir `.tmp/cargo-target-tcpipe03-lead` because
+      an unrelated external worker was sharing the default cargo target dir.
+
+  - id: TC-KNOW-FOUND-01-worldfact-holder-roundtrip
+    kind: implementation
+    acceptance_ids:
+      - DA-KNOW-01
+      - DA-KNOW-03
+    state: integrated
+    depends_on:
+      - TC-VS-KNOW-01-workgraph-split
+      - TC-VS-NPC-01-workgraph-split
+      - TC-PIPE-03-production-flight-recorder-provenance
+    base_sha: <dirty-accepted-vertical-baseline-after-tc-pipe-03>
+    branch: lead-owned/no-code-commit
+    worktree: /Users/haoli/.config/superpowers/worktrees/chatrpg-rs-v1.20-formula/knowledge-runtime-p0
+    read_set:
+      - docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/AcceptanceLedger.md
+      - docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/TaskCards.md
+      - crates/trpg-model/src/knowledge.rs
+      - crates/trpg-model/src/npc_mind.rs
+      - crates/trpg-db/src/lib.rs
+      - crates/trpg-runtime/src/knowledge_projection.rs
+      - crates/trpg-runtime/src/npc_mind.rs
+      - migrations/0033_knowledge_edges_v1_fields.sql
+      - migrations/0034_knowledge_edges_npc_holders.sql
+      - crates/trpg-db/tests/live_knowledge_edges.rs
+      - crates/trpg-db/tests/live_npc_mind_view.rs
+      - crates/trpg-runtime/tests/**
+      - crates/trpg-model/tests/**
+    write_set:
+      - crates/trpg-model/src/knowledge.rs
+      - crates/trpg-model/src/npc_mind.rs
+      - crates/trpg-model/tests/**
+      - crates/trpg-db/src/lib.rs
+      - crates/trpg-db/tests/**
+      - crates/trpg-runtime/src/knowledge_projection.rs
+      - crates/trpg-runtime/src/npc_mind.rs
+      - crates/trpg-runtime/tests/**
+      - docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/scenarios/**
+    hotspot_leases:
+      - knowledge_model
+      - knowledge_db_projection
+      - npc_mind_projection
+    contract_dependencies:
+      - accepted_actor_identity_contract
+      - accepted_production_flight_recorder
+    generated_outputs: []
+    migration_slot: none
+    decision_policy: >
+      Close the holder-specific knowledge foundation without broad refactors:
+      prove `WorldFact`/fact identity is separate from holder state, and prove
+      player_party plus multiple NPC holders can diverge (`knows_true`,
+      `believes_false`, unknown) through storage and runtime projections.
+    validation_profile: knowledge-holder-roundtrip
+    scenario_ids:
+      - JRNY-HOME-01-athena-knowledge-reveal
+      - JRNY-HOME-02-odessa-social-memory
+    commit_sha: null
+    integration_sha: eb77199b74ff7ed5963099ecb5c02f4c555166b3
+    notes: >
+      Accepted as a no_commit in-place evidence slice from worker
+      `.tmp/team-lead/worker-tc-know-found-01-worldfact-holder-roundtrip-20260619-0130.md`.
+      The production implementation was already present; the accepted change
+      adds canonical model/live-DB tests for DA-KNOW-01 and DA-KNOW-03:
+      `same_fact_roundtrips_distinct_holder_states_across_holders`,
+      `two_npc_mind_views_diverge_on_same_fact`, and
+      `two_npcs_diverge_on_same_fact_player_unknown`. Lead validation used
+      isolated `CARGO_TARGET_DIR=.tmp/cargo-target-tcknowfound01-lead`:
+      model mind 6/6, model knowledge 18/18 plus focused bins, runtime
+      knowledge_projection 6/6, runtime npc_mind 4/4, DB live
+      `live_knowledge_edges` 11/11, DB live `live_npc_mind_view` 4/4,
+      `cargo check -p trpg-model -p trpg-db -p trpg-runtime`, and
+      `git diff --check`.

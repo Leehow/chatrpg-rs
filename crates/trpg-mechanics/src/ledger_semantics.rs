@@ -23,7 +23,10 @@ fn value_to_i32(v: &Value) -> Option<i32> {
 /// projection shape `tracks.{id}.current` is stripped to its bare id before
 /// `resolve_resource_track_id` (which only understands `hp` / `resources.{id}`
 /// / bare-name forms — fed raw it would mis-resolve on head=`tracks`).
-pub fn kernel_track_for_path<'a>(parameter_path: &str, kernel: &'a RuleKernel) -> Option<&'a Value> {
+pub fn kernel_track_for_path<'a>(
+    parameter_path: &str,
+    kernel: &'a RuleKernel,
+) -> Option<&'a Value> {
     let p = parameter_path.trim();
     let normalized = p.strip_prefix("tracks.").unwrap_or(p);
     let track_id = resolve_resource_track_id(normalized, kernel)?;
@@ -38,7 +41,11 @@ pub fn kernel_track_for_path<'a>(parameter_path: &str, kernel: &'a RuleKernel) -
 /// Semantic status line for a ledger row's current value, via the kernel track
 /// the row's `parameter_path` resolves to. None when the path matches no
 /// kernel track or the track has nothing semantic to say (fail-closed).
-pub fn semantic_for_parameter_path(parameter_path: &str, current: i32, kernel: &RuleKernel) -> Option<String> {
+pub fn semantic_for_parameter_path(
+    parameter_path: &str,
+    current: i32,
+    kernel: &RuleKernel,
+) -> Option<String> {
     track_semantic_line(kernel_track_for_path(parameter_path, kernel)?, current)
 }
 
@@ -49,8 +56,16 @@ pub fn semantic_for_parameter_path(parameter_path: &str, current: i32, kernel: &
 /// actor-only). Rows without a numeric value or semantic content stay bare.
 pub fn attach_generic_state_semantics(rows: &mut [Value], kernel: &RuleKernel) {
     for row in rows.iter_mut() {
-        let Some(path) = row.get("parameter_path").and_then(|v| v.as_str()).map(str::to_string) else { continue };
-        let Some(current) = row.get("value").and_then(value_to_i32) else { continue };
+        let Some(path) = row
+            .get("parameter_path")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let Some(current) = row.get("value").and_then(value_to_i32) else {
+            continue;
+        };
         if let Some(line) = semantic_for_parameter_path(&path, current, kernel) {
             if let Some(obj) = row.as_object_mut() {
                 obj.insert("semantic".into(), json!(line));
@@ -89,13 +104,26 @@ mod tests {
                    "parameter_path":"tracks.plain_counter.current","value":3}),
         ];
         attach_generic_state_semantics(&mut rows, &kernel);
-        let actor_sem = rows[0].get("semantic").and_then(|v| v.as_str())
+        let actor_sem = rows[0]
+            .get("semantic")
+            .and_then(|v| v.as_str())
             .expect("actor row must carry a \"semantic\" key");
-        assert!(actor_sem.contains("理智受创"), "actor semantic must contain the consequence: {actor_sem}");
-        let scene_sem = rows[1].get("semantic").and_then(|v| v.as_str())
+        assert!(
+            actor_sem.contains("理智受创"),
+            "actor semantic must contain the consequence: {actor_sem}"
+        );
+        let scene_sem = rows[1]
+            .get("semantic")
+            .and_then(|v| v.as_str())
             .expect("scene row must carry a \"semantic\" key");
-        assert!(scene_sem.contains("场面失控"), "scene semantic must contain the consequence: {scene_sem}");
+        assert!(
+            scene_sem.contains("场面失控"),
+            "scene semantic must contain the consequence: {scene_sem}"
+        );
         // No thresholds / zero_means -> bare number, no "semantic" key.
-        assert!(rows[2].get("semantic").is_none(), "row without thresholds/zero_means must stay bare");
+        assert!(
+            rows[2].get("semantic").is_none(),
+            "row without thresholds/zero_means must stay bare"
+        );
     }
 }

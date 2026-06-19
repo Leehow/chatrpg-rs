@@ -37,7 +37,10 @@ impl NpcSecret {
     /// explicitly public / player-visible secrets pass; gm_only / npc_private /
     /// system_only are withheld.
     pub fn is_player_safe(&self) -> bool {
-        matches!(self.visibility, Visibility::Public | Visibility::PlayerVisible)
+        matches!(
+            self.visibility,
+            Visibility::Public | Visibility::PlayerVisible
+        )
     }
 }
 
@@ -199,7 +202,10 @@ impl NpcProfile {
     /// GM-only secrets, for GM-side tooling. Never feed into player/prompt-safe
     /// paths; use [`Self::safe_view`] for anything player-facing.
     pub fn gm_only_secrets(&self) -> Vec<&NpcSecret> {
-        self.secrets.iter().filter(|s| !s.is_player_safe()).collect()
+        self.secrets
+            .iter()
+            .filter(|s| !s.is_player_safe())
+            .collect()
     }
 
     /// Speech-style prompt block (delegates to [`SpeechStyle::to_prompt_block`];

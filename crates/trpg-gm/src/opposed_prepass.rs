@@ -31,7 +31,12 @@ const NARRATION_TAIL_CHARS: usize = 800;
 /// 门 `TRPG_OPPOSED_PREPASS`，默认开（与 stimulus 同款增量成本，仅攻击意图触发现搓）。
 pub fn opposed_prepass_enabled() -> bool {
     std::env::var("TRPG_OPPOSED_PREPASS")
-        .map(|v| !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"))
+        .map(|v| {
+            !matches!(
+                v.to_ascii_lowercase().as_str(),
+                "0" | "false" | "off" | "no"
+            )
+        })
         .unwrap_or(true)
 }
 
@@ -78,7 +83,10 @@ fn tail_chars(s: &str, n: usize) -> String {
 
 /// 场景 NPC 候选行 `id | name`（喂给判定 + 防幻觉校验的白名单）。
 fn npc_lines(scene_npcs: &[(String, String)]) -> Vec<String> {
-    scene_npcs.iter().map(|(id, name)| format!("{} | {}", id, name)).collect()
+    scene_npcs
+        .iter()
+        .map(|(id, name)| format!("{} | {}", id, name))
+        .collect()
 }
 
 /// LLM 裁决原文 → 命中的场景 NPC id（必须在白名单内，防幻觉）；非攻击 / 空 id /
@@ -123,8 +131,14 @@ pub async fn detect_attack_target(
         tail_chars(player_input, PLAYER_INPUT_CHARS),
     );
     let messages = vec![
-        ChatMessage { role: "system".to_string(), content: system_prompt().to_string() },
-        ChatMessage { role: "user".to_string(), content: user },
+        ChatMessage {
+            role: "system".to_string(),
+            content: system_prompt().to_string(),
+        },
+        ChatMessage {
+            role: "user".to_string(),
+            content: user,
+        },
     ];
     let raw = match llm.complete_json(messages, 0.0).await {
         Ok(v) => v,
@@ -151,13 +165,22 @@ pub async fn prepare_binding(
     recent_transcript: Option<&str>,
     history: &[ChatMessage],
 ) -> Option<OpposedBinding> {
-    if !opposed_prepass_enabled() { return None; }
+    if !opposed_prepass_enabled() {
+        return None;
+    }
     // ① 场景在场 NPC（真实 graph id，治 npc.opposition 占位符串台坑 §6③）。
     let scene_npcs = engine.scene_npc_personas(request, state).await;
-    if scene_npcs.is_empty() { return None; }
+    if scene_npcs.is_empty() {
+        return None;
+    }
     // ② 语义判定攻击目标（recent_transcript 缺则回退上回合 assistant 叙事尾段）。
-    let recent = recent_transcript
-        .or_else(|| history.iter().rev().find(|m| m.role == "assistant").map(|m| m.content.as_str()));
+    let recent = recent_transcript.or_else(|| {
+        history
+            .iter()
+            .rev()
+            .find(|m| m.role == "assistant")
+            .map(|m| m.content.as_str())
+    });
     let target = detect_attack_target(llm, user_input, recent, &scene_npcs).await?;
     // ③ 防御键（meet_or_beat→stats.defense / roll_under→skills.dodge，数据驱动）。
     let (bucket, param) = engine.attack_defense_param(&request.ruleset_id).await?;
@@ -167,29 +190,54 @@ pub async fn prepare_binding(
     // 构造 scopes + 两个 EntityNeed（防御值 + HP），emit → resolve_all 触发现搓。
     // resolver 内部 swallow Ok(None)/Err 并恒返回空 outcome（副作用为主），故 bus 本身
     // 判不出防御值是否真落卡 → 用幂等的存在性 re-check 复刻 gate 语义。
-    let hp_ctx = format!("opposed combat prepass: NPC HP seed for damage resolution ({})", target.actor_id);
+    let hp_ctx = format!(
+        "opposed combat prepass: NPC HP seed for damage resolution ({})",
+        target.actor_id
+    );
     let scopes = NeedScopes {
         ruleset_id: request.ruleset_id.clone(),
-        module_id: request.module_id.clone().or_else(|| state.module_id.clone()),
+        module_id: request
+            .module_id
+            .clone()
+            .or_else(|| state.module_id.clone()),
         session_id: request.session_id.clone(),
         turn_id: request.turn_id.clone(),
         scene_id: state.scene_id.clone(),
     };
-    let defense_hint = encode_entity_hint(&target.actor_id, &bucket, &param,
-        "opposed combat prepass: defending against player attack");
+    let defense_hint = encode_entity_hint(
+        &target.actor_id,
+        &bucket,
+        &param,
+        "opposed combat prepass: defending against player attack",
+    );
     let hp_hint = encode_entity_hint(&target.actor_id, "resources", "hp", &hp_ctx);
 
     let resolver = EntityNeedResolver::new(Arc::new(engine.clone()));
     let mut bus = NeedBus::new();
     bus.register(Box::new(resolver));
-    bus.emit(Need::Entity(EntityNeed { scopes: scopes.clone(), entity_hint: Some(defense_hint) }));
-    bus.emit(Need::Entity(EntityNeed { scopes, entity_hint: Some(hp_hint) }));
+    bus.emit(Need::Entity(EntityNeed {
+        scopes: scopes.clone(),
+        entity_hint: Some(defense_hint),
+    }));
+    bus.emit(Need::Entity(EntityNeed {
+        scopes,
+        entity_hint: Some(hp_hint),
+    }));
     let _ = bus.resolve_all().await; // 副作用写卡；outcomes 恒空 blocks 不用
 
     // ④ gate：现搓通路完成后，幂等 re-check 防御值是否已在卡上（缓存命中即 Ok(Some)）。
     // 这是廉价的缓存读回，保留 defense-gate 语义（防御值现搓不成则不绑）。
-    match engine.ensure_npc_parameter(&request.session_id, &request.ruleset_id, &target, &bucket, &param,
-        "opposed prepass: post-bus param existence check (idempotent read-back)").await {
+    match engine
+        .ensure_npc_parameter(
+            &request.session_id,
+            &request.ruleset_id,
+            &target,
+            &bucket,
+            &param,
+            "opposed prepass: post-bus param existence check (idempotent read-back)",
+        )
+        .await
+    {
         Ok(Some(_)) => {}
         Ok(None) => {
             tracing::info!(target: "opposed_prepass", npc = %target.actor_id, "defense synth unavailable after bus (gate off / no LLM / no card) — no opposed binding");
@@ -201,7 +249,11 @@ pub async fn prepare_binding(
         }
     }
     tracing::info!(target: "opposed_prepass", npc = %target.actor_id, bucket = %bucket, param = %param, "opposed binding prepared (GM-omitted opposed will be injected)");
-    Some(OpposedBinding { persona: target, bucket, opponent_parameter: param })
+    Some(OpposedBinding {
+        persona: target,
+        bucket,
+        opponent_parameter: param,
+    })
 }
 
 #[cfg(test)]
@@ -219,12 +271,16 @@ mod tests {
     #[test]
     fn parse_target_returns_present_npc_on_attack() {
         let raw = json!({"is_attack": true, "target_npc_id": "npc.scav_boss", "reason": "fires at the boss"});
-        assert_eq!(parse_target(&raw, &npcs()).as_deref(), Some("npc.scav_boss"));
+        assert_eq!(
+            parse_target(&raw, &npcs()).as_deref(),
+            Some("npc.scav_boss")
+        );
     }
 
     #[test]
     fn parse_target_fail_closed_when_not_attack() {
-        let raw = json!({"is_attack": false, "target_npc_id": "npc.scav_boss", "reason": "just looking"});
+        let raw =
+            json!({"is_attack": false, "target_npc_id": "npc.scav_boss", "reason": "just looking"});
         assert!(parse_target(&raw, &npcs()).is_none());
     }
 
@@ -249,13 +305,25 @@ mod tests {
     fn system_prompt_is_semantic_and_ruleset_agnostic() {
         let p = system_prompt();
         // 语义判据（按 meaning 非 keyword），fail-closed。
-        assert!(p.contains("by MEANING not keywords"), "must judge by meaning: {p}");
-        assert!(p.to_lowercase().contains("fail-closed"), "must be fail-closed: {p}");
+        assert!(
+            p.contains("by MEANING not keywords"),
+            "must judge by meaning: {p}"
+        );
+        assert!(
+            p.to_lowercase().contains("fail-closed"),
+            "must be fail-closed: {p}"
+        );
         // 防幻觉：只许命中提供的场景 NPC，绝不造 id。
-        assert!(p.contains("never invent an id"), "must forbid inventing ids: {p}");
+        assert!(
+            p.contains("never invent an id"),
+            "must forbid inventing ids: {p}"
+        );
         // 零 per-ruleset 硬编码：提示不得把判据钉死成单一规则集名。
         for rs in ["cyberpunk_red", "call_of_cthulhu", "sword_world", "剑世界"] {
-            assert!(!p.contains(rs), "prompt must stay ruleset-agnostic, found `{rs}`: {p}");
+            assert!(
+                !p.contains(rs),
+                "prompt must stay ruleset-agnostic, found `{rs}`: {p}"
+            );
         }
     }
 
@@ -278,14 +346,21 @@ mod tests {
     // These guard that the emit-site encoding the resolver consumes stays in lock-step.
     #[test]
     fn entity_need_hint_encodes_all_fields() {
-        let hint = encode_entity_hint("npc.ras", "skills", "perception",
-            "opposed combat prepass: defending against player attack");
+        let hint = encode_entity_hint(
+            "npc.ras",
+            "skills",
+            "perception",
+            "opposed combat prepass: defending against player attack",
+        );
         let parts: Vec<&str> = hint.splitn(4, '|').collect();
         assert_eq!(parts.len(), 4);
         assert_eq!(parts[0], "npc.ras");
         assert_eq!(parts[1], "skills");
         assert_eq!(parts[2], "perception");
-        assert_eq!(parts[3], "opposed combat prepass: defending against player attack");
+        assert_eq!(
+            parts[3],
+            "opposed combat prepass: defending against player attack"
+        );
     }
 
     #[test]

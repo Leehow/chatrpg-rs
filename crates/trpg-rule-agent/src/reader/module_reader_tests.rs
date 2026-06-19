@@ -55,11 +55,23 @@ fn resolve_entry_prefers_reader_id_then_heuristic() {
         n
     };
     // 卷首语在前、序幕(scene)在中、地点在后 —— 复现"前言陷阱"场景
-    let scenes = vec![mk("preface", "guidance"), mk("prologue", "scene"), mk("loc1", "location")];
+    let scenes = vec![
+        mk("preface", "guidance"),
+        mk("prologue", "scene"),
+        mk("loc1", "location"),
+    ];
     // 语义优先：reader 指定 loc1（即使它不是 scene/story 类型）也采纳
-    assert_eq!(resolve_entry_index(&scenes, Some("loc1")), Some(2), "reader 语义入口即采纳");
+    assert_eq!(
+        resolve_entry_index(&scenes, Some("loc1")),
+        Some(2),
+        "reader 语义入口即采纳"
+    );
     // 失效 id → 兜底 entry_scene_index（首个 scene/story = prologue@1），而非取 preface@0
-    assert_eq!(resolve_entry_index(&scenes, Some("missing")), Some(1), "无效 id → 确定性兜底跳过前言");
+    assert_eq!(
+        resolve_entry_index(&scenes, Some("missing")),
+        Some(1),
+        "无效 id → 确定性兜底跳过前言"
+    );
     // 缺失 → 兜底
     assert_eq!(resolve_entry_index(&scenes, None), Some(1));
     assert_eq!(resolve_entry_index(&[], Some("x")), None, "空 → None");
@@ -71,7 +83,11 @@ fn apply_deep_keeps_read_aloud_none_when_empty() {
     n.node_id = "loc1".into();
     apply_deep_to_node(&mut n, &json!({"scene":{"read_aloud":"  ","gm_notes":""}}));
     assert!(n.read_aloud.is_none(), "空白念白 → 保持 None，绝不编造");
-    assert_eq!(n.extraction_status, SceneExtractionStatus::SkeletonOnly, "无正文 → 不翻 Deep");
+    assert_eq!(
+        n.extraction_status,
+        SceneExtractionStatus::SkeletonOnly,
+        "无正文 → 不翻 Deep"
+    );
 }
 
 #[test]
@@ -107,8 +123,14 @@ fn apply_deep_links_scene_to_entities_from_entities_array() {
             ]
         }),
     );
-    assert!(n.referenced_npc_ids.contains(&"npc1".to_string()), "entities 的 npc 应补进 referenced_npc_ids");
-    assert!(n.referenced_location_ids.contains(&"loc1".to_string()), "entities 的 location 应补进 referenced_location_ids");
+    assert!(
+        n.referenced_npc_ids.contains(&"npc1".to_string()),
+        "entities 的 npc 应补进 referenced_npc_ids"
+    );
+    assert!(
+        n.referenced_location_ids.contains(&"loc1".to_string()),
+        "entities 的 location 应补进 referenced_location_ids"
+    );
     assert_eq!(n.referenced_npc_ids.len(), 1, "空 id 应跳过、不重复");
 }
 
@@ -127,7 +149,11 @@ fn apply_deep_entities_supplement_dedups_against_scene_refs() {
             ]
         }),
     );
-    assert_eq!(n.referenced_npc_ids, vec!["npc1", "npc2"], "保留 scene 已填、追加 entities 新 id、去重");
+    assert_eq!(
+        n.referenced_npc_ids,
+        vec!["npc1", "npc2"],
+        "保留 scene 已填、追加 entities 新 id、去重"
+    );
 }
 
 #[test]
@@ -168,8 +194,15 @@ fn deep_links_merge_supplement_and_upgrade() {
     );
     assert_eq!(n.links.len(), 2, "sc02 去重升级 + sc03 追加");
     let sc02 = n.links.iter().find(|l| l.to_node_id == "sc02").unwrap();
-    assert_eq!(sc02.source_anchor.as_deref(), Some("穿过北门"), "同 target 深抽带锚优先");
-    assert!(n.links.iter().any(|l| l.to_node_id == "sc03"), "深抽新 target 追加");
+    assert_eq!(
+        sc02.source_anchor.as_deref(),
+        Some("穿过北门"),
+        "同 target 深抽带锚优先"
+    );
+    assert!(
+        n.links.iter().any(|l| l.to_node_id == "sc03"),
+        "深抽新 target 追加"
+    );
 }
 
 #[test]

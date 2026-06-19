@@ -27,8 +27,9 @@ async fn apply_delta(
         .await?;
     let mut rel = match current {
         Some(rel) => rel,
-        None => NpcRelationship::new(session_id, npc_id, target)
-            .map_err(|e| anyhow::anyhow!("{e}"))?,
+        None => {
+            NpcRelationship::new(session_id, npc_id, target).map_err(|e| anyhow::anyhow!("{e}"))?
+        }
     };
     rel.apply_delta(delta).map_err(|e| anyhow::anyhow!("{e}"))?;
     db.upsert_npc_relationship(&rel).await?;
@@ -88,7 +89,10 @@ async fn npc_relationship_roundtrip() {
         .await
         .unwrap()
         .expect("relationship persisted");
-    assert_eq!(loaded, rel, "load must reproduce the stored relationship exactly");
+    assert_eq!(
+        loaded, rel,
+        "load must reproduce the stored relationship exactly"
+    );
     assert!(loaded.trust > 0 && loaded.debt > 0);
     assert_eq!(loaded.evidence_event_ids, vec!["evt_helped".to_string()]);
 
@@ -207,13 +211,17 @@ async fn unstable_target_id_fails_closed_at_write_boundary() {
         serde_json::from_value(raw).expect("deserialize into a public-field struct");
 
     let res = db.upsert_npc_relationship(&rel).await;
-    assert!(res.is_err(), "invalid target id must fail closed at write boundary");
+    assert!(
+        res.is_err(),
+        "invalid target id must fail closed at write boundary"
+    );
 
-    let count: i64 = sqlx::query_scalar("select count(*) from npc_relationships where session_id=$1")
-        .bind(&session)
-        .fetch_one(&db.pool)
-        .await
-        .unwrap();
+    let count: i64 =
+        sqlx::query_scalar("select count(*) from npc_relationships where session_id=$1")
+            .bind(&session)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
     assert_eq!(count, 0, "no row written for an invalid target id");
 
     purge(&db, &session).await;
@@ -238,11 +246,12 @@ async fn unstable_npc_id_fails_closed_no_row() {
     .await;
     assert!(res.is_err(), "unstable NPC id must fail closed");
 
-    let count: i64 = sqlx::query_scalar("select count(*) from npc_relationships where session_id=$1")
-        .bind(&session)
-        .fetch_one(&db.pool)
-        .await
-        .unwrap();
+    let count: i64 =
+        sqlx::query_scalar("select count(*) from npc_relationships where session_id=$1")
+            .bind(&session)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
     assert_eq!(count, 0, "no row written for an unstable id");
 
     purge(&db, &session).await;

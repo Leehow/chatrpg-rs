@@ -35,13 +35,20 @@ pub fn catalog_index_text(entries: &[MechanicEntry], limit: usize) -> String {
             || !e.hooks.is_empty()
             || e.passive_projection.is_some();
         if keep {
-            lines.push(format!("{} | {} | {}", one_line(&e.id), one_line(&e.name), one_line(&e.when_to_use)));
+            lines.push(format!(
+                "{} | {} | {}",
+                one_line(&e.id),
+                one_line(&e.name),
+                one_line(&e.when_to_use)
+            ));
         } else {
             omitted += 1;
         }
     }
     if omitted > 0 {
-        lines.push(format!("(+{omitted} entries omitted; use lookup_mechanic by id)"));
+        lines.push(format!(
+            "(+{omitted} entries omitted; use lookup_mechanic by id)"
+        ));
     }
     lines.join("\n")
 }
@@ -60,7 +67,10 @@ fn one_line(s: &str) -> String {
 /// without a non-empty `semantics` string renders nothing (fail-closed: the
 /// caller drops the key and the bare band id/label stays visible in the
 /// outcome JSON — never invented prose).
-pub fn band_semantics_line(dice_core: &serde_json::Value, outcome: &serde_json::Value) -> Option<String> {
+pub fn band_semantics_line(
+    dice_core: &serde_json::Value,
+    outcome: &serde_json::Value,
+) -> Option<String> {
     let band_id = outcome
         .get("success_tier")
         .and_then(|v| v.as_str())
@@ -101,7 +111,10 @@ pub fn band_semantics_line(dice_core: &serde_json::Value, outcome: &serde_json::
 /// bucket (npc_synth / chargen `apply_track_change_to_sheet` conventions).
 /// No template / no tested_parameter / value not found → None (fail-closed:
 /// the line is skipped, never invented).
-pub fn passive_projection_line(entry: &MechanicEntry, sheet_json: &serde_json::Value) -> Option<String> {
+pub fn passive_projection_line(
+    entry: &MechanicEntry,
+    sheet_json: &serde_json::Value,
+) -> Option<String> {
     let template = entry.passive_projection.as_deref()?;
     let param = entry.tested_parameter.as_deref()?;
     let value = sheet_value_text(sheet_json, param)?;
@@ -133,11 +146,16 @@ fn sheet_value_text(sheet: &serde_json::Value, param: &str) -> Option<String> {
         .and_then(scalar_text)
 }
 
-fn lookup_ci<'a>(obj: &'a serde_json::Map<String, serde_json::Value>, key: &str) -> Option<&'a serde_json::Value> {
+fn lookup_ci<'a>(
+    obj: &'a serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Option<&'a serde_json::Value> {
     if let Some(v) = obj.get(key) {
         return Some(v);
     }
-    obj.iter().find(|(k, _)| k.eq_ignore_ascii_case(key)).map(|(_, v)| v)
+    obj.iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(key))
+        .map(|(_, v)| v)
 }
 
 /// Scalar rendering: numbers/strings/bools verbatim; objects via their

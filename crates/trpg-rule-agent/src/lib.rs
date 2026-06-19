@@ -32,7 +32,11 @@ pub struct RuleStewardAgent {
 
 impl RuleStewardAgent {
     pub fn new(db: Db, search: SearchService, data_dir: impl Into<PathBuf>) -> Self {
-        Self { db, search, data_dir: data_dir.into() }
+        Self {
+            db,
+            search,
+            data_dir: data_dir.into(),
+        }
     }
 
     /// Resolve a rules/character/materialization need using source-backed lookup.
@@ -45,12 +49,23 @@ impl RuleStewardAgent {
 
         let mut scopes = BTreeMap::new();
         scopes.insert("ruleset_id".to_string(), need.ruleset_id.clone());
-        if let Some(module_id) = &need.module_id { scopes.insert("module_id".to_string(), module_id.clone()); }
-        if let Some(session_id) = &need.session_id { scopes.insert("session_id".to_string(), session_id.clone()); }
-        if let Some(scene_id) = &need.scene_id { scopes.insert("scene_id".to_string(), scene_id.clone()); }
+        if let Some(module_id) = &need.module_id {
+            scopes.insert("module_id".to_string(), module_id.clone());
+        }
+        if let Some(session_id) = &need.session_id {
+            scopes.insert("session_id".to_string(), session_id.clone());
+        }
+        if let Some(scene_id) = &need.scene_id {
+            scopes.insert("scene_id".to_string(), scene_id.clone());
+        }
 
-        let learned = self.db.list_learned_packets(&need.ruleset_id, need.module_id.as_deref(), 8).await.unwrap_or_default();
-        let learned_hits = learned.iter()
+        let learned = self
+            .db
+            .list_learned_packets(&need.ruleset_id, need.module_id.as_deref(), 8)
+            .await
+            .unwrap_or_default();
+        let learned_hits = learned
+            .iter()
             .filter(|packet| packet_matches_need(packet, &need, &query))
             .cloned()
             .collect::<Vec<_>>();
@@ -58,7 +73,14 @@ impl RuleStewardAgent {
         let search_req = SearchRequest {
             query: query.clone(),
             mode: SearchMode::Auto,
-            domains: vec!["learned".into(), "rules".into(), "modules".into(), "rulings".into(), "source".into(), "parsed".into()],
+            domains: vec![
+                "learned".into(),
+                "rules".into(),
+                "modules".into(),
+                "rulings".into(),
+                "source".into(),
+                "parsed".into(),
+            ],
             scopes,
             limit: 10,
             explain: true,
@@ -77,10 +99,18 @@ impl RuleStewardAgent {
 
         let mut locator_hits = Vec::new();
         if search_response.hits.is_empty() {
-            locator_hits = self.db.search_book_locator_entries(Some(&need.ruleset_id), &query, 8).await.unwrap_or_default();
+            locator_hits = self
+                .db
+                .search_book_locator_entries(Some(&need.ruleset_id), &query, 8)
+                .await
+                .unwrap_or_default();
             if locator_hits.is_empty() {
                 if let Some(module_id) = &need.module_id {
-                    locator_hits = self.db.search_book_locator_entries(Some(module_id), &query, 8).await.unwrap_or_default();
+                    locator_hits = self
+                        .db
+                        .search_book_locator_entries(Some(module_id), &query, 8)
+                        .await
+                        .unwrap_or_default();
                 }
             }
         }
@@ -94,10 +124,17 @@ impl RuleStewardAgent {
         }
 
         let mut source_refs = Vec::new();
-        for hit in &search_response.hits { source_refs.extend(hit.source_refs.clone()); }
-        for packet in &learned_hits { source_refs.extend(packet.source_refs.clone()); }
+        for hit in &search_response.hits {
+            source_refs.extend(hit.source_refs.clone());
+        }
+        for packet in &learned_hits {
+            source_refs.extend(packet.source_refs.clone());
+        }
         for locator in &locator_hits {
-            if let Some(refs) = locator.get("source_refs").and_then(|v| serde_json::from_value::<Vec<SourceRef>>(v.clone()).ok()) {
+            if let Some(refs) = locator
+                .get("source_refs")
+                .and_then(|v| serde_json::from_value::<Vec<SourceRef>>(v.clone()).ok())
+            {
                 source_refs.extend(refs);
             }
         }
@@ -106,7 +143,11 @@ impl RuleStewardAgent {
         let mut context_blocks = Vec::new();
         for hit in search_response.hits.iter().take(6) {
             let mut block = ContextBlock::new(
-                format!("rule_steward.lookup.{}.{}", need.need_id, sanitize_for_block_id(&hit.hit_id)),
+                format!(
+                    "rule_steward.lookup.{}.{}",
+                    need.need_id,
+                    sanitize_for_block_id(&hit.hit_id)
+                ),
                 BlockKind::LookupResult,
                 format!("Rule Steward hit: {}", hit.title),
                 BlockContent::Json(json!({"hit": hit, "rule_need": &need.need_id})),
@@ -116,7 +157,11 @@ impl RuleStewardAgent {
                 Scope::ruleset(need.ruleset_id.clone()),
                 78,
             );
-            block.tags = vec!["rule_steward".into(), "lookup_hit".into(), need.need_kind.as_str().into()];
+            block.tags = vec![
+                "rule_steward".into(),
+                "lookup_hit".into(),
+                need.need_kind.as_str().into(),
+            ];
             block.source_refs = hit.source_refs.clone();
             block.load_reason = Some(format!("rule_need:{}", need.need_id));
             context_blocks.push(block);
@@ -136,7 +181,11 @@ impl RuleStewardAgent {
                 Scope::ruleset(need.ruleset_id.clone()),
                 70,
             );
-            block.tags = vec!["rule_steward".into(), "locator_fallback".into(), need.need_kind.as_str().into()];
+            block.tags = vec![
+                "rule_steward".into(),
+                "locator_fallback".into(),
+                need.need_kind.as_str().into(),
+            ];
             block.source_refs = source_refs.clone();
             context_blocks.push(block);
         }
@@ -198,7 +247,12 @@ impl RuleStewardAgent {
                     tool_name: "trpg-search".into(),
                     query: query.clone(),
                     hit_count: search_response.hits.len().saturating_sub(rg_hits.len()),
-                    selected_hit_ids: search_response.hits.iter().take(6).map(|h| h.hit_id.clone()).collect(),
+                    selected_hit_ids: search_response
+                        .hits
+                        .iter()
+                        .take(6)
+                        .map(|h| h.hit_id.clone())
+                        .collect(),
                     elapsed_ms: started.elapsed().as_millis() as u64,
                 }];
                 if !rg_hits.is_empty() {
@@ -206,7 +260,11 @@ impl RuleStewardAgent {
                         tool_name: "trpg-rg-fallback".into(),
                         query: query.clone(),
                         hit_count: rg_hits.len(),
-                        selected_hit_ids: rg_hits.iter().take(6).map(|h| h.hit_id.clone()).collect(),
+                        selected_hit_ids: rg_hits
+                            .iter()
+                            .take(6)
+                            .map(|h| h.hit_id.clone())
+                            .collect(),
                         elapsed_ms: started.elapsed().as_millis() as u64,
                     });
                 }
@@ -250,27 +308,63 @@ impl RuleStewardAgent {
     /// has not yet been rebuilt.
     fn rg_source_scan(&self, need: &RuleNeed, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
         let terms = query_terms(query);
-        if terms.is_empty() { return Ok(Vec::new()); }
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
         let roots = [self.data_dir.join("parsed"), self.data_dir.join("markdown")];
         let mut hits = Vec::new();
         for root in roots {
-            if !root.exists() { continue; }
-            for entry in WalkDir::new(root).into_iter().filter_map(|entry| entry.ok()) {
-                if hits.len() >= limit { break; }
-                if !entry.file_type().is_file() { continue; }
+            if !root.exists() {
+                continue;
+            }
+            for entry in WalkDir::new(root)
+                .into_iter()
+                .filter_map(|entry| entry.ok())
+            {
+                if hits.len() >= limit {
+                    break;
+                }
+                if !entry.file_type().is_file() {
+                    continue;
+                }
                 let path = entry.path();
-                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
-                if !matches!(ext.as_str(), "md" | "json" | "jsonl" | "txt") { continue; }
-                if std::fs::metadata(path).map(|m| m.len() > 2_000_000).unwrap_or(true) { continue; }
-                let text = match std::fs::read_to_string(path) { Ok(v) => v, Err(_) => continue };
+                let ext = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if !matches!(ext.as_str(), "md" | "json" | "jsonl" | "txt") {
+                    continue;
+                }
+                if std::fs::metadata(path)
+                    .map(|m| m.len() > 2_000_000)
+                    .unwrap_or(true)
+                {
+                    continue;
+                }
+                let text = match std::fs::read_to_string(path) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
                 let lower = text.to_ascii_lowercase();
-                let matched = terms.iter().filter(|term| lower.contains(term.as_str())).count();
-                if matched == 0 { continue; }
-                let source_id = path.file_stem().and_then(|s| s.to_str()).unwrap_or("source").to_string();
+                let matched = terms
+                    .iter()
+                    .filter(|term| lower.contains(term.as_str()))
+                    .count();
+                if matched == 0 {
+                    continue;
+                }
+                let source_id = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("source")
+                    .to_string();
                 let snippet = snippet_for_terms(&text, &terms, 640);
                 let mut scopes = BTreeMap::new();
                 scopes.insert("ruleset_id".into(), need.ruleset_id.clone());
-                if let Some(module_id) = &need.module_id { scopes.insert("module_id".into(), module_id.clone()); }
+                if let Some(module_id) = &need.module_id {
+                    scopes.insert("module_id".into(), module_id.clone());
+                }
                 let source_ref = SourceRef {
                     source_id: source_id.clone(),
                     page: None,
@@ -285,13 +379,25 @@ impl RuleStewardAgent {
                     hit_id: format!("rg_{}", sanitize_for_block_id(&path.to_string_lossy())),
                     search_doc_id: path.to_string_lossy().to_string(),
                     origin: "rg_fallback".into(),
-                    domain: if path.to_string_lossy().contains("modules") { "modules".into() } else { "rules".into() },
+                    domain: if path.to_string_lossy().contains("modules") {
+                        "modules".into()
+                    } else {
+                        "rules".into()
+                    },
                     logical_kind: "source_text".into(),
-                    title: path.file_name().and_then(|s| s.to_str()).unwrap_or("source").to_string(),
+                    title: path
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("source")
+                        .to_string(),
                     snippet,
                     score: 0.45 + (matched as f32 * 0.05),
                     scopes,
-                    tags: vec!["rule_steward".into(), "rg_fallback".into(), need.need_kind.as_str().into()],
+                    tags: vec![
+                        "rule_steward".into(),
+                        "rg_fallback".into(),
+                        need.need_kind.as_str().into(),
+                    ],
                     visibility: Visibility::GmOnly,
                     source_refs: vec![source_ref],
                     metadata: json!({"path": path.to_string_lossy(), "matched_terms": matched}),
@@ -299,46 +405,90 @@ impl RuleStewardAgent {
                 });
             }
         }
-        hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         hits.truncate(limit);
         Ok(hits)
     }
 
     /// Check whether a ruleset/module can reach first playable table state.
-    pub async fn playability_gate(&self, ruleset_id: &str, module_id: Option<&str>) -> Result<PlayabilityGateReport> {
+    pub async fn playability_gate(
+        &self,
+        ruleset_id: &str,
+        module_id: Option<&str>,
+    ) -> Result<PlayabilityGateReport> {
         let kernel = self.db.load_rule_kernel(ruleset_id).await?;
         let template = self.db.load_character_template(ruleset_id).await?;
         let pack = self.db.load_character_onboarding_pack(ruleset_id).await?;
         let has_module_packet = match module_id {
-            Some(module_id) => self.db.has_module_first_session_packet(module_id).await.unwrap_or(false),
+            Some(module_id) => self
+                .db
+                .has_module_first_session_packet(module_id)
+                .await
+                .unwrap_or(false),
             None => true,
         };
 
-        let has_creation_flow = pack.as_ref().map(|p| p.creation_flows.iter().any(|flow| !flow.steps.is_empty())).unwrap_or(false);
-        let has_formula_pack = pack.as_ref().map(|p| !p.derived_formula_pack.formulas.is_empty()).unwrap_or(false);
-        let has_starter_path = pack.as_ref().map(|p| {
-            !p.starter_character_pack.pregens.is_empty()
-                || !p.starter_character_pack.archetypes.is_empty()
-                || !p.starter_character_pack.creation_shortcuts.is_empty()
-                || p.creation_flows.iter().any(|flow| !flow.steps.is_empty())
-        }).unwrap_or(false);
-        let has_runtime_bindings = pack.as_ref().map(|p| !p.runtime_bindings.is_empty()).unwrap_or(false);
+        let has_creation_flow = pack
+            .as_ref()
+            .map(|p| p.creation_flows.iter().any(|flow| !flow.steps.is_empty()))
+            .unwrap_or(false);
+        let has_formula_pack = pack
+            .as_ref()
+            .map(|p| !p.derived_formula_pack.formulas.is_empty())
+            .unwrap_or(false);
+        let has_starter_path = pack
+            .as_ref()
+            .map(|p| {
+                !p.starter_character_pack.pregens.is_empty()
+                    || !p.starter_character_pack.archetypes.is_empty()
+                    || !p.starter_character_pack.creation_shortcuts.is_empty()
+                    || p.creation_flows.iter().any(|flow| !flow.steps.is_empty())
+            })
+            .unwrap_or(false);
+        let has_runtime_bindings = pack
+            .as_ref()
+            .map(|p| !p.runtime_bindings.is_empty())
+            .unwrap_or(false);
 
         let mut blocking_gaps = Vec::new();
         if kernel.is_none() {
-            blocking_gaps.push(PlayabilityGap { gap_id: "missing_rule_kernel".into(), message: "Missing source-backed RuleKernel/BP1 core rules.".into(), repair_skill: Some("rule_steward.core_kernel_distill.v1".into()) });
+            blocking_gaps.push(PlayabilityGap {
+                gap_id: "missing_rule_kernel".into(),
+                message: "Missing source-backed RuleKernel/BP1 core rules.".into(),
+                repair_skill: Some("rule_steward.core_kernel_distill.v1".into()),
+            });
         }
         if template.is_none() {
-            blocking_gaps.push(PlayabilityGap { gap_id: "missing_character_sheet_template".into(), message: "Missing character sheet template.".into(), repair_skill: Some("rule_steward.character_sheet_template_extraction.v1".into()) });
+            blocking_gaps.push(PlayabilityGap {
+                gap_id: "missing_character_sheet_template".into(),
+                message: "Missing character sheet template.".into(),
+                repair_skill: Some("rule_steward.character_sheet_template_extraction.v1".into()),
+            });
         }
         if !has_creation_flow {
-            blocking_gaps.push(PlayabilityGap { gap_id: "missing_character_creation_flow".into(), message: "Missing executable character creation flow.".into(), repair_skill: Some("rule_steward.character_creation_flow_build.v1".into()) });
+            blocking_gaps.push(PlayabilityGap {
+                gap_id: "missing_character_creation_flow".into(),
+                message: "Missing executable character creation flow.".into(),
+                repair_skill: Some("rule_steward.character_creation_flow_build.v1".into()),
+            });
         }
         if !has_starter_path {
-            blocking_gaps.push(PlayabilityGap { gap_id: "missing_starter_character_path".into(), message: "No pregen, quickstart, import, or guided starter path was found.".into(), repair_skill: Some("rule_steward.starter_character_pack_build.v1".into()) });
+            blocking_gaps.push(PlayabilityGap {
+                gap_id: "missing_starter_character_path".into(),
+                message: "No pregen, quickstart, import, or guided starter path was found.".into(),
+                repair_skill: Some("rule_steward.starter_character_pack_build.v1".into()),
+            });
         }
         if !has_module_packet {
-            blocking_gaps.push(PlayabilityGap { gap_id: "missing_first_session_packet".into(), message: "Missing module first-session packet.".into(), repair_skill: Some("module_first_session_prep.skill".into()) });
+            blocking_gaps.push(PlayabilityGap {
+                gap_id: "missing_first_session_packet".into(),
+                message: "Missing module first-session packet.".into(),
+                repair_skill: Some("module_first_session_prep.skill".into()),
+            });
         }
         let require_derived_formulas = std::env::var("TRPG_PLAYABILITY_REQUIRE_DERIVED_FORMULAS")
             .ok()
@@ -348,7 +498,11 @@ impl RuleStewardAgent {
             blocking_gaps.push(PlayabilityGap { gap_id: "missing_derived_formula_pack".into(), message: "Missing source-backed derived/mechanical formulas required for first-play checks, attacks, resources, and damage/effects.".into(), repair_skill: Some("rule_steward.derived_value_formula_extract.v1".into()) });
         }
         if !has_runtime_bindings {
-            blocking_gaps.push(PlayabilityGap { gap_id: "missing_runtime_bindings".into(), message: "Missing character-sheet to runtime parameter bindings.".into(), repair_skill: Some("rule_steward.character_onboarding.v1".into()) });
+            blocking_gaps.push(PlayabilityGap {
+                gap_id: "missing_runtime_bindings".into(),
+                message: "Missing character-sheet to runtime parameter bindings.".into(),
+                repair_skill: Some("rule_steward.character_onboarding.v1".into()),
+            });
         }
 
         let mut warnings = Vec::new();
@@ -356,7 +510,11 @@ impl RuleStewardAgent {
             warnings.push(PlayabilityWarning { code: "missing_derived_formulas".into(), message: "Derived value formulas are incomplete; mechanically-ready characters and combat/effect resolution require more rule lookup.".into() });
         }
         if !has_runtime_bindings {
-            warnings.push(PlayabilityWarning { code: "missing_runtime_bindings".into(), message: "Character sheet fields are not fully bound to runtime parameter paths.".into() });
+            warnings.push(PlayabilityWarning {
+                code: "missing_runtime_bindings".into(),
+                message: "Character sheet fields are not fully bound to runtime parameter paths."
+                    .into(),
+            });
         }
 
         let report = PlayabilityGateReport {
@@ -371,18 +529,26 @@ impl RuleStewardAgent {
             has_first_session_packet: has_module_packet,
             blocking_gaps,
             warnings,
-            ready: kernel.is_some() && template.is_some() && has_creation_flow && has_starter_path && has_module_packet && has_runtime_bindings && (!require_derived_formulas || has_formula_pack),
+            ready: kernel.is_some()
+                && template.is_some()
+                && has_creation_flow
+                && has_starter_path
+                && has_module_packet
+                && has_runtime_bindings
+                && (!require_derived_formulas || has_formula_pack),
             created_at: Some(Utc::now()),
         };
         self.db.save_playability_gate_report(&report).await.ok();
         Ok(report)
     }
 
-    pub async fn character_onboarding_pack(&self, ruleset_id: &str) -> Result<Option<CharacterOnboardingPack>> {
+    pub async fn character_onboarding_pack(
+        &self,
+        ruleset_id: &str,
+    ) -> Result<Option<CharacterOnboardingPack>> {
         self.db.load_character_onboarding_pack(ruleset_id).await
     }
 }
-
 
 /// Raw first-pass outputs produced by Rule Steward skills before trpg-parser
 /// coerces them into the stable RuleBundle data model.
@@ -418,7 +584,11 @@ pub struct RuleStewardFirstPassAgent {
 
 impl RuleStewardFirstPassAgent {
     pub fn new(db: Db, llm: Arc<dyn LlmClient>, data_dir: impl Into<PathBuf>) -> Self {
-        Self { db, llm, data_dir: data_dir.into() }
+        Self {
+            db,
+            llm,
+            data_dir: data_dir.into(),
+        }
     }
 
     pub async fn run_rulebook_first_pass(
@@ -429,12 +599,30 @@ impl RuleStewardFirstPassAgent {
         starter_procedures: &[ProcedureDef],
     ) -> Result<RulebookFirstPassOutput> {
         let book_map = steward_build_book_map(book);
-        let mut output = RulebookFirstPassOutput { book_map: book_map.clone(), ..Default::default() };
+        let mut output = RulebookFirstPassOutput {
+            book_map: book_map.clone(),
+            ..Default::default()
+        };
 
         let locator_terms = [
-            "contents", "table of contents", "index", "chapter", "part", "appendix",
-            "character", "character creation", "character sheet", "combat", "damage",
-            "skill check", "checks", "equipment", "spells", "magic", "gm", "game master",
+            "contents",
+            "table of contents",
+            "index",
+            "chapter",
+            "part",
+            "appendix",
+            "character",
+            "character creation",
+            "character sheet",
+            "combat",
+            "damage",
+            "skill check",
+            "checks",
+            "equipment",
+            "spells",
+            "magic",
+            "gm",
+            "game master",
         ];
         let (locator_hit_count, locator_refs) = scan_book_for_terms(book, &locator_terms, 32);
         let first_pass_run = RuleAgentRun {
@@ -449,7 +637,11 @@ impl RuleStewardFirstPassAgent {
                 tool_name: "trpg-rg".into(),
                 query: locator_terms.join(" | "),
                 hit_count: locator_hit_count,
-                selected_hit_ids: locator_refs.iter().take(8).map(|r| format!("{}:{:?}", r.source_id, r.page)).collect(),
+                selected_hit_ids: locator_refs
+                    .iter()
+                    .take(8)
+                    .map(|r| format!("{}:{:?}", r.source_id, r.page))
+                    .collect(),
                 elapsed_ms: 0,
             }],
             source_refs_read: locator_refs.clone(),
@@ -460,7 +652,9 @@ impl RuleStewardFirstPassAgent {
             created_at: Some(Utc::now()),
         };
         self.db.upsert_rule_agent_run(&first_pass_run).await.ok();
-        output.skill_sequence.push(first_pass_run.selected_skill.clone());
+        output
+            .skill_sequence
+            .push(first_pass_run.selected_skill.clone());
         output.agent_runs.push(first_pass_run);
 
         let core_sample = steward_sample_pages(book, 22_000);
@@ -510,7 +704,10 @@ impl RuleStewardFirstPassAgent {
         output.skill_sequence.push(run.selected_skill.clone());
         output.agent_runs.push(run);
 
-        let template_hint = output.character_template_json.clone().unwrap_or_else(|| json!({}));
+        let template_hint = output
+            .character_template_json
+            .clone()
+            .unwrap_or_else(|| json!({}));
 
         let character_subskills = [
             ("rule_steward.character_creation_flow_build.v1", character_creation_flow_skill_prompt(), "creating a character | step-by-step | easy creation | detailed creation | import existing sheet"),
@@ -554,10 +751,18 @@ Return JSON for this skill only. Use source-backed fields/formulas/locators; unk
                 }],
             ).await;
             match skill_id {
-                "rule_steward.character_creation_flow_build.v1" => output.character_creation_flow_json = value,
-                "rule_steward.character_option_locator.v1" => output.character_option_catalog_json = value,
-                "rule_steward.derived_value_formula_extract.v1" => output.derived_formula_pack_json = value,
-                "rule_steward.starter_character_pack_build.v1" => output.starter_character_pack_json = value,
+                "rule_steward.character_creation_flow_build.v1" => {
+                    output.character_creation_flow_json = value
+                }
+                "rule_steward.character_option_locator.v1" => {
+                    output.character_option_catalog_json = value
+                }
+                "rule_steward.derived_value_formula_extract.v1" => {
+                    output.derived_formula_pack_json = value
+                }
+                "rule_steward.starter_character_pack_build.v1" => {
+                    output.starter_character_pack_json = value
+                }
                 _ => {}
             }
             output.react_trace.push(json!({"phase":"character_steward_subskill", "skill": skill_id, "unresolved_count": run.unresolved_count}));
@@ -565,8 +770,25 @@ Return JSON for this skill only. Use source-backed fields/formulas/locators; unk
             output.agent_runs.push(run);
         }
 
-        if output.derived_formula_pack_json.as_ref().map(|v| !steward_json_has_array(v, &["derived_formula_pack", "formulas", "derived_formulas", "derived_values", "data"])).unwrap_or(true) {
-            output.derived_formula_pack_json = Some(steward_seeded_formula_pack_json(ruleset_id, book));
+        if output
+            .derived_formula_pack_json
+            .as_ref()
+            .map(|v| {
+                !steward_json_has_array(
+                    v,
+                    &[
+                        "derived_formula_pack",
+                        "formulas",
+                        "derived_formulas",
+                        "derived_values",
+                        "data",
+                    ],
+                )
+            })
+            .unwrap_or(true)
+        {
+            output.derived_formula_pack_json =
+                Some(steward_seeded_formula_pack_json(ruleset_id, book));
             output.react_trace.push(json!({"phase":"derived_formula_seeded", "skill":"rule_steward.derived_value_formula_extract.v1", "reason":"LLM skill returned no executable formulas; deterministic source-backed first-play formula seeds added for playability audit"}));
         }
 
@@ -665,10 +887,15 @@ Return one CharacterOnboardingPack JSON. Merge the subskill outputs, prefer loca
             "You are the Rule Steward Agent executing a reusable skill.\nSkill id: {skill_id}\nSkill manifest JSON:\n{}\n\n{task_prompt}\n\nAll mechanical numbers, formulas, and field bindings must be source-backed or marked missing/provisional. Output valid JSON only.",
             serde_json::to_string_pretty(&manifest).unwrap_or_else(|_| "{}".into()),
         );
-        let result = self.llm.complete_json(vec![system(system_prompt), user(user_payload)], 0.1).await;
+        let result = self
+            .llm
+            .complete_json(vec![system(system_prompt), user(user_payload)], 0.1)
+            .await;
         let elapsed_ms = started.elapsed().as_millis() as u64;
         for call in &mut tool_calls {
-            if call.elapsed_ms == 0 { call.elapsed_ms = elapsed_ms; }
+            if call.elapsed_ms == 0 {
+                call.elapsed_ms = elapsed_ms;
+            }
         }
         tool_calls.push(ToolCallRecord {
             tool_name: "llm_json_extractor".into(),
@@ -682,7 +909,12 @@ Return one CharacterOnboardingPack JSON. Merge the subskill outputs, prefer loca
             Ok(value) => {
                 let unresolved = steward_skill_unresolved_count(skill_id, &value);
                 let confidence = if unresolved == 0 { 0.76 } else { 0.54 };
-                (Some(value), confidence, unresolved, vec![format!("raw_skill_output:{skill_id}")])
+                (
+                    Some(value),
+                    confidence,
+                    unresolved,
+                    vec![format!("raw_skill_output:{skill_id}")],
+                )
             }
             Err(err) => {
                 warn!(skill_id = %skill_id, error = %err, "Rule Steward first-pass skill failed; parser fallback may run");
@@ -712,14 +944,22 @@ Return one CharacterOnboardingPack JSON. Merge the subskill outputs, prefer loca
 
     fn load_skill_manifest(&self, skill_id: &str) -> Value {
         let candidates = [
-            self.data_dir.join("agent/skills").join(format!("{skill_id}.json")),
-            self.data_dir.join("agent/skills").join(format!("{}.json", skill_id.replace('/', "."))),
-            self.data_dir.join("agent/skills/rule_steward.character_onboarding.v1.json"),
-            self.data_dir.join("agent/skills/rule_steward.ruleset_first_pass.v1.json"),
+            self.data_dir
+                .join("agent/skills")
+                .join(format!("{skill_id}.json")),
+            self.data_dir
+                .join("agent/skills")
+                .join(format!("{}.json", skill_id.replace('/', "."))),
+            self.data_dir
+                .join("agent/skills/rule_steward.character_onboarding.v1.json"),
+            self.data_dir
+                .join("agent/skills/rule_steward.ruleset_first_pass.v1.json"),
         ];
         for path in candidates {
             if let Ok(text) = std::fs::read_to_string(&path) {
-                if let Ok(value) = serde_json::from_str(&text) { return value; }
+                if let Ok(value) = serde_json::from_str(&text) {
+                    return value;
+                }
             }
         }
         json!({"skill_id": skill_id, "load_status": "manifest_missing_fallback"})
@@ -731,12 +971,23 @@ fn steward_build_book_map(book: &PlainTextBook) -> Value {
     let heading_re = Regex::new(r"(?m)^(#{1,3}\s+)?([A-Z][A-Za-z0-9][A-Za-z0-9 &'’:#,\-]{2,90})$|^(Part \d+|Chapter \d+|CHAPTER [A-Z0-9]+|Appendix|APPENDIX).{0,90}$").unwrap();
     for page in &book.pages {
         for cap in heading_re.captures_iter(&page.text) {
-            let label = cap.get(2).or_else(|| cap.get(3)).map(|m| m.as_str().trim()).unwrap_or("");
-            if label.len() < 3 { continue; }
-            headings.push(json!({"page": page.page, "heading": label, "source_id": book.source_id}));
-            if headings.len() >= 240 { break; }
+            let label = cap
+                .get(2)
+                .or_else(|| cap.get(3))
+                .map(|m| m.as_str().trim())
+                .unwrap_or("");
+            if label.len() < 3 {
+                continue;
+            }
+            headings
+                .push(json!({"page": page.page, "heading": label, "source_id": book.source_id}));
+            if headings.len() >= 240 {
+                break;
+            }
         }
-        if headings.len() >= 240 { break; }
+        if headings.len() >= 240 {
+            break;
+        }
     }
     json!({
         "source_id": book.source_id,
@@ -748,12 +999,19 @@ fn steward_build_book_map(book: &PlainTextBook) -> Value {
     })
 }
 
-fn scan_book_for_terms(book: &PlainTextBook, terms: &[&str], limit: usize) -> (usize, Vec<SourceRef>) {
+fn scan_book_for_terms(
+    book: &PlainTextBook,
+    terms: &[&str],
+    limit: usize,
+) -> (usize, Vec<SourceRef>) {
     let mut refs = Vec::new();
     let mut count = 0usize;
     for page in &book.pages {
         let lower = page.text.to_ascii_lowercase();
-        if terms.iter().any(|term| lower.contains(&term.to_ascii_lowercase())) {
+        if terms
+            .iter()
+            .any(|term| lower.contains(&term.to_ascii_lowercase()))
+        {
             count += 1;
             if refs.len() < limit {
                 refs.push(SourceRef {
@@ -776,74 +1034,306 @@ fn steward_sample_pages(book: &PlainTextBook, max_chars: usize) -> String {
     let mut out = String::new();
     for page in book.pages.iter().take(16) {
         let piece = format!("\n[page {}]\n{}\n", page.page, page.text);
-        if out.len() + piece.len() > max_chars { break; }
+        if out.len() + piece.len() > max_chars {
+            break;
+        }
         out.push_str(&piece);
     }
     out
 }
 
-fn steward_gather_pages_by_keywords(book: &PlainTextBook, keywords: &[&str], max_chars: usize, max_pages: usize) -> String {
+fn steward_gather_pages_by_keywords(
+    book: &PlainTextBook,
+    keywords: &[&str],
+    max_chars: usize,
+    max_pages: usize,
+) -> String {
     let mut out = String::new();
     let mut count = 0usize;
     for page in &book.pages {
         let lower = page.text.to_ascii_lowercase();
-        if keywords.iter().any(|kw| lower.contains(&kw.to_ascii_lowercase())) {
+        if keywords
+            .iter()
+            .any(|kw| lower.contains(&kw.to_ascii_lowercase()))
+        {
             let piece = format!("\n[page {}]\n{}\n", page.page, page.text);
-            if out.len() + piece.len() > max_chars || count >= max_pages { break; }
+            if out.len() + piece.len() > max_chars || count >= max_pages {
+                break;
+            }
             out.push_str(&piece);
             count += 1;
         }
     }
-    if out.trim().is_empty() { steward_sample_pages(book, max_chars) } else { out }
+    if out.trim().is_empty() {
+        steward_sample_pages(book, max_chars)
+    } else {
+        out
+    }
 }
 
 fn steward_character_pages(book: &PlainTextBook, max_chars: usize) -> String {
-    steward_gather_pages_by_keywords(book, &[
-        "character", "character sheet", "creating a character", "create a character", "character creation",
-        "step-by-step", "how to make a pc", "investigator creation", "agent", "onboarding questionnaire",
-        "easy creation", "detailed creation", "sample character", "pregenerated", "pre-generated",
-        "race", "class", "role", "profession", "background", "lifepath", "arc", "competency",
-        "ability scores", "characteristics", "statistics", "skills", "derived", "calculation of values",
-        "hit points", "sanity", "humanity", "mp", "power points", "equipment", "starting equipment",
-        "copy character sheet", "how to read character sheet", "contents", "table of contents"
-    ], max_chars, 30)
+    steward_gather_pages_by_keywords(
+        book,
+        &[
+            "character",
+            "character sheet",
+            "creating a character",
+            "create a character",
+            "character creation",
+            "step-by-step",
+            "how to make a pc",
+            "investigator creation",
+            "agent",
+            "onboarding questionnaire",
+            "easy creation",
+            "detailed creation",
+            "sample character",
+            "pregenerated",
+            "pre-generated",
+            "race",
+            "class",
+            "role",
+            "profession",
+            "background",
+            "lifepath",
+            "arc",
+            "competency",
+            "ability scores",
+            "characteristics",
+            "statistics",
+            "skills",
+            "derived",
+            "calculation of values",
+            "hit points",
+            "sanity",
+            "humanity",
+            "mp",
+            "power points",
+            "equipment",
+            "starting equipment",
+            "copy character sheet",
+            "how to read character sheet",
+            "contents",
+            "table of contents",
+        ],
+        max_chars,
+        30,
+    )
 }
 
 fn steward_onboarding_pages(book: &PlainTextBook, max_chars: usize) -> String {
-    steward_gather_pages_by_keywords(book, &[
-        "what is", "how to play", "getting it done", "resolving actions", "skill check", "checks",
-        "combat", "damage", "character", "character sheet", "game rules", "gm", "game master",
-        "keeper", "director", "dice", "d20", "percentile", "2d6", "chaos", "conflict resolution",
-        "contents", "table of contents"
-    ], max_chars, 28)
+    steward_gather_pages_by_keywords(
+        book,
+        &[
+            "what is",
+            "how to play",
+            "getting it done",
+            "resolving actions",
+            "skill check",
+            "checks",
+            "combat",
+            "damage",
+            "character",
+            "character sheet",
+            "game rules",
+            "gm",
+            "game master",
+            "keeper",
+            "director",
+            "dice",
+            "d20",
+            "percentile",
+            "2d6",
+            "chaos",
+            "conflict resolution",
+            "contents",
+            "table of contents",
+        ],
+        max_chars,
+        28,
+    )
 }
 
 fn steward_json_has_array(value: &Value, keys: &[&str]) -> bool {
     for key in keys {
-        if value.get(*key).and_then(Value::as_array).map(|a| !a.is_empty()).unwrap_or(false) { return true; }
-        if value.get(*key).and_then(|v| v.get("formulas")).and_then(Value::as_array).map(|a| !a.is_empty()).unwrap_or(false) { return true; }
-        if value.get(*key).and_then(|v| v.get("fields")).and_then(Value::as_array).map(|a| !a.is_empty()).unwrap_or(false) { return true; }
-        if value.get(*key).and_then(|v| v.get("creation_flows")).and_then(Value::as_array).map(|a| !a.is_empty()).unwrap_or(false) { return true; }
-        if value.get(*key).and_then(|v| v.get("derived_formula_pack")).and_then(|d| d.get("formulas")).and_then(Value::as_array).map(|a| !a.is_empty()).unwrap_or(false) { return true; }
-        if value.get(*key).and_then(|v| v.get("starter_character_pack")).and_then(|d| d.get("pregens")).and_then(Value::as_array).map(|a| !a.is_empty()).unwrap_or(false) { return true; }
-        if value.get(*key).and_then(|v| v.get("starter_character_pack")).and_then(|d| d.get("archetypes")).and_then(Value::as_array).map(|a| !a.is_empty()).unwrap_or(false) { return true; }
+        if value
+            .get(*key)
+            .and_then(Value::as_array)
+            .map(|a| !a.is_empty())
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        if value
+            .get(*key)
+            .and_then(|v| v.get("formulas"))
+            .and_then(Value::as_array)
+            .map(|a| !a.is_empty())
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        if value
+            .get(*key)
+            .and_then(|v| v.get("fields"))
+            .and_then(Value::as_array)
+            .map(|a| !a.is_empty())
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        if value
+            .get(*key)
+            .and_then(|v| v.get("creation_flows"))
+            .and_then(Value::as_array)
+            .map(|a| !a.is_empty())
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        if value
+            .get(*key)
+            .and_then(|v| v.get("derived_formula_pack"))
+            .and_then(|d| d.get("formulas"))
+            .and_then(Value::as_array)
+            .map(|a| !a.is_empty())
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        if value
+            .get(*key)
+            .and_then(|v| v.get("starter_character_pack"))
+            .and_then(|d| d.get("pregens"))
+            .and_then(Value::as_array)
+            .map(|a| !a.is_empty())
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        if value
+            .get(*key)
+            .and_then(|v| v.get("starter_character_pack"))
+            .and_then(|d| d.get("archetypes"))
+            .and_then(Value::as_array)
+            .map(|a| !a.is_empty())
+            .unwrap_or(false)
+        {
+            return true;
+        }
     }
     false
 }
 
 fn steward_skill_unresolved_count(skill_id: &str, value: &Value) -> usize {
     let mut unresolved = 0usize;
-    if skill_id.contains("character_sheet_template") && !steward_json_has_array(value, &["fields", "character_template", "sheet_template", "template", "data"]) { unresolved += 1; }
-    if skill_id.contains("character_creation_flow") && !steward_json_has_array(value, &["creation_flows", "character_creation_flows", "creation_flow", "flow", "data"]) { unresolved += 1; }
-    if skill_id.contains("character_option_locator") && !steward_json_has_array(value, &["option_catalogs", "option_groups", "locators", "data"]) { unresolved += 1; }
-    if skill_id.contains("derived_value_formula") && !steward_json_has_array(value, &["derived_formula_pack", "formulas", "derived_formulas", "derived_values", "data"]) { unresolved += 1; }
-    if skill_id.contains("starter_character_pack") && !steward_json_has_array(value, &["starter_character_pack", "pregens", "archetypes", "creation_shortcuts", "data"]) { unresolved += 1; }
-    if skill_id.contains("character_onboarding") {
-        if !steward_json_has_array(value, &["creation_flows", "character_onboarding_pack", "pack", "data"]) { unresolved += 1; }
-        if !steward_json_has_array(value, &["derived_formula_pack", "character_onboarding_pack", "pack", "data"]) { unresolved += 1; }
+    if skill_id.contains("character_sheet_template")
+        && !steward_json_has_array(
+            value,
+            &[
+                "fields",
+                "character_template",
+                "sheet_template",
+                "template",
+                "data",
+            ],
+        )
+    {
+        unresolved += 1;
     }
-    if skill_id.contains("gm_onboarding") && !steward_json_has_array(value, &["book_locator", "lookup_recipes", "cold_data_locator"]) { unresolved += 1; }
-    if skill_id.contains("core_kernel") && value.get("resident_core_markdown").and_then(Value::as_str).map(|s| !s.trim().is_empty()).unwrap_or(false) == false && value.get("ruleset_kernel").is_none() { unresolved += 1; }
+    if skill_id.contains("character_creation_flow")
+        && !steward_json_has_array(
+            value,
+            &[
+                "creation_flows",
+                "character_creation_flows",
+                "creation_flow",
+                "flow",
+                "data",
+            ],
+        )
+    {
+        unresolved += 1;
+    }
+    if skill_id.contains("character_option_locator")
+        && !steward_json_has_array(
+            value,
+            &["option_catalogs", "option_groups", "locators", "data"],
+        )
+    {
+        unresolved += 1;
+    }
+    if skill_id.contains("derived_value_formula")
+        && !steward_json_has_array(
+            value,
+            &[
+                "derived_formula_pack",
+                "formulas",
+                "derived_formulas",
+                "derived_values",
+                "data",
+            ],
+        )
+    {
+        unresolved += 1;
+    }
+    if skill_id.contains("starter_character_pack")
+        && !steward_json_has_array(
+            value,
+            &[
+                "starter_character_pack",
+                "pregens",
+                "archetypes",
+                "creation_shortcuts",
+                "data",
+            ],
+        )
+    {
+        unresolved += 1;
+    }
+    if skill_id.contains("character_onboarding") {
+        if !steward_json_has_array(
+            value,
+            &[
+                "creation_flows",
+                "character_onboarding_pack",
+                "pack",
+                "data",
+            ],
+        ) {
+            unresolved += 1;
+        }
+        if !steward_json_has_array(
+            value,
+            &[
+                "derived_formula_pack",
+                "character_onboarding_pack",
+                "pack",
+                "data",
+            ],
+        ) {
+            unresolved += 1;
+        }
+    }
+    if skill_id.contains("gm_onboarding")
+        && !steward_json_has_array(
+            value,
+            &["book_locator", "lookup_recipes", "cold_data_locator"],
+        )
+    {
+        unresolved += 1;
+    }
+    if skill_id.contains("core_kernel")
+        && value
+            .get("resident_core_markdown")
+            .and_then(Value::as_str)
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+            == false
+        && value.get("ruleset_kernel").is_none()
+    {
+        unresolved += 1;
+    }
     unresolved
 }
 
@@ -854,9 +1344,22 @@ fn source_refs_from_tool_calls(calls: &[ToolCallRecord]) -> Vec<SourceRef> {
             let mut parts = id.split(':');
             let source_id = parts.next().unwrap_or_default();
             let page = parts.next().and_then(|p| p.parse::<u32>().ok());
-            if source_id.is_empty() { continue; }
-            refs.push(SourceRef { source_id: source_id.to_string(), page, anchor_id: Some(id.clone()), section_path: vec![call.tool_name.clone()], char_start: None, char_end: None, text_hash: None, note: Some("rule_steward_tool_selected_source".into()) });
-            if refs.len() >= 32 { return refs; }
+            if source_id.is_empty() {
+                continue;
+            }
+            refs.push(SourceRef {
+                source_id: source_id.to_string(),
+                page,
+                anchor_id: Some(id.clone()),
+                section_path: vec![call.tool_name.clone()],
+                char_start: None,
+                char_end: None,
+                text_hash: None,
+                note: Some("rule_steward_tool_selected_source".into()),
+            });
+            if refs.len() >= 32 {
+                return refs;
+            }
         }
     }
     refs
@@ -868,8 +1371,12 @@ fn selected_page_ids(source_text: &str, source_id: &str) -> Vec<String> {
     for cap in re.captures_iter(source_text) {
         if let Some(page) = cap.get(1) {
             let id = format!("{}:{}", source_id, page.as_str());
-            if !ids.contains(&id) { ids.push(id); }
-            if ids.len() >= 16 { break; }
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+            if ids.len() >= 16 {
+                break;
+            }
         }
     }
     ids
@@ -878,8 +1385,17 @@ fn selected_page_ids(source_text: &str, source_id: &str) -> Vec<String> {
 fn steward_seeded_formula_pack_json(ruleset_id: &str, book: &PlainTextBook) -> Value {
     let refs = steward_formula_source_refs(ruleset_id, book);
     let refs_json = serde_json::to_value(&refs).unwrap_or_else(|_| json!([]));
-    let pages = refs.iter().filter_map(|r| r.page.map(|p| p.to_string())).collect::<Vec<_>>().join(",");
-    let note = |label: &str| format!("deterministic source-backed first-play formula seed from rulebook pages [{}]; {}", pages, label);
+    let pages = refs
+        .iter()
+        .filter_map(|r| r.page.map(|p| p.to_string()))
+        .collect::<Vec<_>>()
+        .join(",");
+    let note = |label: &str| {
+        format!(
+            "deterministic source-backed first-play formula seed from rulebook pages [{}]; {}",
+            pages, label
+        )
+    };
     let ruleset = ruleset_id.to_ascii_lowercase();
     // All seeds injected here are provisional: they are deterministic first-play
     // placeholders, not LLM-extracted source-backed formulas. Mark as
@@ -935,27 +1451,93 @@ fn steward_seeded_formula_pack_json(ruleset_id: &str, book: &PlainTextBook) -> V
 fn steward_formula_source_refs(ruleset_id: &str, book: &PlainTextBook) -> Vec<SourceRef> {
     let ruleset = ruleset_id.to_ascii_lowercase();
     let keywords: Vec<&str> = if ruleset.contains("cyberpunk") {
-        vec!["resolving actions", "ranged combat", "damage", "armor", "dv", "friday night firefight"]
+        vec![
+            "resolving actions",
+            "ranged combat",
+            "damage",
+            "armor",
+            "dv",
+            "friday night firefight",
+        ]
     } else if ruleset.contains("dnd") {
-        vec!["d20", "ability checks", "attack rolls", "difficulty class", "armor class", "damage"]
+        vec![
+            "d20",
+            "ability checks",
+            "attack rolls",
+            "difficulty class",
+            "armor class",
+            "damage",
+        ]
     } else if ruleset.contains("sword_world") {
-        vec!["skill check", "2d6", "weapon attacks", "damage", "calculation of values"]
+        vec![
+            "skill check",
+            "2d6",
+            "weapon attacks",
+            "damage",
+            "calculation of values",
+        ]
     } else if ruleset.contains("cthulhu") || ruleset.contains("coc") || ruleset.contains("brp") {
-        vec!["d100", "percentile", "skill roll", "hit points", "sanity", "major wound"]
+        vec![
+            "d100",
+            "percentile",
+            "skill roll",
+            "hit points",
+            "sanity",
+            "major wound",
+        ]
     } else if ruleset.contains("triangle") {
-        vec!["four-sided dice", "conflict resolution", "chaos", "harm", "stability"]
+        vec![
+            "four-sided dice",
+            "conflict resolution",
+            "chaos",
+            "harm",
+            "stability",
+        ]
     } else {
         vec!["skill check", "attack", "damage", "character sheet"]
     };
     let mut refs = Vec::new();
     for page in &book.pages {
         let lower = page.text.to_ascii_lowercase();
-        if keywords.iter().any(|kw| lower.contains(&kw.to_ascii_lowercase())) {
-            refs.push(SourceRef { source_id: book.source_id.clone(), page: Some(page.page), anchor_id: Some(format!("{}:page:{}", book.source_id, page.page)), section_path: vec!["rule_steward_first_pass".into(), "derived_formula_pack".into()], char_start: None, char_end: None, text_hash: None, note: Some("deterministic_formula_seed_source".into()) });
-            if refs.len() >= 8 { break; }
+        if keywords
+            .iter()
+            .any(|kw| lower.contains(&kw.to_ascii_lowercase()))
+        {
+            refs.push(SourceRef {
+                source_id: book.source_id.clone(),
+                page: Some(page.page),
+                anchor_id: Some(format!("{}:page:{}", book.source_id, page.page)),
+                section_path: vec![
+                    "rule_steward_first_pass".into(),
+                    "derived_formula_pack".into(),
+                ],
+                char_start: None,
+                char_end: None,
+                text_hash: None,
+                note: Some("deterministic_formula_seed_source".into()),
+            });
+            if refs.len() >= 8 {
+                break;
+            }
         }
     }
-    if refs.is_empty() { refs = book.pages.first().map(|p| SourceRef { source_id: book.source_id.clone(), page: Some(p.page), anchor_id: Some(format!("{}:page:{}", book.source_id, p.page)), section_path: vec!["rule_steward_first_pass".into()], char_start: None, char_end: None, text_hash: None, note: Some("fallback_formula_seed_source".into()) }).into_iter().collect(); }
+    if refs.is_empty() {
+        refs = book
+            .pages
+            .first()
+            .map(|p| SourceRef {
+                source_id: book.source_id.clone(),
+                page: Some(p.page),
+                anchor_id: Some(format!("{}:page:{}", book.source_id, p.page)),
+                section_path: vec!["rule_steward_first_pass".into()],
+                char_start: None,
+                char_end: None,
+                text_hash: None,
+                note: Some("fallback_formula_seed_source".into()),
+            })
+            .into_iter()
+            .collect();
+    }
     refs
 }
 
@@ -992,12 +1574,32 @@ fn gm_onboarding_skill_prompt() -> &'static str {
 }
 
 fn query_terms(query: &str) -> Vec<String> {
-    const STOP: &[&str] = &["the", "and", "with", "that", "this", "what", "when", "where", "how", "for", "from", "into", "rule", "rules", "procedure"];
+    const STOP: &[&str] = &[
+        "the",
+        "and",
+        "with",
+        "that",
+        "this",
+        "what",
+        "when",
+        "where",
+        "how",
+        "for",
+        "from",
+        "into",
+        "rule",
+        "rules",
+        "procedure",
+    ];
     let mut out = Vec::new();
     for raw in query.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-') {
         let term = raw.trim().to_ascii_lowercase();
-        if term.chars().count() < 3 || STOP.contains(&term.as_str()) { continue; }
-        if !out.contains(&term) { out.push(term); }
+        if term.chars().count() < 3 || STOP.contains(&term.as_str()) {
+            continue;
+        }
+        if !out.contains(&term) {
+            out.push(term);
+        }
     }
     out.truncate(12);
     out
@@ -1005,36 +1607,69 @@ fn query_terms(query: &str) -> Vec<String> {
 
 fn snippet_for_terms(text: &str, terms: &[String], max_chars: usize) -> String {
     let lower = text.to_ascii_lowercase();
-    let idx = terms.iter().filter_map(|term| lower.find(term)).min().unwrap_or(0);
+    let idx = terms
+        .iter()
+        .filter_map(|term| lower.find(term))
+        .min()
+        .unwrap_or(0);
     let start = idx.saturating_sub(max_chars / 3);
     let mut end = (start + max_chars).min(text.len());
-    while end < text.len() && !text.is_char_boundary(end) { end += 1; }
+    while end < text.len() && !text.is_char_boundary(end) {
+        end += 1;
+    }
     let mut start2 = start;
-    while start2 > 0 && !text.is_char_boundary(start2) { start2 -= 1; }
-    text[start2..end].replace('\n', " ").split_whitespace().collect::<Vec<_>>().join(" ")
+    while start2 > 0 && !text.is_char_boundary(start2) {
+        start2 -= 1;
+    }
+    text[start2..end]
+        .replace('\n', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn steward_query_text(need: &RuleNeed) -> String {
     let mut parts = vec![need.need_kind.as_str().replace('_', " ")];
-    if !need.query.trim().is_empty() { parts.push(need.query.clone()); }
-    if !need.player_action_summary.trim().is_empty() { parts.push(need.player_action_summary.clone()); }
-    for facet in &need.missing_facets { parts.push(facet.clone()); }
-    for entity_ref in &need.involved_refs { parts.push(entity_ref.clone()); }
+    if !need.query.trim().is_empty() {
+        parts.push(need.query.clone());
+    }
+    if !need.player_action_summary.trim().is_empty() {
+        parts.push(need.player_action_summary.clone());
+    }
+    for facet in &need.missing_facets {
+        parts.push(facet.clone());
+    }
+    for entity_ref in &need.involved_refs {
+        parts.push(entity_ref.clone());
+    }
     parts.join(" ")
 }
 
 fn packet_matches_need(packet: &LearnedPacket, need: &RuleNeed, query: &str) -> bool {
-    let hay = format!("{} {} {} {}", packet.packet_type, packet.packet_key, packet.title, packet.summary).to_ascii_lowercase();
+    let hay = format!(
+        "{} {} {} {}",
+        packet.packet_type, packet.packet_key, packet.title, packet.summary
+    )
+    .to_ascii_lowercase();
     let kind = need.need_kind.as_str().replace('_', " ");
-    hay.contains(&kind) || query.split_whitespace().any(|term| term.len() > 3 && hay.contains(&term.to_ascii_lowercase()))
+    hay.contains(&kind)
+        || query
+            .split_whitespace()
+            .any(|term| term.len() > 3 && hay.contains(&term.to_ascii_lowercase()))
 }
 
 fn skill_for_need(need: &RuleNeed) -> &'static str {
     match need.need_kind {
-        RuleNeedKind::CoreResolutionModel | RuleNeedKind::Bp1KernelReview => "core_kernel_distill.skill",
-        RuleNeedKind::CharacterSheetField | RuleNeedKind::CharacterCreation => "character_onboarding.skill",
+        RuleNeedKind::CoreResolutionModel | RuleNeedKind::Bp1KernelReview => {
+            "core_kernel_distill.skill"
+        }
+        RuleNeedKind::CharacterSheetField | RuleNeedKind::CharacterCreation => {
+            "character_onboarding.skill"
+        }
         RuleNeedKind::NpcOrMonsterStatBlock => "parameter_materialization.skill",
-        RuleNeedKind::AttackProcedure | RuleNeedKind::DamageProcedure | RuleNeedKind::DefenseOrArmorProcedure => "mechanical_source_pack.skill",
+        RuleNeedKind::AttackProcedure
+        | RuleNeedKind::DamageProcedure
+        | RuleNeedKind::DefenseOrArmorProcedure => "mechanical_source_pack.skill",
         RuleNeedKind::LearningAudit => "learning_promotion.skill",
         RuleNeedKind::VisibilityOrSpoilerDecision => "visibility_redaction.skill",
         _ => "rule_entity_locator.skill",
@@ -1043,9 +1678,15 @@ fn skill_for_need(need: &RuleNeed) -> &'static str {
 
 fn answer_scope_for_need(need: &RuleNeed) -> RuleAnswerScope {
     match need.need_kind {
-        RuleNeedKind::CoreResolutionModel | RuleNeedKind::Bp1KernelReview => RuleAnswerScope::RulesetCore,
-        RuleNeedKind::SceneOrModuleRule | RuleNeedKind::VisibilityOrSpoilerDecision => RuleAnswerScope::ModuleSpecific,
-        RuleNeedKind::CharacterSheetField | RuleNeedKind::CharacterCreation => RuleAnswerScope::CharacterCreation,
+        RuleNeedKind::CoreResolutionModel | RuleNeedKind::Bp1KernelReview => {
+            RuleAnswerScope::RulesetCore
+        }
+        RuleNeedKind::SceneOrModuleRule | RuleNeedKind::VisibilityOrSpoilerDecision => {
+            RuleAnswerScope::ModuleSpecific
+        }
+        RuleNeedKind::CharacterSheetField | RuleNeedKind::CharacterCreation => {
+            RuleAnswerScope::CharacterCreation
+        }
         RuleNeedKind::LearningAudit => RuleAnswerScope::AuditOnly,
         _ => RuleAnswerScope::RuntimeTurn,
     }
@@ -1065,17 +1706,32 @@ fn gm_brief_for_status(status: RuleAssistStatus, query: &str, source_count: usiz
 
 fn dedupe_source_refs(refs: &mut Vec<SourceRef>) {
     let mut seen = std::collections::HashSet::new();
-    refs.retain(|r| seen.insert(format!("{}:{:?}:{:?}:{:?}", r.source_id, r.page, r.anchor_id, r.text_hash)));
+    refs.retain(|r| {
+        seen.insert(format!(
+            "{}:{:?}:{:?}:{:?}",
+            r.source_id, r.page, r.anchor_id, r.text_hash
+        ))
+    });
 }
 
 fn sanitize_for_block_id(input: &str) -> String {
     let cleaned = input
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
         .collect::<String>()
         .trim_matches('_')
         .to_string();
-    if cleaned.is_empty() { "hit".into() } else { cleaned }
+    if cleaned.is_empty() {
+        "hit".into()
+    } else {
+        cleaned
+    }
 }
 
 #[cfg(test)]
@@ -1098,9 +1754,13 @@ mod seeded_formula_tier_tests {
         let formulas = pack_json["derived_formula_pack"]["formulas"]
             .as_array()
             .unwrap_or_else(|| panic!("{ruleset_id}: formulas must be array"));
-        assert!(!formulas.is_empty(), "{ruleset_id}: formulas must not be empty");
+        assert!(
+            !formulas.is_empty(),
+            "{ruleset_id}: formulas must not be empty"
+        );
         for f in formulas {
-            let tier = f["tier"].as_str()
+            let tier = f["tier"]
+                .as_str()
                 .unwrap_or_else(|| panic!("{ruleset_id}: formula missing tier: {f}"));
             assert_eq!(
                 tier, "provisional_seed",

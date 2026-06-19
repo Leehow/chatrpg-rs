@@ -36,26 +36,49 @@ impl Unit {
         self.page_numbers.first().copied()
     }
     pub fn head_path(&self) -> String {
-        let h: Vec<&str> = self.heading_context.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect();
+        let h: Vec<&str> = self
+            .heading_context
+            .iter()
+            .map(|s| s.as_str())
+            .filter(|s| !s.is_empty())
+            .collect();
         if h.is_empty() {
-            if self.title.is_empty() { "?".into() } else { self.title.clone() }
+            if self.title.is_empty() {
+                "?".into()
+            } else {
+                self.title.clone()
+            }
         } else {
             h.join(" > ")
         }
     }
     pub fn index_weight(&self) -> f64 {
-        self.metadata.get("index_weight").and_then(Value::as_f64).unwrap_or(0.5)
+        self.metadata
+            .get("index_weight")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.5)
     }
     pub fn mech_tags(&self) -> Vec<String> {
         self.metadata
             .get("mechanics_tags")
             .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default()
     }
     /// Lowercased haystack of heading + title + body + mechanics_tags for search.
     pub fn haystack(&self) -> String {
-        format!("{} {} {} {}", self.head_path(), self.title, self.content_text, self.mech_tags().join(" ")).to_lowercase()
+        format!(
+            "{} {} {} {}",
+            self.head_path(),
+            self.title,
+            self.content_text,
+            self.mech_tags().join(" ")
+        )
+        .to_lowercase()
     }
 }
 

@@ -64,7 +64,11 @@ TOOLS: get_toc, search(keywords), read(pages), read_layout(pages). Then call sub
 /// examples for each. Returns one object per category (schema + examples +
 /// validation), suitable for `RuleKernel.object_schemas`. Empty when the game
 /// has no such categories (e.g. a freeform-only system).
-pub async fn compile_object_schemas(client: &dyn LlmClient, ctx: &ObjectCtx<'_>, budget: usize) -> Vec<Value> {
+pub async fn compile_object_schemas(
+    client: &dyn LlmClient,
+    ctx: &ObjectCtx<'_>,
+    budget: usize,
+) -> Vec<Value> {
     let cats = discover_object_categories(client, ctx, budget).await;
     let mut out = Vec::new();
     for cat in cats.iter().take(8) {
@@ -82,7 +86,11 @@ pub async fn compile_object_schemas(client: &dyn LlmClient, ctx: &ObjectCtx<'_>,
 /// `couples_to`, but no `schema_slots`/`examples`) so the play-time
 /// materialization can fill it lazily on first use. Empty when the game has no
 /// such categories.
-pub async fn discover_object_categories(client: &dyn LlmClient, ctx: &ObjectCtx<'_>, budget: usize) -> Vec<Value> {
+pub async fn discover_object_categories(
+    client: &dyn LlmClient,
+    ctx: &ObjectCtx<'_>,
+    budget: usize,
+) -> Vec<Value> {
     let toc = tools::toc(ctx.units, 40);
     let submit = tools::submit_tool(
         "submit_categories",
@@ -99,25 +107,51 @@ pub async fn discover_object_categories(client: &dyn LlmClient, ctx: &ObjectCtx<
         "Character skills (coupling sample): {:?}\nResource tracks: {:?}\n\nTOC (already fetched):\n{toc}\n\nDiscover this game's mechanical object/ability categories — omit any it lacks — grounding each in a page you read, then call submit_categories.",
         skills_hint, ctx.resource_tracks
     );
-    let round1 = run_object_loop(client, DISCOVER_SYS, &seed, &schemas, ctx, budget, "submit_categories")
-        .await
-        .and_then(|v| v.get("categories").and_then(Value::as_array).cloned())
-        .unwrap_or_default();
+    let round1 = run_object_loop(
+        client,
+        DISCOVER_SYS,
+        &seed,
+        &schemas,
+        ctx,
+        budget,
+        "submit_categories",
+    )
+    .await
+    .and_then(|v| v.get("categories").and_then(Value::as_array).cloned())
+    .unwrap_or_default();
 
     // Round 2 — completeness critique (mirrors the chargen compiler's 2nd round):
     // a single discover call is lossy + run-to-run inconsistent (it skips mundane
     // categories like a plain weapons table even when present). Show round 1's
     // result and RE-SCAN for the common families it may have missed, then UNION.
     // Generic: names families to RE-VERIFY, never assumes one exists.
-    let kinds: Vec<String> = round1.iter().filter_map(|c| c.get("kind").and_then(Value::as_str).map(String::from)).collect();
-    let ids: Vec<String> = round1.iter().filter_map(|c| c.get("category_id").and_then(Value::as_str).map(String::from)).collect();
+    let kinds: Vec<String> = round1
+        .iter()
+        .filter_map(|c| c.get("kind").and_then(Value::as_str).map(String::from))
+        .collect();
+    let ids: Vec<String> = round1
+        .iter()
+        .filter_map(|c| {
+            c.get("category_id")
+                .and_then(Value::as_str)
+                .map(String::from)
+        })
+        .collect();
     let seed2 = format!(
         "A first pass already found these categories: kinds={kinds:?} ids={ids:?}.\nRE-SCAN the book for categories it may have MISSED. Check EACH of these and SEARCH for it before deciding it's absent: a WEAPONS / firearms / melee damage table; an ARMOR table; a SPELL / power / psychic list; a GEAR / equipment list; a VEHICLE table; any signature item type. For each family NOT already listed above, search the relevant chapter and ADD it if present (skip only if truly absent). Re-submit the COMPLETE list — INCLUDING the first-pass categories — via submit_categories.\n\nTOC (already fetched):\n{toc}"
     );
-    let round2 = run_object_loop(client, DISCOVER_SYS, &seed2, &schemas, ctx, budget.min(8), "submit_categories")
-        .await
-        .and_then(|v| v.get("categories").and_then(Value::as_array).cloned())
-        .unwrap_or_default();
+    let round2 = run_object_loop(
+        client,
+        DISCOVER_SYS,
+        &seed2,
+        &schemas,
+        ctx,
+        budget.min(8),
+        "submit_categories",
+    )
+    .await
+    .and_then(|v| v.get("categories").and_then(Value::as_array).cloned())
+    .unwrap_or_default();
 
     // Annotate each surviving category as a discovered stub (no schema_slots yet)
     // so the play-time materialization can detect + lazily extract it on first use.
@@ -144,12 +178,24 @@ fn annotate_discovered(cats: Vec<Value>) -> Vec<Value> {
 /// (more schema_slots + a located source_pages).
 fn merge_categories(a: Vec<Value>, b: Vec<Value>) -> Vec<Value> {
     let key = |c: &Value| {
-        let kind = c.get("kind").and_then(Value::as_str).unwrap_or("").to_ascii_lowercase();
-        let id = c.get("category_id").and_then(Value::as_str).unwrap_or("").to_ascii_lowercase();
+        let kind = c
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let id = c
+            .get("category_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_ascii_lowercase();
         format!("{kind}|{id}")
     };
     let score = |c: &Value| {
-        let slots = c.get("schema_slots").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0);
+        let slots = c
+            .get("schema_slots")
+            .and_then(Value::as_array)
+            .map(|a| a.len())
+            .unwrap_or(0);
         let has_pages = c.get("source_pages").map(|p| !p.is_null()).unwrap_or(false) as usize;
         slots + has_pages
     };
@@ -159,8 +205,13 @@ fn merge_categories(a: Vec<Value>, b: Vec<Value>) -> Vec<Value> {
         let k = key(&c);
         match map.get(&k) {
             Some(existing) if score(existing) >= score(&c) => {}
-            Some(_) => { map.insert(k, c); }
-            None => { order.push(k.clone()); map.insert(k, c); }
+            Some(_) => {
+                map.insert(k, c);
+            }
+            None => {
+                order.push(k.clone());
+                map.insert(k, c);
+            }
         }
     }
     order.into_iter().filter_map(|k| map.remove(&k)).collect()
@@ -170,7 +221,12 @@ fn merge_categories(a: Vec<Value>, b: Vec<Value>) -> Vec<Value> {
 /// worked examples (the per-category EXTRACT pass). Callable on its own so the
 /// play-time materialization can fill a `discovered` stub lazily on first use.
 /// The returned schema is annotated `status:"compiled"`.
-pub async fn extract_object_category(client: &dyn LlmClient, ctx: &ObjectCtx<'_>, cat: &Value, budget: usize) -> Option<Value> {
+pub async fn extract_object_category(
+    client: &dyn LlmClient,
+    ctx: &ObjectCtx<'_>,
+    cat: &Value,
+    budget: usize,
+) -> Option<Value> {
     let submit = tools::submit_tool(
         "submit_category",
         "Submit this category's schema_slots + exactly 2 example instances.",
@@ -185,12 +241,24 @@ pub async fn extract_object_category(client: &dyn LlmClient, ctx: &ObjectCtx<'_>
     );
     let schemas = object_tool_schemas(submit);
     let cat_json = serde_json::to_string(cat).unwrap_or_default();
-    let pages = cat.get("source_pages").and_then(Value::as_str).unwrap_or("");
+    let pages = cat
+        .get("source_pages")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     let seed = format!(
         "Category to compile:\n{cat_json}\n\nCharacter skills (pick attack_skill hooks from these when one matches): {:?}\nResource tracks (pick ammo / cost hooks from these): {:?}\n\nIts list/table is around pages: {pages}. read_layout those pages for the aligned table, then submit_category with schema_slots + exactly 2 examples (values copied verbatim).",
         ctx.skills, ctx.resource_tracks
     );
-    let out = run_object_loop(client, EXTRACT_SYS, &seed, &schemas, ctx, budget, "submit_category").await?;
+    let out = run_object_loop(
+        client,
+        EXTRACT_SYS,
+        &seed,
+        &schemas,
+        ctx,
+        budget,
+        "submit_category",
+    )
+    .await?;
     // finalize FIRST so confirmed-slot info exists, THEN regrab can target the
     // confirmed-but-null gaps (fix (e), VALDROP last-cell re-grab).
     let finalized = finalize_category(out, ctx);
@@ -224,9 +292,19 @@ pub(super) async fn run_object_loop(
         json!({"role": "user", "content": seed}),
     ];
     for _ in 0..(budget + 8) {
-        let resp = client.complete_with_tools(msgs.clone(), tool_schemas.to_vec()).await.ok()?;
-        let message = resp.pointer("/choices/0/message").cloned().unwrap_or_else(|| json!({}));
-        let tcs = message.get("tool_calls").and_then(Value::as_array).cloned().unwrap_or_default();
+        let resp = client
+            .complete_with_tools(msgs.clone(), tool_schemas.to_vec())
+            .await
+            .ok()?;
+        let message = resp
+            .pointer("/choices/0/message")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let tcs = message
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
         if tcs.is_empty() {
             msgs.push(message);
             msgs.push(json!({"role": "user", "content": format!("Use the tools, then call {submit_name}.")}));
@@ -234,7 +312,10 @@ pub(super) async fn run_object_loop(
         }
         msgs.push(message);
         for tc in &tcs {
-            let name = tc.pointer("/function/name").and_then(Value::as_str).unwrap_or("");
+            let name = tc
+                .pointer("/function/name")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             let args: Value = tc
                 .pointer("/function/arguments")
                 .and_then(Value::as_str)
@@ -252,20 +333,36 @@ pub(super) async fn run_object_loop(
 }
 
 fn object_dispatch(ctx: &ObjectCtx<'_>, name: &str, args: &Value) -> String {
-    let cap = |s: String| if s.len() <= 3000 { s } else { s.chars().take(3000).collect() };
+    let cap = |s: String| {
+        if s.len() <= 3000 {
+            s
+        } else {
+            s.chars().take(3000).collect()
+        }
+    };
     match name {
         "get_toc" => tools::toc(ctx.units, 40),
         "search" => {
             let kws: Vec<String> = args
                 .get("keywords")
                 .and_then(Value::as_array)
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
             cap(tools::search(ctx.units, &kws, 8))
         }
-        "read" => cap(tools::read(ctx.units, args.get("pages").and_then(Value::as_str).unwrap_or(""))),
+        "read" => cap(tools::read(
+            ctx.units,
+            args.get("pages").and_then(Value::as_str).unwrap_or(""),
+        )),
         "read_layout" => match &ctx.sidecar_text {
-            Some(s) => cap(read_layout(s, args.get("pages").and_then(Value::as_str).unwrap_or(""))),
+            Some(s) => cap(read_layout(
+                s,
+                args.get("pages").and_then(Value::as_str).unwrap_or(""),
+            )),
             None => "[no layout view available — mark table-based values provisional]".into(),
         },
         _ => format!("unknown tool {name}"),
@@ -283,14 +380,23 @@ fn finalize_category(mut cat: Value, ctx: &ObjectCtx<'_>) -> Value {
     let mut provisional: Vec<String> = cat
         .get("provisional_slots")
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
     let mut checked = 0usize;
     if let Some(examples) = cat.get("examples").and_then(Value::as_array) {
         for ex in examples {
-            let Some(slots) = ex.get("slots").and_then(Value::as_object) else { continue };
+            let Some(slots) = ex.get("slots").and_then(Value::as_object) else {
+                continue;
+            };
             for (slot, val) in slots {
-                let ty = slot_types.get(slot.as_str()).map(String::as_str).unwrap_or("text");
+                let ty = slot_types
+                    .get(slot.as_str())
+                    .map(String::as_str)
+                    .unwrap_or("text");
                 checked += 1;
                 if !slot_value_ok(ty, val, ctx) && !provisional.contains(slot) {
                     provisional.push(slot.clone());
@@ -305,10 +411,18 @@ fn finalize_category(mut cat: Value, ctx: &ObjectCtx<'_>) -> Value {
     // source column, not a discover over-spec (SCHEMA_OVERSPEC). This lets fill
     // ratio be judged over applicable slots instead of the declared superset.
     let confirmed = confirmed_slots(&cat);
-    let schema_total = cat.get("schema_slots").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0);
+    let schema_total = cat
+        .get("schema_slots")
+        .and_then(Value::as_array)
+        .map(|a| a.len())
+        .unwrap_or(0);
     if let Some(slots) = cat.get_mut("schema_slots").and_then(Value::as_array_mut) {
         for s in slots.iter_mut() {
-            let name = s.get("slot").and_then(Value::as_str).unwrap_or("").to_string();
+            let name = s
+                .get("slot")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
             if let Some(obj) = s.as_object_mut() {
                 obj.insert("confirmed".into(), json!(confirmed.contains(&name)));
             }
@@ -337,9 +451,13 @@ fn finalize_category(mut cat: Value, ctx: &ObjectCtx<'_>) -> Value {
 /// left it empty. Pure (no LLM) so fix (e)'s gap computation can reuse it.
 pub(super) fn confirmed_slots(cat: &Value) -> std::collections::HashSet<String> {
     let mut confirmed = std::collections::HashSet::new();
-    let Some(examples) = cat.get("examples").and_then(Value::as_array) else { return confirmed };
+    let Some(examples) = cat.get("examples").and_then(Value::as_array) else {
+        return confirmed;
+    };
     for ex in examples {
-        let Some(slots) = ex.get("slots").and_then(Value::as_object) else { continue };
+        let Some(slots) = ex.get("slots").and_then(Value::as_object) else {
+            continue;
+        };
         for (slot, val) in slots {
             if is_meaningful(val) {
                 confirmed.insert(slot.clone());
@@ -389,7 +507,9 @@ fn slot_value_ok(ty: &str, val: &Value, ctx: &ObjectCtx<'_>) -> bool {
     match ty {
         "dice" => looks_like_dice(&s),
         "skill_ref" => ctx.skills.is_empty() || ctx.skills.iter().any(|k| fuzzy_match(k, &s)),
-        "resource_ref" => ctx.resource_tracks.is_empty() || ctx.resource_tracks.iter().any(|k| fuzzy_match(k, &s)),
+        "resource_ref" => {
+            ctx.resource_tracks.is_empty() || ctx.resource_tracks.iter().any(|k| fuzzy_match(k, &s))
+        }
         _ => true, // number / range_ref / text: non-empty is enough
     }
 }
@@ -411,7 +531,13 @@ fn looks_like_dice(s: &str) -> bool {
 
 /// Loose id/name match — case-insensitive, snake/space-insensitive, substring.
 fn fuzzy_match(a: &str, b: &str) -> bool {
-    let norm = |x: &str| x.to_ascii_lowercase().replace(['_', '-', '(', ')'], " ").split_whitespace().collect::<Vec<_>>().join(" ");
+    let norm = |x: &str| {
+        x.to_ascii_lowercase()
+            .replace(['_', '-', '(', ')'], " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
     let (na, nb) = (norm(a), norm(b));
     !na.is_empty() && (na == nb || na.contains(&nb) || nb.contains(&na))
 }
@@ -432,7 +558,12 @@ mod tests {
 
     #[test]
     fn finalize_flags_bad_slots() {
-        let ctx = ObjectCtx { units: &[], sidecar_text: None, skills: vec!["firearms_handgun".into()], resource_tracks: vec![] };
+        let ctx = ObjectCtx {
+            units: &[],
+            sidecar_text: None,
+            skills: vec!["firearms_handgun".into()],
+            resource_tracks: vec![],
+        };
         let cat = json!({
             "category_id": "firearms", "kind": "weapon",
             "schema_slots": [
@@ -446,12 +577,30 @@ mod tests {
             ]
         });
         let out = finalize_category(cat, &ctx);
-        let prov: Vec<String> = out["provisional_slots"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
-        assert!(prov.contains(&"damage".to_string()), "bad dice should be flagged: {prov:?}");
-        assert!(prov.contains(&"skill".to_string()), "unknown skill should be flagged: {prov:?}");
-        assert!(!prov.contains(&"range".to_string()), "valid range should pass: {prov:?}");
+        let prov: Vec<String> = out["provisional_slots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            prov.contains(&"damage".to_string()),
+            "bad dice should be flagged: {prov:?}"
+        );
+        assert!(
+            prov.contains(&"skill".to_string()),
+            "unknown skill should be flagged: {prov:?}"
+        );
+        assert!(
+            !prov.contains(&"range".to_string()),
+            "valid range should pass: {prov:?}"
+        );
         // A fully extracted category flips the stub marker to compiled.
-        assert_eq!(out["status"].as_str(), Some("compiled"), "extract should mark compiled");
+        assert_eq!(
+            out["status"].as_str(),
+            Some("compiled"),
+            "extract should mark compiled"
+        );
     }
 
     // Fix (f): a schema slot that NO example fills is tagged confirmed:false
@@ -459,7 +608,12 @@ mod tests {
     // validation block reports the confirmed/total counts. Deterministic — no LLM.
     #[test]
     fn finalize_tags_confirmed_slots() {
-        let ctx = ObjectCtx { units: &[], sidecar_text: None, skills: vec![], resource_tracks: vec![] };
+        let ctx = ObjectCtx {
+            units: &[],
+            sidecar_text: None,
+            skills: vec![],
+            resource_tracks: vec![],
+        };
         let cat = json!({
             "category_id": "armor", "kind": "armor",
             "schema_slots": [
@@ -474,11 +628,33 @@ mod tests {
         });
         let out = finalize_category(cat, &ctx);
         let slots = out["schema_slots"].as_array().unwrap();
-        let by_name = |n: &str| slots.iter().find(|s| s["slot"] == json!(n)).unwrap().clone();
-        assert_eq!(by_name("soak")["confirmed"], json!(true), "filled slot is confirmed");
-        assert_eq!(by_name("location")["confirmed"], json!(false), "all-null slot is over-spec");
-        assert_eq!(out["validation"]["confirmed_slots"], json!(1), "exactly one confirmed");
-        assert_eq!(out["validation"]["schema_slots"], json!(2), "two schema slots total");
+        let by_name = |n: &str| {
+            slots
+                .iter()
+                .find(|s| s["slot"] == json!(n))
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(
+            by_name("soak")["confirmed"],
+            json!(true),
+            "filled slot is confirmed"
+        );
+        assert_eq!(
+            by_name("location")["confirmed"],
+            json!(false),
+            "all-null slot is over-spec"
+        );
+        assert_eq!(
+            out["validation"]["confirmed_slots"],
+            json!(1),
+            "exactly one confirmed"
+        );
+        assert_eq!(
+            out["validation"]["schema_slots"],
+            json!(2),
+            "two schema slots total"
+        );
     }
 
     // The deterministic half of `discover_object_categories`: each surviving
@@ -494,10 +670,23 @@ mod tests {
         let stubs = annotate_discovered(cats);
         assert_eq!(stubs.len(), 2);
         for s in &stubs {
-            assert_eq!(s["status"].as_str(), Some("discovered"), "every category is a discovered stub: {s}");
-            assert!(s.get("source_pages").map(|p| !p.is_null()).unwrap_or(false), "source_pages preserved: {s}");
-            assert!(s.get("schema_slots").is_none(), "a stub has no schema_slots yet: {s}");
-            assert!(s.get("examples").is_none(), "a stub has no examples yet: {s}");
+            assert_eq!(
+                s["status"].as_str(),
+                Some("discovered"),
+                "every category is a discovered stub: {s}"
+            );
+            assert!(
+                s.get("source_pages").map(|p| !p.is_null()).unwrap_or(false),
+                "source_pages preserved: {s}"
+            );
+            assert!(
+                s.get("schema_slots").is_none(),
+                "a stub has no schema_slots yet: {s}"
+            );
+            assert!(
+                s.get("examples").is_none(),
+                "a stub has no examples yet: {s}"
+            );
         }
         // category_id / kind / couples_to survive untouched.
         assert_eq!(stubs[0]["category_id"].as_str(), Some("firearms"));

@@ -1,0 +1,55 @@
+{
+  "identity": {
+    "scenario_id": "JRNY-HOME-03-committed-memory-reload",
+    "scenario_version": "1",
+    "evidence_schema_version": "tc-jrny-02.evidence.v1"
+  },
+  "recorded_mode": "deterministic",
+  "turns": [
+    {
+      "user_input": "我答应先帮那位技术中间人挡住眼前的麻烦，把我能做的条件都跟她讲清楚。",
+      "count_delta": {
+        "memory_facts": 1,
+        "domain_events": 1
+      },
+      "newest_contest_row": null,
+      "player_visible_body": "你把条件讲清楚，答应先替她挡住眼前的麻烦。她点了点头：“行，这份人情我记下了。”",
+      "memory": {
+        "memory_fact_id": "mf_rel_fixer_owes_player",
+        "proposal_present": true,
+        "from_committed_turn": true,
+        "direct_commit_without_proposal": false,
+        "proposal_evidence_event_ids": ["evt_help_offer_t1"],
+        "committed_fact_ids": ["mf_rel_fixer_owes_player"],
+        "duplicate_commit_on_retry": false,
+        "retrieved_after_reload": false,
+        "reload": false,
+        "consumed_in_later_turn": false,
+        "player_known_fact_ids": [],
+        "player_memory_summary": "你与本地技术中间人之间：你曾出手帮她挡住麻烦，她记下了这份人情。",
+        "trace_links": ["player_action", "committed_event", "memory_proposal"]
+      }
+    },
+    {
+      "user_input": "我们重新坐下来。她还记得我上次帮过她吗，现在愿意怎么对我？",
+      "count_delta": {},
+      "newest_contest_row": null,
+      "player_visible_body": "她一眼认出你：“上次你帮过我，那份人情我记着。坐吧，有话好说。”",
+      "memory": {
+        "memory_fact_id": "mf_rel_fixer_owes_player",
+        "proposal_present": false,
+        "from_committed_turn": false,
+        "direct_commit_without_proposal": false,
+        "proposal_evidence_event_ids": ["evt_help_offer_t1"],
+        "committed_fact_ids": ["mf_rel_fixer_owes_player"],
+        "duplicate_commit_on_retry": false,
+        "retrieved_after_reload": true,
+        "reload": true,
+        "consumed_in_later_turn": true,
+        "player_known_fact_ids": [],
+        "player_memory_summary": "你与本地技术中间人之间：你曾出手帮她挡住麻烦，她记下了这份人情。",
+        "trace_links": ["player_action", "committed_event", "memory_proposal", "projection", "later_consumption"]
+      }
+    }
+  ]
+}

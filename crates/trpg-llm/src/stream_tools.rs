@@ -38,7 +38,10 @@ pub enum StreamEvent {
 
 /// 末轮强制散文用 tool_choice 控制（§6 末轮强制）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolChoice { Auto, None }
+pub enum ToolChoice {
+    Auto,
+    None,
+}
 
 impl ToolChoice {
     pub fn as_json(&self) -> Value {
@@ -67,7 +70,9 @@ pub struct ToolStreamAggregator {
 }
 
 impl ToolStreamAggregator {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// 喂入一个已解析的 SSE data JSON（整个 chunk Value，内部取 choices[0].delta）。
     /// content delta 即来即发；tool_calls 分片累积、到 finish_reason chunk 才
@@ -83,7 +88,9 @@ impl ToolStreamAggregator {
                 out.push(StreamEvent::Usage(usage.clone()));
             }
         }
-        let Some(choice) = chunk.pointer("/choices/0") else { return out };
+        let Some(choice) = chunk.pointer("/choices/0") else {
+            return out;
+        };
         if let Some(content) = choice.pointer("/delta/content").and_then(Value::as_str) {
             if !content.is_empty() {
                 out.push(StreamEvent::ContentDelta(content.to_string()));
@@ -94,17 +101,25 @@ impl ToolStreamAggregator {
                 out.push(StreamEvent::ContentDelta(text.to_string()));
             }
         }
-        if let Some(parts) = choice.pointer("/delta/tool_calls").and_then(Value::as_array) {
+        if let Some(parts) = choice
+            .pointer("/delta/tool_calls")
+            .and_then(Value::as_array)
+        {
             for part in parts {
                 let index = part.get("index").and_then(Value::as_u64).unwrap_or(0);
                 let slot = self.calls.entry(index).or_default();
                 if let Some(id) = part.get("id").and_then(Value::as_str) {
-                    if !id.is_empty() { slot.id = id.to_string(); }
+                    if !id.is_empty() {
+                        slot.id = id.to_string();
+                    }
                 }
                 if let Some(name) = part.pointer("/function/name").and_then(Value::as_str) {
-                    if !name.is_empty() { slot.name = name.to_string(); }
+                    if !name.is_empty() {
+                        slot.name = name.to_string();
+                    }
                 }
-                if let Some(arguments) = part.pointer("/function/arguments").and_then(Value::as_str) {
+                if let Some(arguments) = part.pointer("/function/arguments").and_then(Value::as_str)
+                {
                     slot.arguments.push_str(arguments);
                 }
             }
@@ -146,7 +161,11 @@ impl ToolStreamAggregator {
         }
         let calls = std::mem::take(&mut self.calls)
             .into_values()
-            .map(|p| AggregatedToolCall { id: p.id, name: p.name, arguments: p.arguments })
+            .map(|p| AggregatedToolCall {
+                id: p.id,
+                name: p.name,
+                arguments: p.arguments,
+            })
             .collect::<Vec<_>>();
         Some(StreamEvent::ToolCalls(calls))
     }
@@ -174,7 +193,8 @@ impl crate::OpenAiCompatibleClient {
         let mut last_error: Option<anyhow::Error> = None;
         let mut resp_opt = None;
         for attempt in 0..=self.max_retries() {
-            let resp = self.http
+            let resp = self
+                .http
                 .post(self.config.endpoint("chat/completions"))
                 .bearer_auth(&self.config.api_key)
                 .json(&body)
@@ -187,7 +207,11 @@ impl crate::OpenAiCompatibleClient {
                         resp_opt = Some(resp);
                         break;
                     }
-                    let retry_delay_ms = Self::retry_after_delay_ms(&resp, self.retry_base_delay_ms().saturating_mul(1u64 << attempt.min(5)));
+                    let retry_delay_ms = Self::retry_after_delay_ms(
+                        &resp,
+                        self.retry_base_delay_ms()
+                            .saturating_mul(1u64 << attempt.min(5)),
+                    );
                     let text = resp.text().await.unwrap_or_default();
                     let err = anyhow!("LLM API error {status}: {text}");
                     if attempt < self.max_retries() && Self::is_retryable_status(status) {
@@ -199,8 +223,11 @@ impl crate::OpenAiCompatibleClient {
                     return Err(err);
                 }
                 Err(err) => {
-                    let retry_delay_ms = self.retry_base_delay_ms().saturating_mul(1u64 << attempt.min(5));
-                    let err = anyhow!(err).context("LLM tool streaming transport error before first event");
+                    let retry_delay_ms = self
+                        .retry_base_delay_ms()
+                        .saturating_mul(1u64 << attempt.min(5));
+                    let err = anyhow!(err)
+                        .context("LLM tool streaming transport error before first event");
                     if attempt < self.max_retries() {
                         tracing::warn!(attempt = attempt + 1, retry_delay_ms, error = %err, "retrying tool streaming transport error before first event");
                         tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms)).await;
@@ -211,7 +238,11 @@ impl crate::OpenAiCompatibleClient {
                 }
             }
         }
-        let resp = resp_opt.ok_or_else(|| last_error.unwrap_or_else(|| anyhow!("LLM tool streaming request failed without a recorded error")))?;
+        let resp = resp_opt.ok_or_else(|| {
+            last_error.unwrap_or_else(|| {
+                anyhow!("LLM tool streaming request failed without a recorded error")
+            })
+        })?;
         let mut bytes = resp.bytes_stream();
         let s = try_stream! {
             // 与 lib.rs::stream_chat 共用增量 SSE 解码器：就地排干 + parse error 计数。
@@ -253,10 +284,19 @@ mod tests {
         assert_eq!(agg.feed_chunk(&json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"roll_check","arguments":"{\"tested_"}}]}}]})), Vec::<StreamEvent>::new());
         assert_eq!(agg.feed_chunk(&json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"parameter\":\"DEX\"}"}}]}}]})), Vec::<StreamEvent>::new());
         let events = agg.finish(Some("tool_calls".to_string()));
-        assert_eq!(events, vec![
-            StreamEvent::ToolCalls(vec![AggregatedToolCall { id: "call_1".to_string(), name: "roll_check".to_string(), arguments: "{\"tested_parameter\":\"DEX\"}".to_string() }]),
-            StreamEvent::Done { finish_reason: Some("tool_calls".to_string()) },
-        ]);
+        assert_eq!(
+            events,
+            vec![
+                StreamEvent::ToolCalls(vec![AggregatedToolCall {
+                    id: "call_1".to_string(),
+                    name: "roll_check".to_string(),
+                    arguments: "{\"tested_parameter\":\"DEX\"}".to_string()
+                }]),
+                StreamEvent::Done {
+                    finish_reason: Some("tool_calls".to_string())
+                },
+            ]
+        );
     }
 
     #[test]
@@ -271,19 +311,40 @@ mod tests {
             {"index":0,"function":{"arguments":".current\"}"}}
         ]}}]}));
         let events = agg.finish(Some("tool_calls".to_string()));
-        assert_eq!(events[0], StreamEvent::ToolCalls(vec![
-            AggregatedToolCall { id: "call_a".to_string(), name: "get_actor".to_string(), arguments: "{\"actor_id\":\"pc.current\"}".to_string() },
-            AggregatedToolCall { id: "call_b".to_string(), name: "retrieve_rules".to_string(), arguments: "{\"query\":\"stealth\"}".to_string() },
-        ]));
+        assert_eq!(
+            events[0],
+            StreamEvent::ToolCalls(vec![
+                AggregatedToolCall {
+                    id: "call_a".to_string(),
+                    name: "get_actor".to_string(),
+                    arguments: "{\"actor_id\":\"pc.current\"}".to_string()
+                },
+                AggregatedToolCall {
+                    id: "call_b".to_string(),
+                    name: "retrieve_rules".to_string(),
+                    arguments: "{\"query\":\"stealth\"}".to_string()
+                },
+            ])
+        );
     }
 
     #[test]
     fn content_and_tools_do_not_mix() {
         let mut agg = ToolStreamAggregator::new();
-        assert_eq!(agg.feed_chunk(&json!({"choices":[{"delta":{"content":"You duck. "}}]})), vec![StreamEvent::ContentDelta("You duck. ".to_string())]);
+        assert_eq!(
+            agg.feed_chunk(&json!({"choices":[{"delta":{"content":"You duck. "}}]})),
+            vec![StreamEvent::ContentDelta("You duck. ".to_string())]
+        );
         agg.feed_chunk(&json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"change_track","arguments":"{\"bucket\":\"tracks\"}"}}]}}]}));
         let events = agg.finish(Some("tool_calls".to_string()));
-        assert_eq!(events[0], StreamEvent::ToolCalls(vec![AggregatedToolCall { id: "call_1".to_string(), name: "change_track".to_string(), arguments: "{\"bucket\":\"tracks\"}".to_string() }]));
+        assert_eq!(
+            events[0],
+            StreamEvent::ToolCalls(vec![AggregatedToolCall {
+                id: "call_1".to_string(),
+                name: "change_track".to_string(),
+                arguments: "{\"bucket\":\"tracks\"}".to_string()
+            }])
+        );
     }
 
     #[test]
@@ -293,7 +354,12 @@ mod tests {
         let events = agg.feed_chunk(&json!({"choices":[{"delta":{},"finish_reason":"stop"}]}));
         assert_eq!(events, Vec::<StreamEvent>::new());
         // [DONE]/流末统一发 Done，透传暂存的 finish_reason。
-        assert_eq!(agg.finish(None), vec![StreamEvent::Done { finish_reason: Some("stop".to_string()) }]);
+        assert_eq!(
+            agg.finish(None),
+            vec![StreamEvent::Done {
+                finish_reason: Some("stop".to_string())
+            }]
+        );
     }
 
     #[test]
@@ -303,7 +369,12 @@ mod tests {
         let events = agg.finish(None);
         assert_eq!(events.len(), 2);
         assert!(matches!(&events[0], StreamEvent::ToolCalls(v) if v[0].name == "remember"));
-        assert_eq!(events[1], StreamEvent::Done { finish_reason: None });
+        assert_eq!(
+            events[1],
+            StreamEvent::Done {
+                finish_reason: None
+            }
+        );
     }
 
     #[test]
@@ -311,7 +382,8 @@ mod tests {
         // include_usage 的尾 chunk 形如 {"choices":[], "usage":{...}}：
         // usage 检查必须在 choices[0] 守卫之前，否则整个 chunk 被丢弃。
         let mut agg = ToolStreamAggregator::new();
-        let usage = json!({"prompt_tokens": 1200, "prompt_tokens_details": {"cached_tokens": 1024}});
+        let usage =
+            json!({"prompt_tokens": 1200, "prompt_tokens_details": {"cached_tokens": 1024}});
         let events = agg.feed_chunk(&json!({"choices":[], "usage": usage.clone()}));
         assert_eq!(events, vec![StreamEvent::Usage(usage)]);
     }
@@ -324,13 +396,27 @@ mod tests {
         let mut agg = ToolStreamAggregator::new();
         assert_eq!(agg.feed_chunk(&json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"roll_check","arguments":"{\"tested_parameter\":\"DEX\"}"}}]}}]})), Vec::<StreamEvent>::new());
         // finish_reason chunk：分片已齐 → flush ToolCalls；Done 暂存待 [DONE]。
-        assert_eq!(agg.feed_chunk(&json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]})), vec![
-            StreamEvent::ToolCalls(vec![AggregatedToolCall { id: "call_1".to_string(), name: "roll_check".to_string(), arguments: "{\"tested_parameter\":\"DEX\"}".to_string() }]),
-        ]);
+        assert_eq!(
+            agg.feed_chunk(&json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]})),
+            vec![StreamEvent::ToolCalls(vec![AggregatedToolCall {
+                id: "call_1".to_string(),
+                name: "roll_check".to_string(),
+                arguments: "{\"tested_parameter\":\"DEX\"}".to_string()
+            }]),]
+        );
         // usage 尾 chunk 在 finish_reason 之后到达，不能被 done 守卫吞掉。
-        let usage = json!({"prompt_tokens": 1200, "prompt_tokens_details": {"cached_tokens": 1024}});
-        assert_eq!(agg.feed_chunk(&json!({"choices":[], "usage": usage.clone()})), vec![StreamEvent::Usage(usage)]);
+        let usage =
+            json!({"prompt_tokens": 1200, "prompt_tokens_details": {"cached_tokens": 1024}});
+        assert_eq!(
+            agg.feed_chunk(&json!({"choices":[], "usage": usage.clone()})),
+            vec![StreamEvent::Usage(usage)]
+        );
         // [DONE]：发 Done，finish_reason 用暂存的协议值；ToolCalls 不重复发。
-        assert_eq!(agg.finish(None), vec![StreamEvent::Done { finish_reason: Some("tool_calls".to_string()) }]);
+        assert_eq!(
+            agg.finish(None),
+            vec![StreamEvent::Done {
+                finish_reason: Some("tool_calls".to_string())
+            }]
+        );
     }
 }

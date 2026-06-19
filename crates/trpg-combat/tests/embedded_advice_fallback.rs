@@ -7,7 +7,8 @@ use trpg_combat::CombatProfilePack;
 #[test]
 fn embedded_profiles_resolve_triangle_frame_flags_without_dir() {
     // A path that cannot exist → load_dir returns the embedded baseline.
-    let pack = CombatProfilePack::load_dir("/nonexistent/trpg-no-advice-dir").expect("embedded baseline");
+    let pack =
+        CombatProfilePack::load_dir("/nonexistent/trpg-no-advice-dir").expect("embedded baseline");
 
     // Triangle frame-gate flags must still be TRUE from the embedded copy (it
     // was copied from the fixed data/ file).
@@ -24,8 +25,14 @@ fn embedded_profiles_resolve_triangle_frame_flags_without_dir() {
     // Equivalence guard: a different ruleset keeps both flags false (legacy
     // contains(\"triangle\") only).
     let cp = pack.resolve("cyberpunk_red", None);
-    assert!(!cp.low_confidence_frame_start, "cyberpunk low_confidence stays false");
-    assert!(!cp.investigate_opens_frame, "cyberpunk investigate stays false");
+    assert!(
+        !cp.low_confidence_frame_start,
+        "cyberpunk low_confidence stays false"
+    );
+    assert!(
+        !cp.investigate_opens_frame,
+        "cyberpunk investigate stays false"
+    );
 
     // The cyberpunk profile resolves to the embedded cyberpunk advice profile.
     assert_eq!(cp.ruleset_id, "cyberpunk_red");

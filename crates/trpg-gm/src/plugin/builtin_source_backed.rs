@@ -10,9 +10,7 @@
 //! - 纯 prompt（只 PromptBlock，无 filter/verifier）。
 
 use async_trait::async_trait;
-use trpg_model::{
-    BlockContent, BlockKind, CacheZone, ContextBlock, Scope, Stability, Visibility,
-};
+use trpg_model::{BlockContent, BlockKind, CacheZone, ContextBlock, Scope, Stability, Visibility};
 
 use super::host::RuntimePlugin;
 use super::types::{

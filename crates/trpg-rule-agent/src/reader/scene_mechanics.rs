@@ -109,11 +109,27 @@ mod tests {
         assert_eq!(got[0].difficulty.as_ref().unwrap()["kind"], "dv");
         assert_eq!(got[0].difficulty.as_ref().unwrap()["value"], 13);
         let ok = &got[0].effect_policy.on_success;
-        assert!(matches!(ok[0], EffectPatchIntent::CreateFact { .. }), "create_fact 必须落 CreateFact: {:?}", ok[0]);
-        assert!(matches!(ok[1], EffectPatchIntent::SetObjectState { .. }), "set_object_state 必须落 SetObjectState: {:?}", ok[1]);
+        assert!(
+            matches!(ok[0], EffectPatchIntent::CreateFact { .. }),
+            "create_fact 必须落 CreateFact: {:?}",
+            ok[0]
+        );
+        assert!(
+            matches!(ok[1], EffectPatchIntent::SetObjectState { .. }),
+            "set_object_state 必须落 SetObjectState: {:?}",
+            ok[1]
+        );
         let fail = &got[0].effect_policy.on_failure;
-        assert!(matches!(fail[0], EffectPatchIntent::ModifyTrack { .. }), "modify_track 必须落 ModifyTrack: {:?}", fail[0]);
-        assert!(matches!(fail[1], EffectPatchIntent::StartCountdown { .. }), "start_countdown 必须落 StartCountdown: {:?}", fail[1]);
+        assert!(
+            matches!(fail[0], EffectPatchIntent::ModifyTrack { .. }),
+            "modify_track 必须落 ModifyTrack: {:?}",
+            fail[0]
+        );
+        assert!(
+            matches!(fail[1], EffectPatchIntent::StartCountdown { .. }),
+            "start_countdown 必须落 StartCountdown: {:?}",
+            fail[1]
+        );
     }
 
     #[test]
@@ -127,7 +143,10 @@ mod tests {
         ]));
         let got = parse_scene_mechanics(&scene);
         assert_eq!(got.len(), 1);
-        assert!(matches!(got[0].effect_policy.on_success[0], EffectPatchIntent::Other(_)));
+        assert!(matches!(
+            got[0].effect_policy.on_success[0],
+            EffectPatchIntent::Other(_)
+        ));
     }
 
     #[test]
@@ -135,12 +154,24 @@ mod tests {
         // schema 单一事实源自检：difficulty kind 枚举与 scene_policy::difficulty_to_target
         // 认的三种一致；effect kind 枚举恰为四个可执行变体的 serde tag。
         let s = scene_mechanics_schema();
-        let dk = s.pointer("/items/properties/difficulty/properties/kind/enum").unwrap();
+        let dk = s
+            .pointer("/items/properties/difficulty/properties/kind/enum")
+            .unwrap();
         assert_eq!(dk, &json!(["dv", "static", "target_number"]));
         let ek = s
-            .pointer("/items/properties/effect_policy/properties/on_success/items/properties/kind/enum")
+            .pointer(
+                "/items/properties/effect_policy/properties/on_success/items/properties/kind/enum",
+            )
             .unwrap();
-        assert_eq!(ek, &json!(["set_object_state", "modify_track", "create_fact", "start_countdown"]));
+        assert_eq!(
+            ek,
+            &json!([
+                "set_object_state",
+                "modify_track",
+                "create_fact",
+                "start_countdown"
+            ])
+        );
     }
 
     fn scene_with(mechanics: Value) -> Value {

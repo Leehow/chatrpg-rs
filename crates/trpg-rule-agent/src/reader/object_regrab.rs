@@ -51,9 +51,15 @@ pub(super) async fn regrab_missing(
 fn category_gaps(cat: &Value) -> Vec<(usize, String, Vec<String>)> {
     let confirmed = confirmed_slots(cat);
     let mut out = Vec::new();
-    let Some(examples) = cat.get("examples").and_then(Value::as_array) else { return out };
+    let Some(examples) = cat.get("examples").and_then(Value::as_array) else {
+        return out;
+    };
     for (i, ex) in examples.iter().enumerate() {
-        let name = ex.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+        let name = ex
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         let slots = ex.get("slots").and_then(Value::as_object);
         let mut gaps: Vec<String> = Vec::new();
         for slot in &confirmed {
@@ -90,7 +96,10 @@ async fn run_regrab_loop(
     let schemas = object_tool_schemas(submit);
 
     let kind = cat.get("kind").and_then(Value::as_str).unwrap_or("");
-    let cat_pages = cat.get("source_pages").and_then(Value::as_str).unwrap_or("");
+    let cat_pages = cat
+        .get("source_pages")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     let examples = cat.get("examples").and_then(Value::as_array);
     // One bullet per entry-with-gaps: name, the page(s) to look on, the gap slots.
     let mut entries = String::new();
@@ -112,9 +121,17 @@ async fn run_regrab_loop(
         "Category kind: {kind}. Master table around pages: {cat_pages}.\nSome entries dropped a cell that a sibling entry HAS. For each entry below, read_layout the cited page(s), find that entry's row, and return ONLY slots whose value is literally printed for it (omit any truly blank). Copy verbatim — never invent.\n\nEntries to re-check:\n{entries}\nThen call submit_regrab with fills:[{{name, slots:{{<slot>:<value>}}}}]."
     );
 
-    run_object_loop(client, REGRAB_SYS, &seed, &schemas, ctx, budget, "submit_regrab")
-        .await
-        .and_then(|v| v.get("fills").and_then(Value::as_array).cloned())
+    run_object_loop(
+        client,
+        REGRAB_SYS,
+        &seed,
+        &schemas,
+        ctx,
+        budget,
+        "submit_regrab",
+    )
+    .await
+    .and_then(|v| v.get("fills").and_then(Value::as_array).cloned())
 }
 
 /// Merge recovered fills into the category's examples. For each fill matching an
@@ -132,21 +149,36 @@ fn merge_fills(mut cat: Value, fills: &[Value]) -> Value {
     }
     // Declared columns: a fill slot outside this set is unknown -> ignored. When a
     // category has no schema_slots (test fixtures), allow any slot.
-    let declared: Option<std::collections::HashSet<String>> = cat
-        .get("schema_slots")
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|s| s.get("slot").and_then(Value::as_str).map(String::from)).collect());
+    let declared: Option<std::collections::HashSet<String>> =
+        cat.get("schema_slots").and_then(Value::as_array).map(|a| {
+            a.iter()
+                .filter_map(|s| s.get("slot").and_then(Value::as_str).map(String::from))
+                .collect()
+        });
     let is_declared = |slot: &str| declared.as_ref().map(|d| d.contains(slot)).unwrap_or(true);
     let mut newly_filled: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Some(examples) = cat.get_mut("examples").and_then(Value::as_array_mut) {
         for ex in examples.iter_mut() {
-            let name = ex.get("name").and_then(Value::as_str).unwrap_or("").to_string();
-            let Some(fill) = by_name.get(name.as_str()) else { continue };
-            let Some(fill_slots) = fill.get("slots").and_then(Value::as_object) else { continue };
-            let Some(ex_slots) = ex.get_mut("slots").and_then(Value::as_object_mut) else { continue };
+            let name = ex
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let Some(fill) = by_name.get(name.as_str()) else {
+                continue;
+            };
+            let Some(fill_slots) = fill.get("slots").and_then(Value::as_object) else {
+                continue;
+            };
+            let Some(ex_slots) = ex.get_mut("slots").and_then(Value::as_object_mut) else {
+                continue;
+            };
             for (slot, new_val) in fill_slots {
                 // (a) a declared column, (b) currently empty here, (c) fill has a value.
-                let cur_empty = ex_slots.get(slot).map(|v| !is_meaningful(v)).unwrap_or(true);
+                let cur_empty = ex_slots
+                    .get(slot)
+                    .map(|v| !is_meaningful(v))
+                    .unwrap_or(true);
                 if is_declared(slot) && cur_empty && is_meaningful(new_val) {
                     ex_slots.insert(slot.clone(), new_val.clone());
                     newly_filled.insert(slot.clone());
@@ -156,8 +188,15 @@ fn merge_fills(mut cat: Value, fills: &[Value]) -> Value {
     }
     // Drop any newly-filled slot from provisional_slots (it now has a value).
     if !newly_filled.is_empty() {
-        if let Some(prov) = cat.get_mut("provisional_slots").and_then(Value::as_array_mut) {
-            prov.retain(|v| v.as_str().map(|s| !newly_filled.contains(s)).unwrap_or(true));
+        if let Some(prov) = cat
+            .get_mut("provisional_slots")
+            .and_then(Value::as_array_mut)
+        {
+            prov.retain(|v| {
+                v.as_str()
+                    .map(|s| !newly_filled.contains(s))
+                    .unwrap_or(true)
+            });
         }
     }
     cat
@@ -192,7 +231,11 @@ mod tests {
         assert!(gaps[0].2.is_empty(), "A has no gaps: {:?}", gaps[0].2);
         // Entry B dropped `range` (confirmed) -> exactly that, never `bogus`.
         assert_eq!(gaps[1].1, "B");
-        assert_eq!(gaps[1].2, vec!["range".to_string()], "B's only gap is range");
+        assert_eq!(
+            gaps[1].2,
+            vec!["range".to_string()],
+            "B's only gap is range"
+        );
     }
 
     // No example has a gap -> empty per-entry gap lists (regrab_missing then skips
@@ -207,7 +250,10 @@ mod tests {
             ]
         });
         let gaps = category_gaps(&cat);
-        assert!(gaps.iter().all(|(_, _, g)| g.is_empty()), "no gaps anywhere: {gaps:?}");
+        assert!(
+            gaps.iter().all(|(_, _, g)| g.is_empty()),
+            "no gaps anywhere: {gaps:?}"
+        );
     }
 
     // (e) merge: a recovered value lands in the null slot; an already-filled slot
@@ -232,13 +278,32 @@ mod tests {
         })];
         let out = merge_fills(cat, &fills);
         let slots = &out["examples"][0]["slots"];
-        assert_eq!(slots["range"].as_str(), Some("Touch"), "gap filled verbatim");
-        assert_eq!(slots["duration"].as_str(), Some("instant"), "filled slot untouched");
-        assert!(slots.get("unknown").is_none(), "undeclared slot ignored: {slots}");
+        assert_eq!(
+            slots["range"].as_str(),
+            Some("Touch"),
+            "gap filled verbatim"
+        );
+        assert_eq!(
+            slots["duration"].as_str(),
+            Some("instant"),
+            "filled slot untouched"
+        );
+        assert!(
+            slots.get("unknown").is_none(),
+            "undeclared slot ignored: {slots}"
+        );
         // provisional_slots drops the newly-filled `range`, keeps `other`.
-        let prov: Vec<String> = out["provisional_slots"].as_array().unwrap()
-            .iter().filter_map(|v| v.as_str().map(String::from)).collect();
-        assert_eq!(prov, vec!["other".to_string()], "range dropped, other kept: {prov:?}");
+        let prov: Vec<String> = out["provisional_slots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
+        assert_eq!(
+            prov,
+            vec!["other".to_string()],
+            "range dropped, other kept: {prov:?}"
+        );
     }
 
     // The merge must never clobber a meaningful value even when the fill insists.

@@ -1,16 +1,10 @@
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use uuid::Uuid;
 
-pub mod hash;
-pub use hash::*;
-pub mod source;
-pub use source::*;
-pub mod visibility;
-pub use visibility::*;
-pub mod turn_lifecycle;
-pub use turn_lifecycle::*;
 pub mod mechanics;
 pub use mechanics::*;
 pub mod mechanics_render;
@@ -28,14 +22,10 @@ pub mod domain_event;
 pub use domain_event::*;
 pub mod spoiler;
 pub use spoiler::*;
-pub mod block;
-pub use block::*;
-pub mod scope;
-pub use scope::*;
-pub mod context_block;
-pub use context_block::*;
 pub mod knowledge;
 pub use knowledge::*;
+pub mod memory_proposal;
+pub use memory_proposal::*;
 pub mod npc_profile;
 pub use npc_profile::*;
 pub mod npc_relationship;
@@ -44,6 +34,8 @@ pub mod npc_mind;
 pub use npc_mind::*;
 pub mod npc_behavior;
 pub use npc_behavior::*;
+pub mod knowledge_leak_verifier;
+pub use knowledge_leak_verifier::*;
 
 pub const PROJECT_SCHEMA_VERSION: &str = "chatrpg.project_bundle.v1";
 pub const RULE_SCHEMA_VERSION: &str = "chatrpg.rule_bundle.v1";
@@ -52,12 +44,696 @@ pub const GM_ONBOARDING_SCHEMA_VERSION: &str = "chatrpg.gm_onboarding_bundle.v1"
 pub const RULE_STEWARD_SCHEMA_VERSION: &str = "chatrpg.rule_steward.v1";
 pub const CHARACTER_ONBOARDING_SCHEMA_VERSION: &str = "chatrpg.character_onboarding_pack.v1";
 
-// 来源类型（`SourceKind` 等）已移至 `source` 模块；内容哈希工具
-// （`sha256_hex`/`stable_json_hash`）移至 `hash` 模块；回合后处理生命周期常量
-// （`PP_*`/`pp_lifecycle_rank`）移至 `turn_lifecycle` 模块。块类型 `BlockKind`
-// 移至 `block` 模块；作用域 `ScopeType`/`Scope` 移至 `scope` 模块；块内容与结构
-// `BlockContent`/`ContextBlock` 移至 `context_block` 模块。以上均经 `pub use`
-// 在 crate 根重导出，公共 API 保持不变。
+// R5 postprocess 生命周期状态机（turns.pp_lifecycle 列的取值，集中常量）：
+// streaming → critical_done → complete。与 turns.postprocess_status（ready/awaiting）
+// 正交：后者是 finalize 终态，前者是回合后处理的临界/重活落账进度（高水位守卫据此）。
+pub const PP_STREAMING: &str = "streaming";
+pub const PP_CRITICAL_DONE: &str = "critical_done";
+pub const PP_COMPLETE: &str = "complete";
+
+/// 生命周期阶段的有序秩（守卫用：>= critical_done 即可继续，未知值排最低 fail-closed）。
+pub fn pp_lifecycle_rank(phase: &str) -> u8 {
+    match phase {
+        PP_STREAMING => 1,
+        PP_CRITICAL_DONE => 2,
+        PP_COMPLETE => 3,
+        _ => 0, // 未知/旧值/空 → 最低，守卫视作未达 critical（fail-closed 多等不误读）
+    }
+}
+
+pub fn sha256_hex(input: impl AsRef<[u8]>) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_ref());
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+pub fn stable_json_hash<T: Serialize>(value: &T) -> String {
+    let bytes = serde_json::to_vec(value).unwrap_or_default();
+    sha256_hex(bytes)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceKind {
+    Rulebook,
+    Module,
+    Unknown,
+}
+
+impl SourceKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SourceKind::Rulebook => "rulebook",
+            SourceKind::Module => "module",
+            SourceKind::Unknown => "unknown",
+        }
+    }
+}
+
+impl Default for SourceKind {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SourceDocument {
+    pub id: Uuid,
+    pub source_id: String,
+    pub source_kind: SourceKind,
+    pub title: String,
+    pub file_path: String,
+    pub markdown_path: Option<String>,
+    pub source_hash: String,
+    pub parse_config_hash: String,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PageText {
+    pub page: u32,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+pub struct DocumentBoundingBox {
+    pub page: Option<u32>,
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+pub struct DocumentChunk {
+    pub chunk_id: String,
+    pub text: String,
+    #[serde(default)]
+    pub full_text: String,
+    #[serde(default)]
+    pub page_numbers: Vec<u32>,
+    #[serde(default)]
+    pub element_types: Vec<String>,
+    #[serde(default)]
+    pub heading_context: Vec<String>,
+    pub token_estimate: Option<u32>,
+    #[serde(default)]
+    pub is_oversized: bool,
+    #[serde(default)]
+    pub bounding_boxes: Vec<DocumentBoundingBox>,
+    #[serde(default)]
+    pub text_hash: Option<String>,
+    #[serde(default)]
+    pub clean_status: Option<String>,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PlainTextBook {
+    pub source_id: String,
+    pub title: String,
+    pub source_hash: String,
+    pub pages: Vec<PageText>,
+    #[serde(default)]
+    pub chunks: Vec<DocumentChunk>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+pub struct SourceIndex {
+    pub sources: Vec<SourceDocumentRef>,
+    pub anchors: Vec<SourceAnchor>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SourceDocumentRef {
+    pub source_id: String,
+    pub title: String,
+    pub source_kind: SourceKind,
+    pub source_hash: String,
+    pub file_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SourceAnchor {
+    pub anchor_id: String,
+    pub source_id: String,
+    pub page: Option<u32>,
+    pub section_path: Vec<String>,
+    pub char_start: Option<usize>,
+    pub char_end: Option<usize>,
+    pub text_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default, PartialEq)]
+pub struct SourceRef {
+    pub source_id: String,
+    pub page: Option<u32>,
+    pub anchor_id: Option<String>,
+    pub section_path: Vec<String>,
+    pub char_start: Option<usize>,
+    pub char_end: Option<usize>,
+    pub text_hash: Option<String>,
+    pub note: Option<String>,
+}
+
+#[derive(
+    Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheZone {
+    Prefix,
+    PinnedMiddle,
+    DynamicTail,
+    NeverPrompt,
+}
+
+impl CacheZone {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CacheZone::Prefix => "prefix",
+            CacheZone::PinnedMiddle => "pinned_middle",
+            CacheZone::DynamicTail => "dynamic_tail",
+            CacheZone::NeverPrompt => "never_prompt",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Visibility {
+    Public,
+    PlayerVisible,
+    GmOnly,
+    NpcPrivate,
+    SystemOnly,
+}
+
+impl Visibility {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Visibility::Public => "public",
+            Visibility::PlayerVisible => "player_visible",
+            Visibility::GmOnly => "gm_only",
+            Visibility::NpcPrivate => "npc_private",
+            Visibility::SystemOnly => "system_only",
+        }
+    }
+}
+
+impl Default for Visibility {
+    fn default() -> Self {
+        Self::GmOnly
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Stability {
+    Immutable,
+    RarelyChanged,
+    SceneStable,
+    TurnDynamic,
+    Ephemeral,
+}
+
+impl Default for Stability {
+    fn default() -> Self {
+        Self::RarelyChanged
+    }
+}
+
+impl Stability {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Stability::Immutable => "immutable",
+            Stability::RarelyChanged => "rarely_changed",
+            Stability::SceneStable => "scene_stable",
+            Stability::TurnDynamic => "turn_dynamic",
+            Stability::Ephemeral => "ephemeral",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockKind {
+    EngineProtocol,
+    OutputSchema,
+    ToolProtocol,
+    RulesetResidentCore,
+    RulesetWorldStyle,
+    RulesetDirectorPolicy,
+    RulesetActionRouter,
+    RulesetIndex,
+    RulesetCharacterKernel,
+    RulesetOnboarding,
+    RuleStewardKernel,
+    MechanicsCatalogIndex,
+    RuleAgentRun,
+    RuleKernelPatch,
+    RuleEntityLocator,
+    MechanicalSourcePack,
+    PlayabilityGateReport,
+    CharacterOnboardingPack,
+    CharacterCreationFlow,
+    CharacterOptionCatalog,
+    DerivedFormulaPack,
+    StarterCharacterPack,
+    GameIdentity,
+    PlayLoop,
+    BookLocator,
+    LookupRecipe,
+    GmOnboarding,
+    BookLocatorSummary,
+    ColdDataLocator,
+    LearnedPacket,
+    LookupResult,
+    Ruling,
+    RulingLog,
+    RulePackage,
+    ProcedureDetail,
+    ProcedureVariant,
+    ParameterFamily,
+    ParameterEntry,
+    DomainActor,
+    DomainObject,
+    ObjectDefinition,
+    ObjectInstance,
+    ObjectAffordance,
+    ObjectInteractionContract,
+    ObjectPatch,
+    ObjectEvent,
+    ObjectGraph,
+    DomainAbility,
+    AbilityDefinition,
+    AbilityInstance,
+    AbilityTriggerBinding,
+    AbilityActivationContract,
+    AbilityGraph,
+    RuleBindingPacket,
+    SemanticClassification,
+    MaterializationDemand,
+    SourceEvidenceBundle,
+    ExtractionRun,
+    BindingVerification,
+    ActorRuntimeBinding,
+    ObjectRuntimeBinding,
+    AbilityRuntimeBinding,
+    MaterializationGraph,
+    PlayerValueClaim,
+    PlayerValueVerification,
+    TableOverrideAgreement,
+    RefereeRuling,
+    MechanicalLedger,
+    AttackResolutionContract,
+    DamagePacket,
+    RollPlan,
+    EffectResolutionPacket,
+    ParameterImpact,
+    ActorMechanicalState,
+    CombatRoundAction,
+    CombatRoundTransition,
+    ContestProfile,
+    OppositionProfile,
+    ContestResolution,
+    ContestGraph,
+    MechanicsSearchSkill,
+    MechanicsQueryPlan,
+    ParameterFacetBinding,
+    MechanicsSearchTrace,
+    MechanicsSearchGraph,
+    ParameterFacetExecution,
+    GenericParameterState,
+    RulesetMechanicalProfile,
+    DomainInfo,
+    DomainPlace,
+    DomainScenario,
+    StateTrait,
+    StateTrack,
+    StateStatus,
+    StateAspect,
+    StateModifier,
+    ScenarioNode,
+    MissionStatic,
+    Clue,
+    Handout,
+    NpcStatic,
+    LocationStatic,
+    ChapterStatic,
+    ModuleSpine,
+    ModuleStyle,
+    ModuleSpecificRule,
+    ModuleOverview,
+    CurrentSessionPacket,
+    SessionSummary,
+    MemorySnapshot,
+    MemoryFact,
+    MemoryEvent,
+    SceneStatic,
+    AgentPlan,
+    AgentAdvice,
+    CheckContract,
+    PendingCheck,
+    InteractionGate,
+    DiceRoll,
+    StateFrame,
+    FrameEvent,
+    FrameCompaction,
+    CombatFrame,
+    CombatEvent,
+    EffectContract,
+    CombatProfile,
+    ReactionWindow,
+    DirectorPolicy,
+    ActionableSituationBrief,
+    ClueBoard,
+    ConsequenceContract,
+    SpotlightState,
+    ClockEvent,
+    WorldTime,
+    WorldEvent,
+    TimeAdvance,
+    ScheduledEvent,
+    TimeAnchor,
+    WorldState,
+    RetrievedMemory,
+    RecentTranscript,
+    CurrentInput,
+}
+
+impl BlockKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BlockKind::EngineProtocol => "engine_protocol",
+            BlockKind::OutputSchema => "output_schema",
+            BlockKind::ToolProtocol => "tool_protocol",
+            BlockKind::RulesetResidentCore => "ruleset_resident_core",
+            BlockKind::RulesetWorldStyle => "ruleset_world_style",
+            BlockKind::RulesetDirectorPolicy => "ruleset_director_policy",
+            BlockKind::RulesetActionRouter => "ruleset_action_router",
+            BlockKind::RulesetIndex => "ruleset_index",
+            BlockKind::RulesetCharacterKernel => "ruleset_character_kernel",
+            BlockKind::RulesetOnboarding => "ruleset_onboarding",
+            BlockKind::RuleStewardKernel => "rule_steward_kernel",
+            BlockKind::MechanicsCatalogIndex => "mechanics_catalog_index",
+            BlockKind::RuleAgentRun => "rule_agent_run",
+            BlockKind::RuleKernelPatch => "rule_kernel_patch",
+            BlockKind::RuleEntityLocator => "rule_entity_locator",
+            BlockKind::MechanicalSourcePack => "mechanical_source_pack",
+            BlockKind::PlayabilityGateReport => "playability_gate_report",
+            BlockKind::CharacterOnboardingPack => "character_onboarding_pack",
+            BlockKind::CharacterCreationFlow => "character_creation_flow",
+            BlockKind::CharacterOptionCatalog => "character_option_catalog",
+            BlockKind::DerivedFormulaPack => "derived_formula_pack",
+            BlockKind::StarterCharacterPack => "starter_character_pack",
+            BlockKind::GameIdentity => "game_identity",
+            BlockKind::PlayLoop => "play_loop",
+            BlockKind::BookLocator => "book_locator",
+            BlockKind::LookupRecipe => "lookup_recipe",
+            BlockKind::GmOnboarding => "gm_onboarding",
+            BlockKind::BookLocatorSummary => "book_locator_summary",
+            BlockKind::ColdDataLocator => "cold_data_locator",
+            BlockKind::LearnedPacket => "learned_packet",
+            BlockKind::LookupResult => "lookup_result",
+            BlockKind::Ruling => "ruling",
+            BlockKind::RulingLog => "ruling_log",
+            BlockKind::RulePackage => "rule_package",
+            BlockKind::ProcedureDetail => "procedure_detail",
+            BlockKind::ProcedureVariant => "procedure_variant",
+            BlockKind::ParameterFamily => "parameter_family",
+            BlockKind::ParameterEntry => "parameter_entry",
+            BlockKind::DomainActor => "domain_actor",
+            BlockKind::DomainObject => "domain_object",
+            BlockKind::ObjectDefinition => "object_definition",
+            BlockKind::ObjectInstance => "object_instance",
+            BlockKind::ObjectAffordance => "object_affordance",
+            BlockKind::ObjectInteractionContract => "object_interaction_contract",
+            BlockKind::ObjectPatch => "object_patch",
+            BlockKind::ObjectEvent => "object_event",
+            BlockKind::ObjectGraph => "object_graph",
+            BlockKind::DomainAbility => "domain_ability",
+            BlockKind::AbilityDefinition => "ability_definition",
+            BlockKind::AbilityInstance => "ability_instance",
+            BlockKind::AbilityTriggerBinding => "ability_trigger_binding",
+            BlockKind::AbilityActivationContract => "ability_activation_contract",
+            BlockKind::AbilityGraph => "ability_graph",
+            BlockKind::RuleBindingPacket => "rule_binding_packet",
+            BlockKind::SemanticClassification => "semantic_classification",
+            BlockKind::MaterializationDemand => "materialization_demand",
+            BlockKind::SourceEvidenceBundle => "source_evidence_bundle",
+            BlockKind::ExtractionRun => "extraction_run",
+            BlockKind::BindingVerification => "binding_verification",
+            BlockKind::ActorRuntimeBinding => "actor_runtime_binding",
+            BlockKind::ObjectRuntimeBinding => "object_runtime_binding",
+            BlockKind::AbilityRuntimeBinding => "ability_runtime_binding",
+            BlockKind::MaterializationGraph => "materialization_graph",
+            BlockKind::PlayerValueClaim => "player_value_claim",
+            BlockKind::PlayerValueVerification => "player_value_verification",
+            BlockKind::TableOverrideAgreement => "table_override_agreement",
+            BlockKind::RefereeRuling => "referee_ruling",
+            BlockKind::MechanicalLedger => "mechanical_ledger",
+            BlockKind::AttackResolutionContract => "attack_resolution_contract",
+            BlockKind::DamagePacket => "damage_packet",
+            BlockKind::RollPlan => "roll_plan",
+            BlockKind::EffectResolutionPacket => "effect_resolution_packet",
+            BlockKind::ParameterImpact => "parameter_impact",
+            BlockKind::ActorMechanicalState => "actor_mechanical_state",
+            BlockKind::CombatRoundAction => "combat_round_action",
+            BlockKind::CombatRoundTransition => "combat_round_transition",
+            BlockKind::ContestProfile => "contest_profile",
+            BlockKind::OppositionProfile => "opposition_profile",
+            BlockKind::ContestResolution => "contest_resolution",
+            BlockKind::ContestGraph => "contest_graph",
+            BlockKind::MechanicsSearchSkill => "mechanics_search_skill",
+            BlockKind::MechanicsQueryPlan => "mechanics_query_plan",
+            BlockKind::ParameterFacetBinding => "parameter_facet_binding",
+            BlockKind::MechanicsSearchTrace => "mechanics_search_trace",
+            BlockKind::MechanicsSearchGraph => "mechanics_search_graph",
+            BlockKind::ParameterFacetExecution => "parameter_facet_execution",
+            BlockKind::GenericParameterState => "generic_parameter_state",
+            BlockKind::RulesetMechanicalProfile => "ruleset_mechanical_profile",
+            BlockKind::DomainInfo => "domain_info",
+            BlockKind::DomainPlace => "domain_place",
+            BlockKind::DomainScenario => "domain_scenario",
+            BlockKind::StateTrait => "state_trait",
+            BlockKind::StateTrack => "state_track",
+            BlockKind::StateStatus => "state_status",
+            BlockKind::StateAspect => "state_aspect",
+            BlockKind::StateModifier => "state_modifier",
+            BlockKind::ScenarioNode => "scenario_node",
+            BlockKind::MissionStatic => "mission_static",
+            BlockKind::Clue => "clue",
+            BlockKind::Handout => "handout",
+            BlockKind::NpcStatic => "npc_static",
+            BlockKind::LocationStatic => "location_static",
+            BlockKind::ChapterStatic => "chapter_static",
+            BlockKind::ModuleSpine => "module_spine",
+            BlockKind::ModuleStyle => "module_style",
+            BlockKind::ModuleSpecificRule => "module_specific_rule",
+            BlockKind::ModuleOverview => "module_overview",
+            BlockKind::CurrentSessionPacket => "current_session_packet",
+            BlockKind::SessionSummary => "session_summary",
+            BlockKind::MemorySnapshot => "memory_snapshot",
+            BlockKind::MemoryFact => "memory_fact",
+            BlockKind::MemoryEvent => "memory_event",
+            BlockKind::SceneStatic => "scene_static",
+            BlockKind::AgentPlan => "agent_plan",
+            BlockKind::AgentAdvice => "agent_advice",
+            BlockKind::CheckContract => "check_contract",
+            BlockKind::PendingCheck => "pending_check",
+            BlockKind::InteractionGate => "interaction_gate",
+            BlockKind::DiceRoll => "dice_roll",
+            BlockKind::StateFrame => "state_frame",
+            BlockKind::FrameEvent => "frame_event",
+            BlockKind::FrameCompaction => "frame_compaction",
+            BlockKind::CombatFrame => "combat_frame",
+            BlockKind::CombatEvent => "combat_event",
+            BlockKind::EffectContract => "effect_contract",
+            BlockKind::CombatProfile => "combat_profile",
+            BlockKind::ReactionWindow => "reaction_window",
+            BlockKind::DirectorPolicy => "director_policy",
+            BlockKind::ActionableSituationBrief => "actionable_situation_brief",
+            BlockKind::ClueBoard => "clue_board",
+            BlockKind::ConsequenceContract => "consequence_contract",
+            BlockKind::SpotlightState => "spotlight_state",
+            BlockKind::ClockEvent => "clock_event",
+            BlockKind::WorldTime => "world_time",
+            BlockKind::WorldEvent => "world_event",
+            BlockKind::TimeAdvance => "time_advance",
+            BlockKind::ScheduledEvent => "scheduled_event",
+            BlockKind::TimeAnchor => "time_anchor",
+            BlockKind::WorldState => "world_state",
+            BlockKind::RetrievedMemory => "retrieved_memory",
+            BlockKind::RecentTranscript => "recent_transcript",
+            BlockKind::CurrentInput => "current_input",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopeType {
+    Global,
+    Ruleset,
+    Module,
+    Campaign,
+    Chapter,
+    Mission,
+    Location,
+    Npc,
+    Session,
+    Scene,
+    Turn,
+    Material,
+    Character,
+    Object,
+}
+
+impl ScopeType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ScopeType::Global => "global",
+            ScopeType::Ruleset => "ruleset",
+            ScopeType::Module => "module",
+            ScopeType::Campaign => "campaign",
+            ScopeType::Chapter => "chapter",
+            ScopeType::Mission => "mission",
+            ScopeType::Location => "location",
+            ScopeType::Npc => "npc",
+            ScopeType::Session => "session",
+            ScopeType::Scene => "scene",
+            ScopeType::Turn => "turn",
+            ScopeType::Material => "material",
+            ScopeType::Character => "character",
+            ScopeType::Object => "object",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct Scope {
+    pub scope_type: ScopeType,
+    pub scope_id: String,
+}
+
+impl Default for Scope {
+    fn default() -> Self {
+        Self {
+            scope_type: ScopeType::Global,
+            scope_id: "global".to_string(),
+        }
+    }
+}
+
+impl Scope {
+    pub fn global() -> Self {
+        Self {
+            scope_type: ScopeType::Global,
+            scope_id: "global".to_string(),
+        }
+    }
+    pub fn ruleset(id: impl Into<String>) -> Self {
+        Self {
+            scope_type: ScopeType::Ruleset,
+            scope_id: id.into(),
+        }
+    }
+    pub fn module(id: impl Into<String>) -> Self {
+        Self {
+            scope_type: ScopeType::Module,
+            scope_id: id.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "format", content = "value", rename_all = "snake_case")]
+pub enum BlockContent {
+    Markdown(String),
+    Text(String),
+    Json(serde_json::Value),
+    Procedure(ProcedureDef),
+    Asset(serde_json::Value),
+    ScenarioNode(ScenarioNode),
+    DirectorPolicy(DirectorPolicy),
+}
+
+impl BlockContent {
+    pub fn render_text(&self) -> String {
+        match self {
+            BlockContent::Markdown(s) | BlockContent::Text(s) => s.clone(),
+            BlockContent::Json(v) | BlockContent::Asset(v) => {
+                serde_json::to_string_pretty(v).unwrap_or_default()
+            }
+            BlockContent::Procedure(p) => serde_json::to_string_pretty(p).unwrap_or_default(),
+            BlockContent::ScenarioNode(n) => serde_json::to_string_pretty(n).unwrap_or_default(),
+            BlockContent::DirectorPolicy(p) => serde_json::to_string_pretty(p).unwrap_or_default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ContextBlock {
+    pub block_id: String,
+    pub kind: BlockKind,
+    pub title: String,
+    pub content: BlockContent,
+    pub visibility: Visibility,
+    pub stability: Stability,
+    pub cache_zone: CacheZone,
+    pub scope: Scope,
+    pub priority: i32,
+    pub version: u32,
+    pub tags: Vec<String>,
+    pub source_refs: Vec<SourceRef>,
+    pub dependencies: Vec<String>,
+    pub content_hash: String,
+    pub token_estimate: Option<u32>,
+    pub expires_at_turn: Option<String>,
+    pub expires_at_scene: Option<String>,
+    pub load_reason: Option<String>,
+}
+
+impl ContextBlock {
+    pub fn new(
+        block_id: impl Into<String>,
+        kind: BlockKind,
+        title: impl Into<String>,
+        content: BlockContent,
+        visibility: Visibility,
+        stability: Stability,
+        cache_zone: CacheZone,
+        scope: Scope,
+        priority: i32,
+    ) -> Self {
+        let block_id = block_id.into();
+        let title = title.into();
+        let content_hash = stable_json_hash(&content);
+        let token_estimate = Some((content.render_text().chars().count() as u32 / 4).max(1));
+        Self {
+            block_id,
+            kind,
+            title,
+            content,
+            visibility,
+            stability,
+            cache_zone,
+            scope,
+            priority,
+            version: 1,
+            tags: vec![],
+            source_refs: vec![],
+            dependencies: vec![],
+            content_hash,
+            token_estimate,
+            expires_at_turn: None,
+            expires_at_scene: None,
+            load_reason: None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -159,7 +835,9 @@ pub enum DocumentType {
 }
 
 impl Default for DocumentType {
-    fn default() -> Self { Self::Unknown }
+    fn default() -> Self {
+        Self::Unknown
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
@@ -225,15 +903,37 @@ pub struct StateModel {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
-pub struct TraitDef { pub trait_id: String, pub title: String, pub data: serde_json::Value }
+pub struct TraitDef {
+    pub trait_id: String,
+    pub title: String,
+    pub data: serde_json::Value,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
-pub struct TrackDef { pub track_id: String, pub title: String, pub min: Option<i32>, pub max: Option<i32>, pub data: serde_json::Value }
+pub struct TrackDef {
+    pub track_id: String,
+    pub title: String,
+    pub min: Option<i32>,
+    pub max: Option<i32>,
+    pub data: serde_json::Value,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
-pub struct StatusDef { pub status_id: String, pub title: String, pub data: serde_json::Value }
+pub struct StatusDef {
+    pub status_id: String,
+    pub title: String,
+    pub data: serde_json::Value,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
-pub struct AspectDef { pub aspect_id: String, pub title: String, pub data: serde_json::Value }
+pub struct AspectDef {
+    pub aspect_id: String,
+    pub title: String,
+    pub data: serde_json::Value,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
-pub struct ModifierDef { pub modifier_id: String, pub title: String, pub data: serde_json::Value }
+pub struct ModifierDef {
+    pub modifier_id: String,
+    pub title: String,
+    pub data: serde_json::Value,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct DirectorModel {
@@ -250,9 +950,14 @@ pub struct DirectorPolicy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
-pub struct OutputContract { pub contract_id: String, pub content: serde_json::Value }
+pub struct OutputContract {
+    pub contract_id: String,
+    pub content: serde_json::Value,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
-pub struct StateProposalContract { pub content: serde_json::Value }
+pub struct StateProposalContract {
+    pub content: serde_json::Value,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct ProcedureRegistry {
@@ -266,14 +971,24 @@ pub struct ProcedureRegistry {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "family", rename_all = "snake_case")]
 pub enum RollModel {
-    D20 { dc: Option<i32>, allow_advantage: bool },
+    D20 {
+        dc: Option<i32>,
+        allow_advantage: bool,
+    },
     PercentileRollUnder,
-    BrpCharacteristic { default_multiplier: i32 },
-    BrpResistance { auto_difference: Option<i32> },
+    BrpCharacteristic {
+        default_multiplier: i32,
+    },
+    BrpResistance {
+        auto_difference: Option<i32>,
+    },
     D10StatSkill,
     Sw2d6,
     Triangle6d4,
-    DicePool { dice: String, success_threshold: i32 },
+    DicePool {
+        dice: String,
+        success_threshold: i32,
+    },
     Automatic,
 }
 
@@ -290,13 +1005,30 @@ pub struct ProcedureDef {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
-pub struct ProcedureVariant { pub variant_id: String, pub procedure_id: String, pub title: String, pub data: serde_json::Value }
+pub struct ProcedureVariant {
+    pub variant_id: String,
+    pub procedure_id: String,
+    pub title: String,
+    pub data: serde_json::Value,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
-pub struct MechanicalEffectDef { pub effect_id: String, pub title: String, pub data: serde_json::Value }
+pub struct MechanicalEffectDef {
+    pub effect_id: String,
+    pub title: String,
+    pub data: serde_json::Value,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
-pub struct HookDef { pub hook_id: String, pub title: String, pub data: serde_json::Value }
+pub struct HookDef {
+    pub hook_id: String,
+    pub title: String,
+    pub data: serde_json::Value,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
-pub struct ActionTemplate { pub action_id: String, pub title: String, pub data: serde_json::Value }
+pub struct ActionTemplate {
+    pub action_id: String,
+    pub title: String,
+    pub data: serde_json::Value,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct CharacterTemplate {
@@ -343,27 +1075,42 @@ pub struct DerivedValue {
     // backward-compatible: old {field_id,formula,...} entries still parse. When
     // present, `expr` (with {{token}} placeholders) + lookup_tables/hybrid let the
     // evaluator compute the value deterministically instead of reading prose.
-    #[serde(default)] pub role: Option<String>,                 // attribute|skill|resource|resource_max|background
-    #[serde(default)] pub input_kind: Option<String>,           // player|derived|hybrid
-    #[serde(default)] pub recompute: Option<String>,            // live|once
-    #[serde(default)] pub result_type: Option<String>,          // int|float|dice_or_int
-    #[serde(default)] pub expr: Option<String>,                 // machine expr w/ {{ids}}; preferred over `formula`
-    #[serde(default)] pub attr_derived: Option<String>,         // hybrid: characteristic-derived segment (e.g. floor({{dex}}/2))
-    #[serde(default)] pub base: Option<serde_json::Value>,      // hybrid: fixed base
-    #[serde(default)] pub allocations: Vec<serde_json::Value>,  // hybrid: player point-allocation segments
-    #[serde(default)] pub lookup_tables: serde_json::Value,     // inline {name:{ranges:[{min,max,value}]}}
-    #[serde(default)] pub min: Option<serde_json::Value>,
-    #[serde(default)] pub max: Option<serde_json::Value>,
-    #[serde(default)] pub clamp_max: Option<serde_json::Value>,
-    #[serde(default)] pub source_ref: Option<serde_json::Value>,
-    #[serde(default)] pub status: Option<String>,               // source_backed|provisional
+    #[serde(default)]
+    pub role: Option<String>, // attribute|skill|resource|resource_max|background
+    #[serde(default)]
+    pub input_kind: Option<String>, // player|derived|hybrid
+    #[serde(default)]
+    pub recompute: Option<String>, // live|once
+    #[serde(default)]
+    pub result_type: Option<String>, // int|float|dice_or_int
+    #[serde(default)]
+    pub expr: Option<String>, // machine expr w/ {{ids}}; preferred over `formula`
+    #[serde(default)]
+    pub attr_derived: Option<String>, // hybrid: characteristic-derived segment (e.g. floor({{dex}}/2))
+    #[serde(default)]
+    pub base: Option<serde_json::Value>, // hybrid: fixed base
+    #[serde(default)]
+    pub allocations: Vec<serde_json::Value>, // hybrid: player point-allocation segments
+    #[serde(default)]
+    pub lookup_tables: serde_json::Value, // inline {name:{ranges:[{min,max,value}]}}
+    #[serde(default)]
+    pub min: Option<serde_json::Value>,
+    #[serde(default)]
+    pub max: Option<serde_json::Value>,
+    #[serde(default)]
+    pub clamp_max: Option<serde_json::Value>,
+    #[serde(default)]
+    pub source_ref: Option<serde_json::Value>,
+    #[serde(default)]
+    pub status: Option<String>, // source_backed|provisional
     /// Formula classification tier (N1).
     /// - `"exact_executable"`: LLM extracted and source-backed; can drive exact resolution.
     /// - `"provisional_seed"`: deterministic first-play seed injected by Rule Steward/parser;
     ///   usable for context only — combat/effect executor must NOT use for exact dice binding.
     /// - `"operational_abstract"`: extracted but missing numeric values; operational guide only.
     /// Absent (None) → treat as `"exact_executable"` for backward-compat with old packs.
-    #[serde(default)] pub tier: Option<String>,
+    #[serde(default)]
+    pub tier: Option<String>,
 }
 
 impl DerivedValue {
@@ -419,7 +1166,9 @@ pub enum CharacterCreationMode {
 }
 
 impl Default for CharacterCreationMode {
-    fn default() -> Self { Self::Guided }
+    fn default() -> Self {
+        Self::Guided
+    }
 }
 
 impl CharacterCreationMode {
@@ -691,7 +1440,11 @@ pub enum RuleNeedKind {
     GeneralRuleQuery,
 }
 
-impl Default for RuleNeedKind { fn default() -> Self { Self::GeneralRuleQuery } }
+impl Default for RuleNeedKind {
+    fn default() -> Self {
+        Self::GeneralRuleQuery
+    }
+}
 
 impl RuleNeedKind {
     pub fn as_str(&self) -> &'static str {
@@ -719,17 +1472,45 @@ impl RuleNeedKind {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum RuleUrgency { ImmediateTurn, BeforeScene, BackgroundAudit }
-impl Default for RuleUrgency { fn default() -> Self { Self::ImmediateTurn } }
+pub enum RuleUrgency {
+    ImmediateTurn,
+    BeforeScene,
+    BackgroundAudit,
+}
+impl Default for RuleUrgency {
+    fn default() -> Self {
+        Self::ImmediateTurn
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum RuleAssistOutputKind { ContextBlock, CheckContractPatch, ContestProfilePatch, MaterializationPatch, CharacterOnboardingPatch, Bp1PatchProposal, LearnedPacketCandidate }
+pub enum RuleAssistOutputKind {
+    ContextBlock,
+    CheckContractPatch,
+    ContestProfilePatch,
+    MaterializationPatch,
+    CharacterOnboardingPatch,
+    Bp1PatchProposal,
+    LearnedPacketCandidate,
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum RuleAssistStatus { SourceBackedExact, SourceBackedPartial, LearnedStable, ProvisionalTableRuling, UnresolvedNeedsSource, ConflictNeedsReview, NotARulesProblem }
-impl Default for RuleAssistStatus { fn default() -> Self { Self::UnresolvedNeedsSource } }
+pub enum RuleAssistStatus {
+    SourceBackedExact,
+    SourceBackedPartial,
+    LearnedStable,
+    ProvisionalTableRuling,
+    UnresolvedNeedsSource,
+    ConflictNeedsReview,
+    NotARulesProblem,
+}
+impl Default for RuleAssistStatus {
+    fn default() -> Self {
+        Self::UnresolvedNeedsSource
+    }
+}
 
 impl RuleAssistStatus {
     pub fn as_str(&self) -> &'static str {
@@ -747,8 +1528,18 @@ impl RuleAssistStatus {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum RuleAnswerScope { RulesetCore, ModuleSpecific, CharacterCreation, RuntimeTurn, AuditOnly }
-impl Default for RuleAnswerScope { fn default() -> Self { Self::RuntimeTurn } }
+pub enum RuleAnswerScope {
+    RulesetCore,
+    ModuleSpecific,
+    CharacterCreation,
+    RuntimeTurn,
+    AuditOnly,
+}
+impl Default for RuleAnswerScope {
+    fn default() -> Self {
+        Self::RuntimeTurn
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct RuleAssist {
@@ -859,10 +1650,21 @@ pub struct RuleKernel {
 /// semantically (kind first, then id substring) so combat/mechanics read HP by
 /// kernel data, not a hardcoded "hp_max" field name. None if no HP-like track.
 pub fn hp_resource_track_id(resource_tracks: &[serde_json::Value]) -> Option<String> {
-    let id_of = |t: &serde_json::Value| t.get("id").and_then(|v| v.as_str()).map(|s| s.trim().to_string());
+    let id_of = |t: &serde_json::Value| {
+        t.get("id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+    };
     // 1) an explicit health-kind track
-    if let Some(t) = resource_tracks.iter().find(|t| t.get("kind").and_then(|v| v.as_str()) == Some("health")) {
-        if let Some(id) = id_of(t) { if !id.is_empty() { return Some(id); } }
+    if let Some(t) = resource_tracks
+        .iter()
+        .find(|t| t.get("kind").and_then(|v| v.as_str()) == Some("health"))
+    {
+        if let Some(id) = id_of(t) {
+            if !id.is_empty() {
+                return Some(id);
+            }
+        }
     }
     // 2) id contains "hit_point" or equals/starts "hp"
     resource_tracks.iter().filter_map(|t| id_of(t)).find(|id| {
@@ -876,23 +1678,67 @@ pub fn hp_resource_track_id(resource_tracks: &[serde_json::Value]) -> Option<Str
 /// matched case-insensitively). When found, both current and max are that
 /// derived value. When absent, fall back to the track's static kernel
 /// `initial`/`max` (fail-closed; never fabricates). Keyed by kernel track id.
-pub fn match_seed(resources: &serde_json::Value, kernel_tracks: &[serde_json::Value]) -> std::collections::HashMap<String, (Option<i32>, Option<i32>)> {
-    let lookup = |id: &str| -> Option<i32> {
-        let want = id.trim().to_ascii_lowercase();
-        resources.as_object().and_then(|m| m.iter()
-            .find(|(k, _)| k.trim().to_ascii_lowercase() == want)
-            .and_then(|(_, v)| v.as_i64().map(|n| n as i32)))
+pub fn match_seed(
+    resources: &serde_json::Value,
+    kernel_tracks: &[serde_json::Value],
+) -> std::collections::HashMap<String, (Option<i32>, Option<i32>)> {
+    let lookup = |candidate: &str| -> Option<i32> {
+        let want = candidate.trim().to_ascii_lowercase();
+        let want_norm = normalize_seed_key(candidate);
+        let want_compact = want_norm.replace('_', "");
+        resources.as_object().and_then(|m| {
+            m.iter()
+                .find(|(k, _)| {
+                    let key = k.trim().to_ascii_lowercase();
+                    let key_norm = normalize_seed_key(k);
+                    key == want
+                        || key_norm == want_norm
+                        || (!want_compact.is_empty() && key_norm.replace('_', "") == want_compact)
+                })
+                .and_then(|(_, v)| v.as_i64().map(|n| n as i32))
+        })
     };
     let mut out = std::collections::HashMap::new();
     for t in kernel_tracks {
-        let Some(id) = t.get("id").and_then(|v| v.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else { continue };
+        let Some(id) = t
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
         let kmax = t.get("max").and_then(|v| v.as_i64()).map(|n| n as i32);
         let kinit = t.get("initial").and_then(|v| v.as_i64()).map(|n| n as i32);
         // 显式 derived_from 链接优先（修 hp_max->hit_points 种子桥），再回退 track-id 查找。
-        let derived = t.get("derived_from").and_then(|v| v.as_str())
+        let derived = t
+            .get("derived_from")
+            .and_then(|v| v.as_str())
             .and_then(|df| lookup(df))
-            .or_else(|| lookup(&id));
-        out.insert(id, (derived.or(kinit), derived.or(kmax)));  // (current, max)
+            .or_else(|| lookup(&id))
+            .or_else(|| {
+                t.get("name")
+                    .and_then(|v| v.as_str())
+                    .and_then(|name| lookup(name))
+            });
+        out.insert(id, (derived.or(kinit), derived.or(kmax))); // (current, max)
+    }
+    out
+}
+
+fn normalize_seed_key(input: &str) -> String {
+    let mut out = String::new();
+    let mut pending_sep = false;
+    for ch in input.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            if pending_sep && !out.is_empty() {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+            pending_sep = false;
+        } else {
+            pending_sep = true;
+        }
     }
     out
 }
@@ -902,8 +1748,17 @@ pub fn match_seed(resources: &serde_json::Value, kernel_tracks: &[serde_json::Va
 /// were mis-submitted as tracks (e.g. `{field_id, field_type, title}`). Generic
 /// — no per-ruleset logic. Used at parse-write and kernel-load time.
 pub fn normalize_resource_tracks(tracks: &[serde_json::Value]) -> Vec<serde_json::Value> {
-    let has = |t: &serde_json::Value, k: &str| t.get(k).and_then(|v| v.as_str()).map(|s| !s.trim().is_empty()).unwrap_or(false);
-    tracks.iter().filter(|t| has(t, "id") || has(t, "name")).cloned().collect()
+    let has = |t: &serde_json::Value, k: &str| {
+        t.get(k)
+            .and_then(|v| v.as_str())
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+    };
+    tracks
+        .iter()
+        .filter(|t| has(t, "id") || has(t, "name"))
+        .cloned()
+        .collect()
 }
 
 /// 去重共享同一非空 `derived_from` 的 resource_tracks（一公式→一资源→一 track）。
@@ -913,25 +1768,41 @@ pub fn normalize_resource_tracks(tracks: &[serde_json::Value]) -> Vec<serde_json
 pub fn dedup_tracks_by_derived_from(tracks: &[serde_json::Value]) -> Vec<serde_json::Value> {
     let score = |t: &serde_json::Value| -> i32 {
         let health = t.get("kind").and_then(|v| v.as_str()) == Some("health");
-        let has_beh = ["on_outcome", "thresholds"].iter()
-            .any(|k| t.get(*k).and_then(|v| v.as_array()).map(|a| !a.is_empty()).unwrap_or(false));
+        let has_beh = ["on_outcome", "thresholds"].iter().any(|k| {
+            t.get(*k)
+                .and_then(|v| v.as_array())
+                .map(|a| !a.is_empty())
+                .unwrap_or(false)
+        });
         (if health { 2 } else { 0 }) + (if has_beh { 1 } else { 0 })
     };
-    let df_of = |t: &serde_json::Value| t.get("derived_from").and_then(|v| v.as_str())
-        .map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty());
+    let df_of = |t: &serde_json::Value| {
+        t.get("derived_from")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
+    };
     // 先为每个 derived_from 组挑出胜者(最高分, 先出现者优先)。
     let mut best: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for (i, t) in tracks.iter().enumerate() {
         if let Some(df) = df_of(t) {
             match best.get(&df) {
                 Some(&j) if score(&tracks[j]) >= score(t) => {}
-                _ => { best.insert(df, i); }
+                _ => {
+                    best.insert(df, i);
+                }
             }
         }
     }
-    tracks.iter().enumerate().filter(|(i, t)| {
-        match df_of(t) { Some(df) => best.get(&df) == Some(i), None => true }
-    }).map(|(_, t)| t.clone()).collect()
+    tracks
+        .iter()
+        .enumerate()
+        .filter(|(i, t)| match df_of(t) {
+            Some(df) => best.get(&df) == Some(i),
+            None => true,
+        })
+        .map(|(_, t)| t.clone())
+        .collect()
 }
 
 /// Map an effect-roll `parameter_path` to a kernel resource-track id (semantic,
@@ -944,8 +1815,14 @@ pub fn resolve_resource_track_id(parameter_path: &str, kernel: &RuleKernel) -> O
     if head == "hp" {
         return hp_resource_track_id(&kernel.resource_tracks);
     }
-    let candidate = p.strip_prefix("resources.").map(|rest| rest.split('.').next().unwrap_or(rest)).unwrap_or(&head).to_ascii_lowercase();
-    kernel.resource_tracks.iter()
+    let candidate = p
+        .strip_prefix("resources.")
+        .map(|rest| rest.split('.').next().unwrap_or(rest))
+        .unwrap_or(&head)
+        .to_ascii_lowercase();
+    kernel
+        .resource_tracks
+        .iter()
         .filter_map(|t| t.get("id").and_then(|v| v.as_str()))
         .find(|id| id.trim().to_ascii_lowercase() == candidate)
         .map(|s| s.trim().to_string())
@@ -955,7 +1832,12 @@ pub fn resolve_resource_track_id(parameter_path: &str, kernel: &RuleKernel) -> O
 /// `Subtract` (and any non-Add/Set op) is armor-mitigated: effective =
 /// max(amount - sp, 0), result floored at 0. `Add` heals (sp ignored). `Set`
 /// sets the value directly (clamped >= 0). Mirrors the prior inline logic.
-pub fn apply_armor_damage(from: i32, amount: i32, armor: Option<i32>, op: ParameterOperation) -> (i32, i32) {
+pub fn apply_armor_damage(
+    from: i32,
+    amount: i32,
+    armor: Option<i32>,
+    op: ParameterOperation,
+) -> (i32, i32) {
     let sp = armor.unwrap_or(0).max(0);
     match op {
         ParameterOperation::Add => ((from + amount).max(0), 0),
@@ -969,8 +1851,13 @@ pub fn apply_armor_damage(from: i32, amount: i32, armor: Option<i32>, op: Parame
 
 /// Derived wound label from a current value vs a max (None when no row/cap).
 pub fn wound_label(to: i32, max: Option<i32>) -> &'static str {
-    if to <= 0 { return "defeated"; }
-    match max { Some(m) if m > 0 && to <= m / 2 => "wounded", _ => "unhurt" }
+    if to <= 0 {
+        return "defeated";
+    }
+    match max {
+        Some(m) if m > 0 && to <= m / 2 => "wounded",
+        _ => "unhurt",
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
@@ -1069,7 +1956,10 @@ pub struct PlayabilityGap {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
-pub struct PlayabilityWarning { pub code: String, pub message: String }
+pub struct PlayabilityWarning {
+    pub code: String,
+    pub message: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct CharacterSheet {
@@ -1092,14 +1982,22 @@ pub struct ScenarioNode {
     pub links: Vec<ScenarioLink>,
     pub assets: Vec<String>,
     pub data: serde_json::Value,
-    #[serde(default)] pub extraction_status: SceneExtractionStatus,
-    #[serde(default)] pub page_start: Option<u32>,
-    #[serde(default)] pub page_end: Option<u32>,
-    #[serde(default)] pub referenced_npc_ids: Vec<String>,
-    #[serde(default)] pub referenced_clue_ids: Vec<String>,
-    #[serde(default)] pub referenced_location_ids: Vec<String>,
-    #[serde(default)] pub referenced_encounter_ids: Vec<String>,
-    #[serde(default)] pub scene_mechanics: Vec<SceneMechanicIntent>,
+    #[serde(default)]
+    pub extraction_status: SceneExtractionStatus,
+    #[serde(default)]
+    pub page_start: Option<u32>,
+    #[serde(default)]
+    pub page_end: Option<u32>,
+    #[serde(default)]
+    pub referenced_npc_ids: Vec<String>,
+    #[serde(default)]
+    pub referenced_clue_ids: Vec<String>,
+    #[serde(default)]
+    pub referenced_location_ids: Vec<String>,
+    #[serde(default)]
+    pub referenced_encounter_ids: Vec<String>,
+    #[serde(default)]
+    pub scene_mechanics: Vec<SceneMechanicIntent>,
     /// 反剧透元数据（场景级剧透词/安全别名/揭示条件）。揭示前由 spoiler_guard 裁剪，
     /// 揭示态由 revealed-facts 账本按 node_id 控制。空时序列化省略，保旧数据字节不变。
     #[serde(default, skip_serializing_if = "SpoilerMeta::is_empty")]
@@ -1111,8 +2009,10 @@ pub struct ScenarioLink {
     pub to_node_id: String,
     pub reason: String,
     pub clue_id: Option<String>,
-    #[serde(default)] pub link_type: LinkType,
-    #[serde(default)] pub source_anchor: Option<String>,
+    #[serde(default)]
+    pub link_type: LinkType,
+    #[serde(default)]
+    pub source_anchor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
@@ -1166,7 +2066,12 @@ pub struct ConversionTraceEvent {
 
 impl ConversionTraceEvent {
     pub fn new(event_type: impl Into<String>, message: impl Into<String>) -> Self {
-        Self { at: Utc::now(), event_type: event_type.into(), message: message.into(), data: serde_json::Value::Null }
+        Self {
+            at: Utc::now(),
+            event_type: event_type.into(),
+            message: message.into(),
+            data: serde_json::Value::Null,
+        }
     }
 }
 
@@ -1236,13 +2141,14 @@ impl ProjectBundle {
             modules: vec![],
             global_material_index: vec![],
             global_context_blocks: vec![],
-            validation_report: ValidationReport { status: "ok".to_string(), ..Default::default() },
+            validation_report: ValidationReport {
+                status: "ok".to_string(),
+                ..Default::default()
+            },
             conversion_trace: vec![],
         }
     }
 }
-
-
 
 /// 场景节点的抽取深度态，由 module_reader 两遍式产出。
 ///
@@ -1258,7 +2164,9 @@ pub enum SceneExtractionStatus {
 }
 
 impl Default for SceneExtractionStatus {
-    fn default() -> Self { Self::SkeletonOnly }
+    fn default() -> Self {
+        Self::SkeletonOnly
+    }
 }
 
 /// 模组内容分类，决定该内容落到哪个 BP 缓存区。
@@ -1278,7 +2186,9 @@ pub enum ModuleContentClass {
 }
 
 impl Default for ModuleContentClass {
-    fn default() -> Self { Self::Story }
+    fn default() -> Self {
+        Self::Story
+    }
 }
 
 /// 场景节点之间连边的类型：`Spatial`=物理可达、`Trigger`=剧情触发、
@@ -1294,7 +2204,9 @@ pub enum LinkType {
 }
 
 impl Default for LinkType {
-    fn default() -> Self { Self::Sequential }
+    fn default() -> Self {
+        Self::Sequential
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -1309,7 +2221,9 @@ pub enum LearningStage {
 }
 
 impl Default for LearningStage {
-    fn default() -> Self { Self::Unseen }
+    fn default() -> Self {
+        Self::Unseen
+    }
 }
 
 impl LearningStage {
@@ -1334,7 +2248,9 @@ pub enum RulingConfidence {
 }
 
 impl Default for RulingConfidence {
-    fn default() -> Self { Self::Medium }
+    fn default() -> Self {
+        Self::Medium
+    }
 }
 
 impl RulingConfidence {
@@ -1361,7 +2277,9 @@ pub enum RulingStatus {
 }
 
 impl Default for RulingStatus {
-    fn default() -> Self { Self::Provisional }
+    fn default() -> Self {
+        Self::Provisional
+    }
 }
 
 impl RulingStatus {
@@ -1487,7 +2405,6 @@ pub struct ModulePrepPacket {
     pub created_at: DateTime<Utc>,
 }
 
-
 pub type CurrentSessionPacketData = ModulePrepPacket;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1560,14 +2477,16 @@ impl LearnedPacket {
             Scope::ruleset(&self.ruleset_id),
             82,
         );
-        block.tags = vec!["learned_packet".into(), self.packet_type.clone(), self.packet_key.clone()];
+        block.tags = vec![
+            "learned_packet".into(),
+            self.packet_type.clone(),
+            self.packet_key.clone(),
+        ];
         block.source_refs = self.source_refs.clone();
         block.load_reason = Some("learned_packet_relevant".into());
         block
     }
 }
-
-
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -1579,7 +2498,9 @@ pub enum LearningCandidateStatus {
 }
 
 impl Default for LearningCandidateStatus {
-    fn default() -> Self { Self::PendingReview }
+    fn default() -> Self {
+        Self::PendingReview
+    }
 }
 
 impl LearningCandidateStatus {
@@ -1630,7 +2551,13 @@ impl LearningAuditCandidate {
             source_refs: self.source_refs.clone(),
             use_count: 1,
             learning_stage: stage,
-            confidence: if self.evidence_score >= 0.80 { RulingConfidence::High } else if self.evidence_score >= 0.55 { RulingConfidence::Medium } else { RulingConfidence::Low },
+            confidence: if self.evidence_score >= 0.80 {
+                RulingConfidence::High
+            } else if self.evidence_score >= 0.55 {
+                RulingConfidence::Medium
+            } else {
+                RulingConfidence::Low
+            },
             cache_zone: CacheZone::PinnedMiddle,
             visibility: Visibility::GmOnly,
             last_used_at: Some(now),
@@ -1813,18 +2740,67 @@ pub struct WorldState {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum StatePatch {
-    SetTrack { target: String, value: i32, reason: String },
-    ModifyTrack { target: String, amount: i32, reason: String },
-    ActorHpDelta { actor_id: String, from: Option<i32>, delta: i32, to: Option<i32>, reason: String },
-    CreateAspect { target: String, value: serde_json::Value, reason: String },
-    RemoveAspect { target: String, reason: String },
-    ApplyStatus { target: String, status: serde_json::Value, reason: String },
-    RemoveStatus { target: String, reason: String },
-    CreateFact { target: String, fact: serde_json::Value, reason: String },
-    SetTrait { actor_id: String, trait_id: String, value: serde_json::Value, reason: String },
-    GrantObject { actor_id: String, object_id: String, reason: String },
-    ObjectPatch { patch_id: String, object_id: Option<String>, patch_json: serde_json::Value, reason: String },
-    LoadMaterial { material_id: String, reason: String },
+    SetTrack {
+        target: String,
+        value: i32,
+        reason: String,
+    },
+    ModifyTrack {
+        target: String,
+        amount: i32,
+        reason: String,
+    },
+    ActorHpDelta {
+        actor_id: String,
+        from: Option<i32>,
+        delta: i32,
+        to: Option<i32>,
+        reason: String,
+    },
+    CreateAspect {
+        target: String,
+        value: serde_json::Value,
+        reason: String,
+    },
+    RemoveAspect {
+        target: String,
+        reason: String,
+    },
+    ApplyStatus {
+        target: String,
+        status: serde_json::Value,
+        reason: String,
+    },
+    RemoveStatus {
+        target: String,
+        reason: String,
+    },
+    CreateFact {
+        target: String,
+        fact: serde_json::Value,
+        reason: String,
+    },
+    SetTrait {
+        actor_id: String,
+        trait_id: String,
+        value: serde_json::Value,
+        reason: String,
+    },
+    GrantObject {
+        actor_id: String,
+        object_id: String,
+        reason: String,
+    },
+    ObjectPatch {
+        patch_id: String,
+        object_id: Option<String>,
+        patch_json: serde_json::Value,
+        reason: String,
+    },
+    LoadMaterial {
+        material_id: String,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
@@ -1835,7 +2811,6 @@ pub struct DirectorResponse {
     pub follow_up_questions: Vec<String>,
     pub safety_flags: Vec<String>,
 }
-
 
 // -----------------------------------------------------------------------------
 // Agentic checks, roll visibility, and lightweight combat contracts (v0.9)
@@ -1852,7 +2827,9 @@ pub enum ActorKind {
 }
 
 impl Default for ActorKind {
-    fn default() -> Self { Self::PlayerCharacter }
+    fn default() -> Self {
+        Self::PlayerCharacter
+    }
 }
 
 impl ActorKind {
@@ -1885,7 +2862,9 @@ pub enum RollVisibility {
 }
 
 impl Default for RollVisibility {
-    fn default() -> Self { Self::NoRoll }
+    fn default() -> Self {
+        Self::NoRoll
+    }
 }
 
 impl RollVisibility {
@@ -1909,7 +2888,9 @@ pub enum RollAuthority {
 }
 
 impl Default for RollAuthority {
-    fn default() -> Self { Self::GmAgent }
+    fn default() -> Self {
+        Self::GmAgent
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1924,17 +2905,52 @@ pub struct RollDisclosurePolicy {
 
 impl Default for RollDisclosurePolicy {
     fn default() -> Self {
-        Self { show_roll_to_player: false, show_formula_to_player: false, show_dc_to_player: false, show_success_failure_to_player: true, reveal_after_scene: false, reveal_after_session: false }
+        Self {
+            show_roll_to_player: false,
+            show_formula_to_player: false,
+            show_dc_to_player: false,
+            show_success_failure_to_player: true,
+            reveal_after_scene: false,
+            reveal_after_session: false,
+        }
     }
 }
 
 impl RollDisclosurePolicy {
     pub fn for_visibility(visibility: RollVisibility) -> Self {
         match visibility {
-            RollVisibility::PlayerRollRequired => Self { show_roll_to_player: true, show_formula_to_player: true, show_dc_to_player: true, show_success_failure_to_player: true, reveal_after_scene: false, reveal_after_session: false },
-            RollVisibility::PublicGmRoll => Self { show_roll_to_player: true, show_formula_to_player: true, show_dc_to_player: true, show_success_failure_to_player: true, reveal_after_scene: false, reveal_after_session: false },
-            RollVisibility::PrivateGmRoll => Self { show_roll_to_player: false, show_formula_to_player: false, show_dc_to_player: false, show_success_failure_to_player: false, reveal_after_scene: true, reveal_after_session: true },
-            RollVisibility::PassiveResolution => Self { show_roll_to_player: false, show_formula_to_player: false, show_dc_to_player: false, show_success_failure_to_player: false, reveal_after_scene: false, reveal_after_session: true },
+            RollVisibility::PlayerRollRequired => Self {
+                show_roll_to_player: true,
+                show_formula_to_player: true,
+                show_dc_to_player: true,
+                show_success_failure_to_player: true,
+                reveal_after_scene: false,
+                reveal_after_session: false,
+            },
+            RollVisibility::PublicGmRoll => Self {
+                show_roll_to_player: true,
+                show_formula_to_player: true,
+                show_dc_to_player: true,
+                show_success_failure_to_player: true,
+                reveal_after_scene: false,
+                reveal_after_session: false,
+            },
+            RollVisibility::PrivateGmRoll => Self {
+                show_roll_to_player: false,
+                show_formula_to_player: false,
+                show_dc_to_player: false,
+                show_success_failure_to_player: false,
+                reveal_after_scene: true,
+                reveal_after_session: true,
+            },
+            RollVisibility::PassiveResolution => Self {
+                show_roll_to_player: false,
+                show_formula_to_player: false,
+                show_dc_to_player: false,
+                show_success_failure_to_player: false,
+                reveal_after_scene: false,
+                reveal_after_session: true,
+            },
             RollVisibility::NoRoll => Self::default(),
         }
     }
@@ -1943,33 +2959,63 @@ impl RollDisclosurePolicy {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OppositionModel {
-    StaticDc { dc: i32, label: String },
-    OpposedActive { defender: ActorRef, defender_check_label: String, defender_dice_expression: String },
-    PassiveDefense { defender: ActorRef, passive_score_label: String, passive_score: i32 },
-    ArmorOrResistance { defender: ActorRef, field_refs: Vec<String> },
+    StaticDc {
+        dc: i32,
+        label: String,
+    },
+    OpposedActive {
+        defender: ActorRef,
+        defender_check_label: String,
+        defender_dice_expression: String,
+    },
+    PassiveDefense {
+        defender: ActorRef,
+        passive_score_label: String,
+        passive_score: i32,
+    },
+    ArmorOrResistance {
+        defender: ActorRef,
+        field_refs: Vec<String>,
+    },
     NoMechanicalOpposition,
 }
 
 impl Default for OppositionModel {
-    fn default() -> Self { Self::NoMechanicalOpposition }
+    fn default() -> Self {
+        Self::NoMechanicalOpposition
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CheckTargetModel {
-    StaticNumber { value: i32, label: String },
-    Opposed { opponent_id: String, opponent_check: String },
+    StaticNumber {
+        value: i32,
+        label: String,
+    },
+    Opposed {
+        opponent_id: String,
+        opponent_check: String,
+    },
     DegreeOnly,
-    SuccessCount { threshold: i32 },
+    SuccessCount {
+        threshold: i32,
+    },
     /// Dice-pool success counting: roll the pool, count dice showing exactly
     /// `target_face`, succeed when that count >= `threshold` (e.g. Triangle
     /// Agency 6d4, count 3s, succeed on >= 1).
-    DicePoolCount { target_face: i32, threshold: i32, label: String },
+    DicePoolCount {
+        target_face: i32,
+        threshold: i32,
+        label: String,
+    },
     UnknownUntilLookup,
 }
 
 impl Default for CheckTargetModel {
-    fn default() -> Self { Self::UnknownUntilLookup }
+    fn default() -> Self {
+        Self::UnknownUntilLookup
+    }
 }
 
 /// Build a CheckTargetModel from a parsed rule kernel's `dice_core` JSON (the
@@ -1983,20 +3029,32 @@ impl Default for CheckTargetModel {
 /// face in compare_to (Triangle Agency). Returns None when neither yields an
 /// integer — callers then stay fail-closed (never invent a face).
 pub fn count_faces_target_face(dice_core: &serde_json::Value) -> Option<i64> {
-    dice_core.get("target_face").and_then(|v| v.as_i64()).or_else(|| {
-        dice_core.get("compare_to").and_then(|v| v.as_str()).and_then(|s| s.trim().parse::<i64>().ok())
-    })
+    dice_core
+        .get("target_face")
+        .and_then(|v| v.as_i64())
+        .or_else(|| {
+            dice_core
+                .get("compare_to")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.trim().parse::<i64>().ok())
+        })
 }
 
 /// count_faces success threshold: the MACHINE field `success_threshold`, else
 /// the standard "≥1 success face" default that pool games (Triangle) use.
 pub fn count_faces_threshold(dice_core: &serde_json::Value) -> i64 {
-    dice_core.get("success_threshold").and_then(|v| v.as_i64()).unwrap_or(1)
+    dice_core
+        .get("success_threshold")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(1)
 }
 
 pub fn target_model_from_dice_core(dice_core: &serde_json::Value) -> Option<CheckTargetModel> {
     let compare = dice_core.get("compare").and_then(|v| v.as_str());
-    let direction = dice_core.get("direction").and_then(|v| v.as_str()).unwrap_or("");
+    let direction = dice_core
+        .get("direction")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let target_number = dice_core.get("target_number").and_then(|v| v.as_i64());
     if compare == Some("count_faces") || direction == "pool_count" {
         // fail-soft via the shared recovery helpers: Triangle's kernel leaves the
@@ -2014,7 +3072,10 @@ pub fn target_model_from_dice_core(dice_core: &serde_json::Value) -> Option<Chec
     }
     if compare == Some("meet_or_beat") {
         if let Some(tn) = target_number {
-            return Some(CheckTargetModel::StaticNumber { value: tn as i32, label: "kernel core mechanic target".into() });
+            return Some(CheckTargetModel::StaticNumber {
+                value: tn as i32,
+                label: "kernel core mechanic target".into(),
+            });
         }
     }
     None
@@ -2032,9 +3093,16 @@ mod target_model_dice_pool_tests {
         // never resolved); now it recovers a DicePoolCount{face=3, threshold=1}.
         let dc = json!({"dice":"6d4","compare":"count_faces","compare_to":"3","target_face":null,"success_threshold":null});
         match target_model_from_dice_core(&dc) {
-            Some(CheckTargetModel::DicePoolCount { target_face, threshold, .. }) => {
+            Some(CheckTargetModel::DicePoolCount {
+                target_face,
+                threshold,
+                ..
+            }) => {
                 assert_eq!(target_face, 3, "face recovered from compare_to");
-                assert_eq!(threshold, 1, "count_faces threshold defaults to >=1 success");
+                assert_eq!(
+                    threshold, 1,
+                    "count_faces threshold defaults to >=1 success"
+                );
             }
             other => panic!("expected DicePoolCount, got {other:?}"),
         }
@@ -2042,10 +3110,19 @@ mod target_model_dice_pool_tests {
 
     #[test]
     fn count_faces_prefers_explicit_machine_fields() {
-        let dc = json!({"compare":"count_faces","compare_to":"3","target_face":5,"success_threshold":2});
+        let dc =
+            json!({"compare":"count_faces","compare_to":"3","target_face":5,"success_threshold":2});
         match target_model_from_dice_core(&dc) {
-            Some(CheckTargetModel::DicePoolCount { target_face, threshold, .. }) => {
-                assert_eq!((target_face, threshold), (5, 2), "explicit machine fields win over compare_to");
+            Some(CheckTargetModel::DicePoolCount {
+                target_face,
+                threshold,
+                ..
+            }) => {
+                assert_eq!(
+                    (target_face, threshold),
+                    (5, 2),
+                    "explicit machine fields win over compare_to"
+                );
             }
             other => panic!("expected DicePoolCount, got {other:?}"),
         }
@@ -2054,7 +3131,10 @@ mod target_model_dice_pool_tests {
     #[test]
     fn count_faces_unparseable_compare_to_stays_fail_closed() {
         let dc = json!({"compare":"count_faces","compare_to":"the highest die","target_face":null});
-        assert!(target_model_from_dice_core(&dc).is_none(), "no parseable face -> None (fail-closed, never invent)");
+        assert!(
+            target_model_from_dice_core(&dc).is_none(),
+            "no parseable face -> None (fail-closed, never invent)"
+        );
     }
 }
 
@@ -2150,7 +3230,9 @@ pub enum InformationLevel {
 }
 
 impl Default for InformationLevel {
-    fn default() -> Self { Self::Surface }
+    fn default() -> Self {
+        Self::Surface
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -2172,7 +3254,9 @@ pub enum PendingCheckStatus {
 }
 
 impl Default for PendingCheckStatus {
-    fn default() -> Self { Self::Open }
+    fn default() -> Self {
+        Self::Open
+    }
 }
 
 impl PendingCheckStatus {
@@ -2233,7 +3317,9 @@ pub enum GateKind {
 }
 
 impl Default for GateKind {
-    fn default() -> Self { Self::PlayerRollRequired }
+    fn default() -> Self {
+        Self::PlayerRollRequired
+    }
 }
 
 impl GateKind {
@@ -2270,7 +3356,9 @@ pub enum GateStatus {
 }
 
 impl Default for GateStatus {
-    fn default() -> Self { Self::Open }
+    fn default() -> Self {
+        Self::Open
+    }
 }
 
 impl GateStatus {
@@ -2307,15 +3395,27 @@ pub struct ActionOption {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ExpectedInput {
-    RollResult { check_id: String, accepted_forms: Vec<String> },
-    Choice { option_ids: Vec<String> },
-    Confirmation { yes_option: String, no_option: String },
-    FreeTextWithClassifier { classifier_skill_id: String },
+    RollResult {
+        check_id: String,
+        accepted_forms: Vec<String>,
+    },
+    Choice {
+        option_ids: Vec<String>,
+    },
+    Confirmation {
+        yes_option: String,
+        no_option: String,
+    },
+    FreeTextWithClassifier {
+        classifier_skill_id: String,
+    },
 }
 
 impl Default for ExpectedInput {
     fn default() -> Self {
-        ExpectedInput::FreeTextWithClassifier { classifier_skill_id: "none".into() }
+        ExpectedInput::FreeTextWithClassifier {
+            classifier_skill_id: "none".into(),
+        }
     }
 }
 
@@ -2331,7 +3431,9 @@ pub enum GateFallbackPolicy {
 }
 
 impl Default for GateFallbackPolicy {
-    fn default() -> Self { Self::Reprompt }
+    fn default() -> Self {
+        Self::Reprompt
+    }
 }
 
 impl GateFallbackPolicy {
@@ -2437,19 +3539,50 @@ impl InteractionGate {
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum GateHandlingResult {
     None,
-    PendingCheckResolved { result: CheckResultRecord },
-    PendingFollowupCheckCreated { result: CheckResultRecord, pending: Box<PendingCheck>, prompt_public: String, reason: String },
-    GateReprompt { gate_id: String, check_id: String, reason: String, prompt_public: String },
-    GateAbandoned { gate_id: String, check_id: String, reason: String, prompt_public: String },
-    GateChoiceResolved { gate_id: String, option_id: String, option_label: String, resolution_json: serde_json::Value },
-    GateChoiceReprompt { gate_id: String, reason: String, prompt_public: String },
-    GateSuperseded { gate_id: String, reason: String, prompt_public: String },
+    PendingCheckResolved {
+        result: CheckResultRecord,
+    },
+    PendingFollowupCheckCreated {
+        result: CheckResultRecord,
+        pending: Box<PendingCheck>,
+        prompt_public: String,
+        reason: String,
+    },
+    GateReprompt {
+        gate_id: String,
+        check_id: String,
+        reason: String,
+        prompt_public: String,
+    },
+    GateAbandoned {
+        gate_id: String,
+        check_id: String,
+        reason: String,
+        prompt_public: String,
+    },
+    GateChoiceResolved {
+        gate_id: String,
+        option_id: String,
+        option_label: String,
+        resolution_json: serde_json::Value,
+    },
+    GateChoiceReprompt {
+        gate_id: String,
+        reason: String,
+        prompt_public: String,
+    },
+    GateSuperseded {
+        gate_id: String,
+        reason: String,
+        prompt_public: String,
+    },
 }
 
 impl Default for GateHandlingResult {
-    fn default() -> Self { Self::None }
+    fn default() -> Self {
+        Self::None
+    }
 }
-
 
 // -----------------------------------------------------------------------------
 // Interaction Lifecycle Kernel data contracts (v1.5)
@@ -2457,24 +3590,109 @@ impl Default for GateHandlingResult {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum InteractionContextKind { Session, Frame, Scene, Check, Gate, ReactionWindow, Stalemate, ExitContract }
-impl Default for InteractionContextKind { fn default() -> Self { Self::Session } }
-impl InteractionContextKind { pub fn as_str(&self) -> &'static str { match self { Self::Session => "session", Self::Frame => "frame", Self::Scene => "scene", Self::Check => "check", Self::Gate => "gate", Self::ReactionWindow => "reaction_window", Self::Stalemate => "stalemate", Self::ExitContract => "exit_contract" } } }
+pub enum InteractionContextKind {
+    Session,
+    Frame,
+    Scene,
+    Check,
+    Gate,
+    ReactionWindow,
+    Stalemate,
+    ExitContract,
+}
+impl Default for InteractionContextKind {
+    fn default() -> Self {
+        Self::Session
+    }
+}
+impl InteractionContextKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Session => "session",
+            Self::Frame => "frame",
+            Self::Scene => "scene",
+            Self::Check => "check",
+            Self::Gate => "gate",
+            Self::ReactionWindow => "reaction_window",
+            Self::Stalemate => "stalemate",
+            Self::ExitContract => "exit_contract",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum InteractionContextStatus { Active, Paused, Resolving, Closing, Closed, Superseded, Abandoned, Repaired }
-impl Default for InteractionContextStatus { fn default() -> Self { Self::Active } }
-impl InteractionContextStatus { pub fn as_str(&self) -> &'static str { match self { Self::Active => "active", Self::Paused => "paused", Self::Resolving => "resolving", Self::Closing => "closing", Self::Closed => "closed", Self::Superseded => "superseded", Self::Abandoned => "abandoned", Self::Repaired => "repaired" } } }
+pub enum InteractionContextStatus {
+    Active,
+    Paused,
+    Resolving,
+    Closing,
+    Closed,
+    Superseded,
+    Abandoned,
+    Repaired,
+}
+impl Default for InteractionContextStatus {
+    fn default() -> Self {
+        Self::Active
+    }
+}
+impl InteractionContextStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Paused => "paused",
+            Self::Resolving => "resolving",
+            Self::Closing => "closing",
+            Self::Closed => "closed",
+            Self::Superseded => "superseded",
+            Self::Abandoned => "abandoned",
+            Self::Repaired => "repaired",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum SupersededReason { FrameClose, SceneTransition, NewFrame, ExitContract, WorldTimeAdvance, TerminalIntent, Reconcile, StaleGeneration, UserAbandoned }
-impl Default for SupersededReason { fn default() -> Self { Self::Reconcile } }
-impl SupersededReason { pub fn as_str(&self) -> &'static str { match self { Self::FrameClose => "superseded_by_frame_close", Self::SceneTransition => "superseded_by_scene_transition", Self::NewFrame => "superseded_by_new_frame", Self::ExitContract => "superseded_by_exit_contract", Self::WorldTimeAdvance => "superseded_by_world_time_advance", Self::TerminalIntent => "superseded_by_terminal_intent", Self::Reconcile => "superseded_by_reconcile", Self::StaleGeneration => "superseded_by_stale_generation", Self::UserAbandoned => "superseded_by_user_abandoned" } } }
+pub enum SupersededReason {
+    FrameClose,
+    SceneTransition,
+    NewFrame,
+    ExitContract,
+    WorldTimeAdvance,
+    TerminalIntent,
+    Reconcile,
+    StaleGeneration,
+    UserAbandoned,
+}
+impl Default for SupersededReason {
+    fn default() -> Self {
+        Self::Reconcile
+    }
+}
+impl SupersededReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::FrameClose => "superseded_by_frame_close",
+            Self::SceneTransition => "superseded_by_scene_transition",
+            Self::NewFrame => "superseded_by_new_frame",
+            Self::ExitContract => "superseded_by_exit_contract",
+            Self::WorldTimeAdvance => "superseded_by_world_time_advance",
+            Self::TerminalIntent => "superseded_by_terminal_intent",
+            Self::Reconcile => "superseded_by_reconcile",
+            Self::StaleGeneration => "superseded_by_stale_generation",
+            Self::UserAbandoned => "superseded_by_user_abandoned",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
-pub struct InteractionOwner { pub owner_kind: String, pub owner_id: Option<String>, #[serde(default)] pub owner_json: serde_json::Value }
+pub struct InteractionOwner {
+    pub owner_kind: String,
+    pub owner_id: Option<String>,
+    #[serde(default)]
+    pub owner_json: serde_json::Value,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct InteractionContext {
@@ -2484,41 +3702,180 @@ pub struct InteractionContext {
     pub context_kind: InteractionContextKind,
     pub status: InteractionContextStatus,
     pub generation: i64,
-    #[serde(default)] pub active_gate_ids: Vec<String>,
-    #[serde(default)] pub pending_check_ids: Vec<String>,
-    #[serde(default)] pub reaction_window_ids: Vec<String>,
-    #[serde(default)] pub object_interaction_ids: Vec<String>,
-    #[serde(default)] pub child_context_ids: Vec<String>,
+    #[serde(default)]
+    pub active_gate_ids: Vec<String>,
+    #[serde(default)]
+    pub pending_check_ids: Vec<String>,
+    #[serde(default)]
+    pub reaction_window_ids: Vec<String>,
+    #[serde(default)]
+    pub object_interaction_ids: Vec<String>,
+    #[serde(default)]
+    pub child_context_ids: Vec<String>,
     pub opened_at_tick: i64,
     pub closed_at_tick: Option<i64>,
     pub owner: InteractionOwner,
-    #[serde(default)] pub context_json: serde_json::Value,
+    #[serde(default)]
+    pub context_json: serde_json::Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
-impl Default for InteractionContext { fn default() -> Self { Self { context_id: String::new(), session_id: String::new(), frame_id: None, context_kind: InteractionContextKind::Session, status: InteractionContextStatus::Active, generation: 0, active_gate_ids: vec![], pending_check_ids: vec![], reaction_window_ids: vec![], object_interaction_ids: vec![], child_context_ids: vec![], opened_at_tick: 0, closed_at_tick: None, owner: InteractionOwner::default(), context_json: serde_json::Value::Null, created_at: Utc::now(), updated_at: Utc::now() } } }
+impl Default for InteractionContext {
+    fn default() -> Self {
+        Self {
+            context_id: String::new(),
+            session_id: String::new(),
+            frame_id: None,
+            context_kind: InteractionContextKind::Session,
+            status: InteractionContextStatus::Active,
+            generation: 0,
+            active_gate_ids: vec![],
+            pending_check_ids: vec![],
+            reaction_window_ids: vec![],
+            object_interaction_ids: vec![],
+            child_context_ids: vec![],
+            opened_at_tick: 0,
+            closed_at_tick: None,
+            owner: InteractionOwner::default(),
+            context_json: serde_json::Value::Null,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum InteractionEventKind { ReconcileSession, OpenContext, CloseFrameCascade, OpenGate, ResolveGate, RepromptGate, SupersedeGate, CreatePendingCheck, ResolvePendingCheck, SupersedePendingCheck, CreateObjectInteraction, ResolveObjectInteraction, SupersedeObjectInteraction, InvariantRepair, GenerationAdvanced }
-impl Default for InteractionEventKind { fn default() -> Self { Self::ReconcileSession } }
-impl InteractionEventKind { pub fn as_str(&self) -> &'static str { match self { Self::ReconcileSession => "reconcile_session", Self::OpenContext => "open_context", Self::CloseFrameCascade => "close_frame_cascade", Self::OpenGate => "open_gate", Self::ResolveGate => "resolve_gate", Self::RepromptGate => "reprompt_gate", Self::SupersedeGate => "supersede_gate", Self::CreatePendingCheck => "create_pending_check", Self::ResolvePendingCheck => "resolve_pending_check", Self::SupersedePendingCheck => "supersede_pending_check", Self::CreateObjectInteraction => "create_object_interaction", Self::ResolveObjectInteraction => "resolve_object_interaction", Self::SupersedeObjectInteraction => "supersede_object_interaction", Self::InvariantRepair => "invariant_repair", Self::GenerationAdvanced => "generation_advanced" } } }
+pub enum InteractionEventKind {
+    ReconcileSession,
+    OpenContext,
+    CloseFrameCascade,
+    OpenGate,
+    ResolveGate,
+    RepromptGate,
+    SupersedeGate,
+    CreatePendingCheck,
+    ResolvePendingCheck,
+    SupersedePendingCheck,
+    CreateObjectInteraction,
+    ResolveObjectInteraction,
+    SupersedeObjectInteraction,
+    InvariantRepair,
+    GenerationAdvanced,
+}
+impl Default for InteractionEventKind {
+    fn default() -> Self {
+        Self::ReconcileSession
+    }
+}
+impl InteractionEventKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ReconcileSession => "reconcile_session",
+            Self::OpenContext => "open_context",
+            Self::CloseFrameCascade => "close_frame_cascade",
+            Self::OpenGate => "open_gate",
+            Self::ResolveGate => "resolve_gate",
+            Self::RepromptGate => "reprompt_gate",
+            Self::SupersedeGate => "supersede_gate",
+            Self::CreatePendingCheck => "create_pending_check",
+            Self::ResolvePendingCheck => "resolve_pending_check",
+            Self::SupersedePendingCheck => "supersede_pending_check",
+            Self::CreateObjectInteraction => "create_object_interaction",
+            Self::ResolveObjectInteraction => "resolve_object_interaction",
+            Self::SupersedeObjectInteraction => "supersede_object_interaction",
+            Self::InvariantRepair => "invariant_repair",
+            Self::GenerationAdvanced => "generation_advanced",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct InteractionEvent { pub event_id: String, pub session_id: String, pub interaction_context_id: Option<String>, pub frame_id: Option<String>, pub world_tick: i64, pub generation: i64, pub event_kind: InteractionEventKind, #[serde(default)] pub event_json: serde_json::Value, pub created_at: DateTime<Utc> }
-impl Default for InteractionEvent { fn default() -> Self { Self { event_id: String::new(), session_id: String::new(), interaction_context_id: None, frame_id: None, world_tick: 0, generation: 0, event_kind: InteractionEventKind::ReconcileSession, event_json: serde_json::Value::Null, created_at: Utc::now() } } }
+pub struct InteractionEvent {
+    pub event_id: String,
+    pub session_id: String,
+    pub interaction_context_id: Option<String>,
+    pub frame_id: Option<String>,
+    pub world_tick: i64,
+    pub generation: i64,
+    pub event_kind: InteractionEventKind,
+    #[serde(default)]
+    pub event_json: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+}
+impl Default for InteractionEvent {
+    fn default() -> Self {
+        Self {
+            event_id: String::new(),
+            session_id: String::new(),
+            interaction_context_id: None,
+            frame_id: None,
+            world_tick: 0,
+            generation: 0,
+            event_kind: InteractionEventKind::ReconcileSession,
+            event_json: serde_json::Value::Null,
+            created_at: Utc::now(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum InvariantRepairKind { OpenGateWithoutActiveOwner, OpenPendingCheckWithoutActiveOwner, OpenPendingCheckWithoutOpenGate, OpenReactionWithoutActiveFrame, FrameClosedChildrenTerminal, StaleGeneration, MultiplePrimaryContexts, SceneEpochMismatch }
-impl Default for InvariantRepairKind { fn default() -> Self { Self::OpenGateWithoutActiveOwner } }
-impl InvariantRepairKind { pub fn as_str(&self) -> &'static str { match self { Self::OpenGateWithoutActiveOwner => "open_gate_without_active_owner", Self::OpenPendingCheckWithoutActiveOwner => "open_pending_check_without_active_owner", Self::OpenPendingCheckWithoutOpenGate => "open_pending_check_without_open_gate", Self::OpenReactionWithoutActiveFrame => "open_reaction_without_active_frame", Self::FrameClosedChildrenTerminal => "frame_closed_children_terminal", Self::StaleGeneration => "stale_generation", Self::MultiplePrimaryContexts => "multiple_primary_contexts", Self::SceneEpochMismatch => "scene_epoch_mismatch" } } }
+pub enum InvariantRepairKind {
+    OpenGateWithoutActiveOwner,
+    OpenPendingCheckWithoutActiveOwner,
+    OpenPendingCheckWithoutOpenGate,
+    OpenReactionWithoutActiveFrame,
+    FrameClosedChildrenTerminal,
+    StaleGeneration,
+    MultiplePrimaryContexts,
+    SceneEpochMismatch,
+}
+impl Default for InvariantRepairKind {
+    fn default() -> Self {
+        Self::OpenGateWithoutActiveOwner
+    }
+}
+impl InvariantRepairKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::OpenGateWithoutActiveOwner => "open_gate_without_active_owner",
+            Self::OpenPendingCheckWithoutActiveOwner => "open_pending_check_without_active_owner",
+            Self::OpenPendingCheckWithoutOpenGate => "open_pending_check_without_open_gate",
+            Self::OpenReactionWithoutActiveFrame => "open_reaction_without_active_frame",
+            Self::FrameClosedChildrenTerminal => "frame_closed_children_terminal",
+            Self::StaleGeneration => "stale_generation",
+            Self::MultiplePrimaryContexts => "multiple_primary_contexts",
+            Self::SceneEpochMismatch => "scene_epoch_mismatch",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct InvariantRepair { pub repair_id: String, pub kind: InvariantRepairKind, pub target_table: String, pub target_id: String, pub action: String, pub reason: String, pub world_tick: i64, pub generation: i64 }
+pub struct InvariantRepair {
+    pub repair_id: String,
+    pub kind: InvariantRepairKind,
+    pub target_table: String,
+    pub target_id: String,
+    pub action: String,
+    pub reason: String,
+    pub world_tick: i64,
+    pub generation: i64,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
-pub struct InteractionTransitionResult { #[serde(default)] pub events: Vec<InteractionEvent>, #[serde(default)] pub world_events: Vec<WorldEvent>, #[serde(default)] pub repairs: Vec<InvariantRepair>, #[serde(default)] pub sse_events: Vec<serde_json::Value>, #[serde(default)] pub diagnostics: serde_json::Value }
+pub struct InteractionTransitionResult {
+    #[serde(default)]
+    pub events: Vec<InteractionEvent>,
+    #[serde(default)]
+    pub world_events: Vec<WorldEvent>,
+    #[serde(default)]
+    pub repairs: Vec<InvariantRepair>,
+    #[serde(default)]
+    pub sse_events: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub diagnostics: serde_json::Value,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DiceRollRecord {
@@ -2580,7 +3937,9 @@ pub enum FrameKind {
 }
 
 impl Default for FrameKind {
-    fn default() -> Self { Self::SideQuest }
+    fn default() -> Self {
+        Self::SideQuest
+    }
 }
 
 impl FrameKind {
@@ -2617,7 +3976,9 @@ pub enum FrameStatus {
 }
 
 impl Default for FrameStatus {
-    fn default() -> Self { Self::Active }
+    fn default() -> Self {
+        Self::Active
+    }
 }
 
 impl FrameStatus {
@@ -2674,31 +4035,107 @@ pub struct Clock {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum TimeScale { Instant, CombatRound, SceneBeat, Exploration, Travel, Downtime, Flashback }
-impl Default for TimeScale { fn default() -> Self { Self::SceneBeat } }
-impl TimeScale { pub fn as_str(&self) -> &'static str { match self { TimeScale::Instant => "instant", TimeScale::CombatRound => "combat_round", TimeScale::SceneBeat => "scene_beat", TimeScale::Exploration => "exploration", TimeScale::Travel => "travel", TimeScale::Downtime => "downtime", TimeScale::Flashback => "flashback" } } }
+pub enum TimeScale {
+    Instant,
+    CombatRound,
+    SceneBeat,
+    Exploration,
+    Travel,
+    Downtime,
+    Flashback,
+}
+impl Default for TimeScale {
+    fn default() -> Self {
+        Self::SceneBeat
+    }
+}
+impl TimeScale {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TimeScale::Instant => "instant",
+            TimeScale::CombatRound => "combat_round",
+            TimeScale::SceneBeat => "scene_beat",
+            TimeScale::Exploration => "exploration",
+            TimeScale::Travel => "travel",
+            TimeScale::Downtime => "downtime",
+            TimeScale::Flashback => "flashback",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum TimeMutationKind { Advance, NoAdvance, FlashbackFrame, RetconCompensation, TimelineFork }
-impl Default for TimeMutationKind { fn default() -> Self { Self::Advance } }
-impl TimeMutationKind { pub fn as_str(&self) -> &'static str { match self { TimeMutationKind::Advance => "advance", TimeMutationKind::NoAdvance => "no_advance", TimeMutationKind::FlashbackFrame => "flashback_frame", TimeMutationKind::RetconCompensation => "retcon_compensation", TimeMutationKind::TimelineFork => "timeline_fork" } } }
+pub enum TimeMutationKind {
+    Advance,
+    NoAdvance,
+    FlashbackFrame,
+    RetconCompensation,
+    TimelineFork,
+}
+impl Default for TimeMutationKind {
+    fn default() -> Self {
+        Self::Advance
+    }
+}
+impl TimeMutationKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TimeMutationKind::Advance => "advance",
+            TimeMutationKind::NoAdvance => "no_advance",
+            TimeMutationKind::FlashbackFrame => "flashback_frame",
+            TimeMutationKind::RetconCompensation => "retcon_compensation",
+            TimeMutationKind::TimelineFork => "timeline_fork",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct TimeAmount {
-    #[serde(default)] pub seconds: i64,
-    #[serde(default)] pub minutes: i64,
-    #[serde(default)] pub hours: i64,
-    #[serde(default)] pub days: i64,
-    #[serde(default)] pub combat_rounds: i64,
-    #[serde(default)] pub scene_beats: i64,
-    #[serde(default)] pub label: String,
+    #[serde(default)]
+    pub seconds: i64,
+    #[serde(default)]
+    pub minutes: i64,
+    #[serde(default)]
+    pub hours: i64,
+    #[serde(default)]
+    pub days: i64,
+    #[serde(default)]
+    pub combat_rounds: i64,
+    #[serde(default)]
+    pub scene_beats: i64,
+    #[serde(default)]
+    pub label: String,
 }
 impl TimeAmount {
-    pub fn total_seconds(&self) -> i64 { self.seconds + self.minutes * 60 + self.hours * 3600 + self.days * 86400 + self.combat_rounds * 3 + self.scene_beats * 60 }
-    pub fn minutes(minutes: i64) -> Self { Self { minutes, label: format!("{minutes} minute(s)"), ..Default::default() } }
-    pub fn combat_rounds(rounds: i64) -> Self { Self { combat_rounds: rounds, label: format!("{rounds} combat round(s)"), ..Default::default() } }
-    pub fn scene_beats(beats: i64) -> Self { Self { scene_beats: beats, label: format!("{beats} scene beat(s)"), ..Default::default() } }
+    pub fn total_seconds(&self) -> i64 {
+        self.seconds
+            + self.minutes * 60
+            + self.hours * 3600
+            + self.days * 86400
+            + self.combat_rounds * 3
+            + self.scene_beats * 60
+    }
+    pub fn minutes(minutes: i64) -> Self {
+        Self {
+            minutes,
+            label: format!("{minutes} minute(s)"),
+            ..Default::default()
+        }
+    }
+    pub fn combat_rounds(rounds: i64) -> Self {
+        Self {
+            combat_rounds: rounds,
+            label: format!("{rounds} combat round(s)"),
+            ..Default::default()
+        }
+    }
+    pub fn scene_beats(beats: i64) -> Self {
+        Self {
+            scene_beats: beats,
+            label: format!("{beats} scene beat(s)"),
+            ..Default::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
@@ -2719,14 +4156,64 @@ pub struct WorldTimeState {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WorldEventKind {
-    PlayerAction, NpcAction, CheckCreated, CheckResolved, EffectCreated, EffectApplied,
-    ExitContractCreated, StalemateContractCreated, ClockTick, TimeAdvanced, SceneChanged,
-    ClueDiscovered, NpcAttitudeChanged, MemoryFactCreated, LearningCandidateCreated,
-    TableRuling, FrameOpened, FrameClosed, DirectorBriefCreated, NoveltyFreshChange,
-    ScheduledEventDue, RetconCompensation, SystemEvent,
+    PlayerAction,
+    NpcAction,
+    CheckCreated,
+    CheckResolved,
+    EffectCreated,
+    EffectApplied,
+    ExitContractCreated,
+    StalemateContractCreated,
+    ClockTick,
+    TimeAdvanced,
+    SceneChanged,
+    ClueDiscovered,
+    NpcAttitudeChanged,
+    MemoryFactCreated,
+    LearningCandidateCreated,
+    TableRuling,
+    FrameOpened,
+    FrameClosed,
+    DirectorBriefCreated,
+    NoveltyFreshChange,
+    ScheduledEventDue,
+    RetconCompensation,
+    SystemEvent,
 }
-impl Default for WorldEventKind { fn default() -> Self { Self::SystemEvent } }
-impl WorldEventKind { pub fn as_str(&self) -> &'static str { match self { WorldEventKind::PlayerAction => "player_action", WorldEventKind::NpcAction => "npc_action", WorldEventKind::CheckCreated => "check_created", WorldEventKind::CheckResolved => "check_resolved", WorldEventKind::EffectCreated => "effect_created", WorldEventKind::EffectApplied => "effect_applied", WorldEventKind::ExitContractCreated => "exit_contract_created", WorldEventKind::StalemateContractCreated => "stalemate_contract_created", WorldEventKind::ClockTick => "clock_tick", WorldEventKind::TimeAdvanced => "time_advanced", WorldEventKind::SceneChanged => "scene_changed", WorldEventKind::ClueDiscovered => "clue_discovered", WorldEventKind::NpcAttitudeChanged => "npc_attitude_changed", WorldEventKind::MemoryFactCreated => "memory_fact_created", WorldEventKind::LearningCandidateCreated => "learning_candidate_created", WorldEventKind::TableRuling => "table_ruling", WorldEventKind::FrameOpened => "frame_opened", WorldEventKind::FrameClosed => "frame_closed", WorldEventKind::DirectorBriefCreated => "director_brief_created", WorldEventKind::NoveltyFreshChange => "novelty_fresh_change", WorldEventKind::ScheduledEventDue => "scheduled_event_due", WorldEventKind::RetconCompensation => "retcon_compensation", WorldEventKind::SystemEvent => "system_event" } } }
+impl Default for WorldEventKind {
+    fn default() -> Self {
+        Self::SystemEvent
+    }
+}
+impl WorldEventKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            WorldEventKind::PlayerAction => "player_action",
+            WorldEventKind::NpcAction => "npc_action",
+            WorldEventKind::CheckCreated => "check_created",
+            WorldEventKind::CheckResolved => "check_resolved",
+            WorldEventKind::EffectCreated => "effect_created",
+            WorldEventKind::EffectApplied => "effect_applied",
+            WorldEventKind::ExitContractCreated => "exit_contract_created",
+            WorldEventKind::StalemateContractCreated => "stalemate_contract_created",
+            WorldEventKind::ClockTick => "clock_tick",
+            WorldEventKind::TimeAdvanced => "time_advanced",
+            WorldEventKind::SceneChanged => "scene_changed",
+            WorldEventKind::ClueDiscovered => "clue_discovered",
+            WorldEventKind::NpcAttitudeChanged => "npc_attitude_changed",
+            WorldEventKind::MemoryFactCreated => "memory_fact_created",
+            WorldEventKind::LearningCandidateCreated => "learning_candidate_created",
+            WorldEventKind::TableRuling => "table_ruling",
+            WorldEventKind::FrameOpened => "frame_opened",
+            WorldEventKind::FrameClosed => "frame_closed",
+            WorldEventKind::DirectorBriefCreated => "director_brief_created",
+            WorldEventKind::NoveltyFreshChange => "novelty_fresh_change",
+            WorldEventKind::ScheduledEventDue => "scheduled_event_due",
+            WorldEventKind::RetconCompensation => "retcon_compensation",
+            WorldEventKind::SystemEvent => "system_event",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct WorldEvent {
@@ -2748,9 +4235,29 @@ pub struct WorldEvent {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ScheduledEventStatus { Pending, Due, Fired, Cancelled, Superseded }
-impl Default for ScheduledEventStatus { fn default() -> Self { Self::Pending } }
-impl ScheduledEventStatus { pub fn as_str(&self) -> &'static str { match self { ScheduledEventStatus::Pending => "pending", ScheduledEventStatus::Due => "due", ScheduledEventStatus::Fired => "fired", ScheduledEventStatus::Cancelled => "cancelled", ScheduledEventStatus::Superseded => "superseded" } } }
+pub enum ScheduledEventStatus {
+    Pending,
+    Due,
+    Fired,
+    Cancelled,
+    Superseded,
+}
+impl Default for ScheduledEventStatus {
+    fn default() -> Self {
+        Self::Pending
+    }
+}
+impl ScheduledEventStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ScheduledEventStatus::Pending => "pending",
+            ScheduledEventStatus::Due => "due",
+            ScheduledEventStatus::Fired => "fired",
+            ScheduledEventStatus::Cancelled => "cancelled",
+            ScheduledEventStatus::Superseded => "superseded",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct ScheduledEvent {
@@ -2769,15 +4276,21 @@ pub struct ScheduledEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct TimeAdvanceRequest {
     pub session_id: String,
-    #[serde(default)] pub campaign_id: Option<String>,
+    #[serde(default)]
+    pub campaign_id: Option<String>,
     pub reason: String,
     pub amount: TimeAmount,
     pub scale: TimeScale,
-    #[serde(default)] pub mutation_kind: TimeMutationKind,
-    #[serde(default)] pub visibility: Visibility,
-    #[serde(default)] pub caused_by_turn_id: Option<String>,
-    #[serde(default)] pub caused_by_event_id: Option<String>,
-    #[serde(default)] pub scene_epoch: Option<String>,
+    #[serde(default)]
+    pub mutation_kind: TimeMutationKind,
+    #[serde(default)]
+    pub visibility: Visibility,
+    #[serde(default)]
+    pub caused_by_turn_id: Option<String>,
+    #[serde(default)]
+    pub caused_by_event_id: Option<String>,
+    #[serde(default)]
+    pub scene_epoch: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
@@ -2859,14 +4372,23 @@ impl StateFrame {
             format!("state_frame.{}", self.frame_id),
             BlockKind::StateFrame,
             format!("Working State Frame: {}", self.title),
-            BlockContent::Json(serde_json::to_value(self).unwrap_or_else(|_| serde_json::Value::Null)),
+            BlockContent::Json(
+                serde_json::to_value(self).unwrap_or_else(|_| serde_json::Value::Null),
+            ),
             Visibility::GmOnly,
             Stability::TurnDynamic,
             CacheZone::DynamicTail,
-            Scope { scope_type: ScopeType::Turn, scope_id: turn_id.to_string() },
+            Scope {
+                scope_type: ScopeType::Turn,
+                scope_id: turn_id.to_string(),
+            },
             125,
         );
-        block.tags = vec!["working_state_frame".into(), self.frame_kind.as_str().into(), self.status.as_str().into()];
+        block.tags = vec![
+            "working_state_frame".into(),
+            self.frame_kind.as_str().into(),
+            self.status.as_str().into(),
+        ];
         block.expires_at_turn = Some(turn_id.to_string());
         block.load_reason = Some("active_working_state_frame".into());
         block
@@ -2916,7 +4438,6 @@ pub struct CombatFrame {
     pub visibility: Visibility,
 }
 
-
 // -----------------------------------------------------------------------------
 // Conflict Frame & Combat Agent data contracts (v1.0)
 // -----------------------------------------------------------------------------
@@ -2936,7 +4457,9 @@ pub enum CombatMode {
 }
 
 impl Default for CombatMode {
-    fn default() -> Self { Self::TheaterOfMind }
+    fn default() -> Self {
+        Self::TheaterOfMind
+    }
 }
 
 impl CombatMode {
@@ -3240,8 +4763,8 @@ pub struct ModuleConfig {
 
 /// Neutral combat profile (mirrors trpg-combat::default_generic_profile's
 /// fiction-first strategy). Used when kernel.combat_profile is None.
-pub static GENERIC_COMBAT_PROFILE: std::sync::LazyLock<CombatProfile> =
-    std::sync::LazyLock::new(|| CombatProfile {
+pub static GENERIC_COMBAT_PROFILE: std::sync::LazyLock<CombatProfile> = std::sync::LazyLock::new(
+    || CombatProfile {
         profile_id: "generic.situation.v1_3".into(),
         default_mode: "theater_of_mind".into(),
         applies_to_modes: vec![
@@ -3256,7 +4779,8 @@ pub static GENERIC_COMBAT_PROFILE: std::sync::LazyLock<CombatProfile> =
         stalemate_policy: serde_json::json!({"max_repeated_action_count":2,"open_direction_gate":true}),
         npc_drive_policy: serde_json::json!({"default_patience":40,"default_morale":55,"max_repeat_same_tactic":2}),
         search_recipes: vec![],
-    });
+    },
+);
 
 /// Neutral mode policy: no rules → always falls back to TheaterOfMind
 /// (mirrors infer_combat_mode_from_intent's trailing default).
@@ -3315,7 +4839,9 @@ pub enum CombatPhase {
 }
 
 impl Default for CombatPhase {
-    fn default() -> Self { Self::NotStarted }
+    fn default() -> Self {
+        Self::NotStarted
+    }
 }
 
 impl CombatPhase {
@@ -3352,7 +4878,6 @@ pub struct InitiativeSlot {
     pub metadata: serde_json::Value,
 }
 
-
 // -----------------------------------------------------------------------------
 // Semantic Situation Orchestrator / Novelty Director data contracts (v1.1-v1.3)
 // -----------------------------------------------------------------------------
@@ -3374,7 +4899,9 @@ pub enum FrameRelation {
 }
 
 impl Default for FrameRelation {
-    fn default() -> Self { Self::InvalidOrAmbiguous }
+    fn default() -> Self {
+        Self::InvalidOrAmbiguous
+    }
 }
 
 impl FrameRelation {
@@ -3431,7 +4958,9 @@ pub enum SituationActionKind {
 }
 
 impl Default for SituationActionKind {
-    fn default() -> Self { Self::Unknown }
+    fn default() -> Self {
+        Self::Unknown
+    }
 }
 
 impl SituationActionKind {
@@ -3481,7 +5010,9 @@ pub enum EscalationLevel {
 }
 
 impl Default for EscalationLevel {
-    fn default() -> Self { Self::Low }
+    fn default() -> Self {
+        Self::Low
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -3508,7 +5039,9 @@ pub enum FrameOutcome {
 }
 
 impl Default for FrameOutcome {
-    fn default() -> Self { Self::Continue }
+    fn default() -> Self {
+        Self::Continue
+    }
 }
 
 impl FrameOutcome {
@@ -3594,7 +5127,6 @@ pub struct NpcTacticMemory {
     pub last_turn_id: Option<String>,
 }
 
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum FreshChangeType {
@@ -3612,7 +5144,9 @@ pub enum FreshChangeType {
 }
 
 impl Default for FreshChangeType {
-    fn default() -> Self { Self::NewPressure }
+    fn default() -> Self {
+        Self::NewPressure
+    }
 }
 
 impl FreshChangeType {
@@ -3722,7 +5256,9 @@ pub enum CombatantStatus {
 }
 
 impl Default for CombatantStatus {
-    fn default() -> Self { Self::Active }
+    fn default() -> Self {
+        Self::Active
+    }
 }
 
 impl CombatantStatus {
@@ -3760,7 +5296,9 @@ pub enum ExitKind {
 }
 
 impl Default for ExitKind {
-    fn default() -> Self { Self::LeaveScene }
+    fn default() -> Self {
+        Self::LeaveScene
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -3775,7 +5313,9 @@ pub enum OpponentResponsePolicy {
 }
 
 impl Default for OpponentResponsePolicy {
-    fn default() -> Self { Self::NoResponseNeeded }
+    fn default() -> Self {
+        Self::NoResponseNeeded
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
@@ -3974,7 +5514,9 @@ pub enum EffectKind {
 }
 
 impl Default for EffectKind {
-    fn default() -> Self { Self::NarrativeConsequence }
+    fn default() -> Self {
+        Self::NarrativeConsequence
+    }
 }
 
 impl EffectKind {
@@ -4046,7 +5588,6 @@ pub struct CombatProfileSummary {
     pub source_refs: Vec<SourceRef>,
 }
 
-
 // -----------------------------------------------------------------------------
 // Object & Possession Kernel data contracts (v1.6)
 // -----------------------------------------------------------------------------
@@ -4079,20 +5620,105 @@ pub enum ObjectKind {
     AnomalyObject,
     Unknown,
 }
-impl Default for ObjectKind { fn default() -> Self { Self::Unknown } }
-impl ObjectKind { pub fn as_str(&self) -> &'static str { match self { ObjectKind::Weapon => "weapon", ObjectKind::Armor => "armor", ObjectKind::Shield => "shield", ObjectKind::Tool => "tool", ObjectKind::Consumable => "consumable", ObjectKind::Ammo => "ammo", ObjectKind::Container => "container", ObjectKind::Door => "door", ObjectKind::Lock => "lock", ObjectKind::Vehicle => "vehicle", ObjectKind::VehiclePart => "vehicle_part", ObjectKind::Cyberware => "cyberware", ObjectKind::Program => "program", ObjectKind::Device => "device", ObjectKind::Document => "document", ObjectKind::Key => "key", ObjectKind::Clue => "clue", ObjectKind::Currency => "currency", ObjectKind::QuestItem => "quest_item", ObjectKind::EnvironmentalFeature => "environmental_feature", ObjectKind::Structure => "structure", ObjectKind::HazardObject => "hazard_object", ObjectKind::AnomalyObject => "anomaly_object", ObjectKind::Unknown => "unknown" } } }
+impl Default for ObjectKind {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+impl ObjectKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ObjectKind::Weapon => "weapon",
+            ObjectKind::Armor => "armor",
+            ObjectKind::Shield => "shield",
+            ObjectKind::Tool => "tool",
+            ObjectKind::Consumable => "consumable",
+            ObjectKind::Ammo => "ammo",
+            ObjectKind::Container => "container",
+            ObjectKind::Door => "door",
+            ObjectKind::Lock => "lock",
+            ObjectKind::Vehicle => "vehicle",
+            ObjectKind::VehiclePart => "vehicle_part",
+            ObjectKind::Cyberware => "cyberware",
+            ObjectKind::Program => "program",
+            ObjectKind::Device => "device",
+            ObjectKind::Document => "document",
+            ObjectKind::Key => "key",
+            ObjectKind::Clue => "clue",
+            ObjectKind::Currency => "currency",
+            ObjectKind::QuestItem => "quest_item",
+            ObjectKind::EnvironmentalFeature => "environmental_feature",
+            ObjectKind::Structure => "structure",
+            ObjectKind::HazardObject => "hazard_object",
+            ObjectKind::AnomalyObject => "anomaly_object",
+            ObjectKind::Unknown => "unknown",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum EquipSlotKind { MainHand, OffHand, TwoHands, BodyArmor, Head, Body, Accessory, Backpack, VehicleMount, CyberdeckSlot, ProgramSlot, Custom }
-impl Default for EquipSlotKind { fn default() -> Self { Self::Custom } }
-impl EquipSlotKind { pub fn as_str(&self) -> &'static str { match self { EquipSlotKind::MainHand => "main_hand", EquipSlotKind::OffHand => "off_hand", EquipSlotKind::TwoHands => "two_hands", EquipSlotKind::BodyArmor => "body_armor", EquipSlotKind::Head => "head", EquipSlotKind::Body => "body", EquipSlotKind::Accessory => "accessory", EquipSlotKind::Backpack => "backpack", EquipSlotKind::VehicleMount => "vehicle_mount", EquipSlotKind::CyberdeckSlot => "cyberdeck_slot", EquipSlotKind::ProgramSlot => "program_slot", EquipSlotKind::Custom => "custom" } } }
+pub enum EquipSlotKind {
+    MainHand,
+    OffHand,
+    TwoHands,
+    BodyArmor,
+    Head,
+    Body,
+    Accessory,
+    Backpack,
+    VehicleMount,
+    CyberdeckSlot,
+    ProgramSlot,
+    Custom,
+}
+impl Default for EquipSlotKind {
+    fn default() -> Self {
+        Self::Custom
+    }
+}
+impl EquipSlotKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EquipSlotKind::MainHand => "main_hand",
+            EquipSlotKind::OffHand => "off_hand",
+            EquipSlotKind::TwoHands => "two_hands",
+            EquipSlotKind::BodyArmor => "body_armor",
+            EquipSlotKind::Head => "head",
+            EquipSlotKind::Body => "body",
+            EquipSlotKind::Accessory => "accessory",
+            EquipSlotKind::Backpack => "backpack",
+            EquipSlotKind::VehicleMount => "vehicle_mount",
+            EquipSlotKind::CyberdeckSlot => "cyberdeck_slot",
+            EquipSlotKind::ProgramSlot => "program_slot",
+            EquipSlotKind::Custom => "custom",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum HandSlot { Left, Right, Both, Unknown }
-impl Default for HandSlot { fn default() -> Self { Self::Unknown } }
-impl HandSlot { pub fn as_str(&self) -> &'static str { match self { HandSlot::Left => "left", HandSlot::Right => "right", HandSlot::Both => "both", HandSlot::Unknown => "unknown" } } }
+pub enum HandSlot {
+    Left,
+    Right,
+    Both,
+    Unknown,
+}
+impl Default for HandSlot {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+impl HandSlot {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            HandSlot::Left => "left",
+            HandSlot::Right => "right",
+            HandSlot::Both => "both",
+            HandSlot::Unknown => "unknown",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -4128,14 +5754,97 @@ pub enum ObjectInteractionKind {
     CutConnection,
     Unknown,
 }
-impl Default for ObjectInteractionKind { fn default() -> Self { Self::Unknown } }
-impl ObjectInteractionKind { pub fn as_str(&self) -> &'static str { match self { ObjectInteractionKind::GrabHeldObject => "grab_held_object", ObjectInteractionKind::Disarm => "disarm", ObjectInteractionKind::Steal => "steal", ObjectInteractionKind::PickUp => "pick_up", ObjectInteractionKind::Drop => "drop", ObjectInteractionKind::Equip => "equip", ObjectInteractionKind::Unequip => "unequip", ObjectInteractionKind::Draw => "draw", ObjectInteractionKind::Sheathe => "sheathe", ObjectInteractionKind::Reload => "reload", ObjectInteractionKind::Throw => "throw", ObjectInteractionKind::Use => "use", ObjectInteractionKind::Activate => "activate", ObjectInteractionKind::Deactivate => "deactivate", ObjectInteractionKind::Break => "break", ObjectInteractionKind::Repair => "repair", ObjectInteractionKind::Hack => "hack", ObjectInteractionKind::Search => "search", ObjectInteractionKind::Hide => "hide", ObjectInteractionKind::Reveal => "reveal", ObjectInteractionKind::Lock => "lock", ObjectInteractionKind::Unlock => "unlock", ObjectInteractionKind::Install => "install", ObjectInteractionKind::Remove => "remove", ObjectInteractionKind::Transfer => "transfer", ObjectInteractionKind::Loot => "loot", ObjectInteractionKind::Inspect => "inspect", ObjectInteractionKind::TraceConnection => "trace_connection", ObjectInteractionKind::CutConnection => "cut_connection", ObjectInteractionKind::Unknown => "unknown" } } }
+impl Default for ObjectInteractionKind {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+impl ObjectInteractionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ObjectInteractionKind::GrabHeldObject => "grab_held_object",
+            ObjectInteractionKind::Disarm => "disarm",
+            ObjectInteractionKind::Steal => "steal",
+            ObjectInteractionKind::PickUp => "pick_up",
+            ObjectInteractionKind::Drop => "drop",
+            ObjectInteractionKind::Equip => "equip",
+            ObjectInteractionKind::Unequip => "unequip",
+            ObjectInteractionKind::Draw => "draw",
+            ObjectInteractionKind::Sheathe => "sheathe",
+            ObjectInteractionKind::Reload => "reload",
+            ObjectInteractionKind::Throw => "throw",
+            ObjectInteractionKind::Use => "use",
+            ObjectInteractionKind::Activate => "activate",
+            ObjectInteractionKind::Deactivate => "deactivate",
+            ObjectInteractionKind::Break => "break",
+            ObjectInteractionKind::Repair => "repair",
+            ObjectInteractionKind::Hack => "hack",
+            ObjectInteractionKind::Search => "search",
+            ObjectInteractionKind::Hide => "hide",
+            ObjectInteractionKind::Reveal => "reveal",
+            ObjectInteractionKind::Lock => "lock",
+            ObjectInteractionKind::Unlock => "unlock",
+            ObjectInteractionKind::Install => "install",
+            ObjectInteractionKind::Remove => "remove",
+            ObjectInteractionKind::Transfer => "transfer",
+            ObjectInteractionKind::Loot => "loot",
+            ObjectInteractionKind::Inspect => "inspect",
+            ObjectInteractionKind::TraceConnection => "trace_connection",
+            ObjectInteractionKind::CutConnection => "cut_connection",
+            ObjectInteractionKind::Unknown => "unknown",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ObjectRuleTrigger { OnEquip, OnUnequip, OnAttack, OnHit, OnDamageRoll, OnDefense, OnTakeDamage, OnReload, OnMalfunction, OnConcealReveal, OnBreak, OnRepair, OnDisarmAttempt, OnDropped, OnPickedUp, OnTimeTick, OnFrameCompaction }
-impl Default for ObjectRuleTrigger { fn default() -> Self { Self::OnPickedUp } }
-impl ObjectRuleTrigger { pub fn as_str(&self) -> &'static str { match self { ObjectRuleTrigger::OnEquip => "on_equip", ObjectRuleTrigger::OnUnequip => "on_unequip", ObjectRuleTrigger::OnAttack => "on_attack", ObjectRuleTrigger::OnHit => "on_hit", ObjectRuleTrigger::OnDamageRoll => "on_damage_roll", ObjectRuleTrigger::OnDefense => "on_defense", ObjectRuleTrigger::OnTakeDamage => "on_take_damage", ObjectRuleTrigger::OnReload => "on_reload", ObjectRuleTrigger::OnMalfunction => "on_malfunction", ObjectRuleTrigger::OnConcealReveal => "on_conceal_reveal", ObjectRuleTrigger::OnBreak => "on_break", ObjectRuleTrigger::OnRepair => "on_repair", ObjectRuleTrigger::OnDisarmAttempt => "on_disarm_attempt", ObjectRuleTrigger::OnDropped => "on_dropped", ObjectRuleTrigger::OnPickedUp => "on_picked_up", ObjectRuleTrigger::OnTimeTick => "on_time_tick", ObjectRuleTrigger::OnFrameCompaction => "on_frame_compaction" } } }
+pub enum ObjectRuleTrigger {
+    OnEquip,
+    OnUnequip,
+    OnAttack,
+    OnHit,
+    OnDamageRoll,
+    OnDefense,
+    OnTakeDamage,
+    OnReload,
+    OnMalfunction,
+    OnConcealReveal,
+    OnBreak,
+    OnRepair,
+    OnDisarmAttempt,
+    OnDropped,
+    OnPickedUp,
+    OnTimeTick,
+    OnFrameCompaction,
+}
+impl Default for ObjectRuleTrigger {
+    fn default() -> Self {
+        Self::OnPickedUp
+    }
+}
+impl ObjectRuleTrigger {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ObjectRuleTrigger::OnEquip => "on_equip",
+            ObjectRuleTrigger::OnUnequip => "on_unequip",
+            ObjectRuleTrigger::OnAttack => "on_attack",
+            ObjectRuleTrigger::OnHit => "on_hit",
+            ObjectRuleTrigger::OnDamageRoll => "on_damage_roll",
+            ObjectRuleTrigger::OnDefense => "on_defense",
+            ObjectRuleTrigger::OnTakeDamage => "on_take_damage",
+            ObjectRuleTrigger::OnReload => "on_reload",
+            ObjectRuleTrigger::OnMalfunction => "on_malfunction",
+            ObjectRuleTrigger::OnConcealReveal => "on_conceal_reveal",
+            ObjectRuleTrigger::OnBreak => "on_break",
+            ObjectRuleTrigger::OnRepair => "on_repair",
+            ObjectRuleTrigger::OnDisarmAttempt => "on_disarm_attempt",
+            ObjectRuleTrigger::OnDropped => "on_dropped",
+            ObjectRuleTrigger::OnPickedUp => "on_picked_up",
+            ObjectRuleTrigger::OnTimeTick => "on_time_tick",
+            ObjectRuleTrigger::OnFrameCompaction => "on_frame_compaction",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct ObjectRuleBinding {
@@ -4164,12 +5873,29 @@ pub struct ObjectDefinition {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
-pub struct DurabilityState { pub current: i32, pub max: i32, pub broken: bool }
+pub struct DurabilityState {
+    pub current: i32,
+    pub max: i32,
+    pub broken: bool,
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum DiscoveryState { Unknown, VisibleUnidentified, Suspected, Known, Identified, Hidden, GmOnly, Playwalled }
-impl Default for DiscoveryState { fn default() -> Self { Self::Unknown } }
+pub enum DiscoveryState {
+    Unknown,
+    VisibleUnidentified,
+    Suspected,
+    Known,
+    Identified,
+    Hidden,
+    GmOnly,
+    Playwalled,
+}
+impl Default for DiscoveryState {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct ObjectVisibilityState {
@@ -4185,27 +5911,104 @@ pub struct ObjectVisibilityState {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ObjectLocation {
-    Held { actor_id: String, hand: Option<HandSlot> },
-    Equipped { actor_id: String, slot: EquipSlotKind },
-    Worn { actor_id: String, slot: EquipSlotKind },
-    Carried { actor_id: String, container_id: Option<String> },
-    InContainer { container_id: String },
-    Installed { parent_object_id: String, port_or_mount: String },
-    Attached { target_id: String, attachment_kind: String },
-    Connected { endpoint_a: String, endpoint_b: String, connection_kind: String },
-    OnGround { scene_id: String, zone_id: Option<String> },
-    Hidden { scope_id: String, concealment: String },
-    ClaimedByActor { actor_id: String, claim_kind: String },
+    Held {
+        actor_id: String,
+        hand: Option<HandSlot>,
+    },
+    Equipped {
+        actor_id: String,
+        slot: EquipSlotKind,
+    },
+    Worn {
+        actor_id: String,
+        slot: EquipSlotKind,
+    },
+    Carried {
+        actor_id: String,
+        container_id: Option<String>,
+    },
+    InContainer {
+        container_id: String,
+    },
+    Installed {
+        parent_object_id: String,
+        port_or_mount: String,
+    },
+    Attached {
+        target_id: String,
+        attachment_kind: String,
+    },
+    Connected {
+        endpoint_a: String,
+        endpoint_b: String,
+        connection_kind: String,
+    },
+    OnGround {
+        scene_id: String,
+        zone_id: Option<String>,
+    },
+    Hidden {
+        scope_id: String,
+        concealment: String,
+    },
+    ClaimedByActor {
+        actor_id: String,
+        claim_kind: String,
+    },
     Destroyed,
     Unknown,
 }
-impl Default for ObjectLocation { fn default() -> Self { Self::Unknown } }
+impl Default for ObjectLocation {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ObjectRelation { Contains, LoadedWith, InstalledIn, AttachedTo, ConnectedTo, Controls, Locks, Secures, Conceals, Powers, MountedOn, WornBy, HeldBy, ClaimedBy, BelongsTo }
-impl Default for ObjectRelation { fn default() -> Self { Self::Contains } }
-impl ObjectRelation { pub fn as_str(&self) -> &'static str { match self { ObjectRelation::Contains => "contains", ObjectRelation::LoadedWith => "loaded_with", ObjectRelation::InstalledIn => "installed_in", ObjectRelation::AttachedTo => "attached_to", ObjectRelation::ConnectedTo => "connected_to", ObjectRelation::Controls => "controls", ObjectRelation::Locks => "locks", ObjectRelation::Secures => "secures", ObjectRelation::Conceals => "conceals", ObjectRelation::Powers => "powers", ObjectRelation::MountedOn => "mounted_on", ObjectRelation::WornBy => "worn_by", ObjectRelation::HeldBy => "held_by", ObjectRelation::ClaimedBy => "claimed_by", ObjectRelation::BelongsTo => "belongs_to" } } }
+pub enum ObjectRelation {
+    Contains,
+    LoadedWith,
+    InstalledIn,
+    AttachedTo,
+    ConnectedTo,
+    Controls,
+    Locks,
+    Secures,
+    Conceals,
+    Powers,
+    MountedOn,
+    WornBy,
+    HeldBy,
+    ClaimedBy,
+    BelongsTo,
+}
+impl Default for ObjectRelation {
+    fn default() -> Self {
+        Self::Contains
+    }
+}
+impl ObjectRelation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ObjectRelation::Contains => "contains",
+            ObjectRelation::LoadedWith => "loaded_with",
+            ObjectRelation::InstalledIn => "installed_in",
+            ObjectRelation::AttachedTo => "attached_to",
+            ObjectRelation::ConnectedTo => "connected_to",
+            ObjectRelation::Controls => "controls",
+            ObjectRelation::Locks => "locks",
+            ObjectRelation::Secures => "secures",
+            ObjectRelation::Conceals => "conceals",
+            ObjectRelation::Powers => "powers",
+            ObjectRelation::MountedOn => "mounted_on",
+            ObjectRelation::WornBy => "worn_by",
+            ObjectRelation::HeldBy => "held_by",
+            ObjectRelation::ClaimedBy => "claimed_by",
+            ObjectRelation::BelongsTo => "belongs_to",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct ObjectInstance {
@@ -4242,44 +6045,141 @@ pub struct ObjectEdge {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ObjectPrecondition {
-    ObjectExists { object_id: String },
-    ObjectVisibleOrKnown { object_id: String, actor_id: String },
-    ObjectWithinReach { object_id: String, actor_id: String },
-    ObjectHeldBy { object_id: String, actor_id: String },
-    ActorHasFreeHand { actor_id: String },
-    ActorHasSlotFree { actor_id: String, slot: EquipSlotKind },
-    ObjectNotLocked { object_id: String },
-    ObjectNotSecured { object_id: String },
-    ObjectPortable { object_id: String },
-    ObjectCanBeRemoved { object_id: String },
-    RequiresToolOrSkill { object_id: String, requirement: String },
-    RequiresDiscovery { object_id: String },
+    ObjectExists {
+        object_id: String,
+    },
+    ObjectVisibleOrKnown {
+        object_id: String,
+        actor_id: String,
+    },
+    ObjectWithinReach {
+        object_id: String,
+        actor_id: String,
+    },
+    ObjectHeldBy {
+        object_id: String,
+        actor_id: String,
+    },
+    ActorHasFreeHand {
+        actor_id: String,
+    },
+    ActorHasSlotFree {
+        actor_id: String,
+        slot: EquipSlotKind,
+    },
+    ObjectNotLocked {
+        object_id: String,
+    },
+    ObjectNotSecured {
+        object_id: String,
+    },
+    ObjectPortable {
+        object_id: String,
+    },
+    ObjectCanBeRemoved {
+        object_id: String,
+    },
+    RequiresToolOrSkill {
+        object_id: String,
+        requirement: String,
+    },
+    RequiresDiscovery {
+        object_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ObjectPatch {
-    CreateObjectInstance { object: ObjectInstance, reason: String },
-    TransferObject { object_id: String, from: ObjectLocation, to: ObjectLocation, reason: String },
-    SetObjectLocation { object_id: String, location: ObjectLocation, reason: String },
-    SetObjectVisibility { object_id: String, visibility_state: ObjectVisibilityState, reason: String },
-    ModifyQuantity { object_id: String, delta: i32, reason: String },
-    DamageObject { object_id: String, amount: i32, damage_kind: String, reason: String },
-    DestroyObject { object_id: String, reason: String },
-    AddObjectEdge { edge: ObjectEdge, reason: String },
-    RemoveObjectEdge { edge_id: String, reason: String },
-    SetMechanicalState { object_id: String, patch_json: serde_json::Value, reason: String },
+    CreateObjectInstance {
+        object: ObjectInstance,
+        reason: String,
+    },
+    TransferObject {
+        object_id: String,
+        from: ObjectLocation,
+        to: ObjectLocation,
+        reason: String,
+    },
+    SetObjectLocation {
+        object_id: String,
+        location: ObjectLocation,
+        reason: String,
+    },
+    SetObjectVisibility {
+        object_id: String,
+        visibility_state: ObjectVisibilityState,
+        reason: String,
+    },
+    ModifyQuantity {
+        object_id: String,
+        delta: i32,
+        reason: String,
+    },
+    DamageObject {
+        object_id: String,
+        amount: i32,
+        damage_kind: String,
+        reason: String,
+    },
+    DestroyObject {
+        object_id: String,
+        reason: String,
+    },
+    AddObjectEdge {
+        edge: ObjectEdge,
+        reason: String,
+    },
+    RemoveObjectEdge {
+        edge_id: String,
+        reason: String,
+    },
+    SetMechanicalState {
+        object_id: String,
+        patch_json: serde_json::Value,
+        reason: String,
+    },
     /// Turn an existing object into a different one in place (e.g. a depleted
     /// spell wand -> an inert stick): change its kind/name and REPLACE its
     /// mechanical state. The object_id is preserved (edges/possession survive).
-    TransformObject { object_id: String, new_kind: Option<ObjectKind>, new_name: Option<String>, set_mechanical_state: Option<serde_json::Value>, reason: String },
+    TransformObject {
+        object_id: String,
+        new_kind: Option<ObjectKind>,
+        new_name: Option<String>,
+        set_mechanical_state: Option<serde_json::Value>,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ObjectInteractionStatus { Created, AwaitingCheck, Resolved, Failed, Applied, Superseded, Cancelled }
-impl Default for ObjectInteractionStatus { fn default() -> Self { Self::Created } }
-impl ObjectInteractionStatus { pub fn as_str(&self) -> &'static str { match self { ObjectInteractionStatus::Created => "created", ObjectInteractionStatus::AwaitingCheck => "awaiting_check", ObjectInteractionStatus::Resolved => "resolved", ObjectInteractionStatus::Failed => "failed", ObjectInteractionStatus::Applied => "applied", ObjectInteractionStatus::Superseded => "superseded", ObjectInteractionStatus::Cancelled => "cancelled" } } }
+pub enum ObjectInteractionStatus {
+    Created,
+    AwaitingCheck,
+    Resolved,
+    Failed,
+    Applied,
+    Superseded,
+    Cancelled,
+}
+impl Default for ObjectInteractionStatus {
+    fn default() -> Self {
+        Self::Created
+    }
+}
+impl ObjectInteractionStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ObjectInteractionStatus::Created => "created",
+            ObjectInteractionStatus::AwaitingCheck => "awaiting_check",
+            ObjectInteractionStatus::Resolved => "resolved",
+            ObjectInteractionStatus::Failed => "failed",
+            ObjectInteractionStatus::Applied => "applied",
+            ObjectInteractionStatus::Superseded => "superseded",
+            ObjectInteractionStatus::Cancelled => "cancelled",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct ObjectInteractionContract {
@@ -4343,7 +6243,6 @@ pub struct ObjectInteractionResult {
     pub status: ObjectInteractionStatus,
 }
 
-
 // -----------------------------------------------------------------------------
 // Actionable Situation Director / Novelty Director data contracts (v1.2-v1.3)
 // -----------------------------------------------------------------------------
@@ -4364,7 +6263,11 @@ pub enum ActionVector {
     CharacterSpotlight,
 }
 
-impl Default for ActionVector { fn default() -> Self { Self::Observe } }
+impl Default for ActionVector {
+    fn default() -> Self {
+        Self::Observe
+    }
+}
 impl ActionVector {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -4393,18 +6296,56 @@ pub enum GuidanceLevel {
     OfferCostedExamples,
 }
 
-impl Default for GuidanceLevel { fn default() -> Self { Self::ObservableFactsOnly } }
-impl GuidanceLevel { pub fn as_str(&self) -> &'static str { match self { GuidanceLevel::ObservableFactsOnly => "observable_facts_only", GuidanceLevel::SummarizeKnownInfo => "summarize_known_info", GuidanceLevel::AskGoal => "ask_goal", GuidanceLevel::OfferActionCategories => "offer_action_categories", GuidanceLevel::OfferCostedExamples => "offer_costed_examples" } } }
+impl Default for GuidanceLevel {
+    fn default() -> Self {
+        Self::ObservableFactsOnly
+    }
+}
+impl GuidanceLevel {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            GuidanceLevel::ObservableFactsOnly => "observable_facts_only",
+            GuidanceLevel::SummarizeKnownInfo => "summarize_known_info",
+            GuidanceLevel::AskGoal => "ask_goal",
+            GuidanceLevel::OfferActionCategories => "offer_action_categories",
+            GuidanceLevel::OfferCostedExamples => "offer_costed_examples",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum PlayerDecisionPromptKind { ChooseGoal, ChooseRiskTolerance, ChooseApproachVector, ChooseSpotlightFirstActor, ClarifyIntent }
-impl Default for PlayerDecisionPromptKind { fn default() -> Self { Self::ChooseGoal } }
+pub enum PlayerDecisionPromptKind {
+    ChooseGoal,
+    ChooseRiskTolerance,
+    ChooseApproachVector,
+    ChooseSpotlightFirstActor,
+    ClarifyIntent,
+}
+impl Default for PlayerDecisionPromptKind {
+    fn default() -> Self {
+        Self::ChooseGoal
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ScenePurpose { RevealInformation, ForceChoice, SpendResource, ShowConsequence, SpotlightCharacter, RaisePressure, ResolveConflict, TransitionLocation, EstablishTone }
-impl Default for ScenePurpose { fn default() -> Self { Self::ForceChoice } }
+pub enum ScenePurpose {
+    RevealInformation,
+    ForceChoice,
+    SpendResource,
+    ShowConsequence,
+    SpotlightCharacter,
+    RaisePressure,
+    ResolveConflict,
+    TransitionLocation,
+    EstablishTone,
+}
+impl Default for ScenePurpose {
+    fn default() -> Self {
+        Self::ForceChoice
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct VisibleFact {
@@ -4631,10 +6572,20 @@ pub struct VisibilityProfile {
 
 impl VisibilityProfile {
     pub fn gm() -> Self {
-        Self { viewer_kind: ViewerKind::Gm, player_id: None, actor_id: None, can_see_gm_only: true }
+        Self {
+            viewer_kind: ViewerKind::Gm,
+            player_id: None,
+            actor_id: None,
+            can_see_gm_only: true,
+        }
     }
     pub fn player(player_id: impl Into<String>, actor_id: impl Into<String>) -> Self {
-        Self { viewer_kind: ViewerKind::Player, player_id: Some(player_id.into()), actor_id: Some(actor_id.into()), can_see_gm_only: false }
+        Self {
+            viewer_kind: ViewerKind::Player,
+            player_id: Some(player_id.into()),
+            actor_id: Some(actor_id.into()),
+            can_see_gm_only: false,
+        }
     }
 }
 
@@ -4648,7 +6599,12 @@ pub struct TokenBudget {
 
 impl Default for TokenBudget {
     fn default() -> Self {
-        Self { prefix_max: 48_000, pinned_max: 32_000, dynamic_max: 12_000, total_max: 96_000 }
+        Self {
+            prefix_max: 48_000,
+            pinned_max: 32_000,
+            dynamic_max: 12_000,
+            total_max: 96_000,
+        }
     }
 }
 
@@ -4713,7 +6669,9 @@ pub enum SearchMode {
 }
 
 impl Default for SearchMode {
-    fn default() -> Self { Self::Auto }
+    fn default() -> Self {
+        Self::Auto
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -4743,7 +6701,10 @@ impl SearchDocument {
         let mut facets = Vec::new();
         facets.push(format!("origin__{}", normalize_facet_value(&self.origin)));
         facets.push(format!("domain__{}", normalize_facet_value(&self.domain)));
-        facets.push(format!("kind__{}", normalize_facet_value(&self.logical_kind)));
+        facets.push(format!(
+            "kind__{}",
+            normalize_facet_value(&self.logical_kind)
+        ));
         facets.push(format!("visibility__{}", self.visibility.as_str()));
         facets.push(format!("stability__{}", self.stability.as_str()));
         for tag in &self.tags {
@@ -4751,7 +6712,11 @@ impl SearchDocument {
         }
         for (key, value) in &self.scopes {
             if !value.is_empty() {
-                facets.push(format!("{}__{}", normalize_facet_value(key), normalize_facet_value(value)));
+                facets.push(format!(
+                    "{}__{}",
+                    normalize_facet_value(key),
+                    normalize_facet_value(value)
+                ));
             }
         }
         facets.sort();
@@ -4765,7 +6730,13 @@ pub fn normalize_facet_value(input: &str) -> String {
         .trim()
         .to_lowercase()
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect::<String>()
         .trim_matches('_')
         .to_string()
@@ -4799,9 +6770,15 @@ pub struct SearchRequest {
     pub intent: Option<String>,
 }
 
-fn default_search_limit() -> u32 { 10 }
-fn default_search_viewer() -> VisibilityProfile { VisibilityProfile::gm() }
-fn default_search_rewrite_query() -> bool { true }
+fn default_search_limit() -> u32 {
+    10
+}
+fn default_search_viewer() -> VisibilityProfile {
+    VisibilityProfile::gm()
+}
+fn default_search_rewrite_query() -> bool {
+    true
+}
 
 impl Default for SearchRequest {
     fn default() -> Self {
@@ -4823,7 +6800,9 @@ impl Default for SearchRequest {
 }
 
 impl SearchRequest {
-    pub fn effective_limit(&self) -> usize { self.limit.clamp(1, 100) as usize }
+    pub fn effective_limit(&self) -> usize {
+        self.limit.clamp(1, 100) as usize
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
@@ -4896,7 +6875,9 @@ pub struct SearchLoadRequest {
     pub persist: bool,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SearchLoadResponse {
@@ -4909,7 +6890,10 @@ impl SearchLoadRequest {
     pub fn to_context_block(&self) -> ContextBlock {
         let ttl = normalize_search_ttl(&self.ttl);
         let session_or_global = self.session_id.clone().unwrap_or_else(|| "global".into());
-        let scene_id_for_seed = self.scene_id.clone().or_else(|| self.hit.scopes.get("scene_id").cloned());
+        let scene_id_for_seed = self
+            .scene_id
+            .clone()
+            .or_else(|| self.hit.scopes.get("scene_id").cloned());
         let stable_seed = match ttl.as_str() {
             "scene" => serde_json::json!({
                 "search_doc_id": &self.hit.search_doc_id,
@@ -4932,37 +6916,66 @@ impl SearchLoadRequest {
                 "ttl": &ttl,
             }),
         };
-        let suffix = stable_json_hash(&stable_seed).replace("sha256:", "").chars().take(24).collect::<String>();
+        let suffix = stable_json_hash(&stable_seed)
+            .replace("sha256:", "")
+            .chars()
+            .take(24)
+            .collect::<String>();
         let (scope, stability) = match (self.cache_zone, ttl.as_str()) {
             (CacheZone::PinnedMiddle, "scene") => (
                 Scope {
                     scope_type: ScopeType::Scene,
-                    scope_id: self.scene_id.clone()
+                    scope_id: self
+                        .scene_id
+                        .clone()
                         .or_else(|| self.hit.scopes.get("scene_id").cloned())
-                        .unwrap_or_else(|| self.session_id.clone().unwrap_or_else(|| "scene_unknown".into())),
+                        .unwrap_or_else(|| {
+                            self.session_id
+                                .clone()
+                                .unwrap_or_else(|| "scene_unknown".into())
+                        }),
                 },
                 Stability::SceneStable,
             ),
             (CacheZone::PinnedMiddle, "session") => (
-                Scope { scope_type: ScopeType::Session, scope_id: self.session_id.clone().unwrap_or_else(|| "session_unknown".into()) },
+                Scope {
+                    scope_type: ScopeType::Session,
+                    scope_id: self
+                        .session_id
+                        .clone()
+                        .unwrap_or_else(|| "session_unknown".into()),
+                },
                 Stability::SceneStable,
             ),
             (CacheZone::Prefix, _) => (
-                self.ruleset_id.as_ref().map(|id| Scope::ruleset(id.clone())).unwrap_or_else(Scope::global),
+                self.ruleset_id
+                    .as_ref()
+                    .map(|id| Scope::ruleset(id.clone()))
+                    .unwrap_or_else(Scope::global),
                 Stability::RarelyChanged,
             ),
             (_, "none") => (
-                Scope { scope_type: ScopeType::Session, scope_id: session_or_global.clone() },
+                Scope {
+                    scope_type: ScopeType::Session,
+                    scope_id: session_or_global.clone(),
+                },
                 Stability::Ephemeral,
             ),
             _ => (
-                Scope { scope_type: ScopeType::Turn, scope_id: self.turn_id.clone().unwrap_or_else(|| session_or_global.clone()) },
+                Scope {
+                    scope_type: ScopeType::Turn,
+                    scope_id: self
+                        .turn_id
+                        .clone()
+                        .unwrap_or_else(|| session_or_global.clone()),
+                },
                 Stability::TurnDynamic,
             ),
         };
 
         let source_refs = serde_json::to_string(&self.hit.source_refs).unwrap_or_default();
-        let (display_title, display_snippet, redaction_note) = player_facing_safe_search_text(&self.hit);
+        let (display_title, display_snippet, redaction_note) =
+            player_facing_safe_search_text(&self.hit);
         let mut block = ContextBlock::new(
             format!("runtime.search.{}.{}", session_or_global, suffix),
             BlockKind::LookupResult,
@@ -4988,7 +7001,11 @@ Source refs: `{}`",
             stability,
             self.cache_zone,
             scope,
-            if self.cache_zone == CacheZone::PinnedMiddle { 88 } else { 116 },
+            if self.cache_zone == CacheZone::PinnedMiddle {
+                88
+            } else {
+                116
+            },
         );
         block.tags = vec![
             "search_result".into(),
@@ -5000,19 +7017,32 @@ Source refs: `{}`",
         block.source_refs = self.hit.source_refs.clone();
         block.load_reason = Some(self.load_reason.clone());
         if ttl == "turn" {
-            block.expires_at_turn = Some(self.turn_id.clone().unwrap_or_else(|| "turn_unspecified".into()));
+            block.expires_at_turn = Some(
+                self.turn_id
+                    .clone()
+                    .unwrap_or_else(|| "turn_unspecified".into()),
+            );
         }
         if ttl == "scene" {
-            block.expires_at_scene = Some(self.scene_id.clone().or_else(|| self.hit.scopes.get("scene_id").cloned()).unwrap_or_else(|| "scene_unspecified".into()));
+            block.expires_at_scene = Some(
+                self.scene_id
+                    .clone()
+                    .or_else(|| self.hit.scopes.get("scene_id").cloned())
+                    .unwrap_or_else(|| "scene_unspecified".into()),
+            );
         }
         block
     }
 }
 
-
 fn player_facing_safe_search_text(hit: &SearchHit) -> (String, String, String) {
     let redact = std::env::var("TRPG_REDACT_GM_ONLY_SEARCH_HITS")
-        .map(|v| !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"))
+        .map(|v| {
+            !matches!(
+                v.to_ascii_lowercase().as_str(),
+                "0" | "false" | "off" | "no"
+            )
+        })
         .unwrap_or(true);
     if !redact || hit.visibility != Visibility::GmOnly {
         return (hit.title.clone(), hit.snippet.clone(), String::new());
@@ -5032,7 +7062,11 @@ fn player_facing_safe_search_text(hit: &SearchHit) -> (String, String, String) {
         }
     }
     if let Ok(env_terms) = std::env::var("TRPG_SECRET_TERM_OVERRIDES") {
-        for term in env_terms.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        for term in env_terms
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             secret_terms.push(term.to_string());
         }
     } else {
@@ -5070,7 +7104,6 @@ pub fn normalize_search_ttl(ttl: &str) -> String {
     }
 }
 
-
 // -----------------------------------------------------------------------------
 // Semantic Rule Binding & Ability Hydration Kernel (v1.9)
 // -----------------------------------------------------------------------------
@@ -5087,8 +7120,25 @@ pub enum BindingStatus {
     FailedNoSource,
     FailedConflict,
 }
-impl Default for BindingStatus { fn default() -> Self { Self::Unbound } }
-impl BindingStatus { pub fn as_str(&self) -> &'static str { match self { Self::Unbound => "unbound", Self::NamesOnly => "names_only", Self::HydrationRequested => "hydration_requested", Self::BoundProvisional => "bound_provisional", Self::BoundExact => "bound_exact", Self::NeedsReview => "needs_review", Self::FailedNoSource => "failed_no_source", Self::FailedConflict => "failed_conflict" } } }
+impl Default for BindingStatus {
+    fn default() -> Self {
+        Self::Unbound
+    }
+}
+impl BindingStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unbound => "unbound",
+            Self::NamesOnly => "names_only",
+            Self::HydrationRequested => "hydration_requested",
+            Self::BoundProvisional => "bound_provisional",
+            Self::BoundExact => "bound_exact",
+            Self::NeedsReview => "needs_review",
+            Self::FailedNoSource => "failed_no_source",
+            Self::FailedConflict => "failed_conflict",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -5102,14 +7152,49 @@ pub enum RuleBindingTargetKind {
     ConditionDefinition,
     Unknown,
 }
-impl Default for RuleBindingTargetKind { fn default() -> Self { Self::Unknown } }
-impl RuleBindingTargetKind { pub fn as_str(&self) -> &'static str { match self { Self::ActorParameter => "actor_parameter", Self::ObjectDefinition => "object_definition", Self::AbilityDefinition => "ability_definition", Self::CheckContract => "check_contract", Self::EffectContract => "effect_contract", Self::ContestProfile => "contest_profile", Self::ConditionDefinition => "condition_definition", Self::Unknown => "unknown" } } }
+impl Default for RuleBindingTargetKind {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+impl RuleBindingTargetKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ActorParameter => "actor_parameter",
+            Self::ObjectDefinition => "object_definition",
+            Self::AbilityDefinition => "ability_definition",
+            Self::CheckContract => "check_contract",
+            Self::EffectContract => "effect_contract",
+            Self::ContestProfile => "contest_profile",
+            Self::ConditionDefinition => "condition_definition",
+            Self::Unknown => "unknown",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum RuntimeUrgency { Immediate, BeforeResolution, Soon, Background }
-impl Default for RuntimeUrgency { fn default() -> Self { Self::Soon } }
-impl RuntimeUrgency { pub fn as_str(&self) -> &'static str { match self { Self::Immediate => "immediate", Self::BeforeResolution => "before_resolution", Self::Soon => "soon", Self::Background => "background" } } }
+pub enum RuntimeUrgency {
+    Immediate,
+    BeforeResolution,
+    Soon,
+    Background,
+}
+impl Default for RuntimeUrgency {
+    fn default() -> Self {
+        Self::Soon
+    }
+}
+impl RuntimeUrgency {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Immediate => "immediate",
+            Self::BeforeResolution => "before_resolution",
+            Self::Soon => "soon",
+            Self::Background => "background",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct MaterializationRequest {
@@ -5190,7 +7275,6 @@ pub struct RuleBindingPacket {
     pub created_at: DateTime<Utc>,
 }
 
-
 // -----------------------------------------------------------------------------
 // Real Materialization Extractor & Binding Verifier (v1.10)
 // -----------------------------------------------------------------------------
@@ -5213,7 +7297,11 @@ pub enum MaterialTargetKind {
     ConditionDefinition,
     Unknown,
 }
-impl Default for MaterialTargetKind { fn default() -> Self { Self::Unknown } }
+impl Default for MaterialTargetKind {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
 impl MaterialTargetKind {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -5235,9 +7323,16 @@ impl MaterialTargetKind {
     }
     pub fn to_rule_binding_target(self) -> RuleBindingTargetKind {
         match self {
-            Self::ActorProfile | Self::NpcStatBlock | Self::VehicleCard | Self::EncounterCard => RuleBindingTargetKind::ActorParameter,
-            Self::ObjectDefinition | Self::ObjectInstance | Self::ArmorProfile | Self::DamageProfile => RuleBindingTargetKind::ObjectDefinition,
-            Self::AbilityDefinition | Self::AbilityInstance => RuleBindingTargetKind::AbilityDefinition,
+            Self::ActorProfile | Self::NpcStatBlock | Self::VehicleCard | Self::EncounterCard => {
+                RuleBindingTargetKind::ActorParameter
+            }
+            Self::ObjectDefinition
+            | Self::ObjectInstance
+            | Self::ArmorProfile
+            | Self::DamageProfile => RuleBindingTargetKind::ObjectDefinition,
+            Self::AbilityDefinition | Self::AbilityInstance => {
+                RuleBindingTargetKind::AbilityDefinition
+            }
             Self::CheckTarget => RuleBindingTargetKind::CheckContract,
             Self::EffectProfile => RuleBindingTargetKind::EffectContract,
             Self::ConditionDefinition => RuleBindingTargetKind::ConditionDefinition,
@@ -5254,9 +7349,21 @@ pub enum MaterializationUrgency {
     BackgroundPrewarm,
     AuditOnly,
 }
-impl Default for MaterializationUrgency { fn default() -> Self { Self::BeforeNarration } }
-impl MaterializationUrgency { pub fn as_str(&self) -> &'static str { match self { Self::BlockingMechanicalResolution => "blocking_mechanical_resolution", Self::BeforeNarration => "before_narration", Self::BackgroundPrewarm => "background_prewarm", Self::AuditOnly => "audit_only" } } }
-
+impl Default for MaterializationUrgency {
+    fn default() -> Self {
+        Self::BeforeNarration
+    }
+}
+impl MaterializationUrgency {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::BlockingMechanicalResolution => "blocking_mechanical_resolution",
+            Self::BeforeNarration => "before_narration",
+            Self::BackgroundPrewarm => "background_prewarm",
+            Self::AuditOnly => "audit_only",
+        }
+    }
+}
 
 // -----------------------------------------------------------------------------
 // Mechanics Search Skills & Parameter Facet Bindings (v1.12)
@@ -5275,7 +7382,11 @@ pub enum SearchSkillKind {
     SceneObject,
     GenericMechanical,
 }
-impl Default for SearchSkillKind { fn default() -> Self { Self::GenericMechanical } }
+impl Default for SearchSkillKind {
+    fn default() -> Self {
+        Self::GenericMechanical
+    }
+}
 impl SearchSkillKind {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -5305,8 +7416,26 @@ pub enum QueryPlanStepKind {
     Extractor,
     RuntimeWriteback,
 }
-impl Default for QueryPlanStepKind { fn default() -> Self { Self::Locator } }
-impl QueryPlanStepKind { pub fn as_str(&self) -> &'static str { match self { Self::Locator => "locator", Self::ExactEntity => "exact_entity", Self::Field => "field", Self::Procedure => "procedure", Self::ModuleCard => "module_card", Self::BroadFallback => "broad_fallback", Self::SemanticRerank => "semantic_rerank", Self::Extractor => "extractor", Self::RuntimeWriteback => "runtime_writeback" } } }
+impl Default for QueryPlanStepKind {
+    fn default() -> Self {
+        Self::Locator
+    }
+}
+impl QueryPlanStepKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Locator => "locator",
+            Self::ExactEntity => "exact_entity",
+            Self::Field => "field",
+            Self::Procedure => "procedure",
+            Self::ModuleCard => "module_card",
+            Self::BroadFallback => "broad_fallback",
+            Self::SemanticRerank => "semantic_rerank",
+            Self::Extractor => "extractor",
+            Self::RuntimeWriteback => "runtime_writeback",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -5331,8 +7460,36 @@ pub enum ParameterFacetKind {
     VisibilityBinding,
     Unknown,
 }
-impl Default for ParameterFacetKind { fn default() -> Self { Self::Unknown } }
-impl ParameterFacetKind { pub fn as_str(&self) -> &'static str { match self { Self::ActorCheckFacet => "actor_check_facet", Self::ActorDefenseFacet => "actor_defense_facet", Self::ActorResourceTrack => "actor_resource_track", Self::ActorConditionTrack => "actor_condition_track", Self::ObjectAttackFacet => "object_attack_facet", Self::ObjectDamageFacet => "object_damage_facet", Self::ObjectArmorFacet => "object_armor_facet", Self::ObjectDurabilityFacet => "object_durability_facet", Self::AbilityActivationFacet => "ability_activation_facet", Self::AbilityTriggerFacet => "ability_trigger_facet", Self::AbilityCostFacet => "ability_cost_facet", Self::AbilityEffectFacet => "ability_effect_facet", Self::CheckResolutionBinding => "check_resolution_binding", Self::ContestResolutionBinding => "contest_resolution_binding", Self::EffectDamageBinding => "effect_damage_binding", Self::EffectResourceBinding => "effect_resource_binding", Self::EffectConditionBinding => "effect_condition_binding", Self::VisibilityBinding => "visibility_binding", Self::Unknown => "unknown" } } }
+impl Default for ParameterFacetKind {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+impl ParameterFacetKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ActorCheckFacet => "actor_check_facet",
+            Self::ActorDefenseFacet => "actor_defense_facet",
+            Self::ActorResourceTrack => "actor_resource_track",
+            Self::ActorConditionTrack => "actor_condition_track",
+            Self::ObjectAttackFacet => "object_attack_facet",
+            Self::ObjectDamageFacet => "object_damage_facet",
+            Self::ObjectArmorFacet => "object_armor_facet",
+            Self::ObjectDurabilityFacet => "object_durability_facet",
+            Self::AbilityActivationFacet => "ability_activation_facet",
+            Self::AbilityTriggerFacet => "ability_trigger_facet",
+            Self::AbilityCostFacet => "ability_cost_facet",
+            Self::AbilityEffectFacet => "ability_effect_facet",
+            Self::CheckResolutionBinding => "check_resolution_binding",
+            Self::ContestResolutionBinding => "contest_resolution_binding",
+            Self::EffectDamageBinding => "effect_damage_binding",
+            Self::EffectResourceBinding => "effect_resource_binding",
+            Self::EffectConditionBinding => "effect_condition_binding",
+            Self::VisibilityBinding => "visibility_binding",
+            Self::Unknown => "unknown",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct SearchSkillProfile {
@@ -5404,7 +7561,6 @@ pub struct MechanicsSearchTrace {
     pub created_at: DateTime<Utc>,
 }
 
-
 // -----------------------------------------------------------------------------
 // Parameter Facet Executor data contracts (v1.13)
 // -----------------------------------------------------------------------------
@@ -5418,7 +7574,11 @@ pub enum FacetExecutionStatus {
     RejectedByValidator,
     DeferredNeedsBinding,
 }
-impl Default for FacetExecutionStatus { fn default() -> Self { Self::DeferredNeedsBinding } }
+impl Default for FacetExecutionStatus {
+    fn default() -> Self {
+        Self::DeferredNeedsBinding
+    }
+}
 impl FacetExecutionStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -5443,8 +7603,25 @@ pub enum FacetExecutionKind {
     VisibilityRedaction,
     TableLookup,
 }
-impl Default for FacetExecutionKind { fn default() -> Self { Self::EffectImpact } }
-impl FacetExecutionKind { pub fn as_str(&self) -> &'static str { match self { Self::EffectImpact => "effect_impact", Self::ContestResolution => "contest_resolution", Self::DamageReduction => "damage_reduction", Self::ResourceDelta => "resource_delta", Self::ConditionApply => "condition_apply", Self::ObjectStatePatch => "object_state_patch", Self::VisibilityRedaction => "visibility_redaction", Self::TableLookup => "table_lookup" } } }
+impl Default for FacetExecutionKind {
+    fn default() -> Self {
+        Self::EffectImpact
+    }
+}
+impl FacetExecutionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::EffectImpact => "effect_impact",
+            Self::ContestResolution => "contest_resolution",
+            Self::DamageReduction => "damage_reduction",
+            Self::ResourceDelta => "resource_delta",
+            Self::ConditionApply => "condition_apply",
+            Self::ObjectStatePatch => "object_state_patch",
+            Self::VisibilityRedaction => "visibility_redaction",
+            Self::TableLookup => "table_lookup",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct ParameterFacetExecution {
@@ -5506,8 +7683,25 @@ pub enum MaterializationDemandStatus {
     Failed,
     Superseded,
 }
-impl Default for MaterializationDemandStatus { fn default() -> Self { Self::Open } }
-impl MaterializationDemandStatus { pub fn as_str(&self) -> &'static str { match self { Self::Open => "open", Self::EvidenceCollected => "evidence_collected", Self::Extracted => "extracted", Self::Bound => "bound", Self::Verified => "verified", Self::Provisional => "provisional", Self::Failed => "failed", Self::Superseded => "superseded" } } }
+impl Default for MaterializationDemandStatus {
+    fn default() -> Self {
+        Self::Open
+    }
+}
+impl MaterializationDemandStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::EvidenceCollected => "evidence_collected",
+            Self::Extracted => "extracted",
+            Self::Bound => "bound",
+            Self::Verified => "verified",
+            Self::Provisional => "provisional",
+            Self::Failed => "failed",
+            Self::Superseded => "superseded",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct MaterializationDemand {
@@ -5560,9 +7754,39 @@ pub struct SourceEvidenceBundle {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ExtractorKind { ActorProfile, ObjectEntry, AbilityEntry, NpcCard, VehicleCard, DamageProfile, ArmorProfile, CheckProcedure, Condition, Generic }
-impl Default for ExtractorKind { fn default() -> Self { Self::Generic } }
-impl ExtractorKind { pub fn as_str(&self) -> &'static str { match self { Self::ActorProfile => "actor_profile", Self::ObjectEntry => "object_entry", Self::AbilityEntry => "ability_entry", Self::NpcCard => "npc_card", Self::VehicleCard => "vehicle_card", Self::DamageProfile => "damage_profile", Self::ArmorProfile => "armor_profile", Self::CheckProcedure => "check_procedure", Self::Condition => "condition", Self::Generic => "generic" } } }
+pub enum ExtractorKind {
+    ActorProfile,
+    ObjectEntry,
+    AbilityEntry,
+    NpcCard,
+    VehicleCard,
+    DamageProfile,
+    ArmorProfile,
+    CheckProcedure,
+    Condition,
+    Generic,
+}
+impl Default for ExtractorKind {
+    fn default() -> Self {
+        Self::Generic
+    }
+}
+impl ExtractorKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ActorProfile => "actor_profile",
+            Self::ObjectEntry => "object_entry",
+            Self::AbilityEntry => "ability_entry",
+            Self::NpcCard => "npc_card",
+            Self::VehicleCard => "vehicle_card",
+            Self::DamageProfile => "damage_profile",
+            Self::ArmorProfile => "armor_profile",
+            Self::CheckProcedure => "check_procedure",
+            Self::Condition => "condition",
+            Self::Generic => "generic",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct ExtractionRun {
@@ -5589,8 +7813,24 @@ pub enum BindingVerificationStatus {
     RejectedVisibilityLeak,
     RejectedSchemaInvalid,
 }
-impl Default for BindingVerificationStatus { fn default() -> Self { Self::ProvisionalNeedsAudit } }
-impl BindingVerificationStatus { pub fn as_str(&self) -> &'static str { match self { Self::VerifiedExact => "verified_exact", Self::VerifiedPartial => "verified_partial", Self::ProvisionalNeedsAudit => "provisional_needs_audit", Self::RejectedNoSource => "rejected_no_source", Self::RejectedContradictory => "rejected_contradictory", Self::RejectedVisibilityLeak => "rejected_visibility_leak", Self::RejectedSchemaInvalid => "rejected_schema_invalid" } } }
+impl Default for BindingVerificationStatus {
+    fn default() -> Self {
+        Self::ProvisionalNeedsAudit
+    }
+}
+impl BindingVerificationStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::VerifiedExact => "verified_exact",
+            Self::VerifiedPartial => "verified_partial",
+            Self::ProvisionalNeedsAudit => "provisional_needs_audit",
+            Self::RejectedNoSource => "rejected_no_source",
+            Self::RejectedContradictory => "rejected_contradictory",
+            Self::RejectedVisibilityLeak => "rejected_visibility_leak",
+            Self::RejectedSchemaInvalid => "rejected_schema_invalid",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct BindingVerificationResult {
@@ -5646,29 +7886,164 @@ pub enum AbilityKind {
     ObjectGrantedAbility,
     Unknown,
 }
-impl Default for AbilityKind { fn default() -> Self { Self::Unknown } }
-impl AbilityKind { pub fn as_str(&self) -> &'static str { match self { Self::Spell => "spell", Self::Cantrip => "cantrip", Self::Ritual => "ritual", Self::CombatFeat => "combat_feat", Self::RoleAbility => "role_ability", Self::SkillUse => "skill_use", Self::Technique => "technique", Self::Stunt => "stunt", Self::Evocation => "evocation", Self::Program => "program", Self::NetrunAction => "netrun_action", Self::Reaction => "reaction", Self::PassiveTrait => "passive_trait", Self::ClassFeature => "class_feature", Self::MonsterAction => "monster_action", Self::LegendaryAction => "legendary_action", Self::LairAction => "lair_action", Self::AnomalyEffect => "anomaly_effect", Self::Requisition => "requisition", Self::ConditionGrantedAbility => "condition_granted_ability", Self::ObjectGrantedAbility => "object_granted_ability", Self::Unknown => "unknown" } } }
+impl Default for AbilityKind {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+impl AbilityKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Spell => "spell",
+            Self::Cantrip => "cantrip",
+            Self::Ritual => "ritual",
+            Self::CombatFeat => "combat_feat",
+            Self::RoleAbility => "role_ability",
+            Self::SkillUse => "skill_use",
+            Self::Technique => "technique",
+            Self::Stunt => "stunt",
+            Self::Evocation => "evocation",
+            Self::Program => "program",
+            Self::NetrunAction => "netrun_action",
+            Self::Reaction => "reaction",
+            Self::PassiveTrait => "passive_trait",
+            Self::ClassFeature => "class_feature",
+            Self::MonsterAction => "monster_action",
+            Self::LegendaryAction => "legendary_action",
+            Self::LairAction => "lair_action",
+            Self::AnomalyEffect => "anomaly_effect",
+            Self::Requisition => "requisition",
+            Self::ConditionGrantedAbility => "condition_granted_ability",
+            Self::ObjectGrantedAbility => "object_granted_ability",
+            Self::Unknown => "unknown",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum AbilitySourceKind { ActorClass, ActorSkill, SpeciesOrRace, ObjectGranted, StatusGranted, ModuleNpcCard, MonsterStatBlock, RulebookEntry, Anomaly, Unknown }
-impl Default for AbilitySourceKind { fn default() -> Self { Self::Unknown } }
-impl AbilitySourceKind { pub fn as_str(&self) -> &'static str { match self { Self::ActorClass => "actor_class", Self::ActorSkill => "actor_skill", Self::SpeciesOrRace => "species_or_race", Self::ObjectGranted => "object_granted", Self::StatusGranted => "status_granted", Self::ModuleNpcCard => "module_npc_card", Self::MonsterStatBlock => "monster_stat_block", Self::RulebookEntry => "rulebook_entry", Self::Anomaly => "anomaly", Self::Unknown => "unknown" } } }
+pub enum AbilitySourceKind {
+    ActorClass,
+    ActorSkill,
+    SpeciesOrRace,
+    ObjectGranted,
+    StatusGranted,
+    ModuleNpcCard,
+    MonsterStatBlock,
+    RulebookEntry,
+    Anomaly,
+    Unknown,
+}
+impl Default for AbilitySourceKind {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+impl AbilitySourceKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ActorClass => "actor_class",
+            Self::ActorSkill => "actor_skill",
+            Self::SpeciesOrRace => "species_or_race",
+            Self::ObjectGranted => "object_granted",
+            Self::StatusGranted => "status_granted",
+            Self::ModuleNpcCard => "module_npc_card",
+            Self::MonsterStatBlock => "monster_stat_block",
+            Self::RulebookEntry => "rulebook_entry",
+            Self::Anomaly => "anomaly",
+            Self::Unknown => "unknown",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum AbilityTriggerKind { OnActionDeclared, OnAttackDeclared, OnHit, OnMiss, OnDamageRoll, OnTakeDamage, OnDefense, OnFailedCheck, OnSuccessfulCheck, OnObjectInteraction, OnMovement, OnSceneStart, OnTurnStart, OnTurnEnd, OnRoundStart, OnWorldTimeTick, OnRest, OnDeathOrDying, OnNpcAttitudeChange, ManualActivation, PassiveAlways }
-impl Default for AbilityTriggerKind { fn default() -> Self { Self::ManualActivation } }
-impl AbilityTriggerKind { pub fn as_str(&self) -> &'static str { match self { Self::OnActionDeclared => "on_action_declared", Self::OnAttackDeclared => "on_attack_declared", Self::OnHit => "on_hit", Self::OnMiss => "on_miss", Self::OnDamageRoll => "on_damage_roll", Self::OnTakeDamage => "on_take_damage", Self::OnDefense => "on_defense", Self::OnFailedCheck => "on_failed_check", Self::OnSuccessfulCheck => "on_successful_check", Self::OnObjectInteraction => "on_object_interaction", Self::OnMovement => "on_movement", Self::OnSceneStart => "on_scene_start", Self::OnTurnStart => "on_turn_start", Self::OnTurnEnd => "on_turn_end", Self::OnRoundStart => "on_round_start", Self::OnWorldTimeTick => "on_world_time_tick", Self::OnRest => "on_rest", Self::OnDeathOrDying => "on_death_or_dying", Self::OnNpcAttitudeChange => "on_npc_attitude_change", Self::ManualActivation => "manual_activation", Self::PassiveAlways => "passive_always" } } }
+pub enum AbilityTriggerKind {
+    OnActionDeclared,
+    OnAttackDeclared,
+    OnHit,
+    OnMiss,
+    OnDamageRoll,
+    OnTakeDamage,
+    OnDefense,
+    OnFailedCheck,
+    OnSuccessfulCheck,
+    OnObjectInteraction,
+    OnMovement,
+    OnSceneStart,
+    OnTurnStart,
+    OnTurnEnd,
+    OnRoundStart,
+    OnWorldTimeTick,
+    OnRest,
+    OnDeathOrDying,
+    OnNpcAttitudeChange,
+    ManualActivation,
+    PassiveAlways,
+}
+impl Default for AbilityTriggerKind {
+    fn default() -> Self {
+        Self::ManualActivation
+    }
+}
+impl AbilityTriggerKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::OnActionDeclared => "on_action_declared",
+            Self::OnAttackDeclared => "on_attack_declared",
+            Self::OnHit => "on_hit",
+            Self::OnMiss => "on_miss",
+            Self::OnDamageRoll => "on_damage_roll",
+            Self::OnTakeDamage => "on_take_damage",
+            Self::OnDefense => "on_defense",
+            Self::OnFailedCheck => "on_failed_check",
+            Self::OnSuccessfulCheck => "on_successful_check",
+            Self::OnObjectInteraction => "on_object_interaction",
+            Self::OnMovement => "on_movement",
+            Self::OnSceneStart => "on_scene_start",
+            Self::OnTurnStart => "on_turn_start",
+            Self::OnTurnEnd => "on_turn_end",
+            Self::OnRoundStart => "on_round_start",
+            Self::OnWorldTimeTick => "on_world_time_tick",
+            Self::OnRest => "on_rest",
+            Self::OnDeathOrDying => "on_death_or_dying",
+            Self::OnNpcAttitudeChange => "on_npc_attitude_change",
+            Self::ManualActivation => "manual_activation",
+            Self::PassiveAlways => "passive_always",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
-pub struct AbilityActivationModel { pub activation_kind: String, pub action_cost: Option<String>, pub timing: Option<String>, pub notes: Option<String> }
+pub struct AbilityActivationModel {
+    pub activation_kind: String,
+    pub action_cost: Option<String>,
+    pub timing: Option<String>,
+    pub notes: Option<String>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
-pub struct AbilityCostModel { pub resource: Option<String>, pub amount_json: serde_json::Value, pub consumes_use: bool, pub notes: Option<String> }
+pub struct AbilityCostModel {
+    pub resource: Option<String>,
+    pub amount_json: serde_json::Value,
+    pub consumes_use: bool,
+    pub notes: Option<String>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
-pub struct AbilityTargetModel { pub target_kind: String, pub range: Option<String>, pub area: Option<String>, pub notes: Option<String> }
+pub struct AbilityTargetModel {
+    pub target_kind: String,
+    pub range: Option<String>,
+    pub area: Option<String>,
+    pub notes: Option<String>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
-pub struct AbilityEffectModel { pub effect_kind: String, pub summary: String, pub creates_check: bool, pub creates_effect: bool, pub duration: Option<String>, pub raw_json: serde_json::Value }
+pub struct AbilityEffectModel {
+    pub effect_kind: String,
+    pub summary: String,
+    pub creates_check: bool,
+    pub creates_effect: bool,
+    pub duration: Option<String>,
+    pub raw_json: serde_json::Value,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct AbilityRuleBinding {
@@ -5702,21 +8077,74 @@ pub struct AbilityDefinition {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum AbilityKnownState { Unknown, Suspected, KnownByActor, KnownByTable, HiddenGmOnly, Playwalled }
-impl Default for AbilityKnownState { fn default() -> Self { Self::KnownByActor } }
-impl AbilityKnownState { pub fn as_str(&self) -> &'static str { match self { Self::Unknown => "unknown", Self::Suspected => "suspected", Self::KnownByActor => "known_by_actor", Self::KnownByTable => "known_by_table", Self::HiddenGmOnly => "hidden_gm_only", Self::Playwalled => "playwalled" } } }
+pub enum AbilityKnownState {
+    Unknown,
+    Suspected,
+    KnownByActor,
+    KnownByTable,
+    HiddenGmOnly,
+    Playwalled,
+}
+impl Default for AbilityKnownState {
+    fn default() -> Self {
+        Self::KnownByActor
+    }
+}
+impl AbilityKnownState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Suspected => "suspected",
+            Self::KnownByActor => "known_by_actor",
+            Self::KnownByTable => "known_by_table",
+            Self::HiddenGmOnly => "hidden_gm_only",
+            Self::Playwalled => "playwalled",
+        }
+    }
+}
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum AbilityPreparedState { AlwaysAvailable, Prepared, NotPrepared, Expended, Dormant }
-impl Default for AbilityPreparedState { fn default() -> Self { Self::AlwaysAvailable } }
-impl AbilityPreparedState { pub fn as_str(&self) -> &'static str { match self { Self::AlwaysAvailable => "always_available", Self::Prepared => "prepared", Self::NotPrepared => "not_prepared", Self::Expended => "expended", Self::Dormant => "dormant" } } }
+pub enum AbilityPreparedState {
+    AlwaysAvailable,
+    Prepared,
+    NotPrepared,
+    Expended,
+    Dormant,
+}
+impl Default for AbilityPreparedState {
+    fn default() -> Self {
+        Self::AlwaysAvailable
+    }
+}
+impl AbilityPreparedState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AlwaysAvailable => "always_available",
+            Self::Prepared => "prepared",
+            Self::NotPrepared => "not_prepared",
+            Self::Expended => "expended",
+            Self::Dormant => "dormant",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
-pub struct AbilityUsesState { pub current: Option<i32>, pub max: Option<i32>, pub refresh: Option<String> }
+pub struct AbilityUsesState {
+    pub current: Option<i32>,
+    pub max: Option<i32>,
+    pub refresh: Option<String>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
-pub struct AbilityCooldownState { pub cooldown_until_tick: Option<i64>, pub cooldown_remaining_turns: Option<i32> }
+pub struct AbilityCooldownState {
+    pub cooldown_until_tick: Option<i64>,
+    pub cooldown_remaining_turns: Option<i32>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
-pub struct AbilityVisibilityState { pub visibility: Visibility, pub known_state: AbilityKnownState, pub reveal_conditions: Vec<String> }
+pub struct AbilityVisibilityState {
+    pub visibility: Visibility,
+    pub known_state: AbilityKnownState,
+    pub reveal_conditions: Vec<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct AbilityInstance {
@@ -5753,14 +8181,56 @@ pub struct AbilityTriggerBinding {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum AbilityActivationKind { Manual, Reaction, Triggered, Passive, GmSecret }
-impl Default for AbilityActivationKind { fn default() -> Self { Self::Manual } }
-impl AbilityActivationKind { pub fn as_str(&self) -> &'static str { match self { Self::Manual => "manual", Self::Reaction => "reaction", Self::Triggered => "triggered", Self::Passive => "passive", Self::GmSecret => "gm_secret" } } }
+pub enum AbilityActivationKind {
+    Manual,
+    Reaction,
+    Triggered,
+    Passive,
+    GmSecret,
+}
+impl Default for AbilityActivationKind {
+    fn default() -> Self {
+        Self::Manual
+    }
+}
+impl AbilityActivationKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Reaction => "reaction",
+            Self::Triggered => "triggered",
+            Self::Passive => "passive",
+            Self::GmSecret => "gm_secret",
+        }
+    }
+}
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum AbilityActivationStatus { Created, WaitingForGate, WaitingForRoll, Resolved, Superseded, Failed }
-impl Default for AbilityActivationStatus { fn default() -> Self { Self::Created } }
-impl AbilityActivationStatus { pub fn as_str(&self) -> &'static str { match self { Self::Created => "created", Self::WaitingForGate => "waiting_for_gate", Self::WaitingForRoll => "waiting_for_roll", Self::Resolved => "resolved", Self::Superseded => "superseded", Self::Failed => "failed" } } }
+pub enum AbilityActivationStatus {
+    Created,
+    WaitingForGate,
+    WaitingForRoll,
+    Resolved,
+    Superseded,
+    Failed,
+}
+impl Default for AbilityActivationStatus {
+    fn default() -> Self {
+        Self::Created
+    }
+}
+impl AbilityActivationStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::WaitingForGate => "waiting_for_gate",
+            Self::WaitingForRoll => "waiting_for_roll",
+            Self::Resolved => "resolved",
+            Self::Superseded => "superseded",
+            Self::Failed => "failed",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct AbilityActivationContract {
@@ -5786,7 +8256,6 @@ pub struct AbilityActivationContract {
     pub created_at_tick: Option<i64>,
 }
 
-
 // -----------------------------------------------------------------------------
 // Player-supplied value verification and table override policy (v1.10.2)
 // -----------------------------------------------------------------------------
@@ -5805,8 +8274,27 @@ pub enum PlayerSuppliedValueKind {
     AbilityCost,
     GenericParameter,
 }
-impl Default for PlayerSuppliedValueKind { fn default() -> Self { Self::GenericParameter } }
-impl PlayerSuppliedValueKind { pub fn as_str(&self) -> &'static str { match self { Self::DamageRollTotal => "damage_roll_total", Self::DamageExpression => "damage_expression", Self::WeaponDamage => "weapon_damage", Self::DifficultyValue => "difficulty_value", Self::RangeDifficulty => "range_difficulty", Self::ArmorValue => "armor_value", Self::HitPoints => "hit_points", Self::ResourceAmount => "resource_amount", Self::AbilityCost => "ability_cost", Self::GenericParameter => "generic_parameter" } } }
+impl Default for PlayerSuppliedValueKind {
+    fn default() -> Self {
+        Self::GenericParameter
+    }
+}
+impl PlayerSuppliedValueKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::DamageRollTotal => "damage_roll_total",
+            Self::DamageExpression => "damage_expression",
+            Self::WeaponDamage => "weapon_damage",
+            Self::DifficultyValue => "difficulty_value",
+            Self::RangeDifficulty => "range_difficulty",
+            Self::ArmorValue => "armor_value",
+            Self::HitPoints => "hit_points",
+            Self::ResourceAmount => "resource_amount",
+            Self::AbilityCost => "ability_cost",
+            Self::GenericParameter => "generic_parameter",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -5820,14 +8308,51 @@ pub enum PlayerValueVerificationStatus {
     NeedsClarification,
     AcceptedAsTablePreference,
 }
-impl Default for PlayerValueVerificationStatus { fn default() -> Self { Self::NeedsRuleLookup } }
-impl PlayerValueVerificationStatus { pub fn as_str(&self) -> &'static str { match self { Self::RuleConfirmed => "rule_confirmed", Self::TableConsistent => "table_consistent", Self::PlausibleProvisional => "plausible_provisional", Self::UnreasonableNeedsWarning => "unreasonable_needs_warning", Self::ContradictsKnownRule => "contradicts_known_rule", Self::NeedsRuleLookup => "needs_rule_lookup", Self::NeedsClarification => "needs_clarification", Self::AcceptedAsTablePreference => "accepted_as_table_preference" } } }
+impl Default for PlayerValueVerificationStatus {
+    fn default() -> Self {
+        Self::NeedsRuleLookup
+    }
+}
+impl PlayerValueVerificationStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RuleConfirmed => "rule_confirmed",
+            Self::TableConsistent => "table_consistent",
+            Self::PlausibleProvisional => "plausible_provisional",
+            Self::UnreasonableNeedsWarning => "unreasonable_needs_warning",
+            Self::ContradictsKnownRule => "contradicts_known_rule",
+            Self::NeedsRuleLookup => "needs_rule_lookup",
+            Self::NeedsClarification => "needs_clarification",
+            Self::AcceptedAsTablePreference => "accepted_as_table_preference",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum TableOverrideStatus { Proposed, AcceptedByTable, RejectedByGm, Superseded, AuditAfterSession }
-impl Default for TableOverrideStatus { fn default() -> Self { Self::Proposed } }
-impl TableOverrideStatus { pub fn as_str(&self) -> &'static str { match self { Self::Proposed => "proposed", Self::AcceptedByTable => "accepted_by_table", Self::RejectedByGm => "rejected_by_gm", Self::Superseded => "superseded", Self::AuditAfterSession => "audit_after_session" } } }
+pub enum TableOverrideStatus {
+    Proposed,
+    AcceptedByTable,
+    RejectedByGm,
+    Superseded,
+    AuditAfterSession,
+}
+impl Default for TableOverrideStatus {
+    fn default() -> Self {
+        Self::Proposed
+    }
+}
+impl TableOverrideStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Proposed => "proposed",
+            Self::AcceptedByTable => "accepted_by_table",
+            Self::RejectedByGm => "rejected_by_gm",
+            Self::Superseded => "superseded",
+            Self::AuditAfterSession => "audit_after_session",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct PlayerSuppliedValueClaim {
@@ -5900,15 +8425,65 @@ pub struct PlayerValueRefereeResult {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum GateBlockingLevel { HardBlocking, SoftBlocking, Advisory, DebugOnly }
-impl Default for GateBlockingLevel { fn default() -> Self { Self::HardBlocking } }
-impl GateBlockingLevel { pub fn as_str(&self) -> &'static str { match self { Self::HardBlocking => "hard_blocking", Self::SoftBlocking => "soft_blocking", Self::Advisory => "advisory", Self::DebugOnly => "debug_only" } } }
+pub enum GateBlockingLevel {
+    HardBlocking,
+    SoftBlocking,
+    Advisory,
+    DebugOnly,
+}
+impl Default for GateBlockingLevel {
+    fn default() -> Self {
+        Self::HardBlocking
+    }
+}
+impl GateBlockingLevel {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::HardBlocking => "hard_blocking",
+            Self::SoftBlocking => "soft_blocking",
+            Self::Advisory => "advisory",
+            Self::DebugOnly => "debug_only",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum CombatRoundActionKind { ContinuePressure, Attack, TakeCover, Move, Reload, UseObject, ActivateAbility, Withdraw, Hold, AssessRisk, Unknown }
-impl Default for CombatRoundActionKind { fn default() -> Self { Self::Unknown } }
-impl CombatRoundActionKind { pub fn as_str(&self) -> &'static str { match self { Self::ContinuePressure => "continue_pressure", Self::Attack => "attack", Self::TakeCover => "take_cover", Self::Move => "move", Self::Reload => "reload", Self::UseObject => "use_object", Self::ActivateAbility => "activate_ability", Self::Withdraw => "withdraw", Self::Hold => "hold", Self::AssessRisk => "assess_risk", Self::Unknown => "unknown" } } }
+pub enum CombatRoundActionKind {
+    ContinuePressure,
+    Attack,
+    TakeCover,
+    Move,
+    Reload,
+    UseObject,
+    ActivateAbility,
+    Withdraw,
+    Hold,
+    AssessRisk,
+    Unknown,
+}
+impl Default for CombatRoundActionKind {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+impl CombatRoundActionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ContinuePressure => "continue_pressure",
+            Self::Attack => "attack",
+            Self::TakeCover => "take_cover",
+            Self::Move => "move",
+            Self::Reload => "reload",
+            Self::UseObject => "use_object",
+            Self::ActivateAbility => "activate_ability",
+            Self::Withdraw => "withdraw",
+            Self::Hold => "hold",
+            Self::AssessRisk => "assess_risk",
+            Self::Unknown => "unknown",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct ActorMechanicalState {
@@ -5999,21 +8574,113 @@ pub struct DamagePacket {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum RollKind { Attack, Damage, SkillCheck, OpposedCheck, SavingThrow, PercentileCheck, Sanity, Harm, Chaos, SpellEffect, Resistance, TableRoll, SecretNotice, ResourceLoss, EffectRoll, Unknown }
-impl Default for RollKind { fn default() -> Self { Self::Unknown } }
-impl RollKind { pub fn as_str(&self) -> &'static str { match self { Self::Attack => "attack", Self::Damage => "damage", Self::SkillCheck => "skill_check", Self::OpposedCheck => "opposed_check", Self::SavingThrow => "saving_throw", Self::PercentileCheck => "percentile_check", Self::Sanity => "sanity", Self::Harm => "harm", Self::Chaos => "chaos", Self::SpellEffect => "spell_effect", Self::Resistance => "resistance", Self::TableRoll => "table_roll", Self::SecretNotice => "secret_notice", Self::ResourceLoss => "resource_loss", Self::EffectRoll => "effect_roll", Self::Unknown => "unknown" } } }
+pub enum RollKind {
+    Attack,
+    Damage,
+    SkillCheck,
+    OpposedCheck,
+    SavingThrow,
+    PercentileCheck,
+    Sanity,
+    Harm,
+    Chaos,
+    SpellEffect,
+    Resistance,
+    TableRoll,
+    SecretNotice,
+    ResourceLoss,
+    EffectRoll,
+    Unknown,
+}
+impl Default for RollKind {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+impl RollKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Attack => "attack",
+            Self::Damage => "damage",
+            Self::SkillCheck => "skill_check",
+            Self::OpposedCheck => "opposed_check",
+            Self::SavingThrow => "saving_throw",
+            Self::PercentileCheck => "percentile_check",
+            Self::Sanity => "sanity",
+            Self::Harm => "harm",
+            Self::Chaos => "chaos",
+            Self::SpellEffect => "spell_effect",
+            Self::Resistance => "resistance",
+            Self::TableRoll => "table_roll",
+            Self::SecretNotice => "secret_notice",
+            Self::ResourceLoss => "resource_loss",
+            Self::EffectRoll => "effect_roll",
+            Self::Unknown => "unknown",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum EffectTargetKind { Actor, Object, Scene, Clock, Relationship, Anomaly, Campaign, World }
-impl Default for EffectTargetKind { fn default() -> Self { Self::Actor } }
-impl EffectTargetKind { pub fn as_str(&self) -> &'static str { match self { Self::Actor => "actor", Self::Object => "object", Self::Scene => "scene", Self::Clock => "clock", Self::Relationship => "relationship", Self::Anomaly => "anomaly", Self::Campaign => "campaign", Self::World => "world" } } }
+pub enum EffectTargetKind {
+    Actor,
+    Object,
+    Scene,
+    Clock,
+    Relationship,
+    Anomaly,
+    Campaign,
+    World,
+}
+impl Default for EffectTargetKind {
+    fn default() -> Self {
+        Self::Actor
+    }
+}
+impl EffectTargetKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Actor => "actor",
+            Self::Object => "object",
+            Self::Scene => "scene",
+            Self::Clock => "clock",
+            Self::Relationship => "relationship",
+            Self::Anomaly => "anomaly",
+            Self::Campaign => "campaign",
+            Self::World => "world",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ParameterOperation { Add, Subtract, Set, AddCondition, RemoveCondition, AdvanceClock, MarkRevealed }
-impl Default for ParameterOperation { fn default() -> Self { Self::Set } }
-impl ParameterOperation { pub fn as_str(&self) -> &'static str { match self { Self::Add => "add", Self::Subtract => "subtract", Self::Set => "set", Self::AddCondition => "add_condition", Self::RemoveCondition => "remove_condition", Self::AdvanceClock => "advance_clock", Self::MarkRevealed => "mark_revealed" } } }
+pub enum ParameterOperation {
+    Add,
+    Subtract,
+    Set,
+    AddCondition,
+    RemoveCondition,
+    AdvanceClock,
+    MarkRevealed,
+}
+impl Default for ParameterOperation {
+    fn default() -> Self {
+        Self::Set
+    }
+}
+impl ParameterOperation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::Subtract => "subtract",
+            Self::Set => "set",
+            Self::AddCondition => "add_condition",
+            Self::RemoveCondition => "remove_condition",
+            Self::AdvanceClock => "advance_clock",
+            Self::MarkRevealed => "mark_revealed",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct TargetRef {
@@ -6101,20 +8768,71 @@ pub struct CombatRoundTransition {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ContestKind { StaticCheck, OpposedCheck, Attack, Defense, SavingThrow, PercentileAbility, Resistance, RulesetProcedure, Provisional }
-impl Default for ContestKind { fn default() -> Self { Self::Provisional } }
-impl ContestKind { pub fn as_str(&self) -> &'static str { match self { Self::StaticCheck => "static_check", Self::OpposedCheck => "opposed_check", Self::Attack => "attack", Self::Defense => "defense", Self::SavingThrow => "saving_throw", Self::PercentileAbility => "percentile_ability", Self::Resistance => "resistance", Self::RulesetProcedure => "ruleset_procedure", Self::Provisional => "provisional" } } }
+pub enum ContestKind {
+    StaticCheck,
+    OpposedCheck,
+    Attack,
+    Defense,
+    SavingThrow,
+    PercentileAbility,
+    Resistance,
+    RulesetProcedure,
+    Provisional,
+}
+impl Default for ContestKind {
+    fn default() -> Self {
+        Self::Provisional
+    }
+}
+impl ContestKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::StaticCheck => "static_check",
+            Self::OpposedCheck => "opposed_check",
+            Self::Attack => "attack",
+            Self::Defense => "defense",
+            Self::SavingThrow => "saving_throw",
+            Self::PercentileAbility => "percentile_ability",
+            Self::Resistance => "resistance",
+            Self::RulesetProcedure => "ruleset_procedure",
+            Self::Provisional => "provisional",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ContestVerificationStatus { VerifiedExact, VerifiedPartial, ProvisionalNeedsBinding, RejectedNoSource, RejectedSchemaInvalid }
-impl Default for ContestVerificationStatus { fn default() -> Self { Self::ProvisionalNeedsBinding } }
-impl ContestVerificationStatus { pub fn as_str(&self) -> &'static str { match self { Self::VerifiedExact => "verified_exact", Self::VerifiedPartial => "verified_partial", Self::ProvisionalNeedsBinding => "provisional_needs_binding", Self::RejectedNoSource => "rejected_no_source", Self::RejectedSchemaInvalid => "rejected_schema_invalid" } } }
+pub enum ContestVerificationStatus {
+    VerifiedExact,
+    VerifiedPartial,
+    ProvisionalNeedsBinding,
+    RejectedNoSource,
+    RejectedSchemaInvalid,
+}
+impl Default for ContestVerificationStatus {
+    fn default() -> Self {
+        Self::ProvisionalNeedsBinding
+    }
+}
+impl ContestVerificationStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::VerifiedExact => "verified_exact",
+            Self::VerifiedPartial => "verified_partial",
+            Self::ProvisionalNeedsBinding => "provisional_needs_binding",
+            Self::RejectedNoSource => "rejected_no_source",
+            Self::RejectedSchemaInvalid => "rejected_schema_invalid",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CheckResolutionModel {
-    StaticTargetNumber { value: i32, label: String },
+    StaticTargetNumber {
+        value: i32,
+        label: String,
+    },
     OpposedRoll {
         attacker_expression: String,
         #[serde(default)]
@@ -6125,13 +8843,32 @@ pub enum CheckResolutionModel {
         defender_value: Option<i32>,
         defender_roll_visibility: RollVisibility,
     },
-    AttackVsDefense { attack_expression: String, defender_actor_id: Option<String>, defense_label: String, defense_value: i32 },
-    PercentileRollUnder { ability_label: String, ability_value: i32 },
-    SavingThrow { dc: i32, save_label: String, defender_actor_ids: Vec<String> },
-    RulesetProcedureLookup { procedure_label: String, unresolved_fields: Vec<String> },
+    AttackVsDefense {
+        attack_expression: String,
+        defender_actor_id: Option<String>,
+        defense_label: String,
+        defense_value: i32,
+    },
+    PercentileRollUnder {
+        ability_label: String,
+        ability_value: i32,
+    },
+    SavingThrow {
+        dc: i32,
+        save_label: String,
+        defender_actor_ids: Vec<String>,
+    },
+    RulesetProcedureLookup {
+        procedure_label: String,
+        unresolved_fields: Vec<String>,
+    },
     /// Count dice showing `target_face` in the rolled pool; success when the
     /// count >= `threshold`. Resolution reads the per-die array, not the sum.
-    DicePoolCount { target_face: i32, threshold: i32, label: String },
+    DicePoolCount {
+        target_face: i32,
+        threshold: i32,
+        label: String,
+    },
     /// Opposed dice-pool (e.g. Triangle): attacker and defender each roll their
     /// OWN pool and count dice showing `target_face`; the side with more hits
     /// wins (ties favor the defender — engine convention). Mirrors OpposedRoll
@@ -6145,9 +8882,19 @@ pub enum CheckResolutionModel {
         defender_expression: String,
         defender_roll_visibility: RollVisibility,
     },
-    Provisional { reason: String, suggested_target: Option<i32> },
+    Provisional {
+        reason: String,
+        suggested_target: Option<i32>,
+    },
 }
-impl Default for CheckResolutionModel { fn default() -> Self { Self::Provisional { reason: "no contest model selected".into(), suggested_target: None } } }
+impl Default for CheckResolutionModel {
+    fn default() -> Self {
+        Self::Provisional {
+            reason: "no contest model selected".into(),
+            suggested_target: None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct OppositionProfile {
@@ -6226,8 +8973,13 @@ mod module_graph_compat_tests {
         n.extraction_status = SceneExtractionStatus::DeepExtracted;
         n.page_start = Some(17);
         n.referenced_npc_ids = vec!["npc_russell".into()];
-        n.links = vec![ScenarioLink { to_node_id: "loc2".into(), reason: "可达".into(),
-            clue_id: None, link_type: LinkType::Spatial, source_anchor: None }];
+        n.links = vec![ScenarioLink {
+            to_node_id: "loc2".into(),
+            reason: "可达".into(),
+            clue_id: None,
+            link_type: LinkType::Spatial,
+            source_anchor: None,
+        }];
         let s = serde_json::to_string(&n).unwrap();
         let back: ScenarioNode = serde_json::from_str(&s).unwrap();
         assert_eq!(back.extraction_status, SceneExtractionStatus::DeepExtracted);
@@ -6242,7 +8994,8 @@ mod module_graph_compat_tests {
         // 旧 bundle 无 spoiler 键 → 反序列化为空 SpoilerMeta（向后兼容）。
         let old = r#"{"node_id":"n1","title":"序幕","node_type":"chapter","summary":"s",
             "read_aloud":null,"gm_notes":null,"links":[],"assets":[],"data":null}"#;
-        let n: ScenarioNode = serde_json::from_str(old).expect("旧 bundle（无 spoiler）应可反序列化");
+        let n: ScenarioNode =
+            serde_json::from_str(old).expect("旧 bundle（无 spoiler）应可反序列化");
         assert!(n.spoiler.is_empty(), "旧 bundle → 空 spoiler");
         // 带 spoiler 的场景节点 round-trip。
         let mut node = ScenarioNode::default();
@@ -6260,7 +9013,8 @@ mod module_graph_compat_tests {
     // 旧 ScenarioLink（无 link_type）→ 默认 Sequential。
     #[test]
     fn old_link_defaults_to_sequential() {
-        let l: ScenarioLink = serde_json::from_str(r#"{"to_node_id":"x","reason":"r","clue_id":null}"#).unwrap();
+        let l: ScenarioLink =
+            serde_json::from_str(r#"{"to_node_id":"x","reason":"r","clue_id":null}"#).unwrap();
         assert_eq!(l.link_type, LinkType::Sequential);
     }
 
@@ -6268,11 +9022,20 @@ mod module_graph_compat_tests {
     #[test]
     fn scenario_link_source_anchor_roundtrips_and_defaults() {
         // 旧 link(无 source_anchor)→ None
-        let old: ScenarioLink = serde_json::from_str(r#"{"to_node_id":"b","reason":"r","clue_id":null}"#).unwrap();
-        assert!(old.source_anchor.is_none(), "旧 link 无 source_anchor → None");
+        let old: ScenarioLink =
+            serde_json::from_str(r#"{"to_node_id":"b","reason":"r","clue_id":null}"#).unwrap();
+        assert!(
+            old.source_anchor.is_none(),
+            "旧 link 无 source_anchor → None"
+        );
         // 新 link round-trip
-        let l = ScenarioLink { to_node_id: "b".into(), reason: "门".into(), clue_id: None,
-            link_type: LinkType::Trigger, source_anchor: Some("原文片段".into()) };
+        let l = ScenarioLink {
+            to_node_id: "b".into(),
+            reason: "门".into(),
+            clue_id: None,
+            link_type: LinkType::Trigger,
+            source_anchor: Some("原文片段".into()),
+        };
         let back: ScenarioLink = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
         assert_eq!(back.source_anchor.as_deref(), Some("原文片段"));
     }
@@ -6281,13 +9044,34 @@ mod module_graph_compat_tests {
     #[test]
     fn enum_wire_format_is_snake_case() {
         use serde_json::json;
-        assert_eq!(serde_json::to_value(SceneExtractionStatus::SkeletonOnly).unwrap(), json!("skeleton_only"));
-        assert_eq!(serde_json::to_value(SceneExtractionStatus::DeepExtracted).unwrap(), json!("deep_extracted"));
-        assert_eq!(serde_json::to_value(ModuleContentClass::Bp2CustomRule).unwrap(), json!("bp2_custom_rule"));
-        assert_eq!(serde_json::to_value(ModuleContentClass::Bp3Index).unwrap(), json!("bp3_index"));
-        assert_eq!(serde_json::to_value(ModuleContentClass::Story).unwrap(), json!("story"));
-        assert_eq!(serde_json::to_value(LinkType::Spatial).unwrap(), json!("spatial"));
-        assert_eq!(serde_json::to_value(LinkType::Sequential).unwrap(), json!("sequential"));
+        assert_eq!(
+            serde_json::to_value(SceneExtractionStatus::SkeletonOnly).unwrap(),
+            json!("skeleton_only")
+        );
+        assert_eq!(
+            serde_json::to_value(SceneExtractionStatus::DeepExtracted).unwrap(),
+            json!("deep_extracted")
+        );
+        assert_eq!(
+            serde_json::to_value(ModuleContentClass::Bp2CustomRule).unwrap(),
+            json!("bp2_custom_rule")
+        );
+        assert_eq!(
+            serde_json::to_value(ModuleContentClass::Bp3Index).unwrap(),
+            json!("bp3_index")
+        );
+        assert_eq!(
+            serde_json::to_value(ModuleContentClass::Story).unwrap(),
+            json!("story")
+        );
+        assert_eq!(
+            serde_json::to_value(LinkType::Spatial).unwrap(),
+            json!("spatial")
+        );
+        assert_eq!(
+            serde_json::to_value(LinkType::Sequential).unwrap(),
+            json!("sequential")
+        );
     }
 }
 
@@ -6364,29 +9148,69 @@ mod resource_helpers_tests {
         ];
         let clean = normalize_resource_tracks(&dirty);
         assert_eq!(clean.len(), 2);
-        assert!(clean.iter().any(|t| t.get("id").and_then(|v| v.as_str()) == Some("hit_points")));
-        assert!(clean.iter().any(|t| t.get("name").and_then(|v| v.as_str()) == Some("Stress")));
+        assert!(clean
+            .iter()
+            .any(|t| t.get("id").and_then(|v| v.as_str()) == Some("hit_points")));
+        assert!(clean
+            .iter()
+            .any(|t| t.get("name").and_then(|v| v.as_str()) == Some("Stress")));
         assert!(!clean.iter().any(|t| t.get("field_id").is_some()));
     }
 
     #[test]
     fn resolve_track_id_maps_hp_alias_and_resource_path() {
-        let k = RuleKernel { resource_tracks: coc_tracks(), ..Default::default() };
-        assert_eq!(resolve_resource_track_id("hp.current", &k).as_deref(), Some("hit_points"));
-        assert_eq!(resolve_resource_track_id("hp", &k).as_deref(), Some("hit_points"));
-        assert_eq!(resolve_resource_track_id("resources.sanity.current", &k).as_deref(), Some("sanity"));
-        assert_eq!(resolve_resource_track_id("resources.SANITY.current", &k).as_deref(), Some("sanity"));
-        assert_eq!(resolve_resource_track_id("resources.unknown.current", &k), None);
+        let k = RuleKernel {
+            resource_tracks: coc_tracks(),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_resource_track_id("hp.current", &k).as_deref(),
+            Some("hit_points")
+        );
+        assert_eq!(
+            resolve_resource_track_id("hp", &k).as_deref(),
+            Some("hit_points")
+        );
+        assert_eq!(
+            resolve_resource_track_id("resources.sanity.current", &k).as_deref(),
+            Some("sanity")
+        );
+        assert_eq!(
+            resolve_resource_track_id("resources.SANITY.current", &k).as_deref(),
+            Some("sanity")
+        );
+        assert_eq!(
+            resolve_resource_track_id("resources.unknown.current", &k),
+            None
+        );
     }
 
     #[test]
     fn armor_damage_math() {
-        assert_eq!(apply_armor_damage(100, 15, None, ParameterOperation::Subtract), (85, 0));
-        assert_eq!(apply_armor_damage(100, 15, Some(5), ParameterOperation::Subtract), (90, 5));
-        assert_eq!(apply_armor_damage(100, 3, Some(5), ParameterOperation::Subtract), (100, 5));
-        assert_eq!(apply_armor_damage(100, 15, Some(5), ParameterOperation::Add), (115, 0));
-        assert_eq!(apply_armor_damage(100, 30, Some(5), ParameterOperation::Set), (30, 0));
-        assert_eq!(apply_armor_damage(10, 50, None, ParameterOperation::Subtract), (0, 0));
+        assert_eq!(
+            apply_armor_damage(100, 15, None, ParameterOperation::Subtract),
+            (85, 0)
+        );
+        assert_eq!(
+            apply_armor_damage(100, 15, Some(5), ParameterOperation::Subtract),
+            (90, 5)
+        );
+        assert_eq!(
+            apply_armor_damage(100, 3, Some(5), ParameterOperation::Subtract),
+            (100, 5)
+        );
+        assert_eq!(
+            apply_armor_damage(100, 15, Some(5), ParameterOperation::Add),
+            (115, 0)
+        );
+        assert_eq!(
+            apply_armor_damage(100, 30, Some(5), ParameterOperation::Set),
+            (30, 0)
+        );
+        assert_eq!(
+            apply_armor_damage(10, 50, None, ParameterOperation::Subtract),
+            (0, 0)
+        );
     }
 
     #[test]
@@ -6401,11 +9225,27 @@ mod resource_helpers_tests {
     #[test]
     fn match_seed_prefers_derived_from_link() {
         // hit_points track 显式链接到公式层 hp_max；resources 只有 hp_max 键。
-        let tracks = vec![json!({"id":"hit_points","kind":"health","max":100,"initial":0,
-            "owner_kind":"actor","derived_from":"hp_max"})];
+        let tracks = vec![
+            json!({"id":"hit_points","kind":"health","max":100,"initial":0,
+            "owner_kind":"actor","derived_from":"hp_max"}),
+        ];
         let seeds = match_seed(&json!({"hp_max": 12}), &tracks);
-        assert_eq!(seeds.get("hit_points"), Some(&(Some(12), Some(12))),
-            "derived_from 应把 hit_points 从 resources[hp_max] 播种");
+        assert_eq!(
+            seeds.get("hit_points"),
+            Some(&(Some(12), Some(12))),
+            "derived_from 应把 hit_points 从 resources[hp_max] 播种"
+        );
+    }
+
+    #[test]
+    fn match_seed_uses_normalized_track_name_when_id_differs() {
+        let tracks = vec![
+            json!({"id":"hp","name":"Hit Points","kind":"health","max":100,"owner_kind":"actor"}),
+            json!({"id":"mp","name":"Magic Points","kind":"points","owner_kind":"actor"}),
+        ];
+        let seeds = match_seed(&json!({"hit_points": 12, "magic_points": 11}), &tracks);
+        assert_eq!(seeds.get("hp"), Some(&(Some(12), Some(12))));
+        assert_eq!(seeds.get("mp"), Some(&(Some(11), Some(11))));
     }
 
     #[test]
@@ -6414,7 +9254,11 @@ mod resource_helpers_tests {
         let seeds = match_seed(&json!({"sanity": 65}), &coc_tracks());
         assert_eq!(seeds.get("sanity"), Some(&(Some(65), Some(65))));
         let seeds = match_seed(&json!({}), &coc_tracks());
-        assert_eq!(seeds.get("hit_points"), Some(&(Some(0), Some(100))), "无种子回退 kernel 静态");
+        assert_eq!(
+            seeds.get("hit_points"),
+            Some(&(Some(0), Some(100))),
+            "无种子回退 kernel 静态"
+        );
     }
 
     #[test]
@@ -6427,21 +9271,40 @@ mod resource_helpers_tests {
             json!({"id":"chaos","on_outcome":[{"op":"add"}]}), // 无 derived_from，原样保留
         ];
         let out = dedup_tracks_by_derived_from(&tracks);
-        let ids: Vec<&str> = out.iter().filter_map(|t| t.get("id").and_then(|v| v.as_str())).collect();
-        assert_eq!(ids, vec!["hit_points","sanity","chaos"], "inert hp stub 被去重, 其余保留原序: {ids:?}");
+        let ids: Vec<&str> = out
+            .iter()
+            .filter_map(|t| t.get("id").and_then(|v| v.as_str()))
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["hit_points", "sanity", "chaos"],
+            "inert hp stub 被去重, 其余保留原序: {ids:?}"
+        );
     }
 
     #[test]
     fn match_seed_dnd_hp_static_without_link_derived_with_link() {
         // D&D hit_points track, 公式层 id = hit_points_max。
         // 现存数据(无 derived_from): 查 resources["hit_points"] 落空 -> 回退 kernel 静态(冻结基线, 不变)。
-        let plain = vec![json!({"id":"hit_points","kind":"health","max":10,"initial":10,"owner_kind":"actor"})];
+        let plain = vec![
+            json!({"id":"hit_points","kind":"health","max":10,"initial":10,"owner_kind":"actor"}),
+        ];
         let seeds = match_seed(&json!({"hit_points_max": 27}), &plain);
-        assert_eq!(seeds.get("hit_points"), Some(&(Some(10), Some(10))), "无 derived_from: 冻结静态回退");
+        assert_eq!(
+            seeds.get("hit_points"),
+            Some(&(Some(10), Some(10))),
+            "无 derived_from: 冻结静态回退"
+        );
         // 重 parse 后(align 落 derived_from): 读派生 HP 上限(本特性的修复)。
-        let linked = vec![json!({"id":"hit_points","kind":"health","max":10,"initial":10,"owner_kind":"actor","derived_from":"hit_points_max"})];
+        let linked = vec![
+            json!({"id":"hit_points","kind":"health","max":10,"initial":10,"owner_kind":"actor","derived_from":"hit_points_max"}),
+        ];
         let seeds = match_seed(&json!({"hit_points_max": 27}), &linked);
-        assert_eq!(seeds.get("hit_points"), Some(&(Some(27), Some(27))), "有 derived_from: 读派生 HP");
+        assert_eq!(
+            seeds.get("hit_points"),
+            Some(&(Some(27), Some(27))),
+            "有 derived_from: 读派生 HP"
+        );
     }
 }
 
@@ -6457,7 +9320,11 @@ mod consumption_model_tests {
             "defender_roll_visibility":"private_gm_roll"});
         let m: CheckResolutionModel = serde_json::from_value(old).unwrap();
         match m {
-            CheckResolutionModel::OpposedRoll { attacker_value, defender_value, .. } => {
+            CheckResolutionModel::OpposedRoll {
+                attacker_value,
+                defender_value,
+                ..
+            } => {
                 assert_eq!(attacker_value, None);
                 assert_eq!(defender_value, None);
             }
@@ -6509,9 +9376,13 @@ mod derived_value_tier_tests {
         let v: DerivedValue = serde_json::from_value(json!({
             "field_id": "mechanic.attack", "formula": "1d20+5",
             "depends_on": [], "evaluator": "static_dc_contest"
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(v.tier, None);
-        assert!(v.is_exact_executable(), "absent tier => exact (backward compat)");
+        assert!(
+            v.is_exact_executable(),
+            "absent tier => exact (backward compat)"
+        );
         assert!(!v.is_provisional_seed());
         assert!(!v.is_operational_abstract());
     }
@@ -6524,7 +9395,8 @@ mod derived_value_tier_tests {
             "depends_on": ["stat","skill","dv"],
             "evaluator": "contest_profile",
             "tier": "provisional_seed"
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(v.tier.as_deref(), Some("provisional_seed"));
         assert!(v.is_provisional_seed());
         assert!(!v.is_exact_executable());
@@ -6537,7 +9409,8 @@ mod derived_value_tier_tests {
             "field_id": "hp_max", "formula": "floor(CON/2)+SIZ",
             "depends_on": ["con","siz"], "evaluator": "character_derived_value",
             "tier": "exact_executable"
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(v.tier.as_deref(), Some("exact_executable"));
         assert!(v.is_exact_executable());
         assert!(!v.is_provisional_seed());
@@ -6549,7 +9422,8 @@ mod derived_value_tier_tests {
             "field_id": "mechanic.damage", "formula": "weapon damage table result",
             "depends_on": ["weapon"], "evaluator": "table_driven_effect_resolution",
             "tier": "operational_abstract"
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(v.is_operational_abstract());
         assert!(!v.is_exact_executable());
         assert!(!v.is_provisional_seed());
@@ -6574,7 +9448,7 @@ mod derived_value_tier_tests {
 
 #[cfg(test)]
 mod pp_lifecycle_tests {
-    use super::{pp_lifecycle_rank, PP_STREAMING, PP_CRITICAL_DONE, PP_COMPLETE};
+    use super::{pp_lifecycle_rank, PP_COMPLETE, PP_CRITICAL_DONE, PP_STREAMING};
 
     #[test]
     fn lifecycle_ranks_are_strictly_monotonic() {
@@ -6626,7 +9500,10 @@ mod referee_value_bands_tests {
     fn kernel_without_referee_value_bands_defaults_none() {
         let json = serde_json::json!({"kernel_id":"x","ruleset_id":"y","version":"1"});
         let k: RuleKernel = serde_json::from_value(json).unwrap();
-        assert!(k.referee_value_bands.is_none(), "old kernels must not fail on missing field");
+        assert!(
+            k.referee_value_bands.is_none(),
+            "old kernels must not fail on missing field"
+        );
     }
 }
 
@@ -6649,13 +9526,18 @@ mod module_graph_facilitation_tests {
     fn director_facilitation_roundtrips_on_module_graph() {
         let g = ModuleGraph {
             director_facilitation: Some(DirectorModuleConfig {
-                scene_facts: vec![DirectorSceneFact { text: "门半开着".into(), source: "read_aloud".into() }],
+                scene_facts: vec![DirectorSceneFact {
+                    text: "门半开着".into(),
+                    source: "read_aloud".into(),
+                }],
                 ..Default::default()
             }),
             ..Default::default()
         };
         let back: ModuleGraph = serde_json::from_value(serde_json::to_value(&g).unwrap()).unwrap();
-        let df = back.director_facilitation.expect("should survive roundtrip");
+        let df = back
+            .director_facilitation
+            .expect("should survive roundtrip");
         assert_eq!(df.scene_facts.len(), 1);
         assert_eq!(df.scene_facts[0].text, "门半开着");
     }

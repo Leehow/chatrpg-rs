@@ -1,0 +1,44 @@
+{
+  "name": "jrny_home_03_memory_failbranch",
+  "scenario_id": "JRNY-HOME-03-memory-failbranch",
+  "scenario_version": "1",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "session_id": null,
+  "_derived_from": "Negative-control sibling of JRNY-HOME-03-committed-memory-reload. Turn 1 records a provisional/uncommitted turn (from_committed_turn=false) and must fail closed as EXTRACTION_NOT_FROM_COMMITTED. Turn 2 records a proposal that carries no source/evidence ids and must fail closed as EVIDENCE_MISSING. Proves the committed-memory guards are not advisory.",
+  "setup": {
+    "character": {
+      "preferences": "技术型 Cyberpunk RED 角色，可立即开始第一幕。",
+      "auto_complete": true,
+      "require_persisted": true,
+      "require_session_binding": true
+    }
+  },
+  "stream_format": "jsonl",
+  "turns": [
+    {
+      "user_input": "我只是随口跟那位技术中间人寒暄了几句，没谈正事。",
+      "notes": "control (a): an ordinary uncommitted/provisional exchange did not yield a committed-turn proposal → EXTRACTION_NOT_FROM_COMMITTED.",
+      "memory": {
+        "memory_fact_id": "mf_rel_fixer_owes_player",
+        "require_proposal_from_committed": true,
+        "forbid_direct_commit": true,
+        "forbid_player_memory_summary_leak": true
+      }
+    },
+    {
+      "user_input": "我答应帮她，但这条记录没有任何来源凭据被记下来。",
+      "notes": "control (b): a proposal that carries no source/evidence ids → EVIDENCE_MISSING (an unbounded write is rejected).",
+      "memory": {
+        "memory_fact_id": "mf_rel_fixer_owes_player",
+        "require_evidence_ids": true,
+        "forbid_direct_commit": true,
+        "forbid_player_memory_summary_leak": true
+      }
+    }
+  ],
+  "forbidden_player_text": [],
+  "allow_debug_directives": false,
+  "allow_nonhuman_player_input": false,
+  "allow_manual_roll_input": false
+}

@@ -248,7 +248,11 @@ async fn handle_disconnect<M: DisconnectMarker + Sync>(
         marker
             .record(
                 turn_id,
-                &DisconnectInfo { policy, state_mutated, first_delta_sent },
+                &DisconnectInfo {
+                    policy,
+                    state_mutated,
+                    first_delta_sent,
+                },
             )
             .await;
         tracing::info!(
@@ -278,7 +282,10 @@ fn marks_state_mutation(ev: &TurnEvent) -> bool {
 }
 
 fn is_terminal(ev: &TurnEvent) -> bool {
-    matches!(ev, TurnEvent::TurnComplete { .. } | TurnEvent::TurnFailed { .. })
+    matches!(
+        ev,
+        TurnEvent::TurnComplete { .. } | TurnEvent::TurnFailed { .. }
+    )
 }
 
 /// 断开后续 drain：不再发送，只把剩余事件读到终态，让 execute_turn 尾段不因背压卡住。
@@ -302,10 +309,21 @@ async fn send_event_translated<S: EventSink>(
             sink.send(sse_delta(delta)).await?;
             *first_delta_sent = true;
         }
-        TurnEvent::AwaitingPlayerRoll { check_id, prompt_public } => {
+        TurnEvent::AwaitingPlayerRoll {
+            check_id,
+            prompt_public,
+        } => {
             sink.send(sse_delta(prompt_public)).await?;
-            sink.send(sse_phase("pending_check_created", json!({ "check_id": check_id }))).await?;
-            sink.send(sse_phase("done", json!({ "reason": "awaiting_player_roll" }))).await?;
+            sink.send(sse_phase(
+                "pending_check_created",
+                json!({ "check_id": check_id }),
+            ))
+            .await?;
+            sink.send(sse_phase(
+                "done",
+                json!({ "reason": "awaiting_player_roll" }),
+            ))
+            .await?;
         }
         TurnEvent::SceneTransition { from, to, reason } => {
             sink.send(sse_named(
@@ -322,10 +340,15 @@ async fn send_event_translated<S: EventSink>(
             .await?;
         }
         TurnEvent::PostprocessScheduled => {
-            sink.send(sse_phase("postprocess_scheduled", json!({}))).await?;
+            sink.send(sse_phase("postprocess_scheduled", json!({})))
+                .await?;
         }
         TurnEvent::HeavyPostprocessDone => {}
-        TurnEvent::TurnFailed { phase, message, recoverable } => {
+        TurnEvent::TurnFailed {
+            phase,
+            message,
+            recoverable,
+        } => {
             sink.send(sse_named(
                 "error",
                 json!({ "phase": phase, "message": message, "recoverable": recoverable }),
@@ -333,7 +356,11 @@ async fn send_event_translated<S: EventSink>(
             .await?;
         }
         TurnEvent::TurnWarning { phase, message } => {
-            sink.send(sse_named("warning", json!({ "phase": phase, "message": message }))).await?;
+            sink.send(sse_named(
+                "warning",
+                json!({ "phase": phase, "message": message }),
+            ))
+            .await?;
         }
         TurnEvent::TurnComplete { outcome } => {
             if let TurnOutcome::Narration(_) = outcome {

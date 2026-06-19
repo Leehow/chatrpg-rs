@@ -15,10 +15,15 @@ fn count_faces_null_face_unparseable_fails_closed_with_clear_reason() {
     match count_faces_model(&dc) {
         CheckResolutionModel::Provisional { reason, .. } => {
             let r = reason.to_ascii_lowercase();
-            assert!(r.contains("count_faces") || r.contains("target_face") || r.contains("face"),
-                "fail-closed reason 必须点名 count_faces/target_face，便于 GM 改道，实际={reason}");
+            assert!(
+                r.contains("count_faces") || r.contains("target_face") || r.contains("face"),
+                "fail-closed reason 必须点名 count_faces/target_face，便于 GM 改道，实际={reason}"
+            );
         }
-        other => panic!("无可解析面 → 必须 fail-closed 成 Provisional，得到 {:?}", other),
+        other => panic!(
+            "无可解析面 → 必须 fail-closed 成 Provisional，得到 {:?}",
+            other
+        ),
     }
 }
 
@@ -27,18 +32,33 @@ fn count_faces_recovers_face_from_compare_to() {
     // target_face=null 但 compare_to 带整数面 "3" → 还原成 DicePoolCount{face=3,threshold=1}。
     let dc = json!({"compare":"count_faces","target_face":null,"compare_to":"3","success_threshold":null});
     match count_faces_model(&dc) {
-        CheckResolutionModel::DicePoolCount { target_face, threshold, .. } =>
-            assert_eq!((target_face, threshold), (3, 1), "从 compare_to 还原面，阈值默认 1"),
+        CheckResolutionModel::DicePoolCount {
+            target_face,
+            threshold,
+            ..
+        } => assert_eq!(
+            (target_face, threshold),
+            (3, 1),
+            "从 compare_to 还原面，阈值默认 1"
+        ),
         other => panic!("应还原 DicePoolCount，得到 {:?}", other),
     }
 }
 
 #[test]
 fn count_faces_prefers_explicit_machine_fields() {
-    let dc = json!({"compare":"count_faces","compare_to":"3","target_face":5,"success_threshold":2});
+    let dc =
+        json!({"compare":"count_faces","compare_to":"3","target_face":5,"success_threshold":2});
     match count_faces_model(&dc) {
-        CheckResolutionModel::DicePoolCount { target_face, threshold, .. } =>
-            assert_eq!((target_face, threshold), (5, 2), "machine 字段优先于 compare_to"),
+        CheckResolutionModel::DicePoolCount {
+            target_face,
+            threshold,
+            ..
+        } => assert_eq!(
+            (target_face, threshold),
+            (5, 2),
+            "machine 字段优先于 compare_to"
+        ),
         other => panic!("应建 DicePoolCount，得到 {:?}", other),
     }
 }
@@ -71,9 +91,19 @@ fn pool_opposed_builds_dice_pool_opposed_model() {
     let contract = opposed_pool_contract("6d4");
     let model = build_pool_opposed_model(&contract, 3, 1, "6d4");
     match &model {
-        CheckResolutionModel::DicePoolOpposed { target_face, threshold, defender_actor_id, defender_expression, .. } => {
+        CheckResolutionModel::DicePoolOpposed {
+            target_face,
+            threshold,
+            defender_actor_id,
+            defender_expression,
+            ..
+        } => {
             assert_eq!((*target_face, *threshold), (3, 1));
-            assert_eq!(defender_actor_id.as_deref(), Some("npc.rival"), "防御方 id 来自 target_actor");
+            assert_eq!(
+                defender_actor_id.as_deref(),
+                Some("npc.rival"),
+                "防御方 id 来自 target_actor"
+            );
             assert_eq!(defender_expression, "6d4", "防御掷式=入参池掷式");
         }
         other => panic!("count_faces 对抗必须建 DicePoolOpposed，得到 {:?}", other),
@@ -97,9 +127,23 @@ fn pool_opposed_resolves_to_real_verdict_via_hit_counts() {
     // 复刻 resolve_outcome 的骰池对抗尾段：攻击池 3 hits、防御池 1 hit → 攻击方胜（非 null，真结算）。
     let contract = opposed_pool_contract("6d4");
     let model = build_pool_opposed_model(&contract, 3, 1, "6d4");
-    if let CheckResolutionModel::DicePoolOpposed { target_face, threshold, .. } = &model {
-        let (_t, s, d) = resolve_pool_opposed(*target_face, *threshold, &[3, 3, 1, 2, 4, 3], &[3, 1, 2, 2, 4, 1]);
-        assert_eq!(s, Some(true), "攻击 3 hits > 防御 1 hit → 攻击方胜（消费层真结算，非 null）");
+    if let CheckResolutionModel::DicePoolOpposed {
+        target_face,
+        threshold,
+        ..
+    } = &model
+    {
+        let (_t, s, d) = resolve_pool_opposed(
+            *target_face,
+            *threshold,
+            &[3, 3, 1, 2, 4, 3],
+            &[3, 1, 2, 2, 4, 1],
+        );
+        assert_eq!(
+            s,
+            Some(true),
+            "攻击 3 hits > 防御 1 hit → 攻击方胜（消费层真结算，非 null）"
+        );
         assert_eq!(d.as_deref(), Some("attacker_wins"));
     } else {
         panic!("应为 DicePoolOpposed");

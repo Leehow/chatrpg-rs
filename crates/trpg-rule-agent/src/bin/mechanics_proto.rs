@@ -48,32 +48,50 @@ fn write_audit_dump(path: &PathBuf, kernel: &RuleKernel) -> Result<()> {
     }
     std::fs::write(path, lines.join("\n") + "\n")
         .with_context(|| format!("write audit dump to {}", path.display()))?;
-    eprintln!("audit dump ({} entries) written to {}", kernel.mechanics_catalog.len(), path.display());
+    eprintln!(
+        "audit dump ({} entries) written to {}",
+        kernel.mechanics_catalog.len(),
+        path.display()
+    );
     Ok(())
 }
 
 /// `--missing` half: append each audited gap as a `catalog_coverage_gap`
 /// warning. Accepts a JSON array of strings or of {item, note} objects.
 fn append_coverage_gaps(kernel: &mut RuleKernel, raw: &str) -> Result<usize> {
-    let items: Vec<serde_json::Value> = serde_json::from_str(raw).context("parse --missing JSON array")?;
+    let items: Vec<serde_json::Value> =
+        serde_json::from_str(raw).context("parse --missing JSON array")?;
     let mut n = 0;
     for it in items {
         let (target, message) = match &it {
             serde_json::Value::String(s) => (s.clone(), String::new()),
             serde_json::Value::Object(o) => (
-                o.get("item").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                o.get("note").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                o.get("item")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                o.get("note")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
             ),
             _ => continue, // fail-closed: unrecognized shape is skipped, not invented
         };
         if target.is_empty() {
             continue;
         }
-        kernel.validation_report.warnings.push(trpg_model::ValidationMessage {
-            code: "catalog_coverage_gap".to_string(),
-            message: if message.is_empty() { "missing from mechanics_catalog (appendix-A coverage audit)".to_string() } else { message },
-            target: Some(target),
-        });
+        kernel
+            .validation_report
+            .warnings
+            .push(trpg_model::ValidationMessage {
+                code: "catalog_coverage_gap".to_string(),
+                message: if message.is_empty() {
+                    "missing from mechanics_catalog (appendix-A coverage audit)".to_string()
+                } else {
+                    message
+                },
+                target: Some(target),
+            });
         n += 1;
     }
     Ok(n)
@@ -110,7 +128,10 @@ fn schema_skill_names(kernel: &RuleKernel) -> Vec<String> {
 #[tokio::main]
 async fn main() -> Result<()> {
     // Subscriber so the compile loop's per-round tracing is visible.
-    tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).with_target(true).init();
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_target(true)
+        .init();
 
     // ---- args: strip the flag pairs first, then positionals ----
     let mut raw: Vec<String> = std::env::args().skip(1).collect();
@@ -131,7 +152,9 @@ async fn main() -> Result<()> {
     let budget: usize = raw.get(3).and_then(|s| s.parse().ok()).unwrap_or(14);
 
     let units = load_units(&units_path)?;
-    let sidecar_text = sidecar_path.as_ref().and_then(|p| std::fs::read_to_string(p).ok());
+    let sidecar_text = sidecar_path
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok());
     // serde(default) on the kernel's new regions keeps OLD artifacts loadable.
     let mut kernel: RuleKernel = serde_json::from_str(
         &std::fs::read_to_string(&kernel_path)
@@ -162,7 +185,8 @@ async fn main() -> Result<()> {
     }
 
     let mut cfg = LlmConfig::from_env()?;
-    cfg.model = std::env::var("TRPG_MECHANICS_COMPILE_MODEL").unwrap_or_else(|_| "gpt-5.4".to_string());
+    cfg.model =
+        std::env::var("TRPG_MECHANICS_COMPILE_MODEL").unwrap_or_else(|_| "gpt-5.4".to_string());
     let model = cfg.model.clone();
     let client = OpenAiCompatibleClient::new(cfg)?;
 
@@ -197,7 +221,9 @@ async fn main() -> Result<()> {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "<unclassified>".into());
         *by_kind.entry(kind).or_insert(0) += 1;
-        *by_tier.entry(tier_label(expressiveness_tier(e))).or_insert(0) += 1;
+        *by_tier
+            .entry(tier_label(expressiveness_tier(e)))
+            .or_insert(0) += 1;
     }
     eprintln!("\n==================== MECHANICS CATALOG SUMMARY ====================");
     eprintln!("⏱  COMPILE PASS WALL-CLOCK: {:.2}s", total.as_secs_f64());
@@ -216,7 +242,13 @@ async fn main() -> Result<()> {
             .ok()
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_default();
-        eprintln!("  {} | {} | {} | {}", e.id, e.name, kind, tier_label(expressiveness_tier(e)));
+        eprintln!(
+            "  {} | {} | {} | {}",
+            e.id,
+            e.name,
+            kind,
+            tier_label(expressiveness_tier(e))
+        );
     }
     eprintln!(
         "-- validation_report.warnings ({} total, {} pre-existing) --",
@@ -224,7 +256,12 @@ async fn main() -> Result<()> {
         pre_warnings
     );
     for w in &kernel.validation_report.warnings {
-        eprintln!("  {} [{}]: {}", w.code, w.target.as_deref().unwrap_or("-"), w.message);
+        eprintln!(
+            "  {} [{}]: {}",
+            w.code,
+            w.target.as_deref().unwrap_or("-"),
+            w.message
+        );
     }
     eprintln!("-- gap notes ({}) --", gaps.len());
     for g in &gaps {

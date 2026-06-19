@@ -4,28 +4,33 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{BTreeMap, HashSet};
-use trpg_agent::{looks_like_new_action_or_abandon, parse_roll_text, ParsedRollText};
 use trpg_ability::{AbilityService, AbilityTurnInput, AbilityTurnResult};
-use trpg_semantics::SemanticRuleBindingService;
+use trpg_agent::{looks_like_new_action_or_abandon, parse_roll_text, ParsedRollText};
 use trpg_combat::{CombatAgent, ConflictTurnInput, ConflictTurnResult};
 use trpg_contest::ContestService;
+use trpg_db::Db;
 use trpg_director::{ActionableSituationDirector, DirectorInput};
 use trpg_interaction::InteractionLifecycleKernel;
-use trpg_material::{MaterializationService, MaterializationTurnInput, MaterializationTurnResult};
-use trpg_mechanics::{insert_roll_plan, make_roll_plan_from_check, RefereeCombatService, FollowupCheck};
-use trpg_object::{ObjectService, ObjectTurnInput, ObjectTurnResult};
-use trpg_orchestrator::{TurnOrchestrator, TurnOrchestratorInput, TurnOrchestrationResult};
-use trpg_params::RuntimeParameterService;
-use trpg_db::Db;
 use trpg_llm::{system, user};
+use trpg_material::{MaterializationService, MaterializationTurnInput, MaterializationTurnResult};
+use trpg_mechanics::{
+    insert_roll_plan, make_roll_plan_from_check, FollowupCheck, RefereeCombatService,
+};
 use trpg_model::*;
+use trpg_object::{ObjectService, ObjectTurnInput, ObjectTurnResult};
+use trpg_orchestrator::{TurnOrchestrationResult, TurnOrchestrator, TurnOrchestratorInput};
+use trpg_params::RuntimeParameterService;
 use trpg_referee::PlayerValueRefereeService;
 use trpg_search::SearchService;
+use trpg_semantics::SemanticRuleBindingService;
 use trpg_time::WorldTimeService;
 use uuid::Uuid;
 
 mod chargen;
 pub use chargen::{generate_starter_character, materialize_actor_params, CreatedCharacter};
+
+pub mod entry_gate;
+pub use entry_gate::{actor_params_playable, evaluate_entry_gate, EntryGate, EntryGateBlock};
 
 pub mod binding;
 pub use binding::{
@@ -40,6 +45,12 @@ pub use binding_exec::{
 };
 
 pub mod knowledge_projection;
+pub use knowledge_projection::{
+    npc_action_projection_from_mind, npc_speech_projection_from_mind, project_for_gm_adjudication,
+    project_for_npc_action, project_for_npc_speech, project_for_player_narration,
+    GmAdjudicationProjection, NpcActionProjection, NpcOwnedProjection, NpcSpeechProjection,
+    PlayerNarrationProjection,
+};
 
 mod need_resolvers;
 
@@ -51,11 +62,10 @@ pub mod material_need_resolver;
 pub mod parameter_need_resolver;
 
 pub mod entity_need_resolver;
-pub use entity_need_resolver::{EntityNeedResolver, encode_entity_hint};
-
-pub mod npc_synth;
+pub use entity_need_resolver::{encode_entity_hint, EntityNeedResolver};
 
 pub mod npc_profile;
+pub mod npc_synth;
 pub use npc_profile::persona_from_profile;
 pub mod npc_relationship;
 pub use npc_relationship::{apply_npc_relationship_delta, next_relationship};
@@ -63,20 +73,34 @@ pub mod npc_mind;
 pub use npc_mind::{assemble_npc_mind_view, load_npc_mind_view};
 pub mod npc_behavior;
 pub use npc_behavior::{
-    derive_npc_behavior_plan, load_npc_behavior_plan, viewer_behavior_context,
+    derive_npc_behavior_plan, load_active_npc_guidance, load_npc_behavior_plan,
+    viewer_behavior_context,
+};
+pub mod knowledge_leak_verifier;
+pub use knowledge_leak_verifier::{
+    to_verifier_finding, to_verifier_findings, verify_npc_asserted_facts, verify_npc_disclosure,
+    verify_player_narration_leak,
 };
 
 mod scene_projection;
-pub use scene_projection::{module_entry_scene_id, contract_is_opposed, stamp_opposed_check};
-use scene_projection::{resolve_turn_scene_id, map_check_param_need};
+pub use scene_projection::{contract_is_opposed, module_entry_scene_id, stamp_opposed_check};
+use scene_projection::{map_check_param_need, resolve_turn_scene_id};
 
 mod truthgraph;
-pub use truthgraph::surfaced_events_for_scene;
+pub use truthgraph::{
+    context_surfaced_events_for_scene, player_exposed_events_for_scene_narration,
+};
 
 pub mod relationship_extraction;
 pub use relationship_extraction::{
     build_relationship_messages, parse_relationship_triples, relationship_facts_from_inputs,
-    resolve_entity_refs, EntityRef,
+    relationship_gate_should_run, resolve_entity_refs, text_has_social_signal, EntityRef,
+};
+
+pub mod memory_proposal;
+pub use memory_proposal::{
+    proposals_from_json, relationship_facts_to_proposals, review_and_commit_proposals,
+    try_proposals_from_json, CommitContext, CommitOutcome, CommitReport, CommitStatus,
 };
 
 mod spoiler_guard;
@@ -84,11 +108,16 @@ mod spoiler_guard;
 mod context_blocks;
 
 mod spotlight_roster;
-use context_blocks::{memory_snapshot_block, retrieved_memory_block, actionable_situation_block, clue_board_block, world_time_block, world_events_since_block, engine_protocol_block, engine_protocol_block_agent_loop, world_state_block, dynamic_text_block};
+use context_blocks::{
+    actionable_situation_block, clue_board_block, dynamic_text_block, engine_protocol_block,
+    engine_protocol_block_agent_loop, memory_snapshot_block, retrieved_memory_block,
+    world_events_since_block, world_state_block, world_time_block,
+};
 
 pub mod scene_navigation;
 pub use scene_navigation::{
-    extract_module_scenes, build_nav_prompt, scene_navigator, validate_transition, prefetch_frontier,
+    build_nav_prompt, extract_module_scenes, prefetch_frontier, scene_navigator,
+    validate_transition,
 };
 
 #[derive(Clone)]
@@ -107,7 +136,12 @@ pub struct AutoRollExecution {
 /// R5 turn 高水位守卫：回合入口处等上一回合的 critical 组落账（pp_lifecycle >= critical_done）。
 /// fail-closed——从不硬拒玩家：无上一回合 / 已达 critical / heavy 未完（critical_done 非 complete）
 /// 均立即放行；仅当上一回合仍 < critical_done 时 bounded 轮询，超时 warn 放行。
-pub async fn await_prev_turn_critical(db: &Db, session_id: &str, timeout_ms: u64, interval_ms: u64) {
+pub async fn await_prev_turn_critical(
+    db: &Db,
+    session_id: &str,
+    timeout_ms: u64,
+    interval_ms: u64,
+) {
     let reached = |phase: &Option<String>| -> bool {
         match phase {
             None => true, // 无上一回合 → 放行
@@ -117,7 +151,10 @@ pub async fn await_prev_turn_critical(db: &Db, session_id: &str, timeout_ms: u64
     // 首查：常见路径（critical 已落账 / 无上一回合）零等待。
     match db.load_last_turn_pp_lifecycle(session_id).await {
         Ok(ref phase) if reached(phase) => return,
-        Err(err) => { tracing::warn!(error = %err, session_id, "high-water guard load failed; proceeding (fail-closed)"); return; }
+        Err(err) => {
+            tracing::warn!(error = %err, session_id, "high-water guard load failed; proceeding (fail-closed)");
+            return;
+        }
         _ => {}
     }
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
@@ -130,7 +167,10 @@ pub async fn await_prev_turn_critical(db: &Db, session_id: &str, timeout_ms: u64
         tokio::time::sleep(step).await;
         match db.load_last_turn_pp_lifecycle(session_id).await {
             Ok(ref phase) if reached(phase) => return,
-            Err(err) => { tracing::warn!(error = %err, session_id, "high-water guard re-poll failed; proceeding (fail-closed)"); return; }
+            Err(err) => {
+                tracing::warn!(error = %err, session_id, "high-water guard re-poll failed; proceeding (fail-closed)");
+                return;
+            }
             _ => {}
         }
     }
@@ -180,7 +220,14 @@ impl RuntimeEngine {
         let req = SearchRequest {
             query: query.to_string(),
             mode: SearchMode::Auto,
-            domains: vec!["rules".into(), "source".into(), "parsed".into(), "modules".into(), "rulings".into(), "learned".into()],
+            domains: vec![
+                "rules".into(),
+                "source".into(),
+                "parsed".into(),
+                "modules".into(),
+                "rulings".into(),
+                "learned".into(),
+            ],
             scopes,
             limit: k as u32,
             explain: false,
@@ -195,7 +242,12 @@ impl RuntimeEngine {
                 .iter()
                 .take(k)
                 .map(|h| {
-                    let pg = h.source_refs.first().and_then(|r| r.page).map(|p| format!("p{p} ")).unwrap_or_default();
+                    let pg = h
+                        .source_refs
+                        .first()
+                        .and_then(|r| r.page)
+                        .map(|p| format!("p{p} "))
+                        .unwrap_or_default();
                     let title: String = h.title.chars().take(60).collect();
                     let snip: String = h.snippet.chars().take(400).collect();
                     format!("- [{pg}{title}] {snip}")
@@ -216,12 +268,19 @@ impl RuntimeEngine {
             let character_pack = self.db.load_character_onboarding_pack(ruleset_id).await?;
             match character_pack.as_ref() {
                 Some(pack) => {
-                    if pack.sheet_template.fields.is_empty() { missing.push("CharacterSheetTemplate.fields"); }
-                    if pack.creation_flows.iter().all(|flow| flow.steps.is_empty()) { missing.push("CharacterCreationFlow.steps"); }
-                    if pack.runtime_bindings.is_empty() { missing.push("CharacterRuntimeBinding"); }
+                    if pack.sheet_template.fields.is_empty() {
+                        missing.push("CharacterSheetTemplate.fields");
+                    }
+                    if pack.creation_flows.iter().all(|flow| flow.steps.is_empty()) {
+                        missing.push("CharacterCreationFlow.steps");
+                    }
+                    if pack.runtime_bindings.is_empty() {
+                        missing.push("CharacterRuntimeBinding");
+                    }
                     if pack.starter_character_pack.pregens.is_empty()
                         && pack.starter_character_pack.archetypes.is_empty()
-                        && pack.starter_character_pack.creation_shortcuts.is_empty() {
+                        && pack.starter_character_pack.creation_shortcuts.is_empty()
+                    {
                         missing.push("StarterCharacterPack");
                     }
                 }
@@ -229,7 +288,12 @@ impl RuntimeEngine {
             }
             if env_bool_runtime("TRPG_PLAYABILITY_GATE_BLOCKING", false) {
                 if let Some(module_id) = module_id {
-                    if !self.db.has_module_first_session_packet(module_id).await.unwrap_or(false) {
+                    if !self
+                        .db
+                        .has_module_first_session_packet(module_id)
+                        .await
+                        .unwrap_or(false)
+                    {
                         missing.push("ModuleFirstSessionPacket");
                     }
                 }
@@ -244,9 +308,24 @@ impl RuntimeEngine {
         }
 
         let session_id = format!("session_{}", Uuid::new_v4().simple());
-        self.db.create_session(&session_id, ruleset_id, module_id).await?;
-        let _ = WorldTimeService::new(self.db.clone()).ensure_session_time(&session_id, Some(&session_id)).await;
-        let _ = self.db.ensure_interaction_generation(&session_id).await;
+        self.ensure_session_initialized(&session_id, ruleset_id, module_id)
+            .await?;
+        Ok(session_id)
+    }
+
+    pub(crate) async fn ensure_session_initialized(
+        &self,
+        session_id: &str,
+        ruleset_id: &str,
+        module_id: Option<&str>,
+    ) -> Result<()> {
+        self.db
+            .create_session(session_id, ruleset_id, module_id)
+            .await?;
+        let _ = WorldTimeService::new(self.db.clone())
+            .ensure_session_time(session_id, Some(session_id))
+            .await;
+        let _ = self.db.ensure_interaction_generation(session_id).await;
         if let Some(mid) = module_id {
             // fail-closed：任何失败仅 warn，不阻断开局；但必须可见——曾有空图谱静默
             // 跳过激活，导致整局 current_scene_id=NULL 而无任何线索。
@@ -259,19 +338,36 @@ impl RuntimeEngine {
                 Err(err) => tracing::warn!(error = %err, module_id = mid, "load_module_graph failed; entry scene not activated"),
             }
         }
-        Ok(session_id)
+        Ok(())
     }
 
     pub async fn current_world_time(&self, session_id: &str) -> Result<WorldTimeState> {
-        WorldTimeService::new(self.db.clone()).current(session_id).await
+        WorldTimeService::new(self.db.clone())
+            .current(session_id)
+            .await
     }
 
-    pub async fn advance_world_time(&self, request: TimeAdvanceRequest) -> Result<TimeAdvanceResult> {
-        WorldTimeService::new(self.db.clone()).advance(request).await
+    pub async fn advance_world_time(
+        &self,
+        request: TimeAdvanceRequest,
+    ) -> Result<TimeAdvanceResult> {
+        WorldTimeService::new(self.db.clone())
+            .advance(request)
+            .await
     }
 
-    pub async fn record_world_event(&self, session_id: &str, turn_id: Option<&str>, frame_id: Option<&str>, kind: WorldEventKind, event_json: serde_json::Value, visibility: Visibility) -> Result<WorldEvent> {
-        WorldTimeService::new(self.db.clone()).record_event(session_id, turn_id, frame_id, kind, event_json, visibility).await
+    pub async fn record_world_event(
+        &self,
+        session_id: &str,
+        turn_id: Option<&str>,
+        frame_id: Option<&str>,
+        kind: WorldEventKind,
+        event_json: serde_json::Value,
+        visibility: Visibility,
+    ) -> Result<WorldEvent> {
+        WorldTimeService::new(self.db.clone())
+            .record_event(session_id, turn_id, frame_id, kind, event_json, visibility)
+            .await
     }
 
     pub async fn prepare_turn_context(
@@ -286,20 +382,43 @@ impl RuntimeEngine {
         await_prev_turn_critical(&self.db, &request.session_id, 2000, 100).await;
         // 每回合单点把持久化的 current_scene_id 载入运行态（P4 投影）：state 缺场景且有模组时填入。
         let mut state_owned = state.clone();
-        if resolve_turn_scene_id(state_owned.scene_id.as_deref(), state_owned.module_id.as_deref(), None).is_none()
+        if resolve_turn_scene_id(
+            state_owned.scene_id.as_deref(),
+            state_owned.module_id.as_deref(),
+            None,
+        )
+        .is_none()
             && state_owned.module_id.is_some()
         {
-            let loaded = self.db.load_session_scene(&request.session_id).await.ok().flatten();
-            state_owned.scene_id = resolve_turn_scene_id(state_owned.scene_id.as_deref(), state_owned.module_id.as_deref(), loaded);
+            let loaded = self
+                .db
+                .load_session_scene(&request.session_id)
+                .await
+                .ok()
+                .flatten();
+            state_owned.scene_id = resolve_turn_scene_id(
+                state_owned.scene_id.as_deref(),
+                state_owned.module_id.as_deref(),
+                loaded,
+            );
         }
         let state = &state_owned;
-        let _ = InteractionLifecycleKernel::new(self.db.clone()).reconcile_session(&request.session_id).await;
+        let _ = InteractionLifecycleKernel::new(self.db.clone())
+            .reconcile_session(&request.session_id)
+            .await;
         // Load the project bundle FOR THIS RULESET (several rulesets may share a
         // DB; the latest-parsed one is not necessarily the one being played).
-        let project = match self.db.load_project_bundle_for_ruleset(&request.ruleset_id).await? {
-            Some(p) => p,
-            None => self.db.load_latest_project_bundle().await?.ok_or_else(|| anyhow!("no parsed project bundle found; run parse-all first"))?,
-        };
+        let project =
+            match self
+                .db
+                .load_project_bundle_for_ruleset(&request.ruleset_id)
+                .await?
+            {
+                Some(p) => p,
+                None => self.db.load_latest_project_bundle().await?.ok_or_else(|| {
+                    anyhow!("no parsed project bundle found; run parse-all first")
+                })?,
+            };
         let mut bundle_ids = Vec::new();
         for ruleset in &project.rulesets {
             if ruleset.ruleset_id == request.ruleset_id {
@@ -314,18 +433,27 @@ impl RuntimeEngine {
             }
         }
         if bundle_ids.is_empty() {
-            return Err(anyhow!("no bundle found for ruleset={} module={:?}", request.ruleset_id, request.module_id));
+            return Err(anyhow!(
+                "no bundle found for ruleset={} module={:?}",
+                request.ruleset_id,
+                request.module_id
+            ));
         }
 
         let mut blocks = self.db.list_context_blocks_for_bundles(&bundle_ids).await?;
         // P1-4：本回合 Need 取数的来源 trace（rule / scene / parameter / material），
         // 随返回的 CompiledContext 一同传出（见 merge_need_outcome）。
         let mut need_trace: Vec<NeedResolutionTrace> = Vec::new();
-        let material_refs: Vec<String> = state.pending_material_refs.iter()
+        let material_refs: Vec<String> = state
+            .pending_material_refs
+            .iter()
             .chain(state.active_material_refs.iter())
             .cloned()
             .collect();
-        let mut exact = self.db.find_material_blocks(&bundle_ids, &material_refs).await?;
+        let mut exact = self
+            .db
+            .find_material_blocks(&bundle_ids, &material_refs)
+            .await?;
         for b in &mut exact {
             if b.cache_zone == CacheZone::NeverPrompt {
                 b.cache_zone = CacheZone::DynamicTail;
@@ -334,39 +462,70 @@ impl RuntimeEngine {
         }
         blocks.extend(exact);
 
-        let _ = self.db.deactivate_runtime_turn_blocks(&request.session_id, &request.turn_id).await;
-        match self.db.list_runtime_context_blocks(&request.session_id, &request.turn_id, state.scene_id.as_deref()).await {
+        let _ = self
+            .db
+            .deactivate_runtime_turn_blocks(&request.session_id, &request.turn_id)
+            .await;
+        match self
+            .db
+            .list_runtime_context_blocks(
+                &request.session_id,
+                &request.turn_id,
+                state.scene_id.as_deref(),
+            )
+            .await
+        {
             Ok(mut runtime_loaded_blocks) => blocks.append(&mut runtime_loaded_blocks),
-            Err(err) => tracing::warn!(error = %err, "runtime-loaded search blocks failed; continuing"),
+            Err(err) => {
+                tracing::warn!(error = %err, "runtime-loaded search blocks failed; continuing")
+            }
         }
 
         if let Some(input) = current_input {
             // R2: query-driven RULE retrieval is acquired ONLY through the Need bus
             // (RuleNeedResolver → assist, which subsumes auto_search + learned-packet
             // matching and adds source_refs grounding).
-            match self.rule_need_blocks_for_turn(request, state, input, &mut need_trace).await {
+            match self
+                .rule_need_blocks_for_turn(request, state, input, &mut need_trace)
+                .await
+            {
                 Ok(mut rule_blocks) => blocks.append(&mut rule_blocks),
-                Err(err) => tracing::warn!(error = %err, "rule need bus failed; continuing without rule blocks"),
+                Err(err) => {
+                    tracing::warn!(error = %err, "rule need bus failed; continuing without rule blocks")
+                }
             }
         }
 
-        match self.memory_blocks_for_turn(request, state, current_input).await {
+        match self
+            .memory_blocks_for_turn(request, state, current_input)
+            .await
+        {
             Ok(mut memory_blocks) => blocks.append(&mut memory_blocks),
-            Err(err) => tracing::warn!(error = %err, "memory retrieval failed; continuing without memory blocks"),
+            Err(err) => {
+                tracing::warn!(error = %err, "memory retrieval failed; continuing without memory blocks")
+            }
         }
         match self.state_frame_blocks_for_turn(request).await {
             Ok(mut frame_blocks) => blocks.append(&mut frame_blocks),
-            Err(err) => tracing::warn!(error = %err, "working state frame retrieval failed; continuing without frame blocks"),
+            Err(err) => {
+                tracing::warn!(error = %err, "working state frame retrieval failed; continuing without frame blocks")
+            }
         }
         // R2: current-scene deep projection is acquired ONLY through the Need bus
         // (SceneNeedResolver).
         {
-            let project_module_ids: Vec<String> =
-                project.modules.iter().map(|m| m.module_id.clone()).collect();
+            let project_module_ids: Vec<String> = project
+                .modules
+                .iter()
+                .map(|m| m.module_id.clone())
+                .collect();
             let scene_need = trpg_need::Need::Scene(trpg_need::SceneNeed {
                 scopes: trpg_need::NeedScopes {
                     ruleset_id: request.ruleset_id.clone(),
-                    module_id: request.module_id.clone().or_else(|| state.module_id.clone()),
+                    module_id: request
+                        .module_id
+                        .clone()
+                        .or_else(|| state.module_id.clone()),
                     session_id: request.session_id.clone(),
                     turn_id: request.turn_id.clone(),
                     scene_id: state.scene_id.clone(),
@@ -374,20 +533,32 @@ impl RuntimeEngine {
                 project_module_ids,
             });
             let mut scene_bus = trpg_need::NeedBus::new();
-            scene_bus.register(Box::new(SceneNeedResolver { db: self.db.clone() }));
+            scene_bus.register(Box::new(SceneNeedResolver {
+                db: self.db.clone(),
+            }));
             scene_bus.emit(scene_need);
             let outcomes = scene_bus.resolve_all().await;
             for outcome in outcomes {
-                merge_need_outcome(&mut blocks, &mut need_trace, outcome, "scene", "turn context assembly");
+                merge_need_outcome(
+                    &mut blocks,
+                    &mut need_trace,
+                    outcome,
+                    "scene",
+                    "turn context assembly",
+                );
             }
         }
         match self.world_time_blocks_for_turn(request).await {
             Ok(mut time_blocks) => blocks.append(&mut time_blocks),
-            Err(err) => tracing::warn!(error = %err, "world time retrieval failed; continuing without world time blocks"),
+            Err(err) => {
+                tracing::warn!(error = %err, "world time retrieval failed; continuing without world time blocks")
+            }
         }
         match self.object_blocks_for_turn(request).await {
             Ok(mut object_blocks) => blocks.append(&mut object_blocks),
-            Err(err) => tracing::warn!(error = %err, "object graph projection failed; continuing without object blocks"),
+            Err(err) => {
+                tracing::warn!(error = %err, "object graph projection failed; continuing without object blocks")
+            }
         }
         // R2: actor-parameter blocks are acquired ONLY through the Need bus
         // (ParameterNeedResolver).
@@ -408,7 +579,13 @@ impl RuntimeEngine {
                 current_input: current_input.map(str::to_string),
             });
             match resolver.resolve(&need).await {
-                Ok(outcome) => merge_need_outcome(&mut blocks, &mut need_trace, outcome, "parameter", "turn context assembly"),
+                Ok(outcome) => merge_need_outcome(
+                    &mut blocks,
+                    &mut need_trace,
+                    outcome,
+                    "parameter",
+                    "turn context assembly",
+                ),
                 Err(err) => tracing::warn!(
                     error = %err,
                     "ParameterNeedResolver failed; continuing without actor parameter blocks"
@@ -417,11 +594,15 @@ impl RuntimeEngine {
         }
         match self.ability_blocks_for_turn(request).await {
             Ok(mut ability_blocks) => blocks.append(&mut ability_blocks),
-            Err(err) => tracing::warn!(error = %err, "ability graph projection failed; continuing without ability blocks"),
+            Err(err) => {
+                tracing::warn!(error = %err, "ability graph projection failed; continuing without ability blocks")
+            }
         }
         match self.rule_binding_blocks_for_turn(request).await {
             Ok(mut binding_blocks) => blocks.append(&mut binding_blocks),
-            Err(err) => tracing::warn!(error = %err, "rule binding projection failed; continuing without binding blocks"),
+            Err(err) => {
+                tracing::warn!(error = %err, "rule binding projection failed; continuing without binding blocks")
+            }
         }
         // R2: materialization blocks are acquired ONLY through the Need bus
         // (MaterialNeedResolver).
@@ -436,9 +617,18 @@ impl RuntimeEngine {
                 scene_id: state.scene_id.clone(),
             };
             let resolver = MaterialNeedResolver::new(self.db.clone());
-            let need = Need::Material(MaterialNeed { scopes, user_input: None });
+            let need = Need::Material(MaterialNeed {
+                scopes,
+                user_input: None,
+            });
             match resolver.resolve(&need).await {
-                Ok(outcome) => merge_need_outcome(&mut blocks, &mut need_trace, outcome, "material", "turn context assembly"),
+                Ok(outcome) => merge_need_outcome(
+                    &mut blocks,
+                    &mut need_trace,
+                    outcome,
+                    "material",
+                    "turn context assembly",
+                ),
                 Err(err) => tracing::warn!(
                     error = %err,
                     "MaterialNeedResolver failed; continuing without materialization blocks"
@@ -447,15 +637,21 @@ impl RuntimeEngine {
         }
         match self.player_value_referee_blocks_for_turn(request).await {
             Ok(mut referee_blocks) => blocks.append(&mut referee_blocks),
-            Err(err) => tracing::warn!(error = %err, "player value referee projection failed; continuing without referee blocks"),
+            Err(err) => {
+                tracing::warn!(error = %err, "player value referee projection failed; continuing without referee blocks")
+            }
         }
         match self.referee_combat_blocks_for_turn(request).await {
             Ok(mut mech_blocks) => blocks.append(&mut mech_blocks),
-            Err(err) => tracing::warn!(error = %err, "referee combat ledger projection failed; continuing without mechanical ledger blocks"),
+            Err(err) => {
+                tracing::warn!(error = %err, "referee combat ledger projection failed; continuing without mechanical ledger blocks")
+            }
         }
         match self.contest_blocks_for_turn(request).await {
             Ok(mut contest_blocks) => blocks.append(&mut contest_blocks),
-            Err(err) => tracing::warn!(error = %err, "contest/opposition projection failed; continuing without contest blocks"),
+            Err(err) => {
+                tracing::warn!(error = %err, "contest/opposition projection failed; continuing without contest blocks")
+            }
         }
         // R2: learned-packet matching is performed inside the steward's `assist`
         // (RuleNeedResolver), so there is no standalone learned-packet projection.
@@ -463,10 +659,16 @@ impl RuntimeEngine {
         // present, non-query); R2 leaves it untouched.
         match self.rule_steward_prefix_blocks_for_turn(request).await {
             Ok(mut steward_blocks) => blocks.append(&mut steward_blocks),
-            Err(err) => tracing::warn!(error = %err, "rule steward BP1 projection failed; continuing without active kernel blocks"),
+            Err(err) => {
+                tracing::warn!(error = %err, "rule steward BP1 projection failed; continuing without active kernel blocks")
+            }
         }
 
-        blocks.push(if state.agent_loop_protocol { engine_protocol_block_agent_loop() } else { engine_protocol_block() });
+        blocks.push(if state.agent_loop_protocol {
+            engine_protocol_block_agent_loop()
+        } else {
+            engine_protocol_block()
+        });
         blocks.push(world_state_block(state));
         if let Some(transcript) = recent_transcript {
             blocks.push(dynamic_text_block(
@@ -488,15 +690,29 @@ impl RuntimeEngine {
         }
 
         dedupe_blocks(&mut blocks);
-        let visible: Vec<ContextBlock> = blocks.into_iter()
+        let visible: Vec<ContextBlock> = blocks
+            .into_iter()
             .filter_map(|b| project_visibility(b, &request.viewer))
             .collect();
         let planned = plan_blocks(visible, state, request);
         let mut compiled = ContextBuilder::default().build(planned, request)?;
         // P1-4：把本回合 Need 取数 trace 挂到返回的 CompiledContext（source_refs 不再丢弃）。
         compiled.need_trace = need_trace;
-        for block in compiled.prefix_blocks.iter().chain(compiled.pinned_blocks.iter()).chain(compiled.dynamic_blocks.iter()) {
-            let _ = self.db.record_load_event(Some(&request.session_id), Some(&request.turn_id), block, block.load_reason.as_deref().unwrap_or("planner")).await;
+        for block in compiled
+            .prefix_blocks
+            .iter()
+            .chain(compiled.pinned_blocks.iter())
+            .chain(compiled.dynamic_blocks.iter())
+        {
+            let _ = self
+                .db
+                .record_load_event(
+                    Some(&request.session_id),
+                    Some(&request.turn_id),
+                    block,
+                    block.load_reason.as_deref().unwrap_or("planner"),
+                )
+                .await;
         }
         if let Ok(world_time) = self.current_world_time(&request.session_id).await {
             let watermark = ContextWatermark {
@@ -509,45 +725,122 @@ impl RuntimeEngine {
             let _ = self.db.upsert_context_watermark(&watermark).await;
         }
         // 反剧透 TruthGraph 起步切片（优化2 #5）——观测层 write-through：当前场景引用的
-        // clue/NPC 进了本回合 context，即记 EntitySurfaced（幂等 per-session）。fail-soft、
+        // clue/NPC 进了本回合 GM/runtime context，即记 ContextSurfaced（幂等 per-session）。
+        // P0c：这是隐藏内部装载（≠ 玩家暴露），不计入玩家暴露投影、不触发关系抽取。fail-soft、
         // 加在主 context 构建完之后（非关键路径），任何失败仅 warn、绝不影响返回的 compiled。
-        self.record_surfaced_entities(request, state).await;
+        self.record_context_surfaced_entities(request, state).await;
         Ok(compiled)
     }
 
     /// 反剧透 TruthGraph T1 观测写穿（fail-soft，零行为变更）：把**当前场景**引用的
-    /// 线索/NPC 记成幂等 `EntitySurfaced` 事件。无模组 / 无场景 / 图谱加载失败 → warn 跳过，
-    /// 绝不 error 回合。scene 引用经纯函数 [`surfaced_events_for_scene`] 映射后逐条
-    /// append（on-conflict-do-nothing 保 per-session 只记一次）。
-    async fn record_surfaced_entities(&self, request: &ContextRequest, state: &RuntimeState) {
+    /// 线索/NPC 记成幂等 `ContextSurfaced` 事件——"实体进了 GM/context"，**不**代表玩家
+    /// 已见（玩家暴露用 `PlayerExposed`/遗留 `EntitySurfaced`）。无模组 / 无场景 / 图谱加载
+    /// 失败 → warn 跳过，绝不 error 回合。scene 引用经纯函数
+    /// [`context_surfaced_events_for_scene`] 映射后逐条 append（on-conflict-do-nothing 保
+    /// per-session 只记一次）。
+    async fn record_context_surfaced_entities(
+        &self,
+        request: &ContextRequest,
+        state: &RuntimeState,
+    ) {
         let Some(module_id) = request.module_id.as_deref().or(state.module_id.as_deref()) else {
             return; // 无模组：纯规则书会话，无场景实体可记。
         };
         let Some(scene_id) = state.scene_id.as_deref() else {
-            tracing::warn!(module_id, "truthgraph: no current scene_id; skipping EntitySurfaced");
+            tracing::warn!(
+                module_id,
+                "truthgraph: no current scene_id; skipping ContextSurfaced"
+            );
             return;
         };
         let graph = match self.db.load_module_graph(module_id).await {
             Ok(Some(g)) => g,
             Ok(None) => {
-                tracing::warn!(module_id, "truthgraph: no module graph; skipping EntitySurfaced");
+                tracing::warn!(
+                    module_id,
+                    "truthgraph: no module graph; skipping ContextSurfaced"
+                );
                 return;
             }
             Err(err) => {
-                tracing::warn!(error = %err, module_id, "truthgraph: load_module_graph failed; skipping EntitySurfaced");
+                tracing::warn!(error = %err, module_id, "truthgraph: load_module_graph failed; skipping ContextSurfaced");
                 return;
             }
         };
         let Some(node) = graph.scenes.iter().find(|s| s.node_id == scene_id) else {
-            tracing::warn!(module_id, scene_id, "truthgraph: current scene not in graph; skipping EntitySurfaced");
+            tracing::warn!(
+                module_id,
+                scene_id,
+                "truthgraph: current scene not in graph; skipping ContextSurfaced"
+            );
             return;
         };
-        let events = surfaced_events_for_scene(&request.session_id, &request.turn_id, scene_id, node);
+        let events = context_surfaced_events_for_scene(
+            &request.session_id,
+            &request.turn_id,
+            scene_id,
+            node,
+        );
         for ev in &events {
             if let Err(err) = self.db.append_domain_event(ev).await {
-                tracing::warn!(error = %err, event_id = %ev.event_id, "truthgraph: append EntitySurfaced failed (fail-soft)");
+                tracing::warn!(error = %err, event_id = %ev.event_id, "truthgraph: append ContextSurfaced failed (fail-soft)");
             }
         }
+    }
+
+    /// 反剧透 TruthGraph 玩家暴露写穿（fail-soft）：如果当前场景引用的 NPC/线索名字
+    /// 实际出现在玩家可见叙事里，记 `PlayerExposed`。这只表示玩家见过/听见过该实体，
+    /// 不表示玩家知道其隐藏事实（不会写 `KnowledgeEdge`）。
+    pub async fn record_player_exposed_entities_for_narration(
+        &self,
+        request: &ContextRequest,
+        state: &RuntimeState,
+        fallback_scene_id: Option<&str>,
+        narration: &str,
+    ) -> usize {
+        if narration.trim().is_empty() {
+            return 0;
+        }
+        let Some(module_id) = request.module_id.as_deref().or(state.module_id.as_deref()) else {
+            return 0;
+        };
+        let Some(scene_id) = state.scene_id.as_deref().or(fallback_scene_id) else {
+            return 0;
+        };
+        let graph = match self.db.load_module_graph(module_id).await {
+            Ok(Some(g)) => g,
+            Ok(None) => return 0,
+            Err(err) => {
+                tracing::warn!(error = %err, module_id, "truthgraph: load_module_graph failed; skipping PlayerExposed");
+                return 0;
+            }
+        };
+        let Some(node) = graph.scenes.iter().find(|s| s.node_id == scene_id) else {
+            tracing::warn!(
+                module_id,
+                scene_id,
+                "truthgraph: current scene not in graph; skipping PlayerExposed"
+            );
+            return 0;
+        };
+        let events = player_exposed_events_for_scene_narration(
+            &request.session_id,
+            &request.turn_id,
+            scene_id,
+            node,
+            &graph,
+            narration,
+        );
+        let mut written = 0usize;
+        for ev in &events {
+            match self.db.append_domain_event(ev).await {
+                Ok(()) => written += 1,
+                Err(err) => {
+                    tracing::warn!(error = %err, event_id = %ev.event_id, "truthgraph: append PlayerExposed failed (fail-soft)")
+                }
+            }
+        }
+        written
     }
 
     /// 子项目2 知识图谱写穿（fail-soft，env 门控 `TRPG_RELATIONSHIP_EXTRACTION` 默认开）：
@@ -566,28 +859,46 @@ impl RuntimeEngine {
         turn_id: &str,
         module_id: Option<&str>,
         narration: &str,
+        active_npc_ids: &[String],
+        player_input: &str,
     ) -> usize {
-        if !relationship_extraction::relationship_extraction_enabled() || narration.trim().is_empty() {
+        if !relationship_extraction::relationship_extraction_enabled()
+            || narration.trim().is_empty()
+        {
             return 0;
         }
         let Some(module_id) = module_id else { return 0 };
-        let surfaced = self.db.list_surfaced_entities(session_id).await.unwrap_or_default();
+        let surfaced = self
+            .db
+            .list_surfaced_entities(session_id)
+            .await
+            .unwrap_or_default();
         if surfaced.len() < 2 {
             return 0; // 关系至少需要两个已知端点。
         }
-        // 成本闸：只在**本回合首次 surface 了新实体**时才抽（否则已知实体集没变、再抽只会
-        // 重得同样的三元组、白烧一次 LLM）。「新实体」= EntitySurfaced 行 turn_id==本回合
-        // （append 时冻结、on-conflict 不改），是 append 时落定的事实。fail-open：判定查询
-        // 出错时退回旧行为（照抽），宁可偶尔多花一次也不漏抽关系。
-        let new_this_turn = match self.db.has_entity_surfaced_in_turn(session_id, turn_id).await {
+        // TC-D3-04 社交闸：在「本回合 surface 了新实体」之外，再放行「有 active NPC 在场 +
+        // 玩家输入/念白含明确社交信号」的回合（威胁/讨价/帮助/欺骗…会改关系但不 surface 新实体）。
+        // 「新实体」= EntitySurfaced 行 turn_id==本回合（append 时冻结、on-conflict 不改）。
+        // fail-open：新实体判定查询出错时退回旧行为（当作有新实体照抽），宁可偶尔多花一次也不漏。
+        let new_this_turn = match self
+            .db
+            .has_entity_surfaced_in_turn(session_id, turn_id)
+            .await
+        {
             Ok(b) => b,
             Err(err) => {
                 tracing::warn!(error = %err, session_id, turn_id, "relationship: new-surface probe failed; proceeding (fail-open)");
                 true
             }
         };
-        if !new_this_turn {
-            return 0; // 本回合无新实体 → 跳过图谱加载与 LLM 调用。
+        let should_run = relationship_extraction::relationship_gate_should_run(
+            new_this_turn,
+            active_npc_ids.len(),
+            player_input,
+            narration,
+        );
+        if !should_run {
+            return 0; // 无新实体且无 active-NPC 社交信号 → 跳过图谱加载与 LLM 调用。
         }
         let graph = match self.db.load_module_graph(module_id).await {
             Ok(Some(g)) => g,
@@ -608,7 +919,7 @@ impl RuntimeEngine {
             &entities,
             narration,
             relationship_extraction::relationship_min_confidence(),
-            new_this_turn, // 成本闸：本回合无新实体则函数内 fail-closed 返回空（与上面早退一致）。
+            should_run, // 成本闸：闸关则函数内 fail-closed 返回空（与上面早退一致）。
         )
         .await;
         let mut written = 0usize;
@@ -621,7 +932,12 @@ impl RuntimeEngine {
             }
         }
         if written > 0 {
-            tracing::info!(session_id, turn_id, written, "relationship triples written to memory_facts");
+            tracing::info!(
+                session_id,
+                turn_id,
+                written,
+                "relationship triples written to memory_facts"
+            );
         }
         written
     }
@@ -636,7 +952,9 @@ impl RuntimeEngine {
         fact_id: &str,
         reason: Option<&str>,
     ) -> Result<()> {
-        self.db.record_revealed_fact(session_id, turn_id, fact_id, reason).await
+        self.db
+            .record_revealed_fact(session_id, turn_id, fact_id, reason)
+            .await
     }
 
     /// Single post-resolution funnel for EVERY check-resolution path. Runs the
@@ -644,9 +962,17 @@ impl RuntimeEngine {
     /// follow-ups) AND generic object rule effects (e.g. a firearm spending a
     /// round on attack). Centralizing here is why object effects can't miss the
     /// auto-roll combat route the way the old per-path hooks did.
-    async fn post_check_resolution(&self, contract: &CheckContract, result: &mut CheckResultRecord) -> Result<Option<FollowupCheck>> {
-        let followup = RefereeCombatService::new(self.db.clone()).after_check_resolved(contract, result).await?;
-        let _ = ObjectService::new(self.db.clone()).apply_object_rule_effects(&contract.session_id, contract).await;
+    async fn post_check_resolution(
+        &self,
+        contract: &CheckContract,
+        result: &mut CheckResultRecord,
+    ) -> Result<Option<FollowupCheck>> {
+        let followup = RefereeCombatService::new(self.db.clone())
+            .after_check_resolved(contract, result)
+            .await?;
+        let _ = ObjectService::new(self.db.clone())
+            .apply_object_rule_effects(&contract.session_id, contract)
+            .await;
         Ok(followup)
     }
 
@@ -656,12 +982,24 @@ impl RuntimeEngine {
         turn_id: &str,
         user_input: &str,
     ) -> Result<Option<CheckResultRecord>> {
-        let Some(pending) = self.db.get_open_pending_check(session_id).await? else { return Ok(None); };
+        let Some(pending) = self.db.get_open_pending_check(session_id).await? else {
+            return Ok(None);
+        };
         if !roll_input_available(user_input) {
             return Ok(None);
         }
-        let roll = self.resolve_roll_input(session_id, turn_id, Some(&pending.check_id), &pending.contract, user_input).await?;
-        let outcome = self.resolve_outcome_with_opposition(&pending.contract, &roll).await?;
+        let roll = self
+            .resolve_roll_input(
+                session_id,
+                turn_id,
+                Some(&pending.check_id),
+                &pending.contract,
+                user_input,
+            )
+            .await?;
+        let outcome = self
+            .resolve_outcome_with_opposition(&pending.contract, &roll)
+            .await?;
         let result = CheckResultRecord {
             check_id: pending.check_id.clone(),
             roll,
@@ -670,13 +1008,40 @@ impl RuntimeEngine {
             created_at: chrono::Utc::now(),
         };
         let mut result = result;
-        if let Ok(Some(object_result)) = ObjectService::new(self.db.clone()).apply_for_check_result(&result).await {
-            result.committed_patches.push(StatePatch::ObjectPatch { patch_id: format!("object_result_{}", object_result.interaction_id), object_id: object_result.applied_patches.first().and_then(|p| match p { ObjectPatch::TransferObject { object_id, .. } | ObjectPatch::SetObjectLocation { object_id, .. } | ObjectPatch::SetObjectVisibility { object_id, .. } | ObjectPatch::ModifyQuantity { object_id, .. } | ObjectPatch::DamageObject { object_id, .. } | ObjectPatch::DestroyObject { object_id, .. } | ObjectPatch::SetMechanicalState { object_id, .. } | ObjectPatch::TransformObject { object_id, .. } => Some(object_id.clone()), ObjectPatch::CreateObjectInstance { object, .. } => Some(object.object_id.clone()), ObjectPatch::AddObjectEdge { edge, .. } => Some(edge.from_object_id.clone()), ObjectPatch::RemoveObjectEdge { edge_id, .. } => Some(edge_id.clone()) }), patch_json: serde_json::to_value(&object_result).unwrap_or_else(|_| json!({})), reason: "object_interaction_result".into() });
+        if let Ok(Some(object_result)) = ObjectService::new(self.db.clone())
+            .apply_for_check_result(&result)
+            .await
+        {
+            result.committed_patches.push(StatePatch::ObjectPatch {
+                patch_id: format!("object_result_{}", object_result.interaction_id),
+                object_id: object_result.applied_patches.first().and_then(|p| match p {
+                    ObjectPatch::TransferObject { object_id, .. }
+                    | ObjectPatch::SetObjectLocation { object_id, .. }
+                    | ObjectPatch::SetObjectVisibility { object_id, .. }
+                    | ObjectPatch::ModifyQuantity { object_id, .. }
+                    | ObjectPatch::DamageObject { object_id, .. }
+                    | ObjectPatch::DestroyObject { object_id, .. }
+                    | ObjectPatch::SetMechanicalState { object_id, .. }
+                    | ObjectPatch::TransformObject { object_id, .. } => Some(object_id.clone()),
+                    ObjectPatch::CreateObjectInstance { object, .. } => {
+                        Some(object.object_id.clone())
+                    }
+                    ObjectPatch::AddObjectEdge { edge, .. } => Some(edge.from_object_id.clone()),
+                    ObjectPatch::RemoveObjectEdge { edge_id, .. } => Some(edge_id.clone()),
+                }),
+                patch_json: serde_json::to_value(&object_result).unwrap_or_else(|_| json!({})),
+                reason: "object_interaction_result".into(),
+            });
         }
-        let _ = self.post_check_resolution(&pending.contract, &mut result).await;
+        let _ = self
+            .post_check_resolution(&pending.contract, &mut result)
+            .await;
         self.db.insert_check_result(&result).await?;
-        self.db.update_pending_check_status(&pending.check_id, PendingCheckStatus::Resolved).await?;
-        self.close_resolved_check_gate(session_id, &pending.check_id).await;
+        self.db
+            .update_pending_check_status(&pending.check_id, PendingCheckStatus::Resolved)
+            .await?;
+        self.close_resolved_check_gate(session_id, &pending.check_id)
+            .await;
         Ok(Some(result))
     }
 
@@ -697,11 +1062,28 @@ impl RuntimeEngine {
             if !roll_input_available(user_input)
                 && lifecycle.player_input_supersedes_gate(gate, user_input)
             {
-                let _ = lifecycle.supersede_gate_for_terminal_intent(gate, "superseded_by_terminal_intent", user_input).await;
-                if let Some(check_id) = match &gate.expected_input { ExpectedInput::RollResult { check_id, .. } => Some(check_id.clone()), _ => None } {
-                    let _ = self.db.supersede_pending_check(&check_id, "superseded_by_terminal_intent", None).await;
+                let _ = lifecycle
+                    .supersede_gate_for_terminal_intent(
+                        gate,
+                        "superseded_by_terminal_intent",
+                        user_input,
+                    )
+                    .await;
+                if let Some(check_id) = match &gate.expected_input {
+                    ExpectedInput::RollResult { check_id, .. } => Some(check_id.clone()),
+                    _ => None,
+                } {
+                    let _ = self
+                        .db
+                        .supersede_pending_check(&check_id, "superseded_by_terminal_intent", None)
+                        .await;
                 }
-                return Ok(GateHandlingResult::GateSuperseded { gate_id: gate.gate_id.clone(), reason: "superseded_by_terminal_intent".into(), prompt_public: "[system]上一个交互窗口已关闭，继续处理你的新动作。[/system]".into() });
+                return Ok(GateHandlingResult::GateSuperseded {
+                    gate_id: gate.gate_id.clone(),
+                    reason: "superseded_by_terminal_intent".into(),
+                    prompt_public: "[system]上一个交互窗口已关闭，继续处理你的新动作。[/system]"
+                        .into(),
+                });
             }
         }
         let Some(pending) = self.db.get_open_pending_check(session_id).await? else {
@@ -710,10 +1092,18 @@ impl RuntimeEngine {
             // consume it. This turns `/roll` from an orphan RNG call into a
             // resolution of the active attack/effect/check whenever possible.
             if roll_input_available(user_input) {
-                if let Some(contract) = self.db.get_latest_unresolved_check_contract(session_id).await? {
-                    let result = self.resolve_check_with_input(session_id, turn_id, &contract, user_input).await?;
+                if let Some(contract) = self
+                    .db
+                    .get_latest_unresolved_check_contract(session_id)
+                    .await?
+                {
+                    let result = self
+                        .resolve_check_with_input(session_id, turn_id, &contract, user_input)
+                        .await?;
                     if let Some(next_pending) = self.db.get_open_pending_check(session_id).await? {
-                        if next_pending.check_id != contract.check_id && is_effect_or_damage_contract(&next_pending.contract) {
+                        if next_pending.check_id != contract.check_id
+                            && is_effect_or_damage_contract(&next_pending.contract)
+                        {
                             let prompt_public = next_pending.prompt_public.clone();
                             return Ok(GateHandlingResult::PendingFollowupCheckCreated {
                                 result,
@@ -728,8 +1118,19 @@ impl RuntimeEngine {
             }
             if let Some(gate) = open_gate.clone() {
                 if lifecycle.player_input_supersedes_gate(&gate, user_input) {
-                    let _ = lifecycle.supersede_gate_for_terminal_intent(&gate, SupersededReason::TerminalIntent.as_str(), user_input).await;
-                    return Ok(GateHandlingResult::GateSuperseded { gate_id: gate.gate_id.clone(), reason: SupersededReason::TerminalIntent.as_str().into(), prompt_public: "[system]上一个交互窗口已关闭，继续处理你的新动作。[/system]".into() });
+                    let _ = lifecycle
+                        .supersede_gate_for_terminal_intent(
+                            &gate,
+                            SupersededReason::TerminalIntent.as_str(),
+                            user_input,
+                        )
+                        .await;
+                    return Ok(GateHandlingResult::GateSuperseded {
+                        gate_id: gate.gate_id.clone(),
+                        reason: SupersededReason::TerminalIntent.as_str().into(),
+                        prompt_public:
+                            "[system]上一个交互窗口已关闭，继续处理你的新动作。[/system]".into(),
+                    });
                 }
                 return self.handle_choice_or_nonroll_gate(gate, user_input).await;
             }
@@ -737,14 +1138,38 @@ impl RuntimeEngine {
         };
         let gate = open_gate.unwrap_or_else(|| InteractionGate::from_pending_check(&pending));
         if lifecycle.player_input_supersedes_gate(&gate, user_input) {
-            self.db.update_pending_check_status(&pending.check_id, PendingCheckStatus::Superseded).await.ok();
-            let _ = lifecycle.supersede_gate_for_terminal_intent(&gate, SupersededReason::TerminalIntent.as_str(), user_input).await;
-            return Ok(GateHandlingResult::GateSuperseded { gate_id: gate.gate_id.clone(), reason: SupersededReason::TerminalIntent.as_str().into(), prompt_public: "[system]上一个检定/反应窗口已关闭，继续处理你的新动作。[/system]".into() });
+            self.db
+                .update_pending_check_status(&pending.check_id, PendingCheckStatus::Superseded)
+                .await
+                .ok();
+            let _ = lifecycle
+                .supersede_gate_for_terminal_intent(
+                    &gate,
+                    SupersededReason::TerminalIntent.as_str(),
+                    user_input,
+                )
+                .await;
+            return Ok(GateHandlingResult::GateSuperseded {
+                gate_id: gate.gate_id.clone(),
+                reason: SupersededReason::TerminalIntent.as_str().into(),
+                prompt_public: "[system]上一个检定/反应窗口已关闭，继续处理你的新动作。[/system]"
+                    .into(),
+            });
         }
 
         if roll_input_available(user_input) {
-            let roll = self.resolve_roll_input(session_id, turn_id, Some(&pending.check_id), &pending.contract, user_input).await?;
-            let outcome = self.resolve_outcome_with_opposition(&pending.contract, &roll).await?;
+            let roll = self
+                .resolve_roll_input(
+                    session_id,
+                    turn_id,
+                    Some(&pending.check_id),
+                    &pending.contract,
+                    user_input,
+                )
+                .await?;
+            let outcome = self
+                .resolve_outcome_with_opposition(&pending.contract, &roll)
+                .await?;
             let result = CheckResultRecord {
                 check_id: pending.check_id.clone(),
                 roll,
@@ -753,40 +1178,105 @@ impl RuntimeEngine {
                 created_at: chrono::Utc::now(),
             };
             let mut result = result;
-            if let Ok(Some(object_result)) = ObjectService::new(self.db.clone()).apply_for_check_result(&result).await {
-                result.committed_patches.push(StatePatch::ObjectPatch { patch_id: format!("object_result_{}", object_result.interaction_id), object_id: object_result.applied_patches.first().and_then(|p| match p { ObjectPatch::TransferObject { object_id, .. } | ObjectPatch::SetObjectLocation { object_id, .. } | ObjectPatch::SetObjectVisibility { object_id, .. } | ObjectPatch::ModifyQuantity { object_id, .. } | ObjectPatch::DamageObject { object_id, .. } | ObjectPatch::DestroyObject { object_id, .. } | ObjectPatch::SetMechanicalState { object_id, .. } | ObjectPatch::TransformObject { object_id, .. } => Some(object_id.clone()), ObjectPatch::CreateObjectInstance { object, .. } => Some(object.object_id.clone()), ObjectPatch::AddObjectEdge { edge, .. } => Some(edge.from_object_id.clone()), ObjectPatch::RemoveObjectEdge { edge_id, .. } => Some(edge_id.clone()) }), patch_json: serde_json::to_value(&object_result).unwrap_or_else(|_| json!({})), reason: "object_interaction_result".into() });
+            if let Ok(Some(object_result)) = ObjectService::new(self.db.clone())
+                .apply_for_check_result(&result)
+                .await
+            {
+                result.committed_patches.push(StatePatch::ObjectPatch {
+                    patch_id: format!("object_result_{}", object_result.interaction_id),
+                    object_id: object_result.applied_patches.first().and_then(|p| match p {
+                        ObjectPatch::TransferObject { object_id, .. }
+                        | ObjectPatch::SetObjectLocation { object_id, .. }
+                        | ObjectPatch::SetObjectVisibility { object_id, .. }
+                        | ObjectPatch::ModifyQuantity { object_id, .. }
+                        | ObjectPatch::DamageObject { object_id, .. }
+                        | ObjectPatch::DestroyObject { object_id, .. }
+                        | ObjectPatch::SetMechanicalState { object_id, .. }
+                        | ObjectPatch::TransformObject { object_id, .. } => Some(object_id.clone()),
+                        ObjectPatch::CreateObjectInstance { object, .. } => {
+                            Some(object.object_id.clone())
+                        }
+                        ObjectPatch::AddObjectEdge { edge, .. } => {
+                            Some(edge.from_object_id.clone())
+                        }
+                        ObjectPatch::RemoveObjectEdge { edge_id, .. } => Some(edge_id.clone()),
+                    }),
+                    patch_json: serde_json::to_value(&object_result).unwrap_or_else(|_| json!({})),
+                    reason: "object_interaction_result".into(),
+                });
             }
-            if let Ok(Some(followup)) = self.post_check_resolution(&pending.contract, &mut result).await {
+            if let Ok(Some(followup)) = self
+                .post_check_resolution(&pending.contract, &mut result)
+                .await
+            {
                 self.db.insert_check_result(&result).await?;
-                self.db.update_pending_check_status(&pending.check_id, PendingCheckStatus::Resolved).await?;
+                self.db
+                    .update_pending_check_status(&pending.check_id, PendingCheckStatus::Resolved)
+                    .await?;
                 self.db.update_interaction_gate_status(&gate.gate_id, GateStatus::Resolved, json!({"check_id": pending.check_id, "result": result.clone(), "followup": "damage_roll"})).await.ok();
-                return Ok(GateHandlingResult::PendingFollowupCheckCreated { result, pending: Box::new(followup.pending), prompt_public: followup.prompt_public, reason: followup.reason });
+                return Ok(GateHandlingResult::PendingFollowupCheckCreated {
+                    result,
+                    pending: Box::new(followup.pending),
+                    prompt_public: followup.prompt_public,
+                    reason: followup.reason,
+                });
             }
             self.db.insert_check_result(&result).await?;
-            self.db.update_pending_check_status(&pending.check_id, PendingCheckStatus::Resolved).await?;
-            self.db.update_interaction_gate_status(&gate.gate_id, GateStatus::Resolved, json!({"check_id": pending.check_id, "result": result.clone()})).await.ok();
+            self.db
+                .update_pending_check_status(&pending.check_id, PendingCheckStatus::Resolved)
+                .await?;
+            self.db
+                .update_interaction_gate_status(
+                    &gate.gate_id,
+                    GateStatus::Resolved,
+                    json!({"check_id": pending.check_id, "result": result.clone()}),
+                )
+                .await
+                .ok();
             return Ok(GateHandlingResult::PendingCheckResolved { result });
         }
 
         let should_reprompt = looks_like_gate_help_or_question(user_input)
-            || (matches!(gate.on_unparseable, GateFallbackPolicy::Reprompt | GateFallbackPolicy::RequireExplicitChoice)
-                && !looks_like_new_action_or_abandon(user_input));
+            || (matches!(
+                gate.on_unparseable,
+                GateFallbackPolicy::Reprompt | GateFallbackPolicy::RequireExplicitChoice
+            ) && !looks_like_new_action_or_abandon(user_input));
         if should_reprompt {
             let prompt = format!(
                 "[system]上一项检定仍在等待投骰授权。请只回复 `roll`，系统会调用骰子工具；如果要取消，请直接描述新的角色行动。[/system]\n\n{}",
                 gate.prompt_public,
             );
             self.db.update_interaction_gate_status(&gate.gate_id, GateStatus::Open, json!({"last_unparseable_input": user_input, "reason": "unparseable_roll_reply"})).await.ok();
-            return Ok(GateHandlingResult::GateReprompt { gate_id: gate.gate_id, check_id: pending.check_id, reason: "unparseable_roll_reply".into(), prompt_public: prompt });
+            return Ok(GateHandlingResult::GateReprompt {
+                gate_id: gate.gate_id,
+                check_id: pending.check_id,
+                reason: "unparseable_roll_reply".into(),
+                prompt_public: prompt,
+            });
         }
 
-        self.db.update_pending_check_status(&pending.check_id, PendingCheckStatus::AbandonedByNewAction).await?;
-        self.db.update_interaction_gate_status(&gate.gate_id, GateStatus::AbandonedByNewAction, json!({"reason": "player_started_new_action", "new_input": user_input})).await.ok();
+        self.db
+            .update_pending_check_status(
+                &pending.check_id,
+                PendingCheckStatus::AbandonedByNewAction,
+            )
+            .await?;
+        self.db
+            .update_interaction_gate_status(
+                &gate.gate_id,
+                GateStatus::AbandonedByNewAction,
+                json!({"reason": "player_started_new_action", "new_input": user_input}),
+            )
+            .await
+            .ok();
         let prompt = "[system]上一个未完成检定已关闭，继续处理你的新动作。[/system]".to_string();
-        Ok(GateHandlingResult::GateAbandoned { gate_id: gate.gate_id, check_id: pending.check_id, reason: "player_started_new_action".into(), prompt_public: prompt })
+        Ok(GateHandlingResult::GateAbandoned {
+            gate_id: gate.gate_id,
+            check_id: pending.check_id,
+            reason: "player_started_new_action".into(),
+            prompt_public: prompt,
+        })
     }
-
-
 
     pub async fn orchestrate_turn(
         &self,
@@ -797,21 +1287,25 @@ impl RuntimeEngine {
         if !turn_orchestrator_enabled() {
             // When disabled, mimic the pre-v1.7 path: no gate-first override and generic agent can still run.
             let orchestrator = TurnOrchestrator::new(self.db.clone());
-            return orchestrator.reduce_turn(TurnOrchestratorInput {
+            return orchestrator
+                .reduce_turn(TurnOrchestratorInput {
+                    session_id: &request.session_id,
+                    turn_id: &request.turn_id,
+                    ruleset_id: &request.ruleset_id,
+                    module_id: request.module_id.as_deref(),
+                    user_input,
+                })
+                .await;
+        }
+        TurnOrchestrator::new(self.db.clone())
+            .reduce_turn(TurnOrchestratorInput {
                 session_id: &request.session_id,
                 turn_id: &request.turn_id,
                 ruleset_id: &request.ruleset_id,
                 module_id: request.module_id.as_deref(),
                 user_input,
-            }).await;
-        }
-        TurnOrchestrator::new(self.db.clone()).reduce_turn(TurnOrchestratorInput {
-            session_id: &request.session_id,
-            turn_id: &request.turn_id,
-            ruleset_id: &request.ruleset_id,
-            module_id: request.module_id.as_deref(),
-            user_input,
-        }).await
+            })
+            .await
     }
 
     pub async fn try_handle_ability_turn(
@@ -823,37 +1317,75 @@ impl RuntimeEngine {
         if !ability_kernel_enabled() {
             return Ok(AbilityTurnResult::not_handled());
         }
-        let world_tick = self.current_world_time(&request.session_id).await.map(|t| t.world_tick).unwrap_or_default();
-        let frame_id = self.db.list_active_state_frames(&request.session_id, 1).await.ok().and_then(|frames| frames.into_iter().next().map(|f| f.frame_id));
+        let world_tick = self
+            .current_world_time(&request.session_id)
+            .await
+            .map(|t| t.world_tick)
+            .unwrap_or_default();
+        let frame_id = self
+            .db
+            .list_active_state_frames(&request.session_id, 1)
+            .await
+            .ok()
+            .and_then(|frames| frames.into_iter().next().map(|f| f.frame_id));
         let actor_id = request.viewer.actor_id.as_deref().or(Some("pc.current"));
-        AbilityService::new(self.db.clone(), self.search.clone()).handle_turn(AbilityTurnInput {
-            session_id: &request.session_id,
-            turn_id: &request.turn_id,
-            ruleset_id: &request.ruleset_id,
-            module_id: request.module_id.as_deref().or(state.module_id.as_deref()),
-            actor_id,
-            frame_id: frame_id.as_deref(),
-            user_input,
-            world_tick,
-        }).await
+        AbilityService::new(self.db.clone(), self.search.clone())
+            .handle_turn(AbilityTurnInput {
+                session_id: &request.session_id,
+                turn_id: &request.turn_id,
+                ruleset_id: &request.ruleset_id,
+                module_id: request.module_id.as_deref().or(state.module_id.as_deref()),
+                actor_id,
+                frame_id: frame_id.as_deref(),
+                user_input,
+                world_tick,
+            })
+            .await
     }
 
-
-    pub async fn referee_combat_blocks_for_turn(&self, request: &ContextRequest) -> Result<Vec<ContextBlock>> {
-        let world_tick = self.current_world_time(&request.session_id).await.map(|t| t.world_tick).unwrap_or_default();
-        let block = RefereeCombatService::new(self.db.clone()).mechanical_ledger_context_block(&request.session_id, &request.ruleset_id, world_tick).await?;
+    pub async fn referee_combat_blocks_for_turn(
+        &self,
+        request: &ContextRequest,
+    ) -> Result<Vec<ContextBlock>> {
+        let world_tick = self
+            .current_world_time(&request.session_id)
+            .await
+            .map(|t| t.world_tick)
+            .unwrap_or_default();
+        let block = RefereeCombatService::new(self.db.clone())
+            .mechanical_ledger_context_block(&request.session_id, &request.ruleset_id, world_tick)
+            .await?;
         Ok(vec![block])
     }
 
-    pub async fn contest_blocks_for_turn(&self, request: &ContextRequest) -> Result<Vec<ContextBlock>> {
-        let world_tick = self.current_world_time(&request.session_id).await.map(|t| t.world_tick).unwrap_or_default();
-        let block = ContestService::new(self.db.clone()).contest_context_block(&request.session_id, world_tick).await?;
+    pub async fn contest_blocks_for_turn(
+        &self,
+        request: &ContextRequest,
+    ) -> Result<Vec<ContextBlock>> {
+        let world_tick = self
+            .current_world_time(&request.session_id)
+            .await
+            .map(|t| t.world_tick)
+            .unwrap_or_default();
+        let block = ContestService::new(self.db.clone())
+            .contest_context_block(&request.session_id, world_tick)
+            .await?;
         Ok(vec![block])
     }
 
-    pub async fn verify_player_supplied_values(&self, request: &ContextRequest, user_input: &str) -> Result<Option<PlayerValueRefereeResult>> {
+    pub async fn verify_player_supplied_values(
+        &self,
+        request: &ContextRequest,
+        user_input: &str,
+    ) -> Result<Option<PlayerValueRefereeResult>> {
         let result = PlayerValueRefereeService::new(self.db.clone())
-            .inspect_turn(&request.session_id, &request.turn_id, &request.ruleset_id, request.module_id.as_deref(), user_input)
+            .inspect_turn(
+                &request.session_id,
+                &request.turn_id,
+                &request.ruleset_id,
+                request.module_id.as_deref(),
+                user_input,
+            )
             .await?;
         if result.handled {
             if let Some(ctx) = &result.narration_context {
@@ -865,13 +1397,23 @@ impl RuntimeEngine {
                     Visibility::GmOnly,
                     Stability::TurnDynamic,
                     CacheZone::DynamicTail,
-                    Scope { scope_type: ScopeType::Turn, scope_id: request.turn_id.clone() },
+                    Scope {
+                        scope_type: ScopeType::Turn,
+                        scope_id: request.turn_id.clone(),
+                    },
                     142,
                 );
-                block.tags = vec!["player_value_referee".into(), "rules_first".into(), "table_override_policy".into()];
+                block.tags = vec![
+                    "player_value_referee".into(),
+                    "rules_first".into(),
+                    "table_override_policy".into(),
+                ];
                 block.expires_at_turn = Some(request.turn_id.clone());
                 block.load_reason = Some("player_supplied_value_verification".into());
-                let _ = self.db.upsert_runtime_context_block(&request.session_id, &block).await;
+                let _ = self
+                    .db
+                    .upsert_runtime_context_block(&request.session_id, &block)
+                    .await;
             }
             Ok(Some(result))
         } else {
@@ -888,19 +1430,30 @@ impl RuntimeEngine {
         if !real_materialization_enabled() {
             return Ok(MaterializationTurnResult::not_handled());
         }
-        let world_tick = self.current_world_time(&request.session_id).await.map(|t| t.world_tick).unwrap_or_default();
-        let frame_id = self.db.list_active_state_frames(&request.session_id, 1).await.ok().and_then(|frames| frames.into_iter().next().map(|f| f.frame_id));
+        let world_tick = self
+            .current_world_time(&request.session_id)
+            .await
+            .map(|t| t.world_tick)
+            .unwrap_or_default();
+        let frame_id = self
+            .db
+            .list_active_state_frames(&request.session_id, 1)
+            .await
+            .ok()
+            .and_then(|frames| frames.into_iter().next().map(|f| f.frame_id));
         let actor_id = request.viewer.actor_id.as_deref().or(Some("pc.current"));
-        MaterializationService::from_env(self.db.clone(), self.search.clone()).materialize_turn(MaterializationTurnInput {
-            session_id: &request.session_id,
-            turn_id: &request.turn_id,
-            ruleset_id: &request.ruleset_id,
-            module_id: request.module_id.as_deref().or(state.module_id.as_deref()),
-            frame_id: frame_id.as_deref(),
-            actor_id,
-            user_input,
-            world_tick,
-        }).await
+        MaterializationService::from_env(self.db.clone(), self.search.clone())
+            .materialize_turn(MaterializationTurnInput {
+                session_id: &request.session_id,
+                turn_id: &request.turn_id,
+                ruleset_id: &request.ruleset_id,
+                module_id: request.module_id.as_deref().or(state.module_id.as_deref()),
+                frame_id: frame_id.as_deref(),
+                actor_id,
+                user_input,
+                world_tick,
+            })
+            .await
     }
 
     pub async fn try_handle_object_turn(
@@ -912,17 +1465,24 @@ impl RuntimeEngine {
         if !object_kernel_enabled() {
             return Ok(ObjectTurnResult::not_handled());
         }
-        let frame_id = self.db.list_active_state_frames(&request.session_id, 1).await.ok().and_then(|frames| frames.into_iter().next().map(|f| f.frame_id));
+        let frame_id = self
+            .db
+            .list_active_state_frames(&request.session_id, 1)
+            .await
+            .ok()
+            .and_then(|frames| frames.into_iter().next().map(|f| f.frame_id));
         let actor_id = request.viewer.actor_id.as_deref().or(Some("pc.current"));
-        ObjectService::new(self.db.clone()).handle_turn(ObjectTurnInput {
-            session_id: &request.session_id,
-            turn_id: &request.turn_id,
-            ruleset_id: &request.ruleset_id,
-            module_id: request.module_id.as_deref().or(state.module_id.as_deref()),
-            actor_id,
-            frame_id: frame_id.as_deref(),
-            user_input,
-        }).await
+        ObjectService::new(self.db.clone())
+            .handle_turn(ObjectTurnInput {
+                session_id: &request.session_id,
+                turn_id: &request.turn_id,
+                ruleset_id: &request.ruleset_id,
+                module_id: request.module_id.as_deref().or(state.module_id.as_deref()),
+                actor_id,
+                frame_id: frame_id.as_deref(),
+                user_input,
+            })
+            .await
     }
 
     pub async fn try_handle_conflict_turn(
@@ -938,110 +1498,216 @@ impl RuntimeEngine {
         let agent = CombatAgent::from_env_or_default(self.db.clone());
         let actor_id = request.viewer.actor_id.as_deref().or(Some("pc.current"));
         let semantic_hint = orchestration.and_then(Self::conflict_hint_from_orchestration);
-        agent.handle_turn(ConflictTurnInput {
-            session_id: &request.session_id,
-            turn_id: &request.turn_id,
-            ruleset_id: &request.ruleset_id,
-            module_id: request.module_id.as_deref().or(state.module_id.as_deref()),
-            actor_id,
-            user_input,
-            semantic_hint: semantic_hint.as_ref(),
-        }).await
+        agent
+            .handle_turn(ConflictTurnInput {
+                session_id: &request.session_id,
+                turn_id: &request.turn_id,
+                ruleset_id: &request.ruleset_id,
+                module_id: request.module_id.as_deref().or(state.module_id.as_deref()),
+                actor_id,
+                user_input,
+                semantic_hint: semantic_hint.as_ref(),
+            })
+            .await
     }
 
-
-
-
-fn conflict_hint_from_orchestration(result: &TurnOrchestrationResult) -> Option<ConflictIntent> {
-    let action = result.intent.action_kind;
-    let frame_relevant = matches!(action,
-        SituationActionKind::Attack
-            | SituationActionKind::UnderAttack
-            | SituationActionKind::EnemyInitiatedConflict
-            | SituationActionKind::SceneEntersConflict
-            | SituationActionKind::Defend
-            | SituationActionKind::Dodge
-            | SituationActionKind::Counterattack
-            | SituationActionKind::TakeCover
-            | SituationActionKind::Hack
-            | SituationActionKind::DisableDevice
-            | SituationActionKind::InvestigateDuringConflict
-            | SituationActionKind::UseItem
-            | SituationActionKind::Rescue
-            | SituationActionKind::Intimidate
-            | SituationActionKind::CastOrUsePower);
-    let terminal = matches!(result.intent.frame_relation,
-        FrameRelation::ExitAttempt
-            | FrameRelation::DeescalationAttempt
-            | FrameRelation::Surrender
-            | FrameRelation::Flee
-            | FrameRelation::HideToDisengage);
-    if !frame_relevant && !terminal {
-        return None;
+    fn conflict_hint_from_orchestration(
+        result: &TurnOrchestrationResult,
+    ) -> Option<ConflictIntent> {
+        let action = result.intent.action_kind;
+        let frame_relevant = matches!(
+            action,
+            SituationActionKind::Attack
+                | SituationActionKind::UnderAttack
+                | SituationActionKind::EnemyInitiatedConflict
+                | SituationActionKind::SceneEntersConflict
+                | SituationActionKind::Defend
+                | SituationActionKind::Dodge
+                | SituationActionKind::Counterattack
+                | SituationActionKind::TakeCover
+                | SituationActionKind::Hack
+                | SituationActionKind::DisableDevice
+                | SituationActionKind::InvestigateDuringConflict
+                | SituationActionKind::UseItem
+                | SituationActionKind::Rescue
+                | SituationActionKind::Intimidate
+                | SituationActionKind::CastOrUsePower
+        );
+        let terminal = matches!(
+            result.intent.frame_relation,
+            FrameRelation::ExitAttempt
+                | FrameRelation::DeescalationAttempt
+                | FrameRelation::Surrender
+                | FrameRelation::Flee
+                | FrameRelation::HideToDisengage
+        );
+        if !frame_relevant && !terminal {
+            return None;
+        }
+        let mut evidence = result.intent.evidence_terms.clone();
+        evidence.push(format!("turn_route:{}", result.route.route_kind.as_str()));
+        Some(ConflictIntent {
+            intent_id: format!("intent_hint_{}", Uuid::new_v4().simple()),
+            language: Some("semantic_orchestrator".into()),
+            relation_to_active_frame: result.intent.frame_relation,
+            action_kind: action,
+            escalation_level: if matches!(
+                action,
+                SituationActionKind::Attack
+                    | SituationActionKind::UnderAttack
+                    | SituationActionKind::EnemyInitiatedConflict
+                    | SituationActionKind::SceneEntersConflict
+            ) {
+                EscalationLevel::High
+            } else {
+                EscalationLevel::Medium
+            },
+            target_refs: vec![result.intent.target_kind.clone()],
+            desired_outcome: Some(
+                match action {
+                    SituationActionKind::Attack | SituationActionKind::Counterattack => {
+                        "resolve the declared attack or sustained pressure"
+                    }
+                    SituationActionKind::UnderAttack
+                    | SituationActionKind::EnemyInitiatedConflict
+                    | SituationActionKind::SceneEntersConflict => "respond to incoming danger",
+                    SituationActionKind::Flee | SituationActionKind::LeaveScene => {
+                        "exit the active frame"
+                    }
+                    SituationActionKind::Negotiate
+                    | SituationActionKind::Surrender
+                    | SituationActionKind::EndConflict => "de-escalate or close the conflict",
+                    _ => "continue the active frame action",
+                }
+                .into(),
+            ),
+            confidence: result.intent.confidence,
+            evidence_terms: evidence,
+            classifier: "turn_orchestrator_semantic_hint_v1_13_3".into(),
+        })
     }
-    let mut evidence = result.intent.evidence_terms.clone();
-    evidence.push(format!("turn_route:{}", result.route.route_kind.as_str()));
-    Some(ConflictIntent {
-        intent_id: format!("intent_hint_{}", Uuid::new_v4().simple()),
-        language: Some("semantic_orchestrator".into()),
-        relation_to_active_frame: result.intent.frame_relation,
-        action_kind: action,
-        escalation_level: if matches!(action, SituationActionKind::Attack | SituationActionKind::UnderAttack | SituationActionKind::EnemyInitiatedConflict | SituationActionKind::SceneEntersConflict) { EscalationLevel::High } else { EscalationLevel::Medium },
-        target_refs: vec![result.intent.target_kind.clone()],
-        desired_outcome: Some(match action {
-            SituationActionKind::Attack | SituationActionKind::Counterattack => "resolve the declared attack or sustained pressure",
-            SituationActionKind::UnderAttack | SituationActionKind::EnemyInitiatedConflict | SituationActionKind::SceneEntersConflict => "respond to incoming danger",
-            SituationActionKind::Flee | SituationActionKind::LeaveScene => "exit the active frame",
-            SituationActionKind::Negotiate | SituationActionKind::Surrender | SituationActionKind::EndConflict => "de-escalate or close the conflict",
-            _ => "continue the active frame action",
-        }.into()),
-        confidence: result.intent.confidence,
-        evidence_terms: evidence,
-        classifier: "turn_orchestrator_semantic_hint_v1_13_3".into(),
-    })
-}
-    async fn handle_choice_or_nonroll_gate(&self, gate: InteractionGate, user_input: &str) -> Result<GateHandlingResult> {
+    async fn handle_choice_or_nonroll_gate(
+        &self,
+        gate: InteractionGate,
+        user_input: &str,
+    ) -> Result<GateHandlingResult> {
         match &gate.expected_input {
             ExpectedInput::Choice { option_ids: _ } => {
                 let lower = user_input.to_lowercase();
-                if let Some(option) = infer_semantic_choice_option(&gate, user_input).or_else(|| gate.allowed_options.iter().find(|opt| {
-                    lower.contains(&opt.option_id.to_lowercase()) || (!opt.label.is_empty() && lower.contains(&opt.label.to_lowercase()))
-                })) {
+                if let Some(option) =
+                    infer_semantic_choice_option(&gate, user_input).or_else(|| {
+                        gate.allowed_options.iter().find(|opt| {
+                            lower.contains(&opt.option_id.to_lowercase())
+                                || (!opt.label.is_empty()
+                                    && lower.contains(&opt.label.to_lowercase()))
+                        })
+                    })
+                {
                     let resolution = json!({"option_id": option.option_id, "label": option.label, "input": user_input, "resolver":"semantic_choice_gate_v1_3"});
-                    self.db.update_interaction_gate_status(&gate.gate_id, GateStatus::Resolved, resolution.clone()).await.ok();
-                    return Ok(GateHandlingResult::GateChoiceResolved { gate_id: gate.gate_id.clone(), option_id: option.option_id.clone(), option_label: option.label.clone(), resolution_json: resolution });
+                    self.db
+                        .update_interaction_gate_status(
+                            &gate.gate_id,
+                            GateStatus::Resolved,
+                            resolution.clone(),
+                        )
+                        .await
+                        .ok();
+                    return Ok(GateHandlingResult::GateChoiceResolved {
+                        gate_id: gate.gate_id.clone(),
+                        option_id: option.option_id.clone(),
+                        option_label: option.label.clone(),
+                        resolution_json: resolution,
+                    });
                 }
-                let reprompt_count = gate.resolution_json.as_ref().and_then(|v| v.get("reprompt_count")).and_then(|v| v.as_u64()).unwrap_or(0) + 1;
+                let reprompt_count = gate
+                    .resolution_json
+                    .as_ref()
+                    .and_then(|v| v.get("reprompt_count"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0)
+                    + 1;
                 if reprompt_count >= 2 {
                     if let Some(option) = default_choice_after_reprompt(&gate) {
                         let resolution = json!({"option_id": option.option_id, "label": option.label, "input": user_input, "resolver":"auto_default_after_reprompt", "reprompt_count": reprompt_count});
-                        self.db.update_interaction_gate_status(&gate.gate_id, GateStatus::Resolved, resolution.clone()).await.ok();
-                        return Ok(GateHandlingResult::GateChoiceResolved { gate_id: gate.gate_id.clone(), option_id: option.option_id.clone(), option_label: option.label.clone(), resolution_json: resolution });
+                        self.db
+                            .update_interaction_gate_status(
+                                &gate.gate_id,
+                                GateStatus::Resolved,
+                                resolution.clone(),
+                            )
+                            .await
+                            .ok();
+                        return Ok(GateHandlingResult::GateChoiceResolved {
+                            gate_id: gate.gate_id.clone(),
+                            option_id: option.option_id.clone(),
+                            option_label: option.label.clone(),
+                            resolution_json: resolution,
+                        });
                     }
                 }
-                let prompt = format!("当前必须先处理一个交互窗口：{}
+                let prompt = format!(
+                    "当前必须先处理一个交互窗口：{}
 可选项：{}
-如果你想继续当前压制/攻击，可以直接说“继续”或“继续开火”；如果要换方向，请说出目标。", gate.prompt_public, gate.allowed_options.iter().map(|o| format!("{} ({})", o.label, o.option_id)).collect::<Vec<_>>().join("；"));
+如果你想继续当前压制/攻击，可以直接说“继续”或“继续开火”；如果要换方向，请说出目标。",
+                    gate.prompt_public,
+                    gate.allowed_options
+                        .iter()
+                        .map(|o| format!("{} ({})", o.label, o.option_id))
+                        .collect::<Vec<_>>()
+                        .join("；")
+                );
                 self.db.update_interaction_gate_status(&gate.gate_id, GateStatus::Open, json!({"last_unparseable_input": user_input, "reason":"unparseable_choice_reply", "reprompt_count": reprompt_count})).await.ok();
-                return Ok(GateHandlingResult::GateChoiceReprompt { gate_id: gate.gate_id, reason: "unparseable_choice_reply".into(), prompt_public: prompt });
+                return Ok(GateHandlingResult::GateChoiceReprompt {
+                    gate_id: gate.gate_id,
+                    reason: "unparseable_choice_reply".into(),
+                    prompt_public: prompt,
+                });
             }
-            ExpectedInput::Confirmation { yes_option, no_option } => {
+            ExpectedInput::Confirmation {
+                yes_option,
+                no_option,
+            } => {
                 let lower = user_input.to_lowercase();
-                let selected = if ["yes", "y", "确认", "继续", "同意"].iter().any(|t| lower.contains(t)) { Some(yes_option.clone()) }
-                    else if ["no", "n", "取消", "不", "算了"].iter().any(|t| lower.contains(t)) { Some(no_option.clone()) }
-                    else { None };
+                let selected = if ["yes", "y", "确认", "继续", "同意"]
+                    .iter()
+                    .any(|t| lower.contains(t))
+                {
+                    Some(yes_option.clone())
+                } else if ["no", "n", "取消", "不", "算了"]
+                    .iter()
+                    .any(|t| lower.contains(t))
+                {
+                    Some(no_option.clone())
+                } else {
+                    None
+                };
                 if let Some(option_id) = selected {
                     let resolution = json!({"option_id": option_id, "input": user_input});
-                    self.db.update_interaction_gate_status(&gate.gate_id, GateStatus::Resolved, resolution.clone()).await.ok();
-                    return Ok(GateHandlingResult::GateChoiceResolved { gate_id: gate.gate_id.clone(), option_id, option_label: "confirmation".into(), resolution_json: resolution });
+                    self.db
+                        .update_interaction_gate_status(
+                            &gate.gate_id,
+                            GateStatus::Resolved,
+                            resolution.clone(),
+                        )
+                        .await
+                        .ok();
+                    return Ok(GateHandlingResult::GateChoiceResolved {
+                        gate_id: gate.gate_id.clone(),
+                        option_id,
+                        option_label: "confirmation".into(),
+                        resolution_json: resolution,
+                    });
                 }
                 let prompt = format!("请先确认：{}", gate.prompt_public);
-                return Ok(GateHandlingResult::GateChoiceReprompt { gate_id: gate.gate_id, reason: "unparseable_confirmation".into(), prompt_public: prompt });
+                return Ok(GateHandlingResult::GateChoiceReprompt {
+                    gate_id: gate.gate_id,
+                    reason: "unparseable_confirmation".into(),
+                    prompt_public: prompt,
+                });
             }
             _ => Ok(GateHandlingResult::None),
         }
     }
-
 
     pub async fn prepare_actionable_situation(
         &self,
@@ -1062,7 +1728,11 @@ fn conflict_hint_from_orchestration(result: &TurnOrchestrationResult) -> Option<
         };
         // Prior spotlight states are the persistence surface the tracker carries and
         // increments across turns. fail-soft: empty on the first turn or a read error.
-        let prior_spotlights = self.db.load_spotlight_states(&request.session_id).await.unwrap_or_default();
+        let prior_spotlights = self
+            .db
+            .load_spotlight_states(&request.session_id)
+            .await
+            .unwrap_or_default();
         // Real player roster: the session's player-character actor rows ARE the
         // roster (no session→PC table; solo-focused product). The acting actor
         // follows the runtime's pervasive viewer-or-`pc.current` convention so the
@@ -1074,24 +1744,52 @@ fn conflict_hint_from_orchestration(result: &TurnOrchestrationResult) -> Option<
             .list_player_actor_parameters(&request.session_id)
             .await
             .unwrap_or_default();
-        let participants = spotlight_roster::build_spotlight_participants(&player_actors, acting_actor_id);
-        let result = director.prepare(DirectorInput { request, state, compiled, user_input, conflict, module_config: module_cfg.as_ref(), participants: &participants, prior_spotlights: &prior_spotlights });
+        let participants =
+            spotlight_roster::build_spotlight_participants(&player_actors, acting_actor_id);
+        let result = director.prepare(DirectorInput {
+            request,
+            state,
+            compiled,
+            user_input,
+            conflict,
+            module_config: module_cfg.as_ref(),
+            participants: &participants,
+            prior_spotlights: &prior_spotlights,
+        });
         if let Some(brief) = &result.brief {
             self.db.insert_actionable_situation_brief(brief).await.ok();
-            let _ = self.db.upsert_runtime_context_block(&request.session_id, &actionable_situation_block(brief, &request.turn_id)).await;
+            let _ = self
+                .db
+                .upsert_runtime_context_block(
+                    &request.session_id,
+                    &actionable_situation_block(brief, &request.turn_id),
+                )
+                .await;
         }
         if let Some(board) = &result.clue_board {
             self.db.upsert_player_facing_clue_board(board).await.ok();
-            let _ = self.db.upsert_runtime_context_block(&request.session_id, &clue_board_block(board, &request.turn_id)).await;
+            let _ = self
+                .db
+                .upsert_runtime_context_block(
+                    &request.session_id,
+                    &clue_board_block(board, &request.turn_id),
+                )
+                .await;
         }
         if let Some(consequence) = &result.consequence {
             self.db.insert_consequence_contract(consequence).await.ok();
         }
         for tick in &result.clock_ticks {
-            self.db.insert_clock_tick(&request.session_id, &request.turn_id, tick).await.ok();
+            self.db
+                .insert_clock_tick(&request.session_id, &request.turn_id, tick)
+                .await
+                .ok();
         }
         for spotlight in &result.spotlight {
-            self.db.upsert_spotlight_state(&request.session_id, spotlight).await.ok();
+            self.db
+                .upsert_spotlight_state(&request.session_id, spotlight)
+                .await
+                .ok();
         }
         Ok(result)
     }
@@ -1101,7 +1799,10 @@ fn conflict_hint_from_orchestration(result: &TurnOrchestrationResult) -> Option<
     /// Auto-resolve paths bypass `handle_open_interaction_gate`, so without this
     /// a stale `player_roll_required` gate can remain open and hijack later turns.
     async fn close_resolved_check_gate(&self, session_id: &str, check_id: &str) {
-        self.db.update_pending_check_status(check_id, PendingCheckStatus::Resolved).await.ok();
+        self.db
+            .update_pending_check_status(check_id, PendingCheckStatus::Resolved)
+            .await
+            .ok();
 
         // The canonical gate for a PendingCheck is `gate_{check_id}`.  Close it
         // directly first so auto-resolve cannot leave a stale roll gate behind even
@@ -1122,16 +1823,25 @@ fn conflict_hint_from_orchestration(result: &TurnOrchestrationResult) -> Option<
                 ExpectedInput::RollResult { check_id: cid, .. } if cid == check_id
             );
             if matches_check {
-                let _ = self.db.update_interaction_gate_status(
-                    &gate.gate_id,
-                    GateStatus::Resolved,
-                    json!({"check_id": check_id, "auto_resolved_gate_close": true}),
-                ).await;
+                let _ = self
+                    .db
+                    .update_interaction_gate_status(
+                        &gate.gate_id,
+                        GateStatus::Resolved,
+                        json!({"check_id": check_id, "auto_resolved_gate_close": true}),
+                    )
+                    .await;
             }
         }
     }
 
-    fn blocked_missing_source_check_result(&self, session_id: &str, turn_id: &str, contract: &CheckContract, reason: impl Into<String>) -> CheckResultRecord {
+    fn blocked_missing_source_check_result(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        contract: &CheckContract,
+        reason: impl Into<String>,
+    ) -> CheckResultRecord {
         let reason = reason.into();
         let now = chrono::Utc::now();
         CheckResultRecord {
@@ -1180,17 +1890,40 @@ fn conflict_hint_from_orchestration(result: &TurnOrchestrationResult) -> Option<
     ) -> Result<CheckResultRecord> {
         let normalized = normalize_contract_for_system_roll(contract);
         if Self::contract_missing_source_backed_parameters(&normalized) {
-            let blocked = self.blocked_missing_source_check_result(session_id, turn_id, &normalized, "source-backed mechanical parameters are missing");
+            let blocked = self.blocked_missing_source_check_result(
+                session_id,
+                turn_id,
+                &normalized,
+                "source-backed mechanical parameters are missing",
+            );
             self.db.insert_check_result(&blocked).await.ok();
-            self.close_resolved_check_gate(session_id, &contract.check_id).await;
+            self.close_resolved_check_gate(session_id, &contract.check_id)
+                .await;
             return Ok(blocked);
         }
-        let roll = self.resolve_roll_input(session_id, turn_id, Some(&normalized.check_id), &normalized, input).await?;
-        let outcome = self.resolve_outcome_with_opposition(&normalized, &roll).await?;
-        let mut result = CheckResultRecord { check_id: normalized.check_id.clone(), roll, outcome, committed_patches: vec![], created_at: chrono::Utc::now() };
+        let roll = self
+            .resolve_roll_input(
+                session_id,
+                turn_id,
+                Some(&normalized.check_id),
+                &normalized,
+                input,
+            )
+            .await?;
+        let outcome = self
+            .resolve_outcome_with_opposition(&normalized, &roll)
+            .await?;
+        let mut result = CheckResultRecord {
+            check_id: normalized.check_id.clone(),
+            roll,
+            outcome,
+            committed_patches: vec![],
+            created_at: chrono::Utc::now(),
+        };
         let _ = self.post_check_resolution(&normalized, &mut result).await;
         self.db.insert_check_result(&result).await?;
-        self.close_resolved_check_gate(session_id, &contract.check_id).await;
+        self.close_resolved_check_gate(session_id, &contract.check_id)
+            .await;
         Ok(result)
     }
 
@@ -1202,9 +1935,20 @@ fn conflict_hint_from_orchestration(result: &TurnOrchestrationResult) -> Option<
     /// kernel refs) early-return untouched. Rulesets whose kernel lacks a typed
     /// dice/compare (e.g. an old pre-reader kernel) are also left as-is.
     async fn apply_kernel_defaults_if_unsourced(&self, c: &mut CheckContract) {
-        if !c.source_refs.is_empty() || !c.learned_packet_ids.is_empty() { return; }
-        let kernel = match self.db.load_rule_kernel(&c.ruleset_id).await { Ok(Some(k)) => k, _ => return };
-        if let Some(d) = kernel.dice_core.get("dice").and_then(|v| v.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+        if !c.source_refs.is_empty() || !c.learned_packet_ids.is_empty() {
+            return;
+        }
+        let kernel = match self.db.load_rule_kernel(&c.ruleset_id).await {
+            Ok(Some(k)) => k,
+            _ => return,
+        };
+        if let Some(d) = kernel
+            .dice_core
+            .get("dice")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
             c.dice_expression = d;
         }
         let provisional_target = matches!(&c.target, CheckTargetModel::UnknownUntilLookup)
@@ -1217,12 +1961,32 @@ fn conflict_hint_from_orchestration(result: &TurnOrchestrationResult) -> Option<
             // (and not-yet-typed kernels) give None → clear to UnknownUntilLookup so
             // the contest kernel resolves it (e.g. PercentileRollUnder for d100), not
             // a stale roll-high static target.
-            c.target = target_model_from_dice_core(&kernel.dice_core).unwrap_or(CheckTargetModel::UnknownUntilLookup);
+            c.target = target_model_from_dice_core(&kernel.dice_core)
+                .unwrap_or(CheckTargetModel::UnknownUntilLookup);
         }
         if !kernel.source_refs.is_empty() {
             c.source_refs = kernel.source_refs.clone();
             c.ruling_status = RulingStatus::SourceBacked;
         }
+    }
+
+    /// After the kernel defaults run, bind a source-backed static target from the
+    /// loaded module's `technical_option_table` when the check is still unbound.
+    /// This is the GM `roll_check` counterpart of the combat path's tech-DV
+    /// binding: a technical action that hits a module DV row resolves against that
+    /// source-backed DV instead of stalling at `awaiting_binding`. No module / no
+    /// matching row → unchanged (fail-closed; the check still blocks/awaits).
+    async fn bind_source_backed_module_target(&self, c: &mut CheckContract) {
+        if !matches!(c.target, CheckTargetModel::UnknownUntilLookup) {
+            return;
+        }
+        let Some(module_id) = c.module_id.clone() else {
+            return;
+        };
+        let Some(cfg) = self.db.load_module_config(&module_id).await else {
+            return;
+        };
+        bind_tech_option_target(c, &cfg);
     }
 
     pub async fn execute_agent_roll(
@@ -1232,19 +1996,44 @@ fn conflict_hint_from_orchestration(result: &TurnOrchestrationResult) -> Option<
         contract: &CheckContract,
     ) -> Result<CheckResultRecord> {
         let mut normalized = normalize_contract_for_system_roll(contract);
-        self.apply_kernel_defaults_if_unsourced(&mut normalized).await;
+        self.apply_kernel_defaults_if_unsourced(&mut normalized)
+            .await;
+        self.bind_source_backed_module_target(&mut normalized).await;
         if Self::contract_missing_source_backed_parameters(&normalized) {
-            let blocked = self.blocked_missing_source_check_result(session_id, turn_id, &normalized, "source-backed mechanical parameters are missing");
+            let blocked = self.blocked_missing_source_check_result(
+                session_id,
+                turn_id,
+                &normalized,
+                "source-backed mechanical parameters are missing",
+            );
             self.db.insert_check_result(&blocked).await.ok();
-            self.close_resolved_check_gate(session_id, &contract.check_id).await;
+            self.close_resolved_check_gate(session_id, &contract.check_id)
+                .await;
             return Ok(blocked);
         }
-        let roll = self.resolve_roll_input(session_id, turn_id, Some(&normalized.check_id), &normalized, &normalized.dice_expression).await?;
-        let outcome = self.resolve_outcome_with_opposition(&normalized, &roll).await?;
-        let mut result = CheckResultRecord { check_id: normalized.check_id.clone(), roll, outcome, committed_patches: vec![], created_at: chrono::Utc::now() };
+        let roll = self
+            .resolve_roll_input(
+                session_id,
+                turn_id,
+                Some(&normalized.check_id),
+                &normalized,
+                &normalized.dice_expression,
+            )
+            .await?;
+        let outcome = self
+            .resolve_outcome_with_opposition(&normalized, &roll)
+            .await?;
+        let mut result = CheckResultRecord {
+            check_id: normalized.check_id.clone(),
+            roll,
+            outcome,
+            committed_patches: vec![],
+            created_at: chrono::Utc::now(),
+        };
         let _ = self.post_check_resolution(&normalized, &mut result).await;
         self.db.insert_check_result(&result).await?;
-        self.close_resolved_check_gate(session_id, &contract.check_id).await;
+        self.close_resolved_check_gate(session_id, &contract.check_id)
+            .await;
         Ok(result)
     }
 
@@ -1262,30 +2051,66 @@ fn conflict_hint_from_orchestration(result: &TurnOrchestrationResult) -> Option<
         contract: &CheckContract,
     ) -> Result<AutoRollExecution> {
         let mut normalized = normalize_contract_for_system_roll(contract);
-        self.apply_kernel_defaults_if_unsourced(&mut normalized).await;
+        self.apply_kernel_defaults_if_unsourced(&mut normalized)
+            .await;
+        self.bind_source_backed_module_target(&mut normalized).await;
         if Self::contract_missing_source_backed_parameters(&normalized) {
-            let blocked = self.blocked_missing_source_check_result(session_id, turn_id, &normalized, "source-backed mechanical parameters are missing");
+            let blocked = self.blocked_missing_source_check_result(
+                session_id,
+                turn_id,
+                &normalized,
+                "source-backed mechanical parameters are missing",
+            );
             self.db.insert_check_result(&blocked).await.ok();
-            self.close_resolved_check_gate(session_id, &contract.check_id).await;
-            return Ok(AutoRollExecution { primary: blocked, followups: vec![], roll_policy: "blocked_missing_source".into() });
+            self.close_resolved_check_gate(session_id, &contract.check_id)
+                .await;
+            return Ok(AutoRollExecution {
+                primary: blocked,
+                followups: vec![],
+                roll_policy: "blocked_missing_source".into(),
+            });
         }
-        let primary = self.execute_agent_roll(session_id, turn_id, &normalized).await?;
+        let primary = self
+            .execute_agent_roll(session_id, turn_id, &normalized)
+            .await?;
         let mut followups = Vec::new();
 
         // Attack resolution may create an effect/damage PendingCheck. Under
         // product mode this is another tool call, not a second player prompt.
         if let Some(pending) = self.db.get_open_pending_check(session_id).await? {
-            if pending.check_id != normalized.check_id && is_effect_or_damage_contract(&pending.contract) {
+            if pending.check_id != normalized.check_id
+                && is_effect_or_damage_contract(&pending.contract)
+            {
                 let effect_contract = normalize_contract_for_system_roll(&pending.contract);
                 if Self::contract_missing_source_backed_parameters(&effect_contract) {
-                    let blocked = self.blocked_missing_source_check_result(session_id, turn_id, &effect_contract, "source-backed effect/damage parameters are missing");
+                    let blocked = self.blocked_missing_source_check_result(
+                        session_id,
+                        turn_id,
+                        &effect_contract,
+                        "source-backed effect/damage parameters are missing",
+                    );
                     self.db.insert_check_result(&blocked).await.ok();
-                    let _ = self.db.update_pending_check_status(&pending.check_id, PendingCheckStatus::Resolved).await;
+                    let _ = self
+                        .db
+                        .update_pending_check_status(
+                            &pending.check_id,
+                            PendingCheckStatus::Resolved,
+                        )
+                        .await;
                     followups.push(blocked);
-                    return Ok(AutoRollExecution { primary, followups, roll_policy: "blocked_missing_source".into() });
+                    return Ok(AutoRollExecution {
+                        primary,
+                        followups,
+                        roll_policy: "blocked_missing_source".into(),
+                    });
                 }
-                let effect_result = self.execute_agent_roll(session_id, turn_id, &effect_contract).await?;
-                let _ = self.db.update_pending_check_status(&pending.check_id, PendingCheckStatus::Resolved).await;
+                let effect_result = self
+                    .execute_agent_roll(session_id, turn_id, &effect_contract)
+                    .await?;
+                let _ = self
+                    .db
+                    .update_pending_check_status(&pending.check_id, PendingCheckStatus::Resolved)
+                    .await;
                 followups.push(effect_result);
             }
         }
@@ -1297,40 +2122,60 @@ fn conflict_hint_from_orchestration(result: &TurnOrchestrationResult) -> Option<
         })
     }
 
-
-fn contract_missing_source_backed_parameters(contract: &CheckContract) -> bool {
-    if !Self::fail_on_missing_source_backed_parameters() && !Self::graceful_degrade_missing_source_backed_parameters() {
-        return false;
-    }
-    let intent = contract.intent_kind.to_ascii_lowercase();
-    let label = contract.check_label.to_ascii_lowercase();
-    let action = contract.action_summary.to_ascii_lowercase();
-    let parameter_sensitive = ["attack", "counterattack", "defend", "dodge", "damage", "hack", "disable", "shoot", "fire", "开火", "攻击", "射击", "黑入", "切断"]
+    fn contract_missing_source_backed_parameters(contract: &CheckContract) -> bool {
+        if !Self::fail_on_missing_source_backed_parameters()
+            && !Self::graceful_degrade_missing_source_backed_parameters()
+        {
+            return false;
+        }
+        let intent = contract.intent_kind.to_ascii_lowercase();
+        let label = contract.check_label.to_ascii_lowercase();
+        let action = contract.action_summary.to_ascii_lowercase();
+        let parameter_sensitive = [
+            "attack",
+            "counterattack",
+            "defend",
+            "dodge",
+            "damage",
+            "hack",
+            "disable",
+            "shoot",
+            "fire",
+            "开火",
+            "攻击",
+            "射击",
+            "黑入",
+            "切断",
+        ]
         .iter()
         .any(|needle| intent.contains(needle) || label.contains(needle) || action.contains(needle));
-    if !parameter_sensitive {
-        return false;
+        if !parameter_sensitive {
+            return false;
+        }
+        let missing_target = matches!(&contract.target, CheckTargetModel::UnknownUntilLookup);
+        let missing_opposition = matches!(
+            &contract.opposition,
+            OppositionModel::NoMechanicalOpposition
+        );
+        let no_sources = contract.source_refs.is_empty() && contract.learned_packet_ids.is_empty();
+        let bare_die = ["1d10", "d20", "1d20", "2d6", "d100", "1d100", "6d4"]
+            .contains(&contract.dice_expression.trim());
+        no_sources && (missing_target || missing_opposition || bare_die)
     }
-    let missing_target = matches!(&contract.target, CheckTargetModel::UnknownUntilLookup);
-    let missing_opposition = matches!(&contract.opposition, OppositionModel::NoMechanicalOpposition);
-    let no_sources = contract.source_refs.is_empty() && contract.learned_packet_ids.is_empty();
-    let bare_die = ["1d10", "d20", "1d20", "2d6", "d100", "1d100", "6d4"].contains(&contract.dice_expression.trim());
-    no_sources && (missing_target || missing_opposition || bare_die)
-}
 
-fn graceful_degrade_missing_source_backed_parameters() -> bool {
-    std::env::var("TRPG_GRACEFUL_DEGRADE_MISSING_SOURCE_PARAMS")
-        .ok()
-        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(true)
-}
+    fn graceful_degrade_missing_source_backed_parameters() -> bool {
+        std::env::var("TRPG_GRACEFUL_DEGRADE_MISSING_SOURCE_PARAMS")
+            .ok()
+            .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(true)
+    }
 
-fn fail_on_missing_source_backed_parameters() -> bool {
-    std::env::var("TRPG_FAIL_ON_MISSING_SOURCE_BACKED_PARAMS")
-        .ok()
-        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(true)
-}
+    fn fail_on_missing_source_backed_parameters() -> bool {
+        std::env::var("TRPG_FAIL_ON_MISSING_SOURCE_BACKED_PARAMS")
+            .ok()
+            .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(true)
+    }
 
     async fn resolve_roll_input(
         &self,
@@ -1342,10 +2187,19 @@ fn fail_on_missing_source_backed_parameters() -> bool {
     ) -> Result<DiceRollRecord> {
         let parsed = parse_roll_text(input).unwrap_or_else(|| {
             let trimmed = input.trim();
-            if wants_system_roll(input) || trimmed.eq_ignore_ascii_case("/roll") || trimmed.eq_ignore_ascii_case("roll") {
+            if wants_system_roll(input)
+                || trimmed.eq_ignore_ascii_case("/roll")
+                || trimmed.eq_ignore_ascii_case("roll")
+            {
                 ParsedRollText::DiceExpression(contract.dice_expression.clone())
             } else {
-                ParsedRollText::DiceExpression(trimmed.strip_prefix("/roll ").unwrap_or(trimmed).trim().to_string())
+                ParsedRollText::DiceExpression(
+                    trimmed
+                        .strip_prefix("/roll ")
+                        .unwrap_or(trimmed)
+                        .trim()
+                        .to_string(),
+                )
             }
         });
         let parsed = match parsed {
@@ -1354,20 +2208,38 @@ fn fail_on_missing_source_backed_parameters() -> bool {
             {
                 return Err(anyhow!("player-reported roll totals are disabled; reply `roll` to let the system dice tool roll for this check"));
             }
-            ParsedRollText::DiceExpression(expr) if player_supplied_roll_expressions_allowed() => ParsedRollText::DiceExpression(expr),
-            ParsedRollText::DiceExpression(_) => ParsedRollText::DiceExpression(contract.dice_expression.clone()),
+            ParsedRollText::DiceExpression(expr) if player_supplied_roll_expressions_allowed() => {
+                ParsedRollText::DiceExpression(expr)
+            }
+            ParsedRollText::DiceExpression(_) => {
+                ParsedRollText::DiceExpression(contract.dice_expression.clone())
+            }
             other => other,
         };
         let expression_for_record = parsed.expression_for_record();
         let result_json = match parsed {
-            ParsedRollText::ReportedTotal(total) => json!({"mode":"reported_total", "total": total}),
-            ParsedRollText::ReportedDieAndComponents { die, components, total } => json!({"mode":"reported_components", "die": die, "components": components, "total": total}),
+            ParsedRollText::ReportedTotal(total) => {
+                json!({"mode":"reported_total", "total": total})
+            }
+            ParsedRollText::ReportedDieAndComponents {
+                die,
+                components,
+                total,
+            } => {
+                json!({"mode":"reported_components", "die": die, "components": components, "total": total})
+            }
             ParsedRollText::DiceExpression(expr) => {
                 let rolled = roll_dice(&expr)?;
                 json!({"mode":"rolled", "expression": rolled.expression, "rolls": rolled.rolls, "modifier": rolled.modifier, "total": rolled.total})
             }
         };
-        let seed_material = format!("{}:{}:{}:{}", session_id, turn_id, check_id.unwrap_or("none"), serde_json::to_string(&result_json)?);
+        let seed_material = format!(
+            "{}:{}:{}:{}",
+            session_id,
+            turn_id,
+            check_id.unwrap_or("none"),
+            serde_json::to_string(&result_json)?
+        );
         let record = DiceRollRecord {
             roll_id: format!("roll_{}", Uuid::new_v4().simple()),
             session_id: session_id.to_string(),
@@ -1379,10 +2251,21 @@ fn fail_on_missing_source_backed_parameters() -> bool {
             expression: expression_for_record.clone(),
             result: result_json,
             seed_commitment: sha256_hex(seed_material),
-            revealed_at: if contract.disclosure.show_roll_to_player { Some(chrono::Utc::now()) } else { None },
+            revealed_at: if contract.disclosure.show_roll_to_player {
+                Some(chrono::Utc::now())
+            } else {
+                None
+            },
             created_at: chrono::Utc::now(),
         };
-        let mut roll_plan = make_roll_plan_from_check(session_id, turn_id, check_id, contract, &expression_for_record, &record.result);
+        let mut roll_plan = make_roll_plan_from_check(
+            session_id,
+            turn_id,
+            check_id,
+            contract,
+            &expression_for_record,
+            &record.result,
+        );
         roll_plan.roll_plan_id = format!("rollplan_{}", Uuid::new_v4().simple());
         insert_roll_plan(&self.db, &roll_plan).await.ok();
         self.db.insert_dice_roll(&record).await?;
@@ -1403,15 +2286,32 @@ fn fail_on_missing_source_backed_parameters() -> bool {
 
     /// 对抗时预掷防御骰(私有 GM 掷,落库供复算)随 contract 传入 contest;否则 None。
     /// contest 保持零 RNG。defender_expression 取 kernel 核心掷式(dice_core.dice),fallback 攻击式。
-    async fn resolve_outcome_with_opposition(&self, contract: &CheckContract, roll: &DiceRollRecord) -> Result<serde_json::Value> {
+    async fn resolve_outcome_with_opposition(
+        &self,
+        contract: &CheckContract,
+        roll: &DiceRollRecord,
+    ) -> Result<serde_json::Value> {
         let svc = ContestService::new(self.db.clone());
         // 先把（如对抗则）防御方骰子算好，再把两路径汇到单点 dispatch。
         let def_record: Option<DiceRollRecord> = if contract_is_opposed(contract) {
-            let def_expr = self.db.load_rule_kernel(&contract.ruleset_id).await.ok().flatten()
-                .and_then(|k| k.dice_core.get("dice").and_then(|v| v.as_str()).map(str::to_string))
+            let def_expr = self
+                .db
+                .load_rule_kernel(&contract.ruleset_id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|k| {
+                    k.dice_core
+                        .get("dice")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                })
                 .unwrap_or_else(|| contract.dice_expression.clone());
             let rolled = roll_dice(&def_expr)?;
-            let seed_material = format!("{}:{}:defender:{}", contract.session_id, contract.turn_id, contract.check_id);
+            let seed_material = format!(
+                "{}:{}:defender:{}",
+                contract.session_id, contract.turn_id, contract.check_id
+            );
             let rec = DiceRollRecord {
                 roll_id: format!("roll_{}", Uuid::new_v4().simple()),
                 session_id: contract.session_id.clone(),
@@ -1431,7 +2331,8 @@ fn fail_on_missing_source_backed_parameters() -> bool {
         } else {
             None
         };
-        self.resolve_check_dispatch(&svc, contract, roll, def_record.as_ref()).await
+        self.resolve_check_dispatch(&svc, contract, roll, def_record.as_ref())
+            .await
     }
 
     /// 检定结算单点分发。binding takeover **关**（默认）→ 直调权威 `resolve_outcome`（零行为变更）。
@@ -1449,7 +2350,14 @@ fn fail_on_missing_source_backed_parameters() -> bool {
             if let Ok(Some(kernel)) = self.db.load_rule_kernel(&contract.ruleset_id).await {
                 let plan = binding_exec::check_binding_plan(&kernel);
                 if binding_exec::plan_authorizes_check_exec(&plan) {
-                    return binding_exec::execute_check_with_binding(svc, contract, roll, defender_roll, &plan).await;
+                    return binding_exec::execute_check_with_binding(
+                        svc,
+                        contract,
+                        roll,
+                        defender_roll,
+                        &plan,
+                    )
+                    .await;
                 }
                 tracing::warn!(
                     ruleset = %contract.ruleset_id,
@@ -1495,14 +2403,31 @@ fn fail_on_missing_source_backed_parameters() -> bool {
             "turn_id": turn_id,
             "demand_id": demand_id,
         });
-        let lookups = self.db.list_lookup_events_for_demand(Some(session_id), &demand_id, 8).await.unwrap_or_default();
+        let lookups = self
+            .db
+            .list_lookup_events_for_demand(Some(session_id), &demand_id, 8)
+            .await
+            .unwrap_or_default();
         if lookups.is_empty() {
             result.warnings.push("no_lookup_events_for_turn".into());
         }
         let mut mechanical = detect_mechanical_signal(user_input, assistant_output);
-        let check_contracts = self.db.list_check_contracts_for_turn(session_id, turn_id).await.unwrap_or_default();
-        let effect_contracts = self.db.list_effect_contracts_for_turn(session_id, turn_id).await.unwrap_or_default();
-        if !effect_contracts.is_empty() && !mechanical.mentioned_terms.iter().any(|t| t == "effect_contract") {
+        let check_contracts = self
+            .db
+            .list_check_contracts_for_turn(session_id, turn_id)
+            .await
+            .unwrap_or_default();
+        let effect_contracts = self
+            .db
+            .list_effect_contracts_for_turn(session_id, turn_id)
+            .await
+            .unwrap_or_default();
+        if !effect_contracts.is_empty()
+            && !mechanical
+                .mentioned_terms
+                .iter()
+                .any(|t| t == "effect_contract")
+        {
             mechanical.has_signal = true;
             mechanical.mentioned_terms.push("effect_contract".into());
         }
@@ -1511,28 +2436,63 @@ fn fail_on_missing_source_backed_parameters() -> bool {
             mechanical.has_specific_target = true;
             mechanical.target_kind = Some(kind);
             mechanical.target_value = Some(value);
-            if !mechanical.mentioned_terms.iter().any(|t| t == "check_contract") {
+            if !mechanical
+                .mentioned_terms
+                .iter()
+                .any(|t| t == "check_contract")
+            {
                 mechanical.mentioned_terms.push("check_contract".into());
             }
         }
         let source_refs = extract_source_refs_from_lookup_events(&lookups);
         let hit_titles = top_search_hit_titles(&lookups, 4);
-        let has_source_evidence = !source_refs.is_empty() || lookups.iter().any(|e| e.result_status == "source_backed" || e.result_status == "hit");
+        let has_source_evidence = !source_refs.is_empty()
+            || lookups
+                .iter()
+                .any(|e| e.result_status == "source_backed" || e.result_status == "hit");
         if !mechanical.has_signal && !has_source_evidence {
-            result.warnings.push("no_mechanical_or_source_signal".into());
-            let _ = self.db.insert_learning_audit_run(&audit_run_id, Some(session_id), Some(turn_id), Some(ruleset_id), module_id, "done", input_json, serde_json::to_value(&result)?, None).await;
+            result
+                .warnings
+                .push("no_mechanical_or_source_signal".into());
+            let _ = self
+                .db
+                .insert_learning_audit_run(
+                    &audit_run_id,
+                    Some(session_id),
+                    Some(turn_id),
+                    Some(ruleset_id),
+                    module_id,
+                    "done",
+                    input_json,
+                    serde_json::to_value(&result)?,
+                    None,
+                )
+                .await;
             return Ok(result);
         }
 
-        let ruling_status = if has_source_evidence { RulingStatus::SourceBacked } else { RulingStatus::Provisional };
-        let confidence = if has_source_evidence && mechanical.has_specific_target { RulingConfidence::Medium } else { RulingConfidence::Low };
+        let ruling_status = if has_source_evidence {
+            RulingStatus::SourceBacked
+        } else {
+            RulingStatus::Provisional
+        };
+        let confidence = if has_source_evidence && mechanical.has_specific_target {
+            RulingConfidence::Medium
+        } else {
+            RulingConfidence::Low
+        };
         let ruling = RulingLogEntry {
             ruling_id: format!("ruling_{}", Uuid::new_v4().simple()),
             session_id: Some(session_id.to_string()),
             ruleset_id: Some(ruleset_id.to_string()),
             module_id: module_id.map(str::to_string),
             demand_id: Some(demand_id.clone()),
-            ruling_text: make_ruling_summary(user_input, assistant_output, &mechanical, &hit_titles),
+            ruling_text: make_ruling_summary(
+                user_input,
+                assistant_output,
+                &mechanical,
+                &hit_titles,
+            ),
             source_refs: source_refs.clone(),
             status: ruling_status,
             confidence,
@@ -1546,11 +2506,19 @@ fn fail_on_missing_source_backed_parameters() -> bool {
         if has_source_evidence {
             let now = chrono::Utc::now();
             let mut risk_flags = Vec::new();
-            if source_refs.is_empty() { risk_flags.push("no_source_refs_in_hit".to_string()); }
-            if !mechanical.has_specific_target { risk_flags.push("no_specific_difficulty_or_target".to_string()); }
-            if !has_source_evidence { risk_flags.push("provisional_ruling".to_string()); }
+            if source_refs.is_empty() {
+                risk_flags.push("no_source_refs_in_hit".to_string());
+            }
+            if !mechanical.has_specific_target {
+                risk_flags.push("no_specific_difficulty_or_target".to_string());
+            }
+            if !has_source_evidence {
+                risk_flags.push("provisional_ruling".to_string());
+            }
             let evidence_score = evidence_score(&mechanical, &source_refs, &lookups, &risk_flags);
-            if evidence_score < 0.50 { risk_flags.push("low_evidence_score".to_string()); }
+            if evidence_score < 0.50 {
+                risk_flags.push("low_evidence_score".to_string());
+            }
             let packet_type = infer_packet_type(user_input, assistant_output);
             let packet_key = safe_packet_key(&packet_type, user_input, &mechanical);
             let candidate = LearningAuditCandidate {
@@ -1563,7 +2531,12 @@ fn fail_on_missing_source_backed_parameters() -> bool {
                 packet_type,
                 packet_key,
                 title: learning_candidate_title(user_input, &mechanical),
-                summary: make_learning_candidate_summary(user_input, assistant_output, &mechanical, &hit_titles),
+                summary: make_learning_candidate_summary(
+                    user_input,
+                    assistant_output,
+                    &mechanical,
+                    &hit_titles,
+                ),
                 packet_json: json!({
                     "user_input_excerpt": user_input.chars().take(400).collect::<String>(),
                     "assistant_output_excerpt": assistant_output.chars().take(900).collect::<String>(),
@@ -1578,21 +2551,49 @@ fn fail_on_missing_source_backed_parameters() -> bool {
                 evidence_score,
                 risk_flags,
                 verifier_status: LearningCandidateStatus::PendingReview,
-                verifier_notes: Some("Auto-generated by learning_audit; approve only after source/ruling review.".into()),
+                verifier_notes: Some(
+                    "Auto-generated by learning_audit; approve only after source/ruling review."
+                        .into(),
+                ),
                 created_at: now,
                 updated_at: now,
             };
             self.db.insert_learning_candidate(&candidate).await?;
-            if learning_auto_promote_enabled() && candidate.evidence_score >= 0.75 && !candidate.risk_flags.iter().any(|f| f == "low_evidence_score" || f == "provisional_ruling") {
+            if learning_auto_promote_enabled()
+                && candidate.evidence_score >= 0.75
+                && !candidate
+                    .risk_flags
+                    .iter()
+                    .any(|f| f == "low_evidence_score" || f == "provisional_ruling")
+            {
                 let packet = candidate.to_learned_packet(LearningStage::UsedOnce);
                 self.db.upsert_learned_packet(&packet).await?;
-                self.db.update_learning_candidate_status(&candidate.candidate_id, LearningCandidateStatus::AutoPromoted, Some("Auto-promoted by TRPG_LEARNING_AUTO_PROMOTE=true")).await?;
+                self.db
+                    .update_learning_candidate_status(
+                        &candidate.candidate_id,
+                        LearningCandidateStatus::AutoPromoted,
+                        Some("Auto-promoted by TRPG_LEARNING_AUTO_PROMOTE=true"),
+                    )
+                    .await?;
                 result.promoted_packets.push(packet);
             }
             result.candidates.push(candidate);
         }
 
-        let _ = self.db.insert_learning_audit_run(&audit_run_id, Some(session_id), Some(turn_id), Some(ruleset_id), module_id, "done", input_json, serde_json::to_value(&result)?, None).await;
+        let _ = self
+            .db
+            .insert_learning_audit_run(
+                &audit_run_id,
+                Some(session_id),
+                Some(turn_id),
+                Some(ruleset_id),
+                module_id,
+                "done",
+                input_json,
+                serde_json::to_value(&result)?,
+                None,
+            )
+            .await;
         Ok(result)
     }
 
@@ -1619,7 +2620,9 @@ fn fail_on_missing_source_backed_parameters() -> bool {
             return Ok(vec![]);
         }
 
-        let Some(search) = &self.search else { return Ok(vec![]); };
+        let Some(search) = &self.search else {
+            return Ok(vec![]);
+        };
         let trimmed = input.trim();
         if trimmed.is_empty() {
             return Ok(vec![]);
@@ -1652,7 +2655,13 @@ fn fail_on_missing_source_backed_parameters() -> bool {
         let outcomes = bus.resolve_all().await;
         let mut blocks = Vec::new();
         for outcome in outcomes {
-            merge_need_outcome(&mut blocks, need_trace, outcome, "rule", "turn context assembly");
+            merge_need_outcome(
+                &mut blocks,
+                need_trace,
+                outcome,
+                "rule",
+                "turn context assembly",
+            );
         }
         Ok(blocks)
     }
@@ -1663,8 +2672,12 @@ fn fail_on_missing_source_backed_parameters() -> bool {
     /// the rule-sensitivity gate, so module entity recognition is data-driven
     /// rather than baked into the engine. None module / no config → empty.
     async fn module_entity_terms(&self, module_id: Option<&str>) -> Vec<String> {
-        let Some(mid) = module_id else { return Vec::new(); };
-        let Some(cfg) = self.db.load_module_config(mid).await else { return Vec::new(); };
+        let Some(mid) = module_id else {
+            return Vec::new();
+        };
+        let Some(cfg) = self.db.load_module_config(mid).await else {
+            return Vec::new();
+        };
         let mut terms = Vec::new();
         for binding in &cfg.npc_actor_bindings {
             for m in &binding.matcher {
@@ -1694,7 +2707,11 @@ fn fail_on_missing_source_backed_parameters() -> bool {
         current_input: Option<&str>,
     ) -> Result<Vec<ContextBlock>> {
         let mut blocks = Vec::new();
-        for snapshot in self.db.list_memory_snapshots(&request.session_id, 3).await? {
+        for snapshot in self
+            .db
+            .list_memory_snapshots(&request.session_id, 3)
+            .await?
+        {
             if project_visibility(memory_snapshot_block(&snapshot), &request.viewer).is_some() {
                 blocks.push(memory_snapshot_block(&snapshot));
             }
@@ -1704,24 +2721,42 @@ fn fail_on_missing_source_backed_parameters() -> bool {
             session_id: request.session_id.clone(),
             text: query_text,
             ruleset_id: Some(request.ruleset_id.clone()),
-            module_id: request.module_id.clone().or_else(|| state.module_id.clone()),
+            module_id: request
+                .module_id
+                .clone()
+                .or_else(|| state.module_id.clone()),
             scene_id: state.scene_id.clone(),
             location_id: state.location_id.clone(),
             actor_ids: state.active_npc_ids.clone(),
             tags: vec![],
-            limit: std::env::var("TRPG_MEMORY_RETRIEVAL_LIMIT").ok().and_then(|v| v.parse().ok()).unwrap_or(8),
+            limit: std::env::var("TRPG_MEMORY_RETRIEVAL_LIMIT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(8),
             viewer: request.viewer.clone(),
         };
         let retrieved = self.db.retrieve_memory(&memory_query).await?;
         if !retrieved.facts.is_empty() || !retrieved.events.is_empty() {
-            blocks.push(retrieved_memory_block(&request.session_id, &request.turn_id, &retrieved));
+            blocks.push(retrieved_memory_block(
+                &request.session_id,
+                &request.turn_id,
+                &retrieved,
+            ));
         }
         Ok(blocks)
     }
 
-    async fn rule_steward_prefix_blocks_for_turn(&self, request: &ContextRequest) -> Result<Vec<ContextBlock>> {
+    async fn rule_steward_prefix_blocks_for_turn(
+        &self,
+        request: &ContextRequest,
+    ) -> Result<Vec<ContextBlock>> {
         let enabled = std::env::var("TRPG_RULE_STEWARD_ENABLE_V116")
-            .map(|v| !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"))
+            .map(|v| {
+                !matches!(
+                    v.to_ascii_lowercase().as_str(),
+                    "0" | "false" | "off" | "no"
+                )
+            })
             .unwrap_or(true);
         if !enabled {
             return Ok(Vec::new());
@@ -1742,7 +2777,12 @@ fn fail_on_missing_source_backed_parameters() -> bool {
                 Scope::ruleset(&request.ruleset_id),
                 118,
             );
-            block.tags = vec!["rule_steward".into(), "bp1".into(), "active_rule_kernel".into(), "source_backed".into()];
+            block.tags = vec![
+                "rule_steward".into(),
+                "bp1".into(),
+                "active_rule_kernel".into(),
+                "source_backed".into(),
+            ];
             block.source_refs = kernel.source_refs.clone();
             block.load_reason = Some("active_rule_kernel".into());
             blocks.push(block);
@@ -1751,10 +2791,19 @@ fn fail_on_missing_source_backed_parameters() -> bool {
             // for the viewer, all in ONE prefix block right under the kernel block.
             // Empty catalog -> no block (older kernels change nothing, fail-closed).
             if !kernel.mechanics_catalog.is_empty() {
-                let limit = std::env::var("TRPG_MECHANICS_INDEX_BP1_LIMIT").ok().and_then(|v| v.parse().ok()).unwrap_or(96);
+                let limit = std::env::var("TRPG_MECHANICS_INDEX_BP1_LIMIT")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(96);
                 let mut text = catalog_index_text(&kernel.mechanics_catalog, limit);
                 let viewer_actor_id = request.viewer.actor_id.as_deref().unwrap_or("pc.current");
-                let pm_lines = self.passive_lines_for_viewer(&request.session_id, viewer_actor_id, &kernel.mechanics_catalog).await;
+                let pm_lines = self
+                    .passive_lines_for_viewer(
+                        &request.session_id,
+                        viewer_actor_id,
+                        &kernel.mechanics_catalog,
+                    )
+                    .await;
                 if !pm_lines.is_empty() {
                     text.push('\n');
                     text.push_str(&pm_lines.join("\n"));
@@ -1770,12 +2819,21 @@ fn fail_on_missing_source_backed_parameters() -> bool {
                     Scope::ruleset(&request.ruleset_id),
                     116,
                 );
-                index_block.tags = vec!["rule_steward".into(), "bp1".into(), "mechanics_catalog_index".into(), "source_backed".into()];
+                index_block.tags = vec![
+                    "rule_steward".into(),
+                    "bp1".into(),
+                    "mechanics_catalog_index".into(),
+                    "source_backed".into(),
+                ];
                 index_block.load_reason = Some("mechanics_catalog_index".into());
                 blocks.push(index_block);
             }
         }
-        if let Some(pack) = self.db.load_character_onboarding_pack(&request.ruleset_id).await? {
+        if let Some(pack) = self
+            .db
+            .load_character_onboarding_pack(&request.ruleset_id)
+            .await?
+        {
             let mut block = ContextBlock::new(
                 format!("rule_steward.character_onboarding.{}", request.ruleset_id),
                 BlockKind::CharacterOnboardingPack,
@@ -1787,7 +2845,12 @@ fn fail_on_missing_source_backed_parameters() -> bool {
                 Scope::ruleset(&request.ruleset_id),
                 104,
             );
-            block.tags = vec!["rule_steward".into(), "character_onboarding".into(), "character_creation".into(), "playability".into()];
+            block.tags = vec![
+                "rule_steward".into(),
+                "character_onboarding".into(),
+                "character_creation".into(),
+                "playability".into(),
+            ];
             block.source_refs = pack.source_refs.clone();
             block.load_reason = Some("active_character_onboarding_pack".into());
             blocks.push(block);
@@ -1799,25 +2862,52 @@ fn fail_on_missing_source_backed_parameters() -> bool {
     /// usage as `refresh_actor_live_derived`) and render one passive-projection
     /// line per catalog entry that has one. Actor missing / db failure / no PM
     /// entries -> empty Vec — BP1 assembly must never fail on PM projection.
-    async fn passive_lines_for_viewer(&self, session_id: &str, viewer_actor_id: &str, entries: &[MechanicEntry]) -> Vec<String> {
+    async fn passive_lines_for_viewer(
+        &self,
+        session_id: &str,
+        viewer_actor_id: &str,
+        entries: &[MechanicEntry],
+    ) -> Vec<String> {
         let service = RuntimeParameterService::new(self.db.clone());
-        let Ok(Some(params)) = service.load_actor_parameters(session_id, viewer_actor_id).await else {
+        let Ok(Some(params)) = service
+            .load_actor_parameters(session_id, viewer_actor_id)
+            .await
+        else {
             return Vec::new();
         };
-        entries.iter().filter_map(|e| passive_projection_line(e, &params.sheet_json)).collect()
+        entries
+            .iter()
+            .filter_map(|e| passive_projection_line(e, &params.sheet_json))
+            .collect()
     }
 
-    async fn state_frame_blocks_for_turn(&self, request: &ContextRequest) -> Result<Vec<ContextBlock>> {
-        let limit = std::env::var("TRPG_STATE_FRAME_ACTIVE_LIMIT").ok().and_then(|v| v.parse().ok()).unwrap_or(4);
-        let frames = self.db.list_active_state_frames(&request.session_id, limit).await?;
-        Ok(frames.into_iter().map(|frame| frame.to_context_block(&request.turn_id)).collect())
+    async fn state_frame_blocks_for_turn(
+        &self,
+        request: &ContextRequest,
+    ) -> Result<Vec<ContextBlock>> {
+        let limit = std::env::var("TRPG_STATE_FRAME_ACTIVE_LIMIT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4);
+        let frames = self
+            .db
+            .list_active_state_frames(&request.session_id, limit)
+            .await?;
+        Ok(frames
+            .into_iter()
+            .map(|frame| frame.to_context_block(&request.turn_id))
+            .collect())
     }
 
     /// §10.1 LIVE linkage: reload the actor's params, re-derive `recompute=live`
     /// values from CURRENT base stats, and persist if anything changed. Idempotent;
     /// call at the start of every turn so derived values stay current even on
     /// blocked/early-returning turns. No-op when there is no stored chargen_spec.
-    pub async fn refresh_actor_live_derived(&self, session_id: &str, actor_id: &str) -> Result<bool> {
+    pub async fn refresh_actor_live_derived(
+        &self,
+        session_id: &str,
+        actor_id: &str,
+    ) -> Result<bool> {
         chargen::refresh_actor_live_derived_db(&self.db, session_id, actor_id).await
     }
 
@@ -1825,28 +2915,69 @@ fn fail_on_missing_source_backed_parameters() -> bool {
     /// (T1 source > T2 archetype > T3 persona-judge) and write the result. Provisional
     /// (T3) values bypass the strict materialization gate by writing straight to
     /// sheet_json. Returns the value, or None when the gate is off / no LLM / no card.
-    pub async fn ensure_npc_parameter(&self, session_id: &str, ruleset_id: &str, npc: &npc_synth::NpcPersona,
-        bucket: &str, param: &str, check_context: &str) -> anyhow::Result<Option<serde_json::Value>> {
-        if !npc_synth::persona_synthesis_enabled() { return Ok(None); }
+    pub async fn ensure_npc_parameter(
+        &self,
+        session_id: &str,
+        ruleset_id: &str,
+        npc: &npc_synth::NpcPersona,
+        bucket: &str,
+        param: &str,
+        check_context: &str,
+    ) -> anyhow::Result<Option<serde_json::Value>> {
+        if !npc_synth::persona_synthesis_enabled() {
+            return Ok(None);
+        }
         let service = trpg_params::RuntimeParameterService::new(self.db.clone());
         // §Phase3 bug-fix: load_actor_parameters返回None时（NPC行尚未在runtime_actor_parameters中）
         // 使用ensure_actor_parameters按需创建行，再继续现搓。否则opposed prepass调用此方法时
         // 由于npc_athena等真实NPC id尚未存在而提前返回Ok(None)、无法合成防御参数。
-        let world_tick = self.current_world_time(session_id).await.map(|t| t.world_tick).unwrap_or_default();
-        let mut p = match service.load_actor_parameters(session_id, &npc.actor_id).await? {
+        let world_tick = self
+            .current_world_time(session_id)
+            .await
+            .map(|t| t.world_tick)
+            .unwrap_or_default();
+        let mut p = match service
+            .load_actor_parameters(session_id, &npc.actor_id)
+            .await?
+        {
             Some(p) => p,
-            None => service.ensure_actor_parameters(session_id, ruleset_id, &npc.actor_id, trpg_model::ActorKind::Npc, world_tick).await?,
+            None => {
+                service
+                    .ensure_actor_parameters(
+                        session_id,
+                        ruleset_id,
+                        &npc.actor_id,
+                        trpg_model::ActorKind::Npc,
+                        world_tick,
+                    )
+                    .await?
+            }
         };
         // per-parameter cache: already on the card?
-        if let Some(v) = p.sheet_json.pointer(&format!("/{bucket}/{param}")).cloned() { return Ok(Some(v)); }
+        if let Some(v) = p.sheet_json.pointer(&format!("/{bucket}/{param}")).cloned() {
+            return Ok(Some(v));
+        }
         // T1: a source value may already be on the card (e.g. under /source/<param>).
         let source_value = p.sheet_json.pointer(&format!("/source/{param}")).cloned();
         // T2: no archetype-stat source index yet (RecommendedArchetype has fit_tags, not stat params) -> empty -> falls to T3.
         let archetypes: Vec<(String, serde_json::Value)> = Vec::new();
-        let llm = match trpg_llm::LlmConfig::from_env().ok().and_then(|cfg| trpg_llm::OpenAiCompatibleClient::new(cfg).ok()) {
-            Some(c) => c, None => return Ok(None),
+        let llm = match trpg_llm::LlmConfig::from_env()
+            .ok()
+            .and_then(|cfg| trpg_llm::OpenAiCompatibleClient::new(cfg).ok())
+        {
+            Some(c) => c,
+            None => return Ok(None),
         };
-        let synth = npc_synth::resolve_param_tiered(source_value, &archetypes, &llm, npc, param, check_context, ruleset_id).await?;
+        let synth = npc_synth::resolve_param_tiered(
+            source_value,
+            &archetypes,
+            &llm,
+            npc,
+            param,
+            check_context,
+            ruleset_id,
+        )
+        .await?;
         npc_synth::write_synthesized_param(&mut p.sheet_json, bucket, param, &synth);
         // B1: mechanical_profile 是 sheet 的物化视图;contest 读它,故写完立即重投影,
         // 否则现搓值停在 sheet_json、结算读不到。refresh 不动 npc_param_provenance 数据。
@@ -1855,47 +2986,23 @@ fn fail_on_missing_source_backed_parameters() -> bool {
         Ok(Some(synth.value))
     }
 
-    /// §NPC-holder-id-gate slice 1: resolve one scene-referenced NPC id against
-    /// `graph.npcs` into an NpcPersona. The persona carries the NPC's **real
-    /// module-graph id** as `actor_id` (never the `npc.opposition` placeholder),
-    /// with name + body|summary mirroring `scene_node_to_blocks`. Shared by the
-    /// contest path (`current_check_npc_persona`) and the Phase-3 list
-    /// (`scene_npc_personas`) so both id-spaces stay unified. fail-closed: id
-    /// absent from `graph.npcs`, or both name and prose empty → None (never an
-    /// invented id, never an empty persona for the judge to fill).
-    fn persona_from_scene_npc(npcs: &[serde_json::Value], npc_id: &str) -> Option<npc_synth::NpcPersona> {
-        let v = npcs
-            .iter()
-            .find(|v| v.get("id").and_then(|x| x.as_str()) == Some(npc_id))?;
-        let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let prose = v
-            .get("body")
-            .or_else(|| v.get("summary"))
-            .and_then(|x| x.as_str())
-            .unwrap_or("")
-            .to_string();
-        if name.trim().is_empty() && prose.trim().is_empty() {
-            return None;
-        }
-        Some(npc_synth::NpcPersona { actor_id: npc_id.to_string(), name, prose })
-    }
-
-    /// §Task5 Pre-resolution: resolve THIS turn's check NPC into an NpcPersona for
-    /// the CURRENT scene's first referenced NPC. Loads the module graph (single
-    /// source of truth: the module bundle row, mirroring
-    /// `module_scene_blocks_for_turn`), picks the active scene (explicit
-    /// `state.scene_id` else first DeepExtracted), takes the FIRST
-    /// `referenced_npc_ids` entry, and resolves it against `graph.npcs` via the
-    /// shared `persona_from_scene_npc` helper. The persona carries the NPC's
-    /// **real module-graph id** as `actor_id` — matching `scene_npc_personas`,
-    /// never the `npc.opposition` placeholder (治 spec §6③ actor-id 串台坑).
-    /// fail-closed: no module / no scene / no NPC / empty persona → None.
+    /// §Task5 Pre-resolution: resolve THIS turn's check NPC into an NpcPersona by
+    /// re-personaing the single Phase-1 `npc.opposition` slot for the CURRENT scene's
+    /// NPC. Loads the module graph (single source of truth: the module bundle row,
+    /// mirroring `module_scene_blocks_for_turn`), picks the active scene (explicit
+    /// `state.scene_id` else first DeepExtracted), takes the FIRST `referenced_npc_ids`
+    /// entry, and resolves it against `graph.npcs` (name + body|summary, mirroring
+    /// `scene_node_to_blocks`). fail-closed: no module / no scene / no NPC → None.
+    /// (Per-NPC actor ids are Phase 2; here we reuse `npc.opposition`.)
     pub async fn current_check_npc_persona(
         &self,
         request: &ContextRequest,
         state: &RuntimeState,
     ) -> Option<npc_synth::NpcPersona> {
-        let module_id = request.module_id.as_deref().or(state.module_id.as_deref())?;
+        let module_id = request
+            .module_id
+            .as_deref()
+            .or(state.module_id.as_deref())?;
         let graph = self.db.load_module_graph(module_id).await.ok().flatten()?;
         // Active scene: explicit state.scene_id else first DeepExtracted (mirror
         // module_scene_blocks_for_turn). fail-closed: none -> None.
@@ -1909,10 +3016,32 @@ fn fail_on_missing_source_backed_parameters() -> bool {
                     .iter()
                     .find(|s| s.extraction_status == SceneExtractionStatus::DeepExtracted)
             })?;
-        // FIRST referenced NPC of the scene, resolved against graph.npcs via the
-        // shared helper (real graph id as actor_id; name + body|summary).
+        // FIRST referenced NPC of the scene, resolved against graph.npcs by id
+        // (mirror scene_node_to_blocks: name + body|summary).
         let npc_id = node.referenced_npc_ids.first()?;
-        Self::persona_from_scene_npc(&graph.npcs, npc_id)
+        let v = graph
+            .npcs
+            .iter()
+            .find(|v| v.get("id").and_then(|x| x.as_str()) == Some(npc_id.as_str()))?;
+        let name = v
+            .get("name")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let prose = v
+            .get("body")
+            .or_else(|| v.get("summary"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        if name.trim().is_empty() && prose.trim().is_empty() {
+            return None;
+        }
+        Some(npc_synth::NpcPersona {
+            actor_id: "npc.opposition".to_string(),
+            name,
+            prose,
+        })
     }
 
     /// §Phase3 §4.1 对抗预 pass 物料：当前场景在场的全部 NPC 作为 persona 列表，
@@ -1925,19 +3054,51 @@ fn fail_on_missing_source_backed_parameters() -> bool {
         request: &ContextRequest,
         state: &RuntimeState,
     ) -> Vec<npc_synth::NpcPersona> {
-        let Some(module_id) = request.module_id.as_deref().or(state.module_id.as_deref()) else { return Vec::new() };
-        let Some(graph) = self.db.load_module_graph(module_id).await.ok().flatten() else { return Vec::new() };
+        let Some(module_id) = request.module_id.as_deref().or(state.module_id.as_deref()) else {
+            return Vec::new();
+        };
+        let Some(graph) = self.db.load_module_graph(module_id).await.ok().flatten() else {
+            return Vec::new();
+        };
         let node = state
             .scene_id
             .as_deref()
             .and_then(|sid| graph.scenes.iter().find(|s| s.node_id == sid))
-            .or_else(|| graph.scenes.iter().find(|s| s.extraction_status == SceneExtractionStatus::DeepExtracted));
+            .or_else(|| {
+                graph
+                    .scenes
+                    .iter()
+                    .find(|s| s.extraction_status == SceneExtractionStatus::DeepExtracted)
+            });
         let Some(node) = node else { return Vec::new() };
         node.referenced_npc_ids
             .iter()
-            // 真实 graph id 作 actor_id（per-NPC 卡，治占位符串台），与 contest 路径
-            // `current_check_npc_persona` 共用同一解析助手。
-            .filter_map(|npc_id| Self::persona_from_scene_npc(&graph.npcs, npc_id))
+            .filter_map(|npc_id| {
+                let v = graph
+                    .npcs
+                    .iter()
+                    .find(|v| v.get("id").and_then(|x| x.as_str()) == Some(npc_id.as_str()))?;
+                let name = v
+                    .get("name")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let prose = v
+                    .get("body")
+                    .or_else(|| v.get("summary"))
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if name.trim().is_empty() && prose.trim().is_empty() {
+                    return None;
+                }
+                // 真实 graph id 作 actor_id（per-NPC 卡，治占位符串台）。
+                Some(npc_synth::NpcPersona {
+                    actor_id: npc_id.clone(),
+                    name,
+                    prose,
+                })
+            })
             .collect()
     }
 
@@ -1945,9 +3106,23 @@ fn fail_on_missing_source_backed_parameters() -> bool {
     /// will need from the opposition. Loads the rule kernel to get compare model:
     /// meet_or_beat → defense DV; roll_under → dodge skill.
     /// Returns `(bucket, param)` or None for kinds that need no NPC param.
-    pub async fn check_param_need(&self, ruleset_id: &str, action_kind: &SituationActionKind) -> Option<(String, String)> {
-        let compare = self.db.load_rule_kernel(ruleset_id).await.ok().flatten()
-            .and_then(|k| k.dice_core.get("compare").and_then(|v| v.as_str()).map(str::to_string))
+    pub async fn check_param_need(
+        &self,
+        ruleset_id: &str,
+        action_kind: &SituationActionKind,
+    ) -> Option<(String, String)> {
+        let compare = self
+            .db
+            .load_rule_kernel(ruleset_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|k| {
+                k.dice_core
+                    .get("compare")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            })
             .unwrap_or_default();
         map_check_param_need(action_kind, &compare)
     }
@@ -1957,7 +3132,8 @@ fn fail_on_missing_source_backed_parameters() -> bool {
     /// 键（meet_or_beat→stats.defense / roll_under→skills.dodge）。复用同一份
     /// `map_check_param_need` 数据映射，零 per-ruleset 硬编码。无 kernel / 无映射 → None。
     pub async fn attack_defense_param(&self, ruleset_id: &str) -> Option<(String, String)> {
-        self.check_param_need(ruleset_id, &SituationActionKind::Attack).await
+        self.check_param_need(ruleset_id, &SituationActionKind::Attack)
+            .await
     }
 
     /// §Task5 Fire-and-forget wrapper: synthesize+write the NPC param BEFORE contest
@@ -1994,14 +3170,32 @@ fn fail_on_missing_source_backed_parameters() -> bool {
     /// re-derives (live linkage) and persists. A0: engine moves the value only —
     /// the GM/player decides the rule-specific amount. Returns Ok(false) if no params.
     pub async fn apply_track_change(
-        &self, session_id: &str, actor_id: &str,
-        bucket: &str, id: &str, op: &str, amount: f64,
-        text: Option<&str>, kind: Option<&str>, category: Option<&str>,
+        &self,
+        session_id: &str,
+        actor_id: &str,
+        bucket: &str,
+        id: &str,
+        op: &str,
+        amount: f64,
+        text: Option<&str>,
+        kind: Option<&str>,
+        category: Option<&str>,
     ) -> Result<bool> {
         let service = RuntimeParameterService::new(self.db.clone());
-        let Some(mut p) = service.load_actor_parameters(session_id, actor_id).await? else { return Ok(false); };
-        chargen::apply_track_change_to_sheet(&mut p.sheet_json, bucket, id, op, amount, text, kind, category)
-            .map_err(|e| anyhow!("apply_track_change: {e}"))?;
+        let Some(mut p) = service.load_actor_parameters(session_id, actor_id).await? else {
+            return Ok(false);
+        };
+        chargen::apply_track_change_to_sheet(
+            &mut p.sheet_json,
+            bucket,
+            id,
+            op,
+            amount,
+            text,
+            kind,
+            category,
+        )
+        .map_err(|e| anyhow!("apply_track_change: {e}"))?;
         chargen::recompute_live_derived(&mut p.sheet_json);
         chargen::refresh_mechanical_profile(&mut p.mechanical_profile, &p.sheet_json);
         service.upsert_actor_parameters(&p).await?;
@@ -2009,21 +3203,43 @@ fn fail_on_missing_source_backed_parameters() -> bool {
     }
 
     async fn ability_blocks_for_turn(&self, request: &ContextRequest) -> Result<Vec<ContextBlock>> {
-        let world_tick = self.current_world_time(&request.session_id).await.map(|t| t.world_tick).unwrap_or_default();
-        let block = AbilityService::new(self.db.clone(), self.search.clone()).ability_context_block(&request.session_id, world_tick).await?;
+        let world_tick = self
+            .current_world_time(&request.session_id)
+            .await
+            .map(|t| t.world_tick)
+            .unwrap_or_default();
+        let block = AbilityService::new(self.db.clone(), self.search.clone())
+            .ability_context_block(&request.session_id, world_tick)
+            .await?;
         Ok(vec![block])
     }
 
-    async fn rule_binding_blocks_for_turn(&self, request: &ContextRequest) -> Result<Vec<ContextBlock>> {
-        let world_tick = self.current_world_time(&request.session_id).await.map(|t| t.world_tick).unwrap_or_default();
-        let block = SemanticRuleBindingService::from_env(self.db.clone(), self.search.clone()).rule_binding_context_block(&request.session_id, world_tick).await?;
+    async fn rule_binding_blocks_for_turn(
+        &self,
+        request: &ContextRequest,
+    ) -> Result<Vec<ContextBlock>> {
+        let world_tick = self
+            .current_world_time(&request.session_id)
+            .await
+            .map(|t| t.world_tick)
+            .unwrap_or_default();
+        let block = SemanticRuleBindingService::from_env(self.db.clone(), self.search.clone())
+            .rule_binding_context_block(&request.session_id, world_tick)
+            .await?;
         Ok(vec![block])
     }
 
-
-    async fn player_value_referee_blocks_for_turn(&self, request: &ContextRequest) -> Result<Vec<ContextBlock>> {
-        let verifications = self.db.list_recent_player_value_verifications(&request.session_id, 8).await?;
-        if verifications.is_empty() { return Ok(vec![]); }
+    async fn player_value_referee_blocks_for_turn(
+        &self,
+        request: &ContextRequest,
+    ) -> Result<Vec<ContextBlock>> {
+        let verifications = self
+            .db
+            .list_recent_player_value_verifications(&request.session_id, 8)
+            .await?;
+        if verifications.is_empty() {
+            return Ok(vec![]);
+        }
         let mut block = ContextBlock::new(
             format!("player_value_referee.recent.{}", request.session_id),
             BlockKind::PlayerValueVerification,
@@ -2036,36 +3252,85 @@ fn fail_on_missing_source_backed_parameters() -> bool {
             Visibility::GmOnly,
             Stability::TurnDynamic,
             CacheZone::DynamicTail,
-            Scope { scope_type: ScopeType::Session, scope_id: request.session_id.clone() },
+            Scope {
+                scope_type: ScopeType::Session,
+                scope_id: request.session_id.clone(),
+            },
             118,
         );
-        block.tags = vec!["player_value_referee".into(), "rules_first".into(), "table_override_policy".into()];
+        block.tags = vec![
+            "player_value_referee".into(),
+            "rules_first".into(),
+            "table_override_policy".into(),
+        ];
         block.expires_at_turn = Some(request.turn_id.clone());
         block.load_reason = Some("recent_player_value_verifications".into());
         Ok(vec![block])
     }
 
     async fn object_blocks_for_turn(&self, request: &ContextRequest) -> Result<Vec<ContextBlock>> {
-        let world_tick = self.current_world_time(&request.session_id).await.map(|t| t.world_tick).unwrap_or_default();
-        let block = ObjectService::new(self.db.clone()).object_context_block(&request.session_id, None, request.viewer.actor_id.as_deref().unwrap_or("pc.current"), world_tick).await?;
+        let world_tick = self
+            .current_world_time(&request.session_id)
+            .await
+            .map(|t| t.world_tick)
+            .unwrap_or_default();
+        let block = ObjectService::new(self.db.clone())
+            .object_context_block(
+                &request.session_id,
+                None,
+                request.viewer.actor_id.as_deref().unwrap_or("pc.current"),
+                world_tick,
+            )
+            .await?;
         Ok(vec![block])
     }
 
-    async fn world_time_blocks_for_turn(&self, request: &ContextRequest) -> Result<Vec<ContextBlock>> {
+    async fn world_time_blocks_for_turn(
+        &self,
+        request: &ContextRequest,
+    ) -> Result<Vec<ContextBlock>> {
         let service = WorldTimeService::new(self.db.clone());
-        let state = service.ensure_session_time(&request.session_id, Some(&request.session_id)).await?;
-        let watermark = self.db.get_context_watermark(&request.session_id).await?.unwrap_or_default();
+        let state = service
+            .ensure_session_time(&request.session_id, Some(&request.session_id))
+            .await?;
+        let watermark = self
+            .db
+            .get_context_watermark(&request.session_id)
+            .await?
+            .unwrap_or_default();
         let since_tick = watermark.last_compiled_world_tick;
         let since_seq = watermark.last_compiled_event_seq;
-        let events = self.db.list_world_events_since(&request.session_id, since_tick, since_seq, std::env::var("TRPG_WORLD_TIME_CONTEXT_EVENT_LIMIT").ok().and_then(|v| v.parse().ok()).unwrap_or(24)).await.unwrap_or_default();
+        let events = self
+            .db
+            .list_world_events_since(
+                &request.session_id,
+                since_tick,
+                since_seq,
+                std::env::var("TRPG_WORLD_TIME_CONTEXT_EVENT_LIMIT")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(24),
+            )
+            .await
+            .unwrap_or_default();
         let mut blocks = vec![world_time_block(&state, &request.turn_id)];
         if !events.is_empty() {
-            blocks.push(world_events_since_block(&request.session_id, &request.turn_id, since_tick, since_seq, &events));
+            blocks.push(world_events_since_block(
+                &request.session_id,
+                &request.turn_id,
+                since_tick,
+                since_seq,
+                &events,
+            ));
         }
         Ok(blocks)
     }
 
-    pub fn to_prompt_bands(compiled: &CompiledContext, history: Vec<ChatMessage>, user_message: impl Into<String>) -> PromptBands {
+    pub fn to_prompt_bands(
+        compiled: &CompiledContext,
+        history: Vec<ChatMessage>,
+        user_message: impl Into<String>,
+    ) -> PromptBands {
         PromptBands {
             system_prefix: compiled.prefix_text.clone(),
             semi_stable_context: compiled.pinned_text.clone(),
@@ -2115,8 +3380,14 @@ fn fail_on_missing_source_backed_parameters() -> bool {
         Ok(vec![
             system(compiled.prefix_text.clone()),
             system(player_facing_output_contract()),
-            user(format!("[gm]\n[BP2: Pinned Context]\n{}\n[/gm]", compiled.pinned_text)),
-            user(format!("[gm]\n[BP3: Dynamic Context]\n{}\n[/gm]\n\n[Player Input]\n{}", compiled.dynamic_text, user_input)),
+            user(format!(
+                "[gm]\n[BP2: Pinned Context]\n{}\n[/gm]",
+                compiled.pinned_text
+            )),
+            user(format!(
+                "[gm]\n[BP3: Dynamic Context]\n{}\n[/gm]\n\n[Player Input]\n{}",
+                compiled.dynamic_text, user_input
+            )),
         ])
     }
 }
@@ -2132,7 +3403,11 @@ pub struct PlannedContext {
 pub struct ContextBuilder;
 
 impl ContextBuilder {
-    pub fn build(&self, planned: PlannedContext, request: &ContextRequest) -> Result<CompiledContext> {
+    pub fn build(
+        &self,
+        planned: PlannedContext,
+        request: &ContextRequest,
+    ) -> Result<CompiledContext> {
         let mut prefix = planned.prefix_blocks;
         let mut pinned = planned.pinned_blocks;
         let mut dynamic = planned.dynamic_blocks;
@@ -2150,15 +3425,49 @@ impl ContextBuilder {
         let pinned_hash = sha256_hex(&pinned_text);
         let dynamic_hash = sha256_hex(&dynamic_text);
         let visibility_signature = stable_json_hash(&request.viewer);
-        let cache_key = format!("{}:{}:{}", &visibility_signature[..20.min(visibility_signature.len())], &prefix_hash[..20.min(prefix_hash.len())], &pinned_hash[..20.min(pinned_hash.len())]);
-        let token_estimate = prefix.iter().chain(pinned.iter()).chain(dynamic.iter()).map(|b| b.token_estimate.unwrap_or(0)).sum();
-        let block_version_ids = prefix.iter().chain(pinned.iter()).chain(dynamic.iter()).map(|b| format!("{}@{}", b.block_id, b.version)).collect();
+        let cache_key = format!(
+            "{}:{}:{}",
+            &visibility_signature[..20.min(visibility_signature.len())],
+            &prefix_hash[..20.min(prefix_hash.len())],
+            &pinned_hash[..20.min(pinned_hash.len())]
+        );
+        let token_estimate = prefix
+            .iter()
+            .chain(pinned.iter())
+            .chain(dynamic.iter())
+            .map(|b| b.token_estimate.unwrap_or(0))
+            .sum();
+        let block_version_ids = prefix
+            .iter()
+            .chain(pinned.iter())
+            .chain(dynamic.iter())
+            .map(|b| format!("{}@{}", b.block_id, b.version))
+            .collect();
         // need_trace 由 prepare_turn_context 在 build 之后填入（ContextBuilder 不做 Need 取数）。
-        Ok(CompiledContext { prefix_blocks: prefix, pinned_blocks: pinned, dynamic_blocks: dynamic, prefix_text, pinned_text, dynamic_text, prefix_hash, pinned_hash, dynamic_hash, visibility_signature, cache_key, token_estimate, block_version_ids, need_trace: Vec::new() })
+        Ok(CompiledContext {
+            prefix_blocks: prefix,
+            pinned_blocks: pinned,
+            dynamic_blocks: dynamic,
+            prefix_text,
+            pinned_text,
+            dynamic_text,
+            prefix_hash,
+            pinned_hash,
+            dynamic_hash,
+            visibility_signature,
+            cache_key,
+            token_estimate,
+            block_version_ids,
+            need_trace: Vec::new(),
+        })
     }
 }
 
-pub fn plan_blocks(blocks: Vec<ContextBlock>, state: &RuntimeState, request: &ContextRequest) -> PlannedContext {
+pub fn plan_blocks(
+    blocks: Vec<ContextBlock>,
+    state: &RuntimeState,
+    request: &ContextRequest,
+) -> PlannedContext {
     let mut prefix = Vec::new();
     let mut pinned = Vec::new();
     let mut dynamic = Vec::new();
@@ -2166,7 +3475,9 @@ pub fn plan_blocks(blocks: Vec<ContextBlock>, state: &RuntimeState, request: &Co
         if block.cache_zone == CacheZone::NeverPrompt {
             continue;
         }
-        if !scope_matches(&block.scope, state, request) && !block.tags.iter().any(|t| t == "resident") {
+        if !scope_matches(&block.scope, state, request)
+            && !block.tags.iter().any(|t| t == "resident")
+        {
             continue;
         }
         if block.load_reason.is_none() {
@@ -2179,14 +3490,23 @@ pub fn plan_blocks(blocks: Vec<ContextBlock>, state: &RuntimeState, request: &Co
             CacheZone::NeverPrompt => {}
         }
     }
-    PlannedContext { prefix_blocks: prefix, pinned_blocks: pinned, dynamic_blocks: dynamic }
+    PlannedContext {
+        prefix_blocks: prefix,
+        pinned_blocks: pinned,
+        dynamic_blocks: dynamic,
+    }
 }
 
 fn scope_matches(scope: &Scope, state: &RuntimeState, request: &ContextRequest) -> bool {
     match scope.scope_type {
         ScopeType::Global => true,
-        ScopeType::Ruleset => scope.scope_id == request.ruleset_id || scope.scope_id == state.ruleset_id,
-        ScopeType::Module => request.module_id.as_deref() == Some(scope.scope_id.as_str()) || state.module_id.as_deref() == Some(scope.scope_id.as_str()),
+        ScopeType::Ruleset => {
+            scope.scope_id == request.ruleset_id || scope.scope_id == state.ruleset_id
+        }
+        ScopeType::Module => {
+            request.module_id.as_deref() == Some(scope.scope_id.as_str())
+                || state.module_id.as_deref() == Some(scope.scope_id.as_str())
+        }
         ScopeType::Chapter => state.chapter_id.as_deref() == Some(scope.scope_id.as_str()),
         ScopeType::Mission => state.mission_id.as_deref() == Some(scope.scope_id.as_str()),
         ScopeType::Scene => state.scene_id.as_deref() == Some(scope.scope_id.as_str()),
@@ -2194,11 +3514,14 @@ fn scope_matches(scope: &Scope, state: &RuntimeState, request: &ContextRequest) 
         ScopeType::Npc => state.active_npc_ids.iter().any(|id| id == &scope.scope_id),
         ScopeType::Session => scope.scope_id == request.session_id,
         ScopeType::Turn => scope.scope_id == request.turn_id,
-        ScopeType::Material => state.pending_material_refs.iter().chain(state.active_material_refs.iter()).any(|id| id == &scope.scope_id),
+        ScopeType::Material => state
+            .pending_material_refs
+            .iter()
+            .chain(state.active_material_refs.iter())
+            .any(|id| id == &scope.scope_id),
         ScopeType::Campaign | ScopeType::Character | ScopeType::Object => true,
     }
 }
-
 
 fn player_facing_output_contract() -> String {
     "Player-facing output contract:\n\
@@ -2225,7 +3548,8 @@ fn project_visibility(block: ContextBlock, viewer: &VisibilityProfile) -> Option
 
 fn sort_blocks(blocks: &mut Vec<ContextBlock>) {
     blocks.sort_by(|a, b| {
-        b.priority.cmp(&a.priority)
+        b.priority
+            .cmp(&a.priority)
             .then_with(|| scope_rank(&b.scope).cmp(&scope_rank(&a.scope)))
             .then_with(|| a.block_id.cmp(&b.block_id))
             .then_with(|| a.version.cmp(&b.version))
@@ -2263,7 +3587,8 @@ fn render_blocks(blocks: &[ContextBlock]) -> String {
     for block in blocks {
         let title = redact_gm_only_prompt_text(&block.title, block.visibility);
         let content = redact_gm_only_prompt_text(&block.content.render_text(), block.visibility);
-        out.push_str(&format!("
+        out.push_str(&format!(
+            "
 
 ---
 block_id: {}
@@ -2290,13 +3615,18 @@ priority: {}
 
 fn redact_gm_only_prompt_text(input: &str, visibility: Visibility) -> String {
     let redact = std::env::var("TRPG_REDACT_GM_ONLY_PROMPT_TERMS")
-        .map(|v| !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"))
+        .map(|v| {
+            !matches!(
+                v.to_ascii_lowercase().as_str(),
+                "0" | "false" | "off" | "no"
+            )
+        })
         .unwrap_or(true);
     if !redact || visibility != Visibility::GmOnly {
         return input.to_string();
     }
-    let terms = std::env::var("TRPG_SECRET_TERM_OVERRIDES")
-        .unwrap_or_else(|_| "Athena,Shelob".to_string());
+    let terms =
+        std::env::var("TRPG_SECRET_TERM_OVERRIDES").unwrap_or_else(|_| "Athena,Shelob".to_string());
     let mut out = input.to_string();
     for term in terms.split(',').map(str::trim).filter(|s| !s.is_empty()) {
         out = out.replace(term, "[undiscovered entity]");
@@ -2373,7 +3703,6 @@ fn retain_not_dropped(blocks: &mut Vec<ContextBlock>, drop: &HashSet<&str>) -> b
     blocks.len() != before
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct MechanicalSignal {
     has_signal: bool,
@@ -2387,8 +3716,27 @@ fn detect_mechanical_signal(user_input: &str, assistant_output: &str) -> Mechani
     let text = format!("{}\n{}", user_input, assistant_output);
     let mut mentioned_terms = Vec::new();
     let lower = text.to_lowercase();
-    for term in ["dv", "dc", "tn", "检定", "difficulty", "check", "roll", "1d10", "d10", "d100", "2d6", "stealth", "basic tech", "combat", "attack", "damage"] {
-        if lower.contains(term) { mentioned_terms.push(term.to_string()); }
+    for term in [
+        "dv",
+        "dc",
+        "tn",
+        "检定",
+        "difficulty",
+        "check",
+        "roll",
+        "1d10",
+        "d10",
+        "d100",
+        "2d6",
+        "stealth",
+        "basic tech",
+        "combat",
+        "attack",
+        "damage",
+    ] {
+        if lower.contains(term) {
+            mentioned_terms.push(term.to_string());
+        }
     }
     let re = Regex::new(r"(?i)\b(DV|DC|TN)\s*[:=]?\s*(\d{1,3})\b").ok();
     let mut target_kind = None;
@@ -2420,7 +3768,15 @@ fn check_target_signal(contract: &CheckContract) -> Option<(String, i32)> {
     match &contract.target {
         CheckTargetModel::StaticNumber { value, label } => {
             let upper = label.to_ascii_uppercase();
-            let kind = if upper.contains("DV") { "DV" } else if upper.contains("DC") { "DC" } else if upper.contains("TN") { "TN" } else { "TARGET" };
+            let kind = if upper.contains("DV") {
+                "DV"
+            } else if upper.contains("DC") {
+                "DC"
+            } else if upper.contains("TN") {
+                "TN"
+            } else {
+                "TARGET"
+            };
             Some((kind.to_string(), *value))
         }
         CheckTargetModel::SuccessCount { threshold } => Some(("SUCCESSES".into(), *threshold)),
@@ -2443,8 +3799,13 @@ fn extract_source_refs_from_lookup_events(events: &[LookupEvent]) -> Vec<SourceR
             }
         }
     }
-    refs.sort_by(|a, b| format!("{}:{:?}:{:?}", a.source_id, a.page, a.anchor_id).cmp(&format!("{}:{:?}:{:?}", b.source_id, b.page, b.anchor_id)));
-    refs.dedup_by(|a, b| a.source_id == b.source_id && a.page == b.page && a.anchor_id == b.anchor_id);
+    refs.sort_by(|a, b| {
+        format!("{}:{:?}:{:?}", a.source_id, a.page, a.anchor_id)
+            .cmp(&format!("{}:{:?}:{:?}", b.source_id, b.page, b.anchor_id))
+    });
+    refs.dedup_by(|a, b| {
+        a.source_id == b.source_id && a.page == b.page && a.anchor_id == b.anchor_id
+    });
     refs
 }
 
@@ -2454,33 +3815,70 @@ fn top_search_hit_titles(events: &[LookupEvent], limit: usize) -> Vec<String> {
         if let Some(hits) = event.source_hits.as_array() {
             for hit in hits {
                 if let Some(title) = hit.get("title").and_then(|v| v.as_str()) {
-                    if !title.trim().is_empty() { titles.push(title.trim().to_string()); }
+                    if !title.trim().is_empty() {
+                        titles.push(title.trim().to_string());
+                    }
                 }
-                if titles.len() >= limit { return titles; }
+                if titles.len() >= limit {
+                    return titles;
+                }
             }
         }
     }
     titles
 }
 
-fn evidence_score(signal: &MechanicalSignal, refs: &[SourceRef], events: &[LookupEvent], risk_flags: &[String]) -> f32 {
+fn evidence_score(
+    signal: &MechanicalSignal,
+    refs: &[SourceRef],
+    events: &[LookupEvent],
+    risk_flags: &[String],
+) -> f32 {
     let mut score: f32 = 0.20;
-    if !events.is_empty() { score += 0.20; }
-    if !refs.is_empty() { score += 0.25; }
-    if signal.has_signal { score += 0.15; }
-    if signal.has_specific_target { score += 0.15; }
-    if events.iter().any(|e| e.result_status == "source_backed" || e.result_status == "hit") { score += 0.10; }
+    if !events.is_empty() {
+        score += 0.20;
+    }
+    if !refs.is_empty() {
+        score += 0.25;
+    }
+    if signal.has_signal {
+        score += 0.15;
+    }
+    if signal.has_specific_target {
+        score += 0.15;
+    }
+    if events
+        .iter()
+        .any(|e| e.result_status == "source_backed" || e.result_status == "hit")
+    {
+        score += 0.10;
+    }
     score -= (risk_flags.len() as f32) * 0.08;
     score.clamp(0.0, 1.0)
 }
 
 fn infer_packet_type(user_input: &str, assistant_output: &str) -> String {
     let lower = format!("{}\n{}", user_input, assistant_output).to_lowercase();
-    if lower.contains("combat") || lower.contains("attack") || lower.contains("damage") || lower.contains("战斗") || lower.contains("攻击") { "combat_ruling".into() }
-    else if lower.contains("netrun") || lower.contains("hack") || lower.contains("黑") { "netrunning_or_hacking".into() }
-    else if lower.contains("stealth") || lower.contains("潜行") { "skill_check_stealth".into() }
-    else if lower.contains("tech") || lower.contains("修") || lower.contains("线缆") || lower.contains("无人机") { "skill_check_tech".into() }
-    else { "table_ruling".into() }
+    if lower.contains("combat")
+        || lower.contains("attack")
+        || lower.contains("damage")
+        || lower.contains("战斗")
+        || lower.contains("攻击")
+    {
+        "combat_ruling".into()
+    } else if lower.contains("netrun") || lower.contains("hack") || lower.contains("黑") {
+        "netrunning_or_hacking".into()
+    } else if lower.contains("stealth") || lower.contains("潜行") {
+        "skill_check_stealth".into()
+    } else if lower.contains("tech")
+        || lower.contains("修")
+        || lower.contains("线缆")
+        || lower.contains("无人机")
+    {
+        "skill_check_tech".into()
+    } else {
+        "table_ruling".into()
+    }
 }
 
 fn safe_packet_key(packet_type: &str, user_input: &str, signal: &MechanicalSignal) -> String {
@@ -2489,13 +3887,35 @@ fn safe_packet_key(packet_type: &str, user_input: &str, signal: &MechanicalSigna
     if let (Some(kind), Some(value)) = (&signal.target_kind, signal.target_value) {
         parts.push(format!("{}{}", kind.to_ascii_lowercase(), value));
     }
-    for word in user_input.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).take(8) {
-        let cleaned: String = word.to_lowercase().chars().filter(|c| c.is_ascii_alphanumeric()).collect();
-        if !cleaned.is_empty() { parts.push(cleaned); }
+    for word in user_input
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .take(8)
+    {
+        let cleaned: String = word
+            .to_lowercase()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect();
+        if !cleaned.is_empty() {
+            parts.push(cleaned);
+        }
     }
-    let joined = parts.into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("_");
-    let key: String = joined.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_').take(96).collect();
-    if key.is_empty() { "table_ruling".into() } else { key.trim_matches('_').to_string() }
+    let joined = parts
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("_");
+    let key: String = joined
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .take(96)
+        .collect();
+    if key.is_empty() {
+        "table_ruling".into()
+    } else {
+        key.trim_matches('_').to_string()
+    }
 }
 
 fn learning_candidate_title(user_input: &str, signal: &MechanicalSignal) -> String {
@@ -2506,13 +3926,21 @@ fn learning_candidate_title(user_input: &str, signal: &MechanicalSignal) -> Stri
     title
 }
 
-
-fn make_ruling_summary(user_input: &str, assistant_output: &str, signal: &MechanicalSignal, hit_titles: &[String]) -> String {
+fn make_ruling_summary(
+    user_input: &str,
+    assistant_output: &str,
+    signal: &MechanicalSignal,
+    hit_titles: &[String],
+) -> String {
     let target = match (&signal.target_kind, signal.target_value) {
         (Some(k), Some(v)) => format!(" Detected target: {k}{v}."),
         _ => String::new(),
     };
-    let evidence = if hit_titles.is_empty() { String::new() } else { format!(" Evidence hits: {}.", hit_titles.join("; ")) };
+    let evidence = if hit_titles.is_empty() {
+        String::new()
+    } else {
+        format!(" Evidence hits: {}.", hit_titles.join("; "))
+    };
     format!(
         "Player action: {}\nRuling excerpt: {}{}{}",
         user_input.chars().take(360).collect::<String>(),
@@ -2522,7 +3950,12 @@ fn make_ruling_summary(user_input: &str, assistant_output: &str, signal: &Mechan
     )
 }
 
-fn make_learning_candidate_summary(user_input: &str, assistant_output: &str, signal: &MechanicalSignal, hit_titles: &[String]) -> String {
+fn make_learning_candidate_summary(
+    user_input: &str,
+    assistant_output: &str,
+    signal: &MechanicalSignal,
+    hit_titles: &[String],
+) -> String {
     let mut summary = String::new();
     summary.push_str("# Learned Packet Candidate\n\n");
     summary.push_str("Review-gated candidate generated from an actual table turn. Do not treat as stable knowledge until approved.\n\n");
@@ -2535,76 +3968,205 @@ fn make_learning_candidate_summary(user_input: &str, assistant_output: &str, sig
     }
     if !hit_titles.is_empty() {
         summary.push_str("\n## Source Hits\n");
-        for title in hit_titles { summary.push_str(&format!("- {}\n", title)); }
+        for title in hit_titles {
+            summary.push_str(&format!("- {}\n", title));
+        }
     }
     summary
 }
 
 fn learning_audit_enabled() -> bool {
-    std::env::var("TRPG_LEARNING_AUDIT").map(|v| v != "0" && v.to_lowercase() != "false").unwrap_or(true)
+    std::env::var("TRPG_LEARNING_AUDIT")
+        .map(|v| v != "0" && v.to_lowercase() != "false")
+        .unwrap_or(true)
 }
 
 fn learning_auto_promote_enabled() -> bool {
-    std::env::var("TRPG_LEARNING_AUTO_PROMOTE").map(|v| v == "1" || v.to_lowercase() == "true").unwrap_or(false)
+    std::env::var("TRPG_LEARNING_AUTO_PROMOTE")
+        .map(|v| v == "1" || v.to_lowercase() == "true")
+        .unwrap_or(false)
 }
 
-
-fn infer_semantic_choice_option<'a>(gate: &'a InteractionGate, input: &str) -> Option<&'a ActionOption> {
+fn infer_semantic_choice_option<'a>(
+    gate: &'a InteractionGate,
+    input: &str,
+) -> Option<&'a ActionOption> {
     let lower = input.to_lowercase();
     let is_direction_gate = matches!(gate.gate_kind, GateKind::ChooseActionMode)
-        || gate.advice_refs.iter().any(|r| r.contains("direction_gate") || r.contains("stalemate"))
+        || gate
+            .advice_refs
+            .iter()
+            .any(|r| r.contains("direction_gate") || r.contains("stalemate"))
         || gate.bound_action_summary.contains("direction")
         || gate.prompt_public.contains("改变局面")
         || gate.prompt_public.contains("局势");
     if !is_direction_gate {
-        let deescalate_or_end = contains_any_choice(&lower, &["停火", "战斗结束", "结束战斗", "和解", "别打", "谈判", "投降", "ceasefire", "end combat", "stand down", "negotiate", "surrender"]);
+        let deescalate_or_end = contains_any_choice(
+            &lower,
+            &[
+                "停火",
+                "战斗结束",
+                "结束战斗",
+                "和解",
+                "别打",
+                "谈判",
+                "投降",
+                "ceasefire",
+                "end combat",
+                "stand down",
+                "negotiate",
+                "surrender",
+            ],
+        );
         if deescalate_or_end {
-            return gate.allowed_options.iter()
-                .find(|opt| opt.option_id.contains("take") || opt.option_id.contains("decline") || opt.option_id.contains("dodge"))
+            return gate
+                .allowed_options
+                .iter()
+                .find(|opt| {
+                    opt.option_id.contains("take")
+                        || opt.option_id.contains("decline")
+                        || opt.option_id.contains("dodge")
+                })
                 .or_else(|| gate.allowed_options.first());
         }
         return None;
     }
     let want_continue = lower.starts_with("/roll")
-        || contains_any_choice(&lower, &["继续", "继续攻击", "继续开火", "持续压制", "猛打", "正面对抗", "keep firing", "continue", "press", "attack", "shoot", "fire"]);
-    let want_escape = contains_any_choice(&lower, &["撤", "逃", "脱离", "离开", "撤退", "逃跑", "withdraw", "retreat", "escape", "disengage"]);
-    let want_talk = contains_any_choice(&lower, &["谈", "和解", "投降", "停火", "威慑", "negotiate", "truce", "surrender", "deescalate", "talk"]);
-    let want_objective = contains_any_choice(&lower, &["目标", "电缆", "源头", "服务器", "推进", "处理", "objective", "cable", "server", "source", "push"]);
-    let want_change = contains_any_choice(&lower, &["换", "改变", "绕", "战术", "change", "different", "flank", "new tactic"]);
-    let wanted_ids: &[&str] = if want_continue { &["continue_conflict", "continue_pressure"] }
-        else if want_escape { &["escape_or_disengage", "withdraw_or_chase", "leave_node"] }
-        else if want_talk { &["deescalate", "new_leverage", "pressure", "accept_or_leave"] }
-        else if want_objective { &["push_objective", "change_method", "deep_search_cost"] }
-        else if want_change { &["change_tactic", "change_method"] }
-        else { &[] };
+        || contains_any_choice(
+            &lower,
+            &[
+                "继续",
+                "继续攻击",
+                "继续开火",
+                "持续压制",
+                "猛打",
+                "正面对抗",
+                "keep firing",
+                "continue",
+                "press",
+                "attack",
+                "shoot",
+                "fire",
+            ],
+        );
+    let want_escape = contains_any_choice(
+        &lower,
+        &[
+            "撤",
+            "逃",
+            "脱离",
+            "离开",
+            "撤退",
+            "逃跑",
+            "withdraw",
+            "retreat",
+            "escape",
+            "disengage",
+        ],
+    );
+    let want_talk = contains_any_choice(
+        &lower,
+        &[
+            "谈",
+            "和解",
+            "投降",
+            "停火",
+            "威慑",
+            "negotiate",
+            "truce",
+            "surrender",
+            "deescalate",
+            "talk",
+        ],
+    );
+    let want_objective = contains_any_choice(
+        &lower,
+        &[
+            "目标",
+            "电缆",
+            "源头",
+            "服务器",
+            "推进",
+            "处理",
+            "objective",
+            "cable",
+            "server",
+            "source",
+            "push",
+        ],
+    );
+    let want_change = contains_any_choice(
+        &lower,
+        &[
+            "换",
+            "改变",
+            "绕",
+            "战术",
+            "change",
+            "different",
+            "flank",
+            "new tactic",
+        ],
+    );
+    let wanted_ids: &[&str] = if want_continue {
+        &["continue_conflict", "continue_pressure"]
+    } else if want_escape {
+        &["escape_or_disengage", "withdraw_or_chase", "leave_node"]
+    } else if want_talk {
+        &["deescalate", "new_leverage", "pressure", "accept_or_leave"]
+    } else if want_objective {
+        &["push_objective", "change_method", "deep_search_cost"]
+    } else if want_change {
+        &["change_tactic", "change_method"]
+    } else {
+        &[]
+    };
     for id in wanted_ids {
-        if let Some(option) = gate.allowed_options.iter().find(|opt| opt.option_id == *id) { return Some(option); }
+        if let Some(option) = gate.allowed_options.iter().find(|opt| opt.option_id == *id) {
+            return Some(option);
+        }
     }
     // v1.10.1 safety valve: a direction gate must never wedge the player when
     // they clearly mean to continue pressure/attack. If custom profiles renamed
     // the option id, resolve to the first direction option instead of reprompting.
-    if want_continue || want_escape || want_talk || want_objective || want_change { return gate.allowed_options.first(); }
+    if want_continue || want_escape || want_talk || want_objective || want_change {
+        return gate.allowed_options.first();
+    }
     None
 }
 
 fn default_choice_after_reprompt(gate: &InteractionGate) -> Option<&ActionOption> {
-    gate.allowed_options.iter().find(|opt| opt.is_default)
-        .or_else(|| gate.allowed_options.iter().find(|opt| opt.option_id == "continue_conflict" || opt.option_id == "continue_pressure"))
+    gate.allowed_options
+        .iter()
+        .find(|opt| opt.is_default)
+        .or_else(|| {
+            gate.allowed_options.iter().find(|opt| {
+                opt.option_id == "continue_conflict" || opt.option_id == "continue_pressure"
+            })
+        })
         .or_else(|| gate.allowed_options.first())
 }
 
-fn contains_any_choice(text: &str, terms: &[&str]) -> bool { terms.iter().any(|term| text.contains(term)) }
+fn contains_any_choice(text: &str, terms: &[&str]) -> bool {
+    terms.iter().any(|term| text.contains(term))
+}
 
 fn turn_orchestrator_enabled() -> bool {
-    std::env::var("TRPG_TURN_ORCHESTRATOR_ENABLE_V17").map(|v| v != "0" && v.to_ascii_lowercase() != "false").unwrap_or(true)
+    std::env::var("TRPG_TURN_ORCHESTRATOR_ENABLE_V17")
+        .map(|v| v != "0" && v.to_ascii_lowercase() != "false")
+        .unwrap_or(true)
 }
 
 fn ability_kernel_enabled() -> bool {
-    std::env::var("TRPG_ABILITY_KERNEL_ENABLE_V19").map(|v| v != "0" && v.to_ascii_lowercase() != "false").unwrap_or(true)
+    std::env::var("TRPG_ABILITY_KERNEL_ENABLE_V19")
+        .map(|v| v != "0" && v.to_ascii_lowercase() != "false")
+        .unwrap_or(true)
 }
 
 fn object_kernel_enabled() -> bool {
-    std::env::var("TRPG_OBJECT_KERNEL_ENABLE_V16").map(|v| v != "0" && v.to_ascii_lowercase() != "false").unwrap_or(true)
+    std::env::var("TRPG_OBJECT_KERNEL_ENABLE_V16")
+        .map(|v| v != "0" && v.to_ascii_lowercase() != "false")
+        .unwrap_or(true)
 }
 
 fn conflict_agent_v10_enabled() -> bool {
@@ -2647,7 +4209,9 @@ pub(crate) fn build_rule_need_for_turn(
 /// `TRPG_RUNTIME_AUTO_SEARCH=0`/`=false` disables in-turn rule retrieval entirely.
 /// Default (unset / any other value) → enabled. Matches the OLD semantics exactly.
 fn runtime_auto_search_enabled() -> bool {
-    !std::env::var("TRPG_RUNTIME_AUTO_SEARCH").map(|v| v == "false" || v == "0").unwrap_or(false)
+    !std::env::var("TRPG_RUNTIME_AUTO_SEARCH")
+        .map(|v| v == "false" || v == "0")
+        .unwrap_or(false)
 }
 
 /// P0-3: decide rule/module sensitivity WITHOUT hardcoded module entity nouns.
@@ -2659,13 +4223,43 @@ fn runtime_auto_search_enabled() -> bool {
 fn looks_rule_or_module_sensitive(input: &str, module_terms: &[String]) -> bool {
     let lowered = input.to_lowercase();
     const GENERIC_KEYWORDS: &[&str] = &[
-        "check", "roll", "rule", "dc", "dv", "skill", "attack", "combat", "damage", "heal",
-        "netrun", "hack", "scene", "npc", "clue", "where", "how",
-        "检定", "判定", "规则", "技能", "攻击", "战斗", "伤害", "治疗", "黑客", "线索", "调查", "地点", "怎么", "能不能",
+        "check",
+        "roll",
+        "rule",
+        "dc",
+        "dv",
+        "skill",
+        "attack",
+        "combat",
+        "damage",
+        "heal",
+        "netrun",
+        "hack",
+        "scene",
+        "npc",
+        "clue",
+        "where",
+        "how",
+        "检定",
+        "判定",
+        "规则",
+        "技能",
+        "攻击",
+        "战斗",
+        "伤害",
+        "治疗",
+        "黑客",
+        "线索",
+        "调查",
+        "地点",
+        "怎么",
+        "能不能",
     ];
     lowered.split_whitespace().count() > 8
         || GENERIC_KEYWORDS.iter().any(|kw| lowered.contains(kw))
-        || module_terms.iter().any(|t| !t.is_empty() && lowered.contains(t.as_str()))
+        || module_terms
+            .iter()
+            .any(|t| !t.is_empty() && lowered.contains(t.as_str()))
 }
 
 /// Push a trimmed, lowercased, de-duplicated term into the harvest set.
@@ -2691,7 +4285,10 @@ mod rule_sensitivity_tests {
     #[test]
     fn module_term_drives_sensitivity() {
         let terms = vec!["athena".to_string(), "雅典娜".to_string()];
-        assert!(looks_rule_or_module_sensitive("i walk toward athena", &terms));
+        assert!(looks_rule_or_module_sensitive(
+            "i walk toward athena",
+            &terms
+        ));
         assert!(looks_rule_or_module_sensitive("走向雅典娜", &terms));
     }
 
@@ -2703,19 +4300,216 @@ mod rule_sensitivity_tests {
         assert!(!looks_rule_or_module_sensitive("i walk toward athena", &[]));
         assert!(!looks_rule_or_module_sensitive("cut the cable", &[]));
         // ...but with module data they are recognized again:
-        assert!(looks_rule_or_module_sensitive("cut the cable", &["cable".to_string()]));
+        assert!(looks_rule_or_module_sensitive(
+            "cut the cable",
+            &["cable".to_string()]
+        ));
     }
 
     // The long-input heuristic still applies (a wordy turn likely needs grounding).
     #[test]
     fn long_input_is_sensitive() {
-        assert!(looks_rule_or_module_sensitive("i quietly move along the wall toward the far door and listen", &[]));
+        assert!(looks_rule_or_module_sensitive(
+            "i quietly move along the wall toward the far door and listen",
+            &[]
+        ));
+    }
+}
+
+/// PURE: bind a source-backed static target from the loaded module's
+/// `technical_option_table` when the kernel left the check unbound. Mirrors the
+/// combat path (`trpg_combat::tech_dv_from_config`, combat lib.rs): a technical
+/// action whose label/summary hits a module DV row resolves against that
+/// source-backed DV (a real meet-or-beat target + StaticDc opposition) instead
+/// of stalling at `awaiting_binding`. Returns true iff a DV was bound.
+///
+/// Fail-closed: only an `UnknownUntilLookup` target is touched (never overrides a
+/// real target), and a no-match action (e.g. a pure perception/observe turn with
+/// no module DV row) is left unbound so it still blocks / awaits binding. No
+/// invented values — the DV is read verbatim from `technical_option_table`.
+pub fn bind_tech_option_target(contract: &mut CheckContract, cfg: &ModuleConfig) -> bool {
+    if !matches!(contract.target, CheckTargetModel::UnknownUntilLookup) {
+        return false;
+    }
+    let match_text =
+        format!("{} {}", contract.check_label, contract.action_summary).to_ascii_lowercase();
+    // Mirrors trpg_combat::policy::tech_dv_from_config (first matcher hit wins),
+    // reading the same public `technical_option_table` shape; kept here because
+    // that fn is private to trpg-combat.
+    let Some(dv) = cfg.technical_option_table.as_ref().and_then(|table| {
+        table
+            .iter()
+            .find(|opt| {
+                opt.matcher
+                    .iter()
+                    .any(|k| match_text.contains(&k.to_ascii_lowercase()))
+            })
+            .map(|opt| opt.dv)
+    }) else {
+        return false;
+    };
+    let label = "source-backed module technical option DV".to_string();
+    contract.target = CheckTargetModel::StaticNumber {
+        value: dv,
+        label: label.clone(),
+    };
+    contract.opposition = OppositionModel::StaticDc { dc: dv, label };
+    contract.source_refs.push(SourceRef {
+        source_id: format!("module_config:technical_option_table:dv={dv}"),
+        ..Default::default()
+    });
+    contract.ruling_status = RulingStatus::SourceBacked;
+    true
+}
+
+#[cfg(test)]
+mod tech_option_binding_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn contract(check_label: &str, action_summary: &str) -> CheckContract {
+        serde_json::from_value(json!({
+            "check_id": "check_t", "session_id": "s", "turn_id": "t",
+            "ruleset_id": "cyberpunk_red", "module_id": "cyberpunk_red.homecoming",
+            "initiator": {"actor_id":"pc.current","actor_kind":"player_character","display_name":null},
+            "target_actor": null,
+            "opposition": {"kind":"no_mechanical_opposition"},
+            "action_summary": action_summary, "intent_kind": "agent_selected_check",
+            "check_label": check_label, "dice_expression": "1d10", "modifiers": [],
+            "target": {"kind":"unknown_until_lookup"},
+            "tested_parameter": {"domain":null,"key":"tech","label":"tech"},
+            "opponent_tested_parameter": null,
+            "actor_snapshot_ids": [], "source_refs": [], "learned_packet_ids": [],
+            "roll_visibility": "public_gm_roll", "roll_authority": "system",
+            "disclosure": {"show_roll_to_player":true,"show_formula_to_player":true,"show_dc_to_player":true,"show_success_failure_to_player":true,"reveal_after_scene":false,"reveal_after_session":false},
+            "stakes": {"before_roll_public":"","success_public":"","failure_public":"","critical_public":null,"fumble_public":null,"success_patches_allowed":[],"failure_patches_allowed":[],"irreversible":false},
+            "confidence": "medium", "ruling_status": "provisional", "advice_refs": [], "expires_at_turn": null
+        })).unwrap()
+    }
+
+    // The real Homecoming technical_option_table: cut/power/cable -> DV 14, hack/server -> DV 12.
+    fn homecoming_cfg() -> ModuleConfig {
+        serde_json::from_value(json!({
+            "technical_option_table": [
+                {"matcher": ["basic tech","cut off","power","cable","线缆","切断","供电"], "dv": 14},
+                {"matcher": ["hack","interface","net","server","黑入","服务器"], "dv": 12}
+            ]
+        })).unwrap()
+    }
+
+    // THE FIX: a source-backed technical action binds the module DV as a real
+    // static target (+ StaticDc) so it resolves instead of awaiting_binding.
+    #[test]
+    fn technical_action_binds_source_backed_dv() {
+        let cfg = homecoming_cfg();
+        let mut c = contract(
+            "Basic Tech check to cut power to the cable",
+            "切断外露电缆的供电",
+        );
+        assert!(
+            bind_tech_option_target(&mut c, &cfg),
+            "a matching technical action must bind a DV"
+        );
+        match &c.target {
+            CheckTargetModel::StaticNumber { value, .. } => assert_eq!(
+                *value, 14,
+                "DV must come verbatim from the table (cut/power/cable -> 14)"
+            ),
+            other => panic!("expected StaticNumber target, got {other:?}"),
+        }
+        match &c.opposition {
+            OppositionModel::StaticDc { dc, .. } => {
+                assert_eq!(*dc, 14, "opposition StaticDc mirrors the bound DV")
+            }
+            other => panic!("expected StaticDc opposition, got {other:?}"),
+        }
+        assert!(
+            matches!(c.ruling_status, RulingStatus::SourceBacked),
+            "a table-bound DV is source-backed"
+        );
+        assert!(
+            c.source_refs
+                .iter()
+                .any(|r| r.source_id.contains("technical_option_table")),
+            "must record the module source ref: {:?}",
+            c.source_refs
+        );
+        // No longer UnknownUntilLookup -> the contest takes the resolved branch (non-null success/degree).
+        assert!(!matches!(c.target, CheckTargetModel::UnknownUntilLookup));
+    }
+
+    #[test]
+    fn hack_action_binds_dv_12() {
+        let cfg = homecoming_cfg();
+        let mut c = contract("Interface check to hack the Athena server", "黑入服务器");
+        assert!(bind_tech_option_target(&mut c, &cfg));
+        assert!(
+            matches!(c.target, CheckTargetModel::StaticNumber { value: 12, .. }),
+            "hack/server -> DV 12: {:?}",
+            c.target
+        );
+    }
+
+    // FAIL-CLOSED: a perception/observe action with no matching DV row stays
+    // unbound (the live-gap action), so the journey still fails closed honestly.
+    #[test]
+    fn perception_action_with_no_source_stays_unbound() {
+        let cfg = homecoming_cfg();
+        let mut c = contract(
+            "Perception check to spot an ambush",
+            "我压低声音靠近公寓门口，先仔细观察有没有埋伏",
+        );
+        assert!(
+            !bind_tech_option_target(&mut c, &cfg),
+            "no DV row matches a pure perception action"
+        );
+        assert!(
+            matches!(c.target, CheckTargetModel::UnknownUntilLookup),
+            "target must stay unbound: {:?}",
+            c.target
+        );
+        assert!(
+            c.source_refs.is_empty(),
+            "no invented source ref when nothing matched"
+        );
+    }
+
+    // Never override a target that is already bound (idempotent / no double-stamp).
+    #[test]
+    fn already_bound_target_is_left_untouched() {
+        let cfg = homecoming_cfg();
+        let mut c = contract("cut the cable", "cut the cable");
+        c.target = CheckTargetModel::StaticNumber {
+            value: 99,
+            label: "preset".into(),
+        };
+        assert!(
+            !bind_tech_option_target(&mut c, &cfg),
+            "an already-bound target must not be re-bound"
+        );
+        assert!(
+            matches!(c.target, CheckTargetModel::StaticNumber { value: 99, .. }),
+            "preset target preserved: {:?}",
+            c.target
+        );
     }
 }
 
 fn looks_like_gate_help_or_question(input: &str) -> bool {
     let lower = input.to_lowercase();
-    let terms = ["怎么投", "投什么", "骰什么", "怎么算", "不会", "不懂", "?", "？", "how", "what do i roll", "what should i roll"];
+    let terms = [
+        "怎么投",
+        "投什么",
+        "骰什么",
+        "怎么算",
+        "不会",
+        "不懂",
+        "?",
+        "？",
+        "how",
+        "what do i roll",
+        "what should i roll",
+    ];
     terms.iter().any(|term| lower.contains(term))
 }
 
@@ -2739,20 +4533,37 @@ pub trait DiceRollerPlugin: Send + Sync {
 pub struct PseudoRandomDiceRoller;
 
 impl DiceRollerPlugin for PseudoRandomDiceRoller {
-    fn plugin_id(&self) -> &'static str { "pseudo_random_v1" }
+    fn plugin_id(&self) -> &'static str {
+        "pseudo_random_v1"
+    }
 
     fn roll(&self, expression: &str) -> Result<DiceRoll> {
         let re = Regex::new(r"(?i)^\s*(\d*)d(\d+)([+-]\d+)?\s*$").unwrap();
-        let caps = re.captures(expression).ok_or_else(|| anyhow!("unsupported dice expression: {expression}"))?;
+        let caps = re
+            .captures(expression)
+            .ok_or_else(|| anyhow!("unsupported dice expression: {expression}"))?;
         let n = caps.get(1).map(|m| m.as_str()).unwrap_or("1");
         let n: i32 = if n.is_empty() { 1 } else { n.parse()? };
         let sides: i32 = caps.get(2).unwrap().as_str().parse()?;
-        let modifier: i32 = caps.get(3).map(|m| m.as_str().parse()).transpose()?.unwrap_or(0);
-        if n <= 0 || n > 100 || sides <= 1 || sides > 1000 { return Err(anyhow!("dice expression outside safety bounds: {expression}")); }
+        let modifier: i32 = caps
+            .get(3)
+            .map(|m| m.as_str().parse())
+            .transpose()?
+            .unwrap_or(0);
+        if n <= 0 || n > 100 || sides <= 1 || sides > 1000 {
+            return Err(anyhow!(
+                "dice expression outside safety bounds: {expression}"
+            ));
+        }
         let mut rng = rand::thread_rng();
         let rolls: Vec<i32> = (0..n).map(|_| rng.gen_range(1..=sides)).collect();
         let total = rolls.iter().sum::<i32>() + modifier;
-        Ok(DiceRoll { expression: expression.to_string(), rolls, modifier, total })
+        Ok(DiceRoll {
+            expression: expression.to_string(),
+            rolls,
+            modifier,
+            total,
+        })
     }
 }
 
@@ -2764,35 +4575,55 @@ pub fn roll_dice(expression: &str) -> Result<DiceRoll> {
     PseudoRandomDiceRoller.roll(expression)
 }
 
-pub fn validate_character_template_sheet(template: &CharacterTemplate, sheet: &serde_json::Value) -> ValidationReport {
-    let mut report = ValidationReport { status: "ok".to_string(), ..Default::default() };
+pub fn validate_character_template_sheet(
+    template: &CharacterTemplate,
+    sheet: &serde_json::Value,
+) -> ValidationReport {
+    let mut report = ValidationReport {
+        status: "ok".to_string(),
+        ..Default::default()
+    };
     let obj = match sheet.as_object() {
         Some(o) => o,
         None => {
             report.status = "error".to_string();
-            report.errors.push(ValidationMessage { code: "sheet_not_object".into(), message: "Character sheet must be a JSON object.".into(), target: None });
+            report.errors.push(ValidationMessage {
+                code: "sheet_not_object".into(),
+                message: "Character sheet must be a JSON object.".into(),
+                target: None,
+            });
             return report;
         }
     };
     for field in &template.fields {
         if field.required && !obj.contains_key(&field.field_id) {
             report.status = "error".to_string();
-            report.errors.push(ValidationMessage { code: "missing_required_field".into(), message: format!("Missing required field: {}", field.field_id), target: Some(field.field_id.clone()) });
+            report.errors.push(ValidationMessage {
+                code: "missing_required_field".into(),
+                message: format!("Missing required field: {}", field.field_id),
+                target: Some(field.field_id.clone()),
+            });
         }
     }
     report
 }
 
-
 fn is_effect_or_damage_contract(contract: &CheckContract) -> bool {
     let text = format!("{} {}", contract.intent_kind, contract.check_label).to_ascii_lowercase();
-    text.contains("damage") || text.contains("effect") || text.contains("伤害") || text.contains("san") || text.contains("chaos") || text.contains("harm")
+    text.contains("damage")
+        || text.contains("effect")
+        || text.contains("伤害")
+        || text.contains("san")
+        || text.contains("chaos")
+        || text.contains("harm")
 }
 
 fn roll_input_available(input: &str) -> bool {
     match parse_roll_text(input) {
         Some(ParsedRollText::DiceExpression(_)) => true,
-        Some(ParsedRollText::ReportedTotal(_) | ParsedRollText::ReportedDieAndComponents { .. }) => player_reported_roll_totals_allowed(),
+        Some(
+            ParsedRollText::ReportedTotal(_) | ParsedRollText::ReportedDieAndComponents { .. },
+        ) => player_reported_roll_totals_allowed(),
         None => wants_system_roll(input),
     }
 }
@@ -2801,8 +4632,22 @@ fn roll_input_available(input: &str) -> bool {
 /// 守卫复用此函数，与 resolve_roll_input 的回退语义保持单一事实源）。
 pub fn wants_system_roll(input: &str) -> bool {
     let lower = input.trim().to_ascii_lowercase();
-    if lower == "/roll" || lower == "roll" { return true; }
-    let terms = ["你来投", "你帮我投", "系统投", "系统掷", "代投", "帮我掷", "gm roll", "roll for me", "you roll", "system roll", "auto roll"];
+    if lower == "/roll" || lower == "roll" {
+        return true;
+    }
+    let terms = [
+        "你来投",
+        "你帮我投",
+        "系统投",
+        "系统掷",
+        "代投",
+        "帮我掷",
+        "gm roll",
+        "roll for me",
+        "you roll",
+        "system roll",
+        "auto roll",
+    ];
     terms.iter().any(|term| lower.contains(term))
 }
 
@@ -2825,13 +4670,23 @@ pub fn normalize_contract_for_system_roll(contract: &CheckContract) -> CheckCont
 
 fn player_reported_roll_totals_allowed() -> bool {
     std::env::var("TRPG_PLAYER_REPORTED_ROLL_TOTALS")
-        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on" | "allow" | "allowed"))
+        .map(|v| {
+            matches!(
+                v.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on" | "allow" | "allowed"
+            )
+        })
         .unwrap_or(false)
 }
 
 fn player_supplied_roll_expressions_allowed() -> bool {
     std::env::var("TRPG_PLAYER_SUPPLIED_ROLL_EXPRESSIONS")
-        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on" | "allow" | "allowed"))
+        .map(|v| {
+            matches!(
+                v.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on" | "allow" | "allowed"
+            )
+        })
         .unwrap_or(false)
 }
 
@@ -2870,7 +4725,12 @@ fn warn_if_core_mechanics_disabled() {
     });
 }
 
-fn real_materialization_enabled() -> bool { std::env::var("TRPG_REAL_MATERIALIZATION_ENABLE_V110").ok().map(|v| matches!(v.to_ascii_lowercase().as_str(), "1"|"true"|"yes"|"on")).unwrap_or(true) }
+fn real_materialization_enabled() -> bool {
+    std::env::var("TRPG_REAL_MATERIALIZATION_ENABLE_V110")
+        .ok()
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(true)
+}
 
 // NOTE: module_scene_proj_tests moved to scene_projection.rs
 
@@ -2900,12 +4760,21 @@ mod build_rule_need_tests {
         assert_eq!(need.turn_id.as_deref(), Some("turn7"));
         assert_eq!(need.scene_id.as_deref(), Some("sc02"));
         assert_eq!(need.query, "I attack the cultist with my knife");
-        assert_eq!(need.player_action_summary, "I attack the cultist with my knife");
+        assert_eq!(
+            need.player_action_summary,
+            "I attack the cultist with my knife"
+        );
         assert_eq!(need.need_kind, RuleNeedKind::GeneralRuleQuery);
         assert!(matches!(need.urgency, RuleUrgency::ImmediateTurn));
         assert!(matches!(need.visibility, Visibility::GmOnly));
-        assert_eq!(need.allowed_outputs, vec![RuleAssistOutputKind::ContextBlock]);
-        assert!(!need.need_id.is_empty(), "need_id must be generated, not empty");
+        assert_eq!(
+            need.allowed_outputs,
+            vec![RuleAssistOutputKind::ContextBlock]
+        );
+        assert!(
+            !need.need_id.is_empty(),
+            "need_id must be generated, not empty"
+        );
     }
 
     #[test]
@@ -2931,13 +4800,17 @@ mod runtime_auto_search_gate_tests {
     }
     impl AutoSearchEnvGuard {
         fn set(value: &str) -> Self {
-            let lock = AUTO_SEARCH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let lock = AUTO_SEARCH_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             let prev = std::env::var("TRPG_RUNTIME_AUTO_SEARCH").ok();
             std::env::set_var("TRPG_RUNTIME_AUTO_SEARCH", value);
             Self { prev, _lock: lock }
         }
         fn unset() -> Self {
-            let lock = AUTO_SEARCH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let lock = AUTO_SEARCH_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             let prev = std::env::var("TRPG_RUNTIME_AUTO_SEARCH").ok();
             std::env::remove_var("TRPG_RUNTIME_AUTO_SEARCH");
             Self { prev, _lock: lock }
@@ -2961,25 +4834,37 @@ mod runtime_auto_search_gate_tests {
     #[test]
     fn auto_search_disabled_when_zero() {
         let _g = AutoSearchEnvGuard::set("0");
-        assert!(!runtime_auto_search_enabled(), "=0 must disable in-turn rule retrieval (empty blocks)");
+        assert!(
+            !runtime_auto_search_enabled(),
+            "=0 must disable in-turn rule retrieval (empty blocks)"
+        );
     }
 
     #[test]
     fn auto_search_disabled_when_false() {
         let _g = AutoSearchEnvGuard::set("false");
-        assert!(!runtime_auto_search_enabled(), "=false must disable in-turn rule retrieval (empty blocks)");
+        assert!(
+            !runtime_auto_search_enabled(),
+            "=false must disable in-turn rule retrieval (empty blocks)"
+        );
     }
 
     #[test]
     fn auto_search_enabled_by_default_when_unset() {
         let _g = AutoSearchEnvGuard::unset();
-        assert!(runtime_auto_search_enabled(), "unset must keep default-ON behavior unchanged");
+        assert!(
+            runtime_auto_search_enabled(),
+            "unset must keep default-ON behavior unchanged"
+        );
     }
 
     #[test]
     fn auto_search_enabled_for_other_values() {
         let _g = AutoSearchEnvGuard::set("1");
-        assert!(runtime_auto_search_enabled(), "any value other than 0/false stays enabled (matches old semantics)");
+        assert!(
+            runtime_auto_search_enabled(),
+            "any value other than 0/false stays enabled (matches old semantics)"
+        );
     }
 }
 
@@ -3022,7 +4907,13 @@ mod merge_need_outcome_tests {
             source_refs: vec![sample_source_ref("r1"), sample_source_ref("r2")],
         };
 
-        merge_need_outcome(&mut blocks, &mut trace, outcome, "rule", "turn context assembly");
+        merge_need_outcome(
+            &mut blocks,
+            &mut trace,
+            outcome,
+            "rule",
+            "turn context assembly",
+        );
 
         // blocks extended by exactly 2 (pre-existing 1 → 3).
         assert_eq!(blocks.len(), 3);
@@ -3088,7 +4979,9 @@ mod apply_context_filter_tests {
             pinned_blocks: vec![],
             dynamic_blocks: vec![block("d.keep", "Keep", "keep body", CacheZone::DynamicTail)],
         };
-        let baseline = ContextBuilder.build(baseline_planned, &req).expect("build baseline");
+        let baseline = ContextBuilder
+            .build(baseline_planned, &req)
+            .expect("build baseline");
 
         let prefix_text_before = compiled.prefix_text.clone();
         let prefix_hash_before = compiled.prefix_hash.clone();
@@ -3096,7 +4989,11 @@ mod apply_context_filter_tests {
         apply_context_filter(&mut compiled, &["d.drop".to_string()]);
 
         // 被删块不在了；保留块仍在。
-        let ids: Vec<&str> = compiled.dynamic_blocks.iter().map(|b| b.block_id.as_str()).collect();
+        let ids: Vec<&str> = compiled
+            .dynamic_blocks
+            .iter()
+            .map(|b| b.block_id.as_str())
+            .collect();
         assert_eq!(ids, vec!["d.keep"]);
         // dynamic text/hash 与基线（从未含 d.drop 的装配）逐字一致——证明走的是同一渲染路径。
         assert_eq!(compiled.dynamic_text, baseline.dynamic_text);
@@ -3106,8 +5003,14 @@ mod apply_context_filter_tests {
         assert_eq!(compiled.prefix_hash, prefix_hash_before);
         assert_eq!(compiled.prefix_text, baseline.prefix_text);
         // block_version_ids 不再含被删块。
-        assert!(!compiled.block_version_ids.iter().any(|v| v.starts_with("d.drop@")));
-        assert!(compiled.block_version_ids.iter().any(|v| v.starts_with("d.keep@")));
+        assert!(!compiled
+            .block_version_ids
+            .iter()
+            .any(|v| v.starts_with("d.drop@")));
+        assert!(compiled
+            .block_version_ids
+            .iter()
+            .any(|v| v.starts_with("d.keep@")));
     }
 
     /// 空 drop set → 完全 no-op（所有 band text/hash byte-stable）。
@@ -3151,42 +5054,5 @@ mod apply_context_filter_tests {
         assert_eq!(compiled.dynamic_hash, before.dynamic_hash);
         assert_eq!(compiled.prefix_text, before.prefix_text);
         assert_eq!(compiled.prefix_hash, before.prefix_hash);
-    }
-}
-
-#[cfg(test)]
-mod current_check_npc_persona_tests {
-    //! §NPC-holder-id-gate slice 1: the contest-path persona must carry the NPC's
-    //! real module-graph id as `actor_id`, matching `scene_npc_personas` — never
-    //! the `npc.opposition` placeholder (spec §6③ 串台坑). These tests exercise the
-    //! pure resolver shared by `current_check_npc_persona` and `scene_npc_personas`
-    //! so the id contract is provable without a live module-graph DB.
-    use super::*;
-    use serde_json::json;
-
-    fn npcs() -> Vec<serde_json::Value> {
-        vec![
-            json!({"id": "npc.lars", "name": "拉斯", "summary": "加油站老板", "body": "沉默寡言的退伍兵。"}),
-            json!({"id": "npc.ghost", "name": "", "summary": "", "body": ""}),
-        ]
-    }
-
-    #[test]
-    fn current_check_npc_persona_carries_real_graph_id_not_placeholder() {
-        let persona = RuntimeEngine::persona_from_scene_npc(&npcs(), "npc.lars").expect("resolves existing npc");
-        // The whole point of slice 1: stable per-NPC id, NOT the collide-prone
-        // `npc.opposition` placeholder the old code returned.
-        assert_eq!(persona.actor_id, "npc.lars");
-        assert_ne!(persona.actor_id, "npc.opposition");
-        assert_eq!(persona.name, "拉斯");
-        assert_eq!(persona.prose, "沉默寡言的退伍兵。"); // body wins over summary
-    }
-
-    #[test]
-    fn current_check_npc_persona_fail_closed_on_empty_and_missing() {
-        // both name and prose empty -> None (no empty persona for the judge to fill)
-        assert!(RuntimeEngine::persona_from_scene_npc(&npcs(), "npc.ghost").is_none());
-        // id absent from graph.npcs -> None (never invents an id)
-        assert!(RuntimeEngine::persona_from_scene_npc(&npcs(), "npc.nobody").is_none());
     }
 }

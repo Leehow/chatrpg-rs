@@ -1,7 +1,7 @@
 //! 通用对抗结算(数据驱动,零 per-ruleset):按 kernel `compare` 方向算双方成败,
 //! 用 `success_bands` 的 tier rank 比质量。fail-closed:缺值返 (None,None,None)。
-use serde_json::Value;
-use crate::success_tier_for; // lib.rs 中的既有纯函数(本任务改为 pub(crate))
+use crate::success_tier_for;
+use serde_json::Value; // lib.rs 中的既有纯函数(本任务改为 pub(crate))
 
 /// 算一侧是否成功(compare 方向数据驱动)。
 fn side_succeeds(compare: &str, total: i64, value: i32) -> bool {
@@ -14,7 +14,9 @@ fn side_succeeds(compare: &str, total: i64, value: i32) -> bool {
 /// 一侧的 (是否成功, tier rank, margin)。margin:两种 compare 都"越大越好"。
 fn side_rank(compare: &str, bands: &[Value], total: i64, value: i32) -> (bool, i64, i64) {
     let succeeds = side_succeeds(compare, total, value);
-    let tier = success_tier_for(bands, total, value as i64).map(|(_, r)| r).unwrap_or(0);
+    let tier = success_tier_for(bands, total, value as i64)
+        .map(|(_, r)| r)
+        .unwrap_or(0);
     let margin = match compare {
         "meet_or_beat" => total - value as i64,
         _ => value as i64 - total,
@@ -26,11 +28,17 @@ fn side_rank(compare: &str, bands: &[Value], total: i64, value: i32) -> (bool, i
 /// fail-closed:任一值缺 → (None,None,None)。平局 → 防御方胜
 /// (engine convention — ties favor the defender / status quo; a future kernel field may override)。
 pub fn resolve_opposed(
-    compare: &str, bands: &[Value],
-    atk_total: i64, atk_value: Option<i32>,
-    def_total: i64, def_value: Option<i32>,
+    compare: &str,
+    bands: &[Value],
+    atk_total: i64,
+    atk_value: Option<i32>,
+    def_total: i64,
+    def_value: Option<i32>,
 ) -> (Option<i64>, Option<bool>, Option<String>) {
-    let (av, dv) = match (atk_value, def_value) { (Some(a), Some(d)) => (a, d), _ => return (None, None, None) };
+    let (av, dv) = match (atk_value, def_value) {
+        (Some(a), Some(d)) => (a, d),
+        _ => return (None, None, None),
+    };
     let a = side_rank(compare, bands, atk_total, av);
     let d = side_rank(compare, bands, def_total, dv);
     let (atk_ok, def_ok) = (a.0, d.0);
@@ -39,14 +47,26 @@ pub fn resolve_opposed(
         (false, true) => false,
         (false, false) => false, // 双败:主动方未达成 → 防御方胜(status quo)
         (true, true) => {
-            if a.1 != d.1 { a.1 > d.1 }        // 比 tier rank
-            else if a.2 != d.2 { a.2 > d.2 }   // 再比 margin
-            else { false }                      // 平局归防御方
+            if a.1 != d.1 {
+                a.1 > d.1
+            }
+            // 比 tier rank
+            else if a.2 != d.2 {
+                a.2 > d.2
+            }
+            // 再比 margin
+            else {
+                false
+            } // 平局归防御方
         }
     };
-    let degree = Some(if !atk_ok && !def_ok { "mutual_failure".to_string() }
-        else if attacker_wins { "attacker_wins".to_string() }
-        else { "defender_wins".to_string() });
+    let degree = Some(if !atk_ok && !def_ok {
+        "mutual_failure".to_string()
+    } else if attacker_wins {
+        "attacker_wins".to_string()
+    } else {
+        "defender_wins".to_string()
+    });
     (None, Some(attacker_wins), degree)
 }
 
@@ -57,10 +77,14 @@ pub fn resolve_opposed(
 /// 返回 (target=None, success=attacker_wins, degree)——形态与 resolve_opposed 对齐,供
 /// resolve_outcome 直接覆盖 target/success/degree。
 pub fn resolve_pool_opposed(
-    target_face: i32, threshold: i32,
-    atk_rolls: &[i64], def_rolls: &[i64],
+    target_face: i32,
+    threshold: i32,
+    atk_rolls: &[i64],
+    def_rolls: &[i64],
 ) -> (Option<i64>, Option<bool>, Option<String>) {
-    if atk_rolls.is_empty() || def_rolls.is_empty() { return (None, None, None); }
+    if atk_rolls.is_empty() || def_rolls.is_empty() {
+        return (None, None, None);
+    }
     let face = target_face as i64;
     let atk_hits = atk_rolls.iter().filter(|&&d| d == face).count() as i64;
     let def_hits = def_rolls.iter().filter(|&&d| d == face).count() as i64;
@@ -68,12 +92,16 @@ pub fn resolve_pool_opposed(
     let attacker_wins = match (atk_ok, def_ok) {
         (true, false) => true,
         (false, true) => false,
-        (false, false) => false,            // 双方未达阈值:防御方守成(status quo)
+        (false, false) => false, // 双方未达阈值:防御方守成(status quo)
         (true, true) => atk_hits > def_hits, // 都达阈值:hits 多者胜,平局归防御方
     };
-    let degree = Some(if !atk_ok && !def_ok { "mutual_failure".to_string() }
-        else if attacker_wins { "attacker_wins".to_string() }
-        else { "defender_wins".to_string() });
+    let degree = Some(if !atk_ok && !def_ok {
+        "mutual_failure".to_string()
+    } else if attacker_wins {
+        "attacker_wins".to_string()
+    } else {
+        "defender_wins".to_string()
+    });
     (None, Some(attacker_wins), degree)
 }
 
@@ -89,7 +117,8 @@ mod tests {
             {"id":"hard","rank":2,"test":{"kind":"roll_under_fraction","denominator":2}},
             {"id":"extreme","rank":3,"test":{"kind":"roll_under_fraction","denominator":5}},
             {"id":"fumble","rank":0,"test":{"kind":"in_range","min":96,"max":100}}
-        ])).unwrap()
+        ]))
+        .unwrap()
     }
 
     #[test]
@@ -181,7 +210,13 @@ mod tests {
     #[test]
     fn pool_opposed_empty_pool_fails_closed() {
         // 任一池为空(未掷)→ fail-closed (None,None,None),绝不乱判胜负。
-        assert_eq!(resolve_pool_opposed(3, 1, &[], &[3, 3, 1]), (None, None, None));
-        assert_eq!(resolve_pool_opposed(3, 1, &[3, 3, 1], &[]), (None, None, None));
+        assert_eq!(
+            resolve_pool_opposed(3, 1, &[], &[3, 3, 1]),
+            (None, None, None)
+        );
+        assert_eq!(
+            resolve_pool_opposed(3, 1, &[3, 3, 1], &[]),
+            (None, None, None)
+        );
     }
 }

@@ -3534,7 +3534,6 @@ dependencies = [
  "sqlx",
  "tokio",
  "trpg-model",
- "trpg-runtime",
 ]
 
 [[package]]

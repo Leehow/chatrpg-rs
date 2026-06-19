@@ -51,6 +51,9 @@ impl NeedResolver for MaterialNeedResolver {
         let block = MaterializationService::from_env(self.db.clone(), None)
             .materialization_context_block(&scopes.session_id, world_tick)
             .await?;
-        Ok(NeedOutcome { blocks: vec![block], source_refs: vec![] })
+        Ok(NeedOutcome {
+            blocks: vec![block],
+            source_refs: vec![],
+        })
     }
 }

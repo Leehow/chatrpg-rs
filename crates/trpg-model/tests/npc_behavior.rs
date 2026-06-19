@@ -213,8 +213,14 @@ fn guidance_block_omits_unknown_fact_and_belief_ids() {
     };
     let plan = NpcBehaviorPlan::derive(&view_with(rel_with(100, 0, 0), &entries), &ctx);
     let block = plan.to_guidance_block();
-    assert!(!block.contains("ghost_fact"), "unknown fact id must not enter guidance: {block}");
-    assert!(!block.contains("rumor"), "a belief id must not enter guidance: {block}");
+    assert!(
+        !block.contains("ghost_fact"),
+        "unknown fact id must not enter guidance: {block}"
+    );
+    assert!(
+        !block.contains("rumor"),
+        "a belief id must not enter guidance: {block}"
+    );
     assert!(!block.contains("May reveal fact ids"));
     assert!(!block.contains("Withhold fact ids"));
 }

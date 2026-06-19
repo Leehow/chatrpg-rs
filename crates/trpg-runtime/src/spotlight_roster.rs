@@ -54,7 +54,11 @@ fn extract_spotlight_fields(sheet_json: &Value) -> (Vec<String>, Vec<String>, Op
         bucket
             .and_then(|b| b.get(key))
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default()
     };
     let strengths = string_list("character_strengths");
@@ -90,8 +94,15 @@ mod tests {
 
         assert_eq!(out.len(), 2, "one participant per player-character row");
 
-        let alice = out.iter().find(|p| p.player_id == "pc.alice").expect("alice");
-        assert_eq!(alice.character_id.as_deref(), Some("pc.alice"), "character_id = actor_id");
+        let alice = out
+            .iter()
+            .find(|p| p.player_id == "pc.alice")
+            .expect("alice");
+        assert_eq!(
+            alice.character_id.as_deref(),
+            Some("pc.alice"),
+            "character_id = actor_id"
+        );
         assert!(!alice.acted_this_turn, "alice did not act this turn");
 
         let bob = out.iter().find(|p| p.player_id == "pc.bob").expect("bob");
@@ -111,15 +122,24 @@ mod tests {
         });
         let out = build_spotlight_participants(&[pc("pc.alice", sheet)], "pc.alice");
         let alice = &out[0];
-        assert_eq!(alice.character_strengths, vec!["medicine".to_string(), "stealth".to_string()]);
+        assert_eq!(
+            alice.character_strengths,
+            vec!["medicine".to_string(), "stealth".to_string()]
+        );
         assert_eq!(alice.preferred_playstyle, vec!["cautious".to_string()]);
-        assert_eq!(alice.pending_personal_hook.as_deref(), Some("find her brother"));
+        assert_eq!(
+            alice.pending_personal_hook.as_deref(),
+            Some("find her brother")
+        );
     }
 
     // No spotlight bucket (or wrong-typed) ⇒ empty / None, never a panic.
     #[test]
     fn missing_spotlight_bucket_yields_empty_colour() {
-        let out = build_spotlight_participants(&[pc("pc.solo", json!({"resources": {"hp": 10}}))], "pc.solo");
+        let out = build_spotlight_participants(
+            &[pc("pc.solo", json!({"resources": {"hp": 10}}))],
+            "pc.solo",
+        );
         let solo = &out[0];
         assert!(solo.character_strengths.is_empty());
         assert!(solo.preferred_playstyle.is_empty());
@@ -132,7 +152,10 @@ mod tests {
     fn acting_actor_absent_flags_nobody() {
         let players = vec![pc("pc.alice", json!({})), pc("pc.bob", json!({}))];
         let out = build_spotlight_participants(&players, "pc.ghost");
-        assert!(out.iter().all(|p| !p.acted_this_turn), "no row matches the acting actor");
+        assert!(
+            out.iter().all(|p| !p.acted_this_turn),
+            "no row matches the acting actor"
+        );
     }
 
     // Empty roster ⇒ empty participants (caller then falls back to viewer-solo).
@@ -152,7 +175,11 @@ mod tests {
                 "pending_personal_hook": 42
             }
         }));
-        assert_eq!(strengths, vec!["a".to_string(), "b".to_string()], "non-string array entries dropped");
+        assert_eq!(
+            strengths,
+            vec!["a".to_string(), "b".to_string()],
+            "non-string array entries dropped"
+        );
         assert!(playstyle.is_empty(), "non-array playstyle ignored");
         assert_eq!(hook, None, "non-string hook ignored");
     }

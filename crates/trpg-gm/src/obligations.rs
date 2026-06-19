@@ -71,21 +71,36 @@ pub enum RetroDebtKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WaiverRecord { pub target_id: String, pub reason: String, pub scope: WaiveScope, pub turn_id: String }
+pub struct WaiverRecord {
+    pub target_id: String,
+    pub reason: String,
+    pub scope: WaiveScope,
+    pub turn_id: String,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum WaiveScope { Turn, Scene }
+pub enum WaiveScope {
+    Turn,
+    Scene,
+}
 
 impl WaiveScope {
     pub fn as_str(&self) -> &'static str {
-        match self { WaiveScope::Turn => "turn", WaiveScope::Scene => "scene" }
+        match self {
+            WaiveScope::Turn => "turn",
+            WaiveScope::Scene => "scene",
+        }
     }
 }
 
 /// blocking() 的未清债务视图条目；kind ∈ {"due","check","debt"}（开放字符串）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ObligationView { pub kind: String, pub target_id: String, pub summary: String }
+pub struct ObligationView {
+    pub kind: String,
+    pub target_id: String,
+    pub summary: String,
+}
 
 impl ObligationLedger {
     /// 回合开始：置当前回合 id + 过期 turn-scope 豁免（Turn=默认，下回合仍提醒；
@@ -105,7 +120,12 @@ impl ObligationLedger {
     /// 紧节拍 + 有结算 + 零效果 ⇒ 簇未闭合（kind="cluster" 进 blocking()，
     /// waive 通道照常）；其余情形清空——tight=false（mode=None/幕间）恒无簇债务，
     /// 二期行为字节级一致。
-    pub fn update_cluster_closure(&mut self, tight: bool, settled_checks: usize, effects_booked: usize) {
+    pub fn update_cluster_closure(
+        &mut self,
+        tight: bool,
+        settled_checks: usize,
+        effects_booked: usize,
+    ) {
         if tight && settled_checks > 0 && effects_booked == 0 {
             let target_id = format!("cluster.{}", self.current_turn_id);
             let summary = format!("engagement cluster not effect-closed: {settled_checks} settled check(s) this turn but no effect/track entry booked; book the consequences via apply_effect/change_track before narrating past this cluster, or waive_obligation with a reason");
@@ -121,9 +141,15 @@ impl ObligationLedger {
     /// 语义配对留给 agent 的债务观察回填，引擎只做"落账即清偿"的保守记账。
     pub fn settle_retro_debts_with_effects(&mut self, effect_ids: &[String]) {
         for eid in effect_ids {
-            if self.consumed_effect_ids.iter().any(|c| c == eid) { continue; }
+            if self.consumed_effect_ids.iter().any(|c| c == eid) {
+                continue;
+            }
             self.consumed_effect_ids.push(eid.clone());
-            if let Some(pos) = self.retro_debts.iter().position(|d| d.kind == RetroDebtKind::Effect) {
+            if let Some(pos) = self
+                .retro_debts
+                .iter()
+                .position(|d| d.kind == RetroDebtKind::Effect)
+            {
                 self.retro_debts.remove(pos);
             }
         }
@@ -134,9 +160,15 @@ impl ObligationLedger {
     /// 保守记账，语义配对留给 agent 的债务观察回填）。
     pub fn settle_retro_debts_with_checks(&mut self, check_ids: &[String]) {
         for cid in check_ids {
-            if self.consumed_check_ids.iter().any(|c| c == cid) { continue; }
+            if self.consumed_check_ids.iter().any(|c| c == cid) {
+                continue;
+            }
             self.consumed_check_ids.push(cid.clone());
-            if let Some(pos) = self.retro_debts.iter().position(|d| d.kind == RetroDebtKind::Check) {
+            if let Some(pos) = self
+                .retro_debts
+                .iter()
+                .position(|d| d.kind == RetroDebtKind::Check)
+            {
                 self.retro_debts.remove(pos);
             }
         }
@@ -200,8 +232,16 @@ impl ObligationLedger {
     pub fn ensure_mode_exit_obligations(&mut self, mode_id: &str, descriptions: &[String]) {
         for (idx, description) in descriptions.iter().enumerate() {
             let obligation_id = format!("mode_exit.{mode_id}.{idx}");
-            if !self.mode_exit.iter().any(|o| o.obligation_id == obligation_id) {
-                self.mode_exit.push(ModeExitObligation { obligation_id, mode_id: mode_id.to_string(), description: description.clone() });
+            if !self
+                .mode_exit
+                .iter()
+                .any(|o| o.obligation_id == obligation_id)
+            {
+                self.mode_exit.push(ModeExitObligation {
+                    obligation_id,
+                    mode_id: mode_id.to_string(),
+                    description: description.clone(),
+                });
             }
         }
     }
@@ -216,8 +256,14 @@ impl ObligationLedger {
     pub fn exit_blocking(&self) -> Vec<ObligationView> {
         let mut out = self.blocking();
         for o in &self.mode_exit {
-            if self.waived(&o.obligation_id) { continue; }
-            out.push(ObligationView { kind: "mode_exit".to_string(), target_id: o.obligation_id.clone(), summary: format!("mode '{}' exit obligation: {}", o.mode_id, o.description) });
+            if self.waived(&o.obligation_id) {
+                continue;
+            }
+            out.push(ObligationView {
+                kind: "mode_exit".to_string(),
+                target_id: o.obligation_id.clone(),
+                summary: format!("mode '{}' exit obligation: {}", o.mode_id, o.description),
+            });
         }
         out
     }
@@ -226,24 +272,46 @@ impl ObligationLedger {
     pub fn blocking(&self) -> Vec<ObligationView> {
         let mut out = Vec::new();
         for due in &self.dues {
-            if due.status != DueStatus::Open || self.waived(&due.due_id) { continue; }
-            out.push(ObligationView { kind: "due".to_string(), target_id: due.due_id.clone(), summary: due_summary(due) });
+            if due.status != DueStatus::Open || self.waived(&due.due_id) {
+                continue;
+            }
+            out.push(ObligationView {
+                kind: "due".to_string(),
+                target_id: due.due_id.clone(),
+                summary: due_summary(due),
+            });
         }
         for check_id in &self.open_check_ids {
-            if self.waived(check_id) { continue; }
-            out.push(ObligationView { kind: "check".to_string(), target_id: check_id.clone(), summary: format!("unresolved check contract {check_id}") });
+            if self.waived(check_id) {
+                continue;
+            }
+            out.push(ObligationView {
+                kind: "check".to_string(),
+                target_id: check_id.clone(),
+                summary: format!("unresolved check contract {check_id}"),
+            });
         }
         for debt in &self.retro_debts {
-            if self.waived(&debt.debt_id) { continue; }
+            if self.waived(&debt.debt_id) {
+                continue;
+            }
             let summary = match debt.kind {
                 RetroDebtKind::Effect => format!("retroactive effect debt (turn {}): {} — book it via apply_effect or waive with a reason", debt.turn_id, debt.finding_detail),
                 RetroDebtKind::Check => format!("retroactive check debt (turn {}): {} — the moment demanded a check that was never rolled; settle via roll_check now or waive with a reason", debt.turn_id, debt.finding_detail),
             };
-            out.push(ObligationView { kind: "debt".to_string(), target_id: debt.debt_id.clone(), summary });
+            out.push(ObligationView {
+                kind: "debt".to_string(),
+                target_id: debt.debt_id.clone(),
+                summary,
+            });
         }
         if let Some((target_id, summary)) = &self.open_cluster {
             if !self.waived(target_id) {
-                out.push(ObligationView { kind: "cluster".to_string(), target_id: target_id.clone(), summary: summary.clone() });
+                out.push(ObligationView {
+                    kind: "cluster".to_string(),
+                    target_id: target_id.clone(),
+                    summary: summary.clone(),
+                });
             }
         }
         out
@@ -253,20 +321,37 @@ impl ObligationLedger {
     /// evidence 摘要。无债务 → None。
     pub fn block_text(&self) -> Option<String> {
         let views = self.blocking();
-        if views.is_empty() { return None; }
+        if views.is_empty() {
+            return None;
+        }
         Some(format!("[obligations]\n以下机械债务必须处理（roll_check / request_player_roll / apply_effect）或 waive_obligation（必须带理由）：\n{}\n[/obligations]", render_lines(&views)))
     }
 
     /// waive：target_id 匹配 due_id/check_id/debt_id；不存在 → Err
     /// （工具层转 obligation_not_found）。
-    pub fn waive(&mut self, target_id: &str, reason: &str, scope: WaiveScope) -> Result<WaiverRecord> {
+    pub fn waive(
+        &mut self,
+        target_id: &str,
+        reason: &str,
+        scope: WaiveScope,
+    ) -> Result<WaiverRecord> {
         let exists = self.dues.iter().any(|d| d.due_id == target_id)
             || self.open_check_ids.iter().any(|c| c == target_id)
             || self.retro_debts.iter().any(|d| d.debt_id == target_id)
             || self.mode_exit.iter().any(|o| o.obligation_id == target_id)
-            || self.open_cluster.as_ref().is_some_and(|(id, _)| id == target_id);
-        if !exists { return Err(anyhow!("unknown obligation target: {target_id}")); }
-        let record = WaiverRecord { target_id: target_id.to_string(), reason: reason.to_string(), scope, turn_id: self.current_turn_id.clone() };
+            || self
+                .open_cluster
+                .as_ref()
+                .is_some_and(|(id, _)| id == target_id);
+        if !exists {
+            return Err(anyhow!("unknown obligation target: {target_id}"));
+        }
+        let record = WaiverRecord {
+            target_id: target_id.to_string(),
+            reason: reason.to_string(),
+            scope,
+            turn_id: self.current_turn_id.clone(),
+        };
         self.waivers.push(record.clone());
         Ok(record)
     }
@@ -274,13 +359,19 @@ impl ObligationLedger {
     /// 回合收尾未清债务 → 下回合 BP3 obligations_block 文本；无 → None。
     pub fn carryover_block(&self) -> Option<String> {
         let views = self.blocking();
-        if views.is_empty() { return None; }
+        if views.is_empty() {
+            return None;
+        }
         Some(format!("[obligations_carryover]\n上回合遗留未清机械债务（本回合必须处理或 waive_obligation 带理由，绝不静默丢失）：\n{}\n[/obligations_carryover]", render_lines(&views)))
     }
 }
 
 fn render_lines(views: &[ObligationView]) -> String {
-    views.iter().map(|v| format!("- {} {}: {}", v.kind, v.target_id, v.summary)).collect::<Vec<_>>().join("\n")
+    views
+        .iter()
+        .map(|v| format!("- {} {}: {}", v.kind, v.target_id, v.summary))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// due 行摘要：threshold_desc + followup + evidence（紧凑 JSON）。
@@ -296,15 +387,53 @@ fn due_summary(due: &MechanicDue) -> String {
 /// waive 审计载荷（复用 errata.to_memory_event 样板；tags=["gm_waive"]）。
 /// 调用方负责 db.save_memory_event（落库失败仅 warn，绝不反向阻断回合）。
 pub fn waiver_to_memory_event(request: &ContextRequest, record: &WaiverRecord) -> MemoryEvent {
-    MemoryEvent { event_id: format!("mem_waive_{}", Uuid::new_v4().simple()), session_id: request.session_id.clone(), turn_id: Some(request.turn_id.clone()), ruleset_id: request.ruleset_id.clone(), module_id: request.module_id.clone(), scene_id: None, location_id: None, actor_ids: vec![], visibility: Visibility::GmOnly, event_kind: MemoryKind::Event, summary: format!("waived obligation {} (scope={}): {}", record.target_id, record.scope.as_str(), record.reason), transcript_excerpt: None, source: json!({"source":"waive_obligation"}), tags: vec!["gm_waive".to_string()], importance: 2, occurred_at: Utc::now() }
+    MemoryEvent {
+        event_id: format!("mem_waive_{}", Uuid::new_v4().simple()),
+        session_id: request.session_id.clone(),
+        turn_id: Some(request.turn_id.clone()),
+        ruleset_id: request.ruleset_id.clone(),
+        module_id: request.module_id.clone(),
+        scene_id: None,
+        location_id: None,
+        actor_ids: vec![],
+        visibility: Visibility::GmOnly,
+        event_kind: MemoryKind::Event,
+        summary: format!(
+            "waived obligation {} (scope={}): {}",
+            record.target_id,
+            record.scope.as_str(),
+            record.reason
+        ),
+        transcript_excerpt: None,
+        source: json!({"source":"waive_obligation"}),
+        tags: vec!["gm_waive".to_string()],
+        importance: 2,
+        occurred_at: Utc::now(),
+    }
 }
 
 /// 轮耗尽带债强制叙事后的勘误记忆载荷（债务绝不静默丢失；BP3 注入由下回合
 /// carryover_block 完成）。
 pub fn carryover_memory_event(request: &ContextRequest, block: &str) -> MemoryEvent {
-    MemoryEvent { event_id: format!("mem_obligations_{}", Uuid::new_v4().simple()), session_id: request.session_id.clone(), turn_id: Some(request.turn_id.clone()), ruleset_id: request.ruleset_id.clone(), module_id: request.module_id.clone(), scene_id: None, location_id: None, actor_ids: vec![], visibility: Visibility::GmOnly, event_kind: MemoryKind::Event, summary: block.chars().take(280).collect(), transcript_excerpt: None, source: json!({"source":"gm_agent.obligation_carryover"}), tags: vec!["gm_obligation_carryover".to_string()], importance: 2, occurred_at: Utc::now() }
+    MemoryEvent {
+        event_id: format!("mem_obligations_{}", Uuid::new_v4().simple()),
+        session_id: request.session_id.clone(),
+        turn_id: Some(request.turn_id.clone()),
+        ruleset_id: request.ruleset_id.clone(),
+        module_id: request.module_id.clone(),
+        scene_id: None,
+        location_id: None,
+        actor_ids: vec![],
+        visibility: Visibility::GmOnly,
+        event_kind: MemoryKind::Event,
+        summary: block.chars().take(280).collect(),
+        transcript_excerpt: None,
+        source: json!({"source":"gm_agent.obligation_carryover"}),
+        tags: vec!["gm_obligation_carryover".to_string()],
+        importance: 2,
+        occurred_at: Utc::now(),
+    }
 }
-
 
 #[cfg(test)]
 #[path = "obligations_tests.rs"]

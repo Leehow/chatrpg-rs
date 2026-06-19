@@ -29,7 +29,9 @@ fn skip_no_db() -> Option<String> {
 }
 
 fn data_dir() -> PathBuf {
-    std::env::var("TRPG_DATA_DIR").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("data"))
+    std::env::var("TRPG_DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("data"))
 }
 
 fn has_kernel(ctx: &CompiledContext) -> bool {
@@ -46,7 +48,9 @@ fn rule_retrieval_block_count(ctx: &CompiledContext) -> usize {
         .filter(|b| {
             b.block_id.starts_with("rule_steward.lookup.")
                 || b.block_id.starts_with("rule_steward.locators.")
-                || b.tags.iter().any(|t| t == "rule_steward" || t == "lookup_hit")
+                || b.tags
+                    .iter()
+                    .any(|t| t == "rule_steward" || t == "lookup_hit")
         })
         .count()
 }
@@ -81,20 +85,30 @@ async fn rule_need_bus_covers_rule_retrieval_and_grounds() {
     };
     let mut ruleset_id = None;
     for rb in &bundle.rulesets {
-        if db.load_rule_kernel(&rb.ruleset_id).await.ok().flatten().is_some() {
+        if db
+            .load_rule_kernel(&rb.ruleset_id)
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+        {
             ruleset_id = Some(rb.ruleset_id.clone());
             break;
         }
     }
-    let ruleset_id = match ruleset_id.or_else(|| bundle.rulesets.first().map(|r| r.ruleset_id.clone())) {
-        Some(r) => r,
-        None => {
-            eprintln!("SKIP: project bundle has no rulesets");
-            return;
-        }
-    };
+    let ruleset_id =
+        match ruleset_id.or_else(|| bundle.rulesets.first().map(|r| r.ruleset_id.clone())) {
+            Some(r) => r,
+            None => {
+                eprintln!("SKIP: project bundle has no rulesets");
+                return;
+            }
+        };
 
-    let search = match SearchService::open(db.pool.clone(), SearchConfig::from_env_or_defaults(data_dir())) {
+    let search = match SearchService::open(
+        db.pool.clone(),
+        SearchConfig::from_env_or_defaults(data_dir()),
+    ) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("SKIP: search open failed: {e}");
@@ -111,7 +125,10 @@ async fn rule_need_bus_covers_rule_retrieval_and_grounds() {
         viewer: VisibilityProfile::gm(),
         token_budget: TokenBudget::default(),
     };
-    let state = RuntimeState { ruleset_id: ruleset_id.clone(), ..Default::default() };
+    let state = RuntimeState {
+        ruleset_id: ruleset_id.clone(),
+        ..Default::default()
+    };
     // Rule-sensitive input (contains 攻击 / 检定 → passes looks_rule_or_module_sensitive).
     let input = "我用小刀攻击邪教徒，要做什么检定？";
 
@@ -123,7 +140,10 @@ async fn rule_need_bus_covers_rule_retrieval_and_grounds() {
 
     // Assertion 1: BP1 active kernel projection survives (Task 7 did not touch
     // rule_steward_prefix_blocks_for_turn).
-    assert!(has_kernel(&bus_ctx), "bus path must still carry BP1 active kernel projection");
+    assert!(
+        has_kernel(&bus_ctx),
+        "bus path must still carry BP1 active kernel projection"
+    );
 
     // Assertion 2: bus path produces >=1 rule retrieval block (covers the rule info
     // the legacy auto_search would have provided).

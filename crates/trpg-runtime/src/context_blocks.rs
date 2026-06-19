@@ -21,7 +21,11 @@ pub(crate) fn memory_snapshot_block(snapshot: &MemorySnapshot) -> ContextBlock {
     block
 }
 
-pub(crate) fn retrieved_memory_block(session_id: &str, turn_id: &str, result: &MemoryRetrievalResult) -> ContextBlock {
+pub(crate) fn retrieved_memory_block(
+    session_id: &str,
+    turn_id: &str,
+    result: &MemoryRetrievalResult,
+) -> ContextBlock {
     let mut content = String::from("# Retrieved GM Memory\n\nThese memories were retrieved for this turn only. Treat them as recall aids, not as newly committed state.\n");
     if !result.facts.is_empty() {
         content.push_str("\n## Durable facts\n");
@@ -43,7 +47,10 @@ pub(crate) fn retrieved_memory_block(session_id: &str, turn_id: &str, result: &M
         Visibility::GmOnly,
         Stability::TurnDynamic,
         CacheZone::DynamicTail,
-        Scope { scope_type: ScopeType::Turn, scope_id: turn_id.to_string() },
+        Scope {
+            scope_type: ScopeType::Turn,
+            scope_id: turn_id.to_string(),
+        },
         105,
     );
     block.tags = vec!["memory".into(), "retrieved".into(), "dynamic".into()];
@@ -52,7 +59,10 @@ pub(crate) fn retrieved_memory_block(session_id: &str, turn_id: &str, result: &M
     block
 }
 
-pub(crate) fn actionable_situation_block(brief: &ActionableSituationBrief, turn_id: &str) -> ContextBlock {
+pub(crate) fn actionable_situation_block(
+    brief: &ActionableSituationBrief,
+    turn_id: &str,
+) -> ContextBlock {
     let mut block = ContextBlock::new(
         format!("director.brief.{}", brief.brief_id),
         BlockKind::ActionableSituationBrief,
@@ -61,10 +71,17 @@ pub(crate) fn actionable_situation_block(brief: &ActionableSituationBrief, turn_
         Visibility::PlayerVisible,
         Stability::TurnDynamic,
         CacheZone::DynamicTail,
-        Scope { scope_type: ScopeType::Turn, scope_id: turn_id.to_string() },
+        Scope {
+            scope_type: ScopeType::Turn,
+            scope_id: turn_id.to_string(),
+        },
         110,
     );
-    block.tags = vec!["director".into(), "actionable_situation".into(), brief.guidance.level.as_str().into()];
+    block.tags = vec![
+        "director".into(),
+        "actionable_situation".into(),
+        brief.guidance.level.as_str().into(),
+    ];
     block.load_reason = Some("actionable_situation_director".into());
     block.expires_at_turn = Some(turn_id.to_string());
     block
@@ -79,10 +96,17 @@ pub(crate) fn clue_board_block(board: &PlayerFacingClueBoard, turn_id: &str) -> 
         Visibility::PlayerVisible,
         Stability::SceneStable,
         CacheZone::PinnedMiddle,
-        Scope { scope_type: ScopeType::Session, scope_id: board.session_id.clone() },
+        Scope {
+            scope_type: ScopeType::Session,
+            scope_id: board.session_id.clone(),
+        },
         95,
     );
-    block.tags = vec!["director".into(), "clue_board".into(), "player_facing".into()];
+    block.tags = vec![
+        "director".into(),
+        "clue_board".into(),
+        "player_facing".into(),
+    ];
     block.load_reason = Some("actionable_situation_director".into());
     block.expires_at_turn = Some(turn_id.to_string());
     block
@@ -97,28 +121,50 @@ pub(crate) fn world_time_block(state: &WorldTimeState, turn_id: &str) -> Context
         Visibility::PlayerVisible,
         Stability::TurnDynamic,
         CacheZone::DynamicTail,
-        Scope { scope_type: ScopeType::Session, scope_id: state.session_id.clone() },
+        Scope {
+            scope_type: ScopeType::Session,
+            scope_id: state.session_id.clone(),
+        },
         60,
     );
-    block.tags = vec!["world_time".into(), state.time_scale.as_str().into(), "dynamic".into()];
+    block.tags = vec![
+        "world_time".into(),
+        state.time_scale.as_str().into(),
+        "dynamic".into(),
+    ];
     block.expires_at_turn = Some(turn_id.to_string());
     block.load_reason = Some("world_time_spine".into());
     block
 }
 
-pub(crate) fn world_events_since_block(session_id: &str, turn_id: &str, since_tick: i64, since_event_seq: i64, events: &[WorldEvent]) -> ContextBlock {
+pub(crate) fn world_events_since_block(
+    session_id: &str,
+    turn_id: &str,
+    since_tick: i64,
+    since_event_seq: i64,
+    events: &[WorldEvent],
+) -> ContextBlock {
     let mut block = ContextBlock::new(
         format!("world_events_since.{session_id}.{turn_id}"),
         BlockKind::WorldEvent,
         "World Events Since Last Context Watermark",
-        BlockContent::Json(json!({"since_tick": since_tick, "since_event_seq": since_event_seq, "events": events})),
+        BlockContent::Json(
+            json!({"since_tick": since_tick, "since_event_seq": since_event_seq, "events": events}),
+        ),
         Visibility::GmOnly,
         Stability::TurnDynamic,
         CacheZone::DynamicTail,
-        Scope { scope_type: ScopeType::Turn, scope_id: turn_id.to_string() },
+        Scope {
+            scope_type: ScopeType::Turn,
+            scope_id: turn_id.to_string(),
+        },
         105,
     );
-    block.tags = vec!["world_time".into(), "world_events".into(), "incremental".into()];
+    block.tags = vec![
+        "world_time".into(),
+        "world_events".into(),
+        "incremental".into(),
+    ];
     block.expires_at_turn = Some(turn_id.to_string());
     block.load_reason = Some("world_time_watermark_incremental_context".into());
     block
@@ -167,14 +213,23 @@ pub(crate) fn world_state_block(state: &RuntimeState) -> ContextBlock {
         Visibility::GmOnly,
         Stability::TurnDynamic,
         CacheZone::DynamicTail,
-        Scope { scope_type: ScopeType::Turn, scope_id: "current".to_string() },
+        Scope {
+            scope_type: ScopeType::Turn,
+            scope_id: "current".to_string(),
+        },
         100,
     );
     block.tags = vec!["world_state".into(), "dynamic".into()];
     block
 }
 
-pub(crate) fn dynamic_text_block(block_id: &str, kind: BlockKind, title: &str, text: &str, tags: Vec<&str>) -> ContextBlock {
+pub(crate) fn dynamic_text_block(
+    block_id: &str,
+    kind: BlockKind,
+    title: &str,
+    text: &str,
+    tags: Vec<&str>,
+) -> ContextBlock {
     let mut block = ContextBlock::new(
         block_id.to_string(),
         kind,
@@ -183,7 +238,10 @@ pub(crate) fn dynamic_text_block(block_id: &str, kind: BlockKind, title: &str, t
         Visibility::GmOnly,
         Stability::TurnDynamic,
         CacheZone::DynamicTail,
-        Scope { scope_type: ScopeType::Turn, scope_id: "current".to_string() },
+        Scope {
+            scope_type: ScopeType::Turn,
+            scope_id: "current".to_string(),
+        },
         120,
     );
     block.tags = tags.into_iter().map(str::to_string).collect();

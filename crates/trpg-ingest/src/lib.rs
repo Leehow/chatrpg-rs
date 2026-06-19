@@ -56,7 +56,12 @@ pub struct PdfExtractionResult {
 
 #[async_trait]
 pub trait PdfMarkdownExtractor: Send + Sync {
-    async fn extract(&self, pdf_path: &Path, source_kind: SourceKind, config: &IngestConfig) -> Result<PdfExtractionResult>;
+    async fn extract(
+        &self,
+        pdf_path: &Path,
+        source_kind: SourceKind,
+        config: &IngestConfig,
+    ) -> Result<PdfExtractionResult>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,7 +79,11 @@ impl PdfBackendKind {
         // prose (indexed) + a -layout sidecar with aligned tables (param grep). Fast, pure-CPU, no
         // ligature loss. ("pdftotext"/"poppler" are legacy aliases for the same backend.) mineru
         // (vision) handles 2-col order natively but is ~500x slower and row-shifts dense tables.
-        match std::env::var("TRPG_PDF_BACKEND").unwrap_or_else(|_| "duotext".to_string()).to_ascii_lowercase().as_str() {
+        match std::env::var("TRPG_PDF_BACKEND")
+            .unwrap_or_else(|_| "duotext".to_string())
+            .to_ascii_lowercase()
+            .as_str()
+        {
             "duotext" | "pdftotext" | "poppler" => Self::Pdftotext,
             "oxidize" | "oxidize-pdf" => Self::Oxidize,
             "mineru" => Self::Mineru,
@@ -104,7 +113,11 @@ pub enum ExtractionCleanMode {
 
 impl ExtractionCleanMode {
     pub fn from_env() -> Self {
-        match std::env::var("TRPG_OXIDIZE_CLEAN_MODE").unwrap_or_else(|_| "heuristic".to_string()).to_ascii_lowercase().as_str() {
+        match std::env::var("TRPG_OXIDIZE_CLEAN_MODE")
+            .unwrap_or_else(|_| "heuristic".to_string())
+            .to_ascii_lowercase()
+            .as_str()
+        {
             "raw" => Self::Raw,
             "llm" | "llm_ready" | "llm-ready" => Self::LlmReady,
             _ => Self::Heuristic,
@@ -127,22 +140,46 @@ pub struct HybridPdfBackend {
 
 impl Default for HybridPdfBackend {
     fn default() -> Self {
-        Self { backend: PdfBackendKind::from_env() }
+        Self {
+            backend: PdfBackendKind::from_env(),
+        }
     }
 }
 
 #[async_trait]
 impl PdfMarkdownExtractor for HybridPdfBackend {
-    async fn extract(&self, pdf_path: &Path, source_kind: SourceKind, config: &IngestConfig) -> Result<PdfExtractionResult> {
+    async fn extract(
+        &self,
+        pdf_path: &Path,
+        source_kind: SourceKind,
+        config: &IngestConfig,
+    ) -> Result<PdfExtractionResult> {
         match self.backend {
-            PdfBackendKind::Oxidize => OxidizePdfBackend.extract(pdf_path, source_kind, config).await,
-            PdfBackendKind::Pdftotext => PdftotextBackend.extract(pdf_path, source_kind, config).await,
-            PdfBackendKind::Mineru => MineruPdfBackend.extract(pdf_path, source_kind, config).await,
-            PdfBackendKind::Auto => match OxidizePdfBackend.extract(pdf_path, source_kind.clone(), config).await {
+            PdfBackendKind::Oxidize => {
+                OxidizePdfBackend
+                    .extract(pdf_path, source_kind, config)
+                    .await
+            }
+            PdfBackendKind::Pdftotext => {
+                PdftotextBackend
+                    .extract(pdf_path, source_kind, config)
+                    .await
+            }
+            PdfBackendKind::Mineru => {
+                MineruPdfBackend
+                    .extract(pdf_path, source_kind, config)
+                    .await
+            }
+            PdfBackendKind::Auto => match OxidizePdfBackend
+                .extract(pdf_path, source_kind.clone(), config)
+                .await
+            {
                 Ok(result) => Ok(result),
                 Err(err) => {
                     warn!(path = %pdf_path.display(), error = %err, "oxidize-pdf failed; falling back to pdftotext");
-                    PdftotextBackend.extract(pdf_path, source_kind, config).await
+                    PdftotextBackend
+                        .extract(pdf_path, source_kind, config)
+                        .await
                 }
             },
         }
@@ -158,8 +195,17 @@ pub struct AutoPdfBackend;
 
 #[async_trait]
 impl PdfMarkdownExtractor for AutoPdfBackend {
-    async fn extract(&self, pdf_path: &Path, source_kind: SourceKind, config: &IngestConfig) -> Result<PdfExtractionResult> {
-        HybridPdfBackend { backend: config.pdf_backend }.extract(pdf_path, source_kind, config).await
+    async fn extract(
+        &self,
+        pdf_path: &Path,
+        source_kind: SourceKind,
+        config: &IngestConfig,
+    ) -> Result<PdfExtractionResult> {
+        HybridPdfBackend {
+            backend: config.pdf_backend,
+        }
+        .extract(pdf_path, source_kind, config)
+        .await
     }
 }
 
@@ -168,7 +214,12 @@ pub struct OxidizePdfBackend;
 
 #[async_trait]
 impl PdfMarkdownExtractor for OxidizePdfBackend {
-    async fn extract(&self, pdf_path: &Path, source_kind: SourceKind, config: &IngestConfig) -> Result<PdfExtractionResult> {
+    async fn extract(
+        &self,
+        pdf_path: &Path,
+        source_kind: SourceKind,
+        config: &IngestConfig,
+    ) -> Result<PdfExtractionResult> {
         let source_hash = file_sha256(pdf_path).await?;
         let source_id = source_id_from_path(pdf_path);
         let title = title_from_path(pdf_path);
@@ -183,10 +234,24 @@ impl PdfMarkdownExtractor for OxidizePdfBackend {
 
         if !config.force_markdown && markdown_path.exists() && raw_chunks_path.exists() {
             let markdown_header = fs::read_to_string(&markdown_path).await.unwrap_or_default();
-            if markdown_header.contains(&format!("source_hash: {source_hash}")) && markdown_header.contains("extractor: oxidize-pdf") {
-                let chunks = read_chunks_jsonl(&raw_chunks_path).await.unwrap_or_default();
-                let pages = if chunks.is_empty() { read_markdown_pages(&markdown_path).await? } else { pages_from_chunks(&chunks) };
-                let book = PlainTextBook { source_id: source_id.clone(), title: title.clone(), source_hash: source_hash.clone(), pages, chunks };
+            if markdown_header.contains(&format!("source_hash: {source_hash}"))
+                && markdown_header.contains("extractor: oxidize-pdf")
+            {
+                let chunks = read_chunks_jsonl(&raw_chunks_path)
+                    .await
+                    .unwrap_or_default();
+                let pages = if chunks.is_empty() {
+                    read_markdown_pages(&markdown_path).await?
+                } else {
+                    pages_from_chunks(&chunks)
+                };
+                let book = PlainTextBook {
+                    source_id: source_id.clone(),
+                    title: title.clone(),
+                    source_hash: source_hash.clone(),
+                    pages,
+                    chunks,
+                };
                 let doc = SourceDocument {
                     id: Uuid::new_v4(),
                     source_id,
@@ -204,21 +269,49 @@ impl PdfMarkdownExtractor for OxidizePdfBackend {
                         "cleaning_status": config.clean_mode.as_str(),
                     }),
                 };
-                return Ok(PdfExtractionResult { source_document: doc, book, markdown_path, raw_chunks_path: Some(raw_chunks_path) });
+                return Ok(PdfExtractionResult {
+                    source_document: doc,
+                    book,
+                    markdown_path,
+                    raw_chunks_path: Some(raw_chunks_path),
+                });
             }
         }
 
-        let chunks = extract_oxidize_chunks_blocking(pdf_path.to_path_buf(), source_id.clone(), config.clean_mode).await?;
+        let chunks = extract_oxidize_chunks_blocking(
+            pdf_path.to_path_buf(),
+            source_id.clone(),
+            config.clean_mode,
+        )
+        .await?;
         if config.write_raw_chunk_sidecar {
             write_chunks_jsonl(&raw_chunks_path, &chunks).await?;
-            write_cleanup_manifest(&cleanup_manifest_path, &source_id, &source_hash, &chunks).await?;
+            write_cleanup_manifest(&cleanup_manifest_path, &source_id, &source_hash, &chunks)
+                .await?;
         }
         let pages = pages_from_chunks(&chunks);
-        let markdown = render_oxidize_markdown(&source_id, &title, &source_hash, &chunks, Some(&raw_chunks_path), Some(&cleanup_manifest_path), "oxidize-pdf");
+        let markdown = render_oxidize_markdown(
+            &source_id,
+            &title,
+            &source_hash,
+            &chunks,
+            Some(&raw_chunks_path),
+            Some(&cleanup_manifest_path),
+            "oxidize-pdf",
+        );
         fs::write(&markdown_path, markdown).await?;
 
-        let cleanup_needed = chunks.iter().filter(|c| c.clean_status.as_deref() == Some("needs_llm_cleanup")).count();
-        let book = PlainTextBook { source_id: source_id.clone(), title: title.clone(), source_hash: source_hash.clone(), pages, chunks };
+        let cleanup_needed = chunks
+            .iter()
+            .filter(|c| c.clean_status.as_deref() == Some("needs_llm_cleanup"))
+            .count();
+        let book = PlainTextBook {
+            source_id: source_id.clone(),
+            title: title.clone(),
+            source_hash: source_hash.clone(),
+            pages,
+            chunks,
+        };
         let doc = SourceDocument {
             id: Uuid::new_v4(),
             source_id,
@@ -238,7 +331,12 @@ impl PdfMarkdownExtractor for OxidizePdfBackend {
                 "cleaning_status": config.clean_mode.as_str(),
             }),
         };
-        Ok(PdfExtractionResult { source_document: doc, book, markdown_path, raw_chunks_path: Some(raw_chunks_path) })
+        Ok(PdfExtractionResult {
+            source_document: doc,
+            book,
+            markdown_path,
+            raw_chunks_path: Some(raw_chunks_path),
+        })
     }
 }
 
@@ -247,7 +345,12 @@ pub struct PdftotextBackend;
 
 #[async_trait]
 impl PdfMarkdownExtractor for PdftotextBackend {
-    async fn extract(&self, pdf_path: &Path, source_kind: SourceKind, config: &IngestConfig) -> Result<PdfExtractionResult> {
+    async fn extract(
+        &self,
+        pdf_path: &Path,
+        source_kind: SourceKind,
+        config: &IngestConfig,
+    ) -> Result<PdfExtractionResult> {
         let source_hash = file_sha256(pdf_path).await?;
         let source_id = source_id_from_path(pdf_path);
         let title = title_from_path(pdf_path);
@@ -262,9 +365,16 @@ impl PdfMarkdownExtractor for PdftotextBackend {
         if !config.force_markdown && markdown_path.exists() {
             let markdown_header = fs::read_to_string(&markdown_path).await.unwrap_or_default();
             if markdown_header.contains(&format!("source_hash: {source_hash}"))
-                && markdown_header.contains("extractor: duotext2") {
+                && markdown_header.contains("extractor: duotext2")
+            {
                 let pages = read_markdown_pages(&markdown_path).await?;
-                let book = PlainTextBook { source_id: source_id.clone(), title: title.clone(), source_hash: source_hash.clone(), pages, chunks: vec![] };
+                let book = PlainTextBook {
+                    source_id: source_id.clone(),
+                    title: title.clone(),
+                    source_hash: source_hash.clone(),
+                    pages,
+                    chunks: vec![],
+                };
                 let doc = SourceDocument {
                     id: Uuid::new_v4(),
                     source_id,
@@ -276,7 +386,12 @@ impl PdfMarkdownExtractor for PdftotextBackend {
                     parse_config_hash: config.parse_config_hash.clone(),
                     metadata: json!({"extractor":"duotext2", "cached_markdown": true}),
                 };
-                return Ok(PdfExtractionResult { source_document: doc, book, markdown_path, raw_chunks_path: None });
+                return Ok(PdfExtractionResult {
+                    source_document: doc,
+                    book,
+                    markdown_path,
+                    raw_chunks_path: None,
+                });
             }
         }
 
@@ -289,11 +404,18 @@ impl PdfMarkdownExtractor for PdftotextBackend {
         let reading_pages = split_pdftotext_pages(&main_raw);
         let layout_pages = split_pdftotext_pages_keep_layout(&layout_raw);
         let pages = merge_duotext_pages(reading_pages, layout_pages);
-        let markdown = render_page_anchored_markdown(&source_id, &title, &source_hash, &pages, "duotext2");
+        let markdown =
+            render_page_anchored_markdown(&source_id, &title, &source_hash, &pages, "duotext2");
         fs::write(&markdown_path, markdown).await?;
         let _ = fs::remove_file(&legacy_sidecar).await; // remove any old two-file sidecar
 
-        let book = PlainTextBook { source_id: source_id.clone(), title: title.clone(), source_hash: source_hash.clone(), pages, chunks: vec![] };
+        let book = PlainTextBook {
+            source_id: source_id.clone(),
+            title: title.clone(),
+            source_hash: source_hash.clone(),
+            pages,
+            chunks: vec![],
+        };
         let doc = SourceDocument {
             id: Uuid::new_v4(),
             source_id,
@@ -305,14 +427,30 @@ impl PdfMarkdownExtractor for PdftotextBackend {
             parse_config_hash: config.parse_config_hash.clone(),
             metadata: json!({"extractor":"duotext2", "cached_markdown": false}),
         };
-        Ok(PdfExtractionResult { source_document: doc, book, markdown_path, raw_chunks_path: None })
+        Ok(PdfExtractionResult {
+            source_document: doc,
+            book,
+            markdown_path,
+            raw_chunks_path: None,
+        })
     }
 }
 
 fn duotext_line_gaps(line: &str) -> usize {
     let (mut gaps, mut run) = (0usize, 0usize);
-    for c in line.chars() { if c == ' ' { run += 1; } else { if run >= 2 { gaps += 1; } run = 0; } }
-    if run >= 2 { gaps += 1; }
+    for c in line.chars() {
+        if c == ' ' {
+            run += 1;
+        } else {
+            if run >= 2 {
+                gaps += 1;
+            }
+            run = 0;
+        }
+    }
+    if run >= 2 {
+        gaps += 1;
+    }
     gaps
 }
 
@@ -322,8 +460,12 @@ fn is_duotext_table_page(layout_text: &str) -> bool {
     let (mut multi2, mut multi4) = (0usize, 0usize);
     for line in layout_text.lines() {
         let g = duotext_line_gaps(line);
-        if g >= 2 { multi2 += 1; }
-        if g >= 4 { multi4 += 1; }
+        if g >= 2 {
+            multi2 += 1;
+        }
+        if g >= 4 {
+            multi4 += 1;
+        }
     }
     multi2 >= 6 || multi4 >= 3
 }
@@ -338,30 +480,47 @@ fn decolumnize_layout_page(layout_text: &str) -> Option<String> {
     // 预过滤挡空/极短页；真正的可信度护栏是下方"切分后每列都须有非空内容"。
     const MIN_PAGE_WIDTH: usize = 16;
     let lines: Vec<Vec<char>> = layout_text.lines().map(|l| l.chars().collect()).collect();
-    let body: Vec<&Vec<char>> = lines.iter().filter(|l| l.iter().any(|c| !c.is_whitespace())).collect();
-    if body.len() < 5 { return None; }
+    let body: Vec<&Vec<char>> = lines
+        .iter()
+        .filter(|l| l.iter().any(|c| !c.is_whitespace()))
+        .collect();
+    if body.len() < 5 {
+        return None;
+    }
     let width = body.iter().map(|l| l.len()).max().unwrap_or(0);
-    if width < MIN_PAGE_WIDTH { return None; }
+    if width < MIN_PAGE_WIDTH {
+        return None;
+    }
     // 每个字符列：有多少 body 行在此处是空格（或更短）。
     let mut blank = vec![0usize; width];
     for l in &body {
         for c in 0..width {
-            if l.get(c).map(|ch| *ch == ' ').unwrap_or(true) { blank[c] += 1; }
+            if l.get(c).map(|ch| *ch == ' ').unwrap_or(true) {
+                blank[c] += 1;
+            }
         }
     }
     let n = body.len();
     let is_gutter = |c: usize| blank[c] * 100 >= n * 90; // ≥90% 行此列为空 = 河
-    // 找连续河带，内部、宽度 ≥3 的取中点作为切分位。
+                                                         // 找连续河带，内部、宽度 ≥3 的取中点作为切分位。
     let mut splits: Vec<usize> = Vec::new();
     let mut c = 0;
     while c < width {
         if is_gutter(c) {
             let start = c;
-            while c < width && is_gutter(c) { c += 1; }
-            if c - start >= 3 && start > 2 && c < width - 2 { splits.push((start + c) / 2); }
-        } else { c += 1; }
+            while c < width && is_gutter(c) {
+                c += 1;
+            }
+            if c - start >= 3 && start > 2 && c < width - 2 {
+                splits.push((start + c) / 2);
+            }
+        } else {
+            c += 1;
+        }
     }
-    if splits.is_empty() { return None; }
+    if splits.is_empty() {
+        return None;
+    }
     // 列边界。
     let mut bounds = vec![0usize];
     bounds.extend(splits);
@@ -376,7 +535,8 @@ fn decolumnize_layout_page(layout_text: &str) -> Option<String> {
     for w in bounds.windows(2) {
         let (cs, ce) = (w[0], w[1]);
         let mut col = String::new();
-        for l in &lines { // 用全部行（含空行）保留段落断点
+        for l in &lines {
+            // 用全部行（含空行）保留段落断点
             let seg: String = (cs..ce.min(l.len())).map(|i| l[i]).collect();
             let seg = seg.trim();
             col.push_str(seg);
@@ -386,12 +546,20 @@ fn decolumnize_layout_page(layout_text: &str) -> Option<String> {
     }
     // 可信度护栏：切分得到的每一列都必须有非空内容。任一列全空 = 把单栏误切成两半，
     // 不可信 → fail-closed 返回 None，调用方回退 reading-order。
-    if cols.iter().any(|c| c.is_empty()) { return None; }
+    if cols.iter().any(|c| c.is_empty()) {
+        return None;
+    }
     for col in cols {
-        if !out.is_empty() { out.push_str("\n\n"); }
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
         out.push_str(&col);
     }
-    if out.trim().is_empty() { None } else { Some(out) }
+    if out.trim().is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 /// Merge reading-order pages (prose) with layout pages (aligned tables) into ONE page set:
@@ -402,73 +570,114 @@ fn merge_duotext_pages(reading: Vec<PageText>, layout: Vec<PageText>) -> Vec<Pag
     let mut nums: Vec<u32> = read_map.keys().chain(lay_map.keys()).copied().collect();
     nums.sort();
     nums.dedup();
-    nums.into_iter().filter_map(|pg| {
-        let text = match (lay_map.get(&pg), read_map.get(&pg)) {
-            // 表页：保留 -layout 列对齐（不变）
-            (Some(l), _) if is_duotext_table_page(l) => l.clone(),
-            // 散文页：优先从 -layout 去栏（消除交错）；检不出 → 回退 reading-order
-            (Some(l), Some(r)) => decolumnize_layout_page(l).unwrap_or_else(|| r.clone()),
-            (Some(l), None) => decolumnize_layout_page(l).unwrap_or_else(|| l.clone()),
-            (None, Some(r)) => r.clone(),
-            (None, None) => return None,
-        };
-        Some(PageText { page: pg, text })
-    }).collect()
+    nums.into_iter()
+        .filter_map(|pg| {
+            let text = match (lay_map.get(&pg), read_map.get(&pg)) {
+                // 表页：保留 -layout 列对齐（不变）
+                (Some(l), _) if is_duotext_table_page(l) => l.clone(),
+                // 散文页：优先从 -layout 去栏（消除交错）；检不出 → 回退 reading-order
+                (Some(l), Some(r)) => decolumnize_layout_page(l).unwrap_or_else(|| r.clone()),
+                (Some(l), None) => decolumnize_layout_page(l).unwrap_or_else(|| l.clone()),
+                (None, Some(r)) => r.clone(),
+                (None, None) => return None,
+            };
+            Some(PageText { page: pg, text })
+        })
+        .collect()
 }
 
 /// Run `pdftotext [extra...] -enc UTF-8 <pdf> -` and return stdout (CR-stripped).
 /// extra=`[]` => default reading-order mode (clean prose); extra=`["-layout"]` => aligned tables.
 async fn run_pdftotext(pdf_path: &Path, extra: &[&str]) -> Result<String> {
     let mut cmd = Command::new("pdftotext");
-    for a in extra { cmd.arg(a); }
+    for a in extra {
+        cmd.arg(a);
+    }
     let output = cmd
-        .arg("-enc").arg("UTF-8").arg(pdf_path).arg("-")
+        .arg("-enc")
+        .arg("UTF-8")
+        .arg(pdf_path)
+        .arg("-")
         .output()
         .await
-        .with_context(|| "failed to run pdftotext; install poppler-utils or set TRPG_PDF_BACKEND=oxidize/auto")?;
+        .with_context(|| {
+            "failed to run pdftotext; install poppler-utils or set TRPG_PDF_BACKEND=oxidize/auto"
+        })?;
     if !output.status.success() {
-        return Err(anyhow!("pdftotext failed for {}: {}", pdf_path.display(), String::from_utf8_lossy(&output.stderr)));
+        return Err(anyhow!(
+            "pdftotext failed for {}: {}",
+            pdf_path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).replace('\r', ""))
 }
 
-async fn extract_oxidize_chunks_blocking(pdf_path: PathBuf, source_id: String, clean_mode: ExtractionCleanMode) -> Result<Vec<DocumentChunk>> {
+async fn extract_oxidize_chunks_blocking(
+    pdf_path: PathBuf,
+    source_id: String,
+    clean_mode: ExtractionCleanMode,
+) -> Result<Vec<DocumentChunk>> {
     tokio::task::spawn_blocking(move || -> Result<Vec<DocumentChunk>> {
         use oxidize_pdf::parser::PdfDocument;
         let doc = PdfDocument::open(&pdf_path)
             .with_context(|| format!("oxidize-pdf failed to open {}", pdf_path.display()))?;
-        let raw_chunks = doc.rag_chunks()
+        let raw_chunks = doc
+            .rag_chunks()
             .with_context(|| format!("oxidize-pdf rag_chunks failed for {}", pdf_path.display()))?;
         let mut chunks = Vec::new();
         for raw in raw_chunks {
             let raw_text = raw.text.clone();
             let raw_full_text = raw.full_text.clone();
-            let page_numbers = raw.page_numbers.iter().map(|p| *p as u32).collect::<Vec<_>>();
-            let cleanup_reasons = detect_oxidize_cleanup_reasons(&raw_text, &raw_full_text, raw.is_oversized, raw.heading_context.as_deref(), raw.token_estimate as usize);
+            let page_numbers = raw
+                .page_numbers
+                .iter()
+                .map(|p| *p as u32)
+                .collect::<Vec<_>>();
+            let cleanup_reasons = detect_oxidize_cleanup_reasons(
+                &raw_text,
+                &raw_full_text,
+                raw.is_oversized,
+                raw.heading_context.as_deref(),
+                raw.token_estimate as usize,
+            );
             let text = match clean_mode {
                 ExtractionCleanMode::Raw => raw_text,
-                ExtractionCleanMode::Heuristic | ExtractionCleanMode::LlmReady => clean_extracted_spacing(&raw_text),
+                ExtractionCleanMode::Heuristic | ExtractionCleanMode::LlmReady => {
+                    clean_extracted_spacing(&raw_text)
+                }
             };
             let full_text = match clean_mode {
                 ExtractionCleanMode::Raw => raw_full_text,
-                ExtractionCleanMode::Heuristic | ExtractionCleanMode::LlmReady => clean_extracted_spacing(&raw_full_text),
+                ExtractionCleanMode::Heuristic | ExtractionCleanMode::LlmReady => {
+                    clean_extracted_spacing(&raw_full_text)
+                }
             };
-            let heading_context = raw.heading_context
+            let heading_context = raw
+                .heading_context
                 .as_ref()
                 .map(|h| split_heading_context(h, clean_mode))
                 .unwrap_or_default();
-            let bounding_boxes = raw.bounding_boxes.iter().map(|bbox| {
-                let page = page_numbers.first().copied();
-                DocumentBoundingBox {
-                    page,
-                    x0: bbox.x as f32,
-                    y0: bbox.y as f32,
-                    x1: (bbox.x + bbox.width) as f32,
-                    y1: (bbox.y + bbox.height) as f32,
-                }
-            }).collect::<Vec<_>>();
+            let bounding_boxes = raw
+                .bounding_boxes
+                .iter()
+                .map(|bbox| {
+                    let page = page_numbers.first().copied();
+                    DocumentBoundingBox {
+                        page,
+                        x0: bbox.x as f32,
+                        y0: bbox.y as f32,
+                        x1: (bbox.x + bbox.width) as f32,
+                        y1: (bbox.y + bbox.height) as f32,
+                    }
+                })
+                .collect::<Vec<_>>();
             let chunk_id = format!("{}.chunk_{:05}", source_id, raw.chunk_index as u32);
-            let hash_body = if full_text.trim().is_empty() { &text } else { &full_text };
+            let hash_body = if full_text.trim().is_empty() {
+                &text
+            } else {
+                &full_text
+            };
             let text_hash = sha256_hex(hash_body);
             let clean_status = if cleanup_reasons.is_empty() {
                 match clean_mode {
@@ -499,7 +708,8 @@ async fn extract_oxidize_chunks_blocking(pdf_path: PathBuf, source_id: String, c
             });
         }
         Ok(chunks)
-    }).await?
+    })
+    .await?
 }
 
 /// Path to the local MinerU wrapper (skill). Override with TRPG_MINERU_WRAPPER.
@@ -515,7 +725,10 @@ fn mineru_wrapper_path() -> String {
 /// per page, tables kept as clean HTML inline. This is the source of CLEAN
 /// tables that oxidize collapses. Heavy (vision model) — intended for the async
 /// background upgrade path, not the fast first-pass.
-fn extract_mineru_chunks_blocking(pdf_path: PathBuf, source_id: String) -> Result<Vec<DocumentChunk>> {
+fn extract_mineru_chunks_blocking(
+    pdf_path: PathBuf,
+    source_id: String,
+) -> Result<Vec<DocumentChunk>> {
     // Per-process tmp dir so two parse-all runs of the same book never clobber each other's
     // MinerU output (the source_id alone is not unique across concurrent invocations).
     let tmp = std::env::temp_dir().join(format!("trpg_mineru_{source_id}_{}", std::process::id()));
@@ -523,36 +736,83 @@ fn extract_mineru_chunks_blocking(pdf_path: PathBuf, source_id: String) -> Resul
     std::fs::create_dir_all(&tmp)?;
     let wrapper = mineru_wrapper_path();
     let out = std::process::Command::new("bash")
-        .arg(&wrapper).arg("-p").arg(&pdf_path).arg("-o").arg(&tmp)
-        .arg("--plain").arg("--").arg("-m").arg("auto").arg("-f").arg("false")
+        .arg(&wrapper)
+        .arg("-p")
+        .arg(&pdf_path)
+        .arg("-o")
+        .arg(&tmp)
+        .arg("--plain")
+        .arg("--")
+        .arg("-m")
+        .arg("auto")
+        .arg("-f")
+        .arg("false")
         .output()
         .with_context(|| format!("failed to spawn MinerU wrapper {wrapper}"))?;
     if !out.status.success() {
-        anyhow::bail!("MinerU failed: {}", String::from_utf8_lossy(&out.stderr).chars().rev().take(600).collect::<String>().chars().rev().collect::<String>());
+        anyhow::bail!(
+            "MinerU failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+                .chars()
+                .rev()
+                .take(600)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect::<String>()
+        );
     }
-    let cl = WalkDir::new(&tmp).into_iter().filter_map(|e| e.ok())
+    let cl = WalkDir::new(&tmp)
+        .into_iter()
+        .filter_map(|e| e.ok())
         .map(|e| e.into_path())
-        .find(|p| p.file_name().map(|n| n.to_string_lossy().ends_with("content_list.json")).unwrap_or(false))
-        .ok_or_else(|| anyhow::anyhow!("MinerU produced no content_list.json under {}", tmp.display()))?;
+        .find(|p| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().ends_with("content_list.json"))
+                .unwrap_or(false)
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "MinerU produced no content_list.json under {}",
+                tmp.display()
+            )
+        })?;
     let blocks: Vec<serde_json::Value> = serde_json::from_str(&std::fs::read_to_string(&cl)?)?;
-    let mut by_page: std::collections::BTreeMap<i64, (Vec<String>, Vec<String>)> = std::collections::BTreeMap::new();
+    let mut by_page: std::collections::BTreeMap<i64, (Vec<String>, Vec<String>)> =
+        std::collections::BTreeMap::new();
     for b in &blocks {
         let page = b.get("page_idx").and_then(|v| v.as_i64()).unwrap_or(0);
         let ty = b.get("type").and_then(|v| v.as_str()).unwrap_or("text");
         let text = match ty {
             "table" => {
-                let cap = b.get("table_caption").and_then(|v| v.as_array())
-                    .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(" ")).unwrap_or_default();
+                let cap = b
+                    .get("table_caption")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .unwrap_or_default();
                 let body = b.get("table_body").and_then(|v| v.as_str()).unwrap_or("");
                 format!("{cap}\n{body}").trim().to_string()
             }
             "image" => String::new(),
-            _ => b.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            _ => b
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
         };
-        if text.trim().is_empty() { continue; }
+        if text.trim().is_empty() {
+            continue;
+        }
         let e = by_page.entry(page).or_default();
         e.0.push(text);
-        if !e.1.contains(&ty.to_string()) { e.1.push(ty.to_string()); }
+        if !e.1.contains(&ty.to_string()) {
+            e.1.push(ty.to_string());
+        }
     }
     let _ = std::fs::remove_dir_all(&tmp);
     let mut chunks = Vec::new();
@@ -583,7 +843,12 @@ pub struct MineruPdfBackend;
 
 #[async_trait]
 impl PdfMarkdownExtractor for MineruPdfBackend {
-    async fn extract(&self, pdf_path: &Path, source_kind: SourceKind, config: &IngestConfig) -> Result<PdfExtractionResult> {
+    async fn extract(
+        &self,
+        pdf_path: &Path,
+        source_kind: SourceKind,
+        config: &IngestConfig,
+    ) -> Result<PdfExtractionResult> {
         let source_hash = file_sha256(pdf_path).await?;
         let source_id = source_id_from_path(pdf_path);
         let title = title_from_path(pdf_path);
@@ -600,10 +865,24 @@ impl PdfMarkdownExtractor for MineruPdfBackend {
         // model. Mirrors OxidizePdfBackend; re-extract only with --force.
         if !config.force_markdown && markdown_path.exists() && raw_chunks_path.exists() {
             let markdown_header = fs::read_to_string(&markdown_path).await.unwrap_or_default();
-            if markdown_header.contains(&format!("source_hash: {source_hash}")) && markdown_header.contains("extractor: mineru") {
-                let chunks = read_chunks_jsonl(&raw_chunks_path).await.unwrap_or_default();
-                let pages = if chunks.is_empty() { read_markdown_pages(&markdown_path).await? } else { pages_from_chunks(&chunks) };
-                let book = PlainTextBook { source_id: source_id.clone(), title: title.clone(), source_hash: source_hash.clone(), pages, chunks };
+            if markdown_header.contains(&format!("source_hash: {source_hash}"))
+                && markdown_header.contains("extractor: mineru")
+            {
+                let chunks = read_chunks_jsonl(&raw_chunks_path)
+                    .await
+                    .unwrap_or_default();
+                let pages = if chunks.is_empty() {
+                    read_markdown_pages(&markdown_path).await?
+                } else {
+                    pages_from_chunks(&chunks)
+                };
+                let book = PlainTextBook {
+                    source_id: source_id.clone(),
+                    title: title.clone(),
+                    source_hash: source_hash.clone(),
+                    pages,
+                    chunks,
+                };
                 let doc = SourceDocument {
                     id: Uuid::new_v4(),
                     source_id,
@@ -615,22 +894,43 @@ impl PdfMarkdownExtractor for MineruPdfBackend {
                     parse_config_hash: config.parse_config_hash.clone(),
                     metadata: json!({"extractor":"mineru", "cached_markdown": true, "raw_chunks_path": raw_chunks_path.to_string_lossy().to_string()}),
                 };
-                return Ok(PdfExtractionResult { source_document: doc, book, markdown_path, raw_chunks_path: Some(raw_chunks_path) });
+                return Ok(PdfExtractionResult {
+                    source_document: doc,
+                    book,
+                    markdown_path,
+                    raw_chunks_path: Some(raw_chunks_path),
+                });
             }
         }
 
         let pdf_buf = pdf_path.to_path_buf();
         let sid = source_id.clone();
-        let chunks = tokio::task::spawn_blocking(move || extract_mineru_chunks_blocking(pdf_buf, sid)).await??;
+        let chunks =
+            tokio::task::spawn_blocking(move || extract_mineru_chunks_blocking(pdf_buf, sid))
+                .await??;
 
         if config.write_raw_chunk_sidecar {
             write_chunks_jsonl(&raw_chunks_path, &chunks).await?;
         }
         let pages = pages_from_chunks(&chunks);
-        let markdown = render_oxidize_markdown(&source_id, &title, &source_hash, &chunks, Some(&raw_chunks_path), Some(&cleanup_manifest_path), "mineru");
+        let markdown = render_oxidize_markdown(
+            &source_id,
+            &title,
+            &source_hash,
+            &chunks,
+            Some(&raw_chunks_path),
+            Some(&cleanup_manifest_path),
+            "mineru",
+        );
         fs::write(&markdown_path, markdown).await?;
 
-        let book = PlainTextBook { source_id: source_id.clone(), title: title.clone(), source_hash: source_hash.clone(), pages, chunks };
+        let book = PlainTextBook {
+            source_id: source_id.clone(),
+            title: title.clone(),
+            source_hash: source_hash.clone(),
+            pages,
+            chunks,
+        };
         let doc = SourceDocument {
             id: Uuid::new_v4(),
             source_id,
@@ -642,7 +942,12 @@ impl PdfMarkdownExtractor for MineruPdfBackend {
             parse_config_hash: config.parse_config_hash.clone(),
             metadata: json!({"extractor": "mineru", "cached_markdown": false, "raw_chunks_path": raw_chunks_path.to_string_lossy().to_string(), "chunk_count": book.chunks.len()}),
         };
-        Ok(PdfExtractionResult { source_document: doc, book, markdown_path, raw_chunks_path: Some(raw_chunks_path) })
+        Ok(PdfExtractionResult {
+            source_document: doc,
+            book,
+            markdown_path,
+            raw_chunks_path: Some(raw_chunks_path),
+        })
     }
 }
 
@@ -671,24 +976,42 @@ pub fn find_pdfs(data_dir: &Path, source_kind: SourceKind) -> Vec<PathBuf> {
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
         .map(|e| e.into_path())
-        .filter(|p| p.extension().map(|e| e.to_string_lossy().to_ascii_lowercase() == "pdf").unwrap_or(false))
+        .filter(|p| {
+            p.extension()
+                .map(|e| e.to_string_lossy().to_ascii_lowercase() == "pdf")
+                .unwrap_or(false)
+        })
         .collect()
 }
 
 pub async fn file_sha256(path: &Path) -> Result<String> {
-    let bytes = fs::read(path).await.with_context(|| format!("failed to read {}", path.display()))?;
+    let bytes = fs::read(path)
+        .await
+        .with_context(|| format!("failed to read {}", path.display()))?;
     Ok(sha256_hex(bytes))
 }
 
 pub fn source_id_from_path(path: &Path) -> String {
-    let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "document".to_string());
-    let re = Regex::new(r"[^a-zA-Z0-9]+" ).unwrap();
-    let cleaned = re.replace_all(&stem.to_ascii_lowercase(), "_").trim_matches('_').to_string();
-    if cleaned.is_empty() { "document".to_string() } else { cleaned }
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "document".to_string());
+    let re = Regex::new(r"[^a-zA-Z0-9]+").unwrap();
+    let cleaned = re
+        .replace_all(&stem.to_ascii_lowercase(), "_")
+        .trim_matches('_')
+        .to_string();
+    if cleaned.is_empty() {
+        "document".to_string()
+    } else {
+        cleaned
+    }
 }
 
 pub fn title_from_path(path: &Path) -> String {
-    path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Untitled PDF".to_string())
+    path.file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Untitled PDF".to_string())
 }
 
 pub fn split_pdftotext_pages(raw: &str) -> Vec<PageText> {
@@ -699,7 +1022,10 @@ pub fn split_pdftotext_pages(raw: &str) -> Vec<PageText> {
             if text.is_empty() {
                 None
             } else {
-                Some(PageText { page: idx as u32 + 1, text })
+                Some(PageText {
+                    page: idx as u32 + 1,
+                    text,
+                })
             }
         })
         .collect()
@@ -708,8 +1034,17 @@ pub fn split_pdftotext_pages(raw: &str) -> Vec<PageText> {
 /// Like `normalize_pdf_text` but PRESERVES internal multi-space runs (column alignment) — used for
 /// the duotext `-layout` table sidecar, where the spacing IS the table structure.
 pub fn normalize_pdf_text_keep_layout(input: &str) -> String {
-    let cleaned = input.replace('\r', "").replace('\u{fffd}', "").replace('\u{0000}', "");
-    cleaned.lines().map(|l| l.trim_end()).collect::<Vec<_>>().join("\n").trim_matches('\n').to_string()
+    let cleaned = input
+        .replace('\r', "")
+        .replace('\u{fffd}', "")
+        .replace('\u{0000}', "");
+    cleaned
+        .lines()
+        .map(|l| l.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_matches('\n')
+        .to_string()
 }
 
 /// Split pdftotext `-layout` output into pages WITHOUT collapsing column whitespace.
@@ -718,17 +1053,33 @@ pub fn split_pdftotext_pages_keep_layout(raw: &str) -> Vec<PageText> {
         .enumerate()
         .filter_map(|(idx, page)| {
             let text = normalize_pdf_text_keep_layout(page);
-            if text.is_empty() { None } else { Some(PageText { page: idx as u32 + 1, text }) }
+            if text.is_empty() {
+                None
+            } else {
+                Some(PageText {
+                    page: idx as u32 + 1,
+                    text,
+                })
+            }
         })
         .collect()
 }
 
-pub fn render_page_anchored_markdown(source_id: &str, title: &str, source_hash: &str, pages: &[PageText], extractor: &str) -> String {
+pub fn render_page_anchored_markdown(
+    source_id: &str,
+    title: &str,
+    source_hash: &str,
+    pages: &[PageText],
+    extractor: &str,
+) -> String {
     let mut out = String::new();
     out.push_str(&format!("---\nsource_id: {source_id}\ntitle: {title:?}\nsource_hash: {source_hash}\nformat: page_anchored_markdown\nextractor: {extractor}\n---\n\n"));
     for page in pages {
         let text_hash = sha256_hex(&page.text);
-        out.push_str(&format!("<!-- source_id={source_id} page={} text_hash={text_hash} -->\n\n", page.page));
+        out.push_str(&format!(
+            "<!-- source_id={source_id} page={} text_hash={text_hash} -->\n\n",
+            page.page
+        ));
         out.push_str(&format!("# Page {}\n\n", page.page));
         out.push_str(page.text.trim());
         out.push_str("\n\n");
@@ -736,29 +1087,54 @@ pub fn render_page_anchored_markdown(source_id: &str, title: &str, source_hash: 
     out
 }
 
-pub fn render_oxidize_markdown(source_id: &str, title: &str, source_hash: &str, chunks: &[DocumentChunk], raw_chunks_path: Option<&Path>, cleanup_manifest_path: Option<&Path>, extractor: &str) -> String {
+pub fn render_oxidize_markdown(
+    source_id: &str,
+    title: &str,
+    source_hash: &str,
+    chunks: &[DocumentChunk],
+    raw_chunks_path: Option<&Path>,
+    cleanup_manifest_path: Option<&Path>,
+    extractor: &str,
+) -> String {
     let mut out = String::new();
     out.push_str(&format!("---\nsource_id: {source_id}\ntitle: {title:?}\nsource_hash: {source_hash}\nformat: oxidize_rag_chunks\nextractor: {extractor}\nchunk_count: {}\n", chunks.len()));
     if let Some(path) = raw_chunks_path {
         out.push_str(&format!("raw_chunks_path: {:?}\n", path.to_string_lossy()));
     }
     if let Some(path) = cleanup_manifest_path {
-        out.push_str(&format!("cleanup_manifest_path: {:?}\n", path.to_string_lossy()));
+        out.push_str(&format!(
+            "cleanup_manifest_path: {:?}\n",
+            path.to_string_lossy()
+        ));
     }
     out.push_str("---\n\n");
     for chunk in chunks {
-        let pages = chunk.page_numbers.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(",");
+        let pages = chunk
+            .page_numbers
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
         let types = chunk.element_types.join(",");
         let heading = chunk.heading_context.join(" > ");
         out.push_str(&format!("<!-- source_id={source_id} chunk_id={} pages={pages} text_hash={} clean_status={} -->\n\n", chunk.chunk_id, chunk.text_hash.clone().unwrap_or_default(), chunk.clean_status.clone().unwrap_or_default()));
-        out.push_str(&format!("## Chunk {} · p[{}] · [{}]\n\n", chunk.chunk_id.rsplit('_').next().unwrap_or("0"), pages, types));
+        out.push_str(&format!(
+            "## Chunk {} · p[{}] · [{}]\n\n",
+            chunk.chunk_id.rsplit('_').next().unwrap_or("0"),
+            pages,
+            types
+        ));
         if !heading.is_empty() {
             out.push_str(&format!("**heading_context:** {heading}\n\n"));
         }
         if let Some(status) = &chunk.clean_status {
             out.push_str(&format!("**clean_status:** {status}\n\n"));
         }
-        let body = if chunk.full_text.trim().is_empty() { &chunk.text } else { &chunk.full_text };
+        let body = if chunk.full_text.trim().is_empty() {
+            &chunk.text
+        } else {
+            &chunk.full_text
+        };
         out.push_str(body.trim());
         out.push_str("\n\n");
     }
@@ -773,10 +1149,20 @@ pub async fn read_markdown_pages(path: &Path) -> Result<Vec<PageText>> {
         let mut pages = Vec::new();
         for (idx, m) in matches.iter().enumerate() {
             let start = m.end();
-            let end = matches.get(idx + 1).map(|n| n.start()).unwrap_or(content.len());
+            let end = matches
+                .get(idx + 1)
+                .map(|n| n.start())
+                .unwrap_or(content.len());
             let header = &content[m.start()..m.end()];
-            let page_num = header.trim_start_matches("# Page ").trim().parse::<u32>().unwrap_or(idx as u32 + 1);
-            pages.push(PageText { page: page_num, text: content[start..end].trim().to_string() });
+            let page_num = header
+                .trim_start_matches("# Page ")
+                .trim()
+                .parse::<u32>()
+                .unwrap_or(idx as u32 + 1);
+            pages.push(PageText {
+                page: page_num,
+                text: content[start..end].trim().to_string(),
+            });
         }
         return Ok(pages);
     }
@@ -793,14 +1179,25 @@ pub async fn read_markdown_pages(path: &Path) -> Result<Vec<PageText>> {
                 .and_then(|m| m.as_str().parse::<u32>().ok())
                 .unwrap_or(idx as u32 + 1);
             let start = m.end();
-            let end = chunk_matches.get(idx + 1).map(|n| n.start()).unwrap_or(content.len());
+            let end = chunk_matches
+                .get(idx + 1)
+                .map(|n| n.start())
+                .unwrap_or(content.len());
             let entry = pages.entry(page_num).or_default();
-            if !entry.is_empty() { entry.push('\n'); }
+            if !entry.is_empty() {
+                entry.push('\n');
+            }
             entry.push_str(content[start..end].trim());
         }
-        return Ok(pages.into_iter().map(|(page, text)| PageText { page, text }).collect());
+        return Ok(pages
+            .into_iter()
+            .map(|(page, text)| PageText { page, text })
+            .collect());
     }
-    Ok(vec![PageText { page: 1, text: content }])
+    Ok(vec![PageText {
+        page: 1,
+        text: content,
+    }])
 }
 
 pub async fn write_chunks_jsonl(path: &Path, chunks: &[DocumentChunk]) -> Result<()> {
@@ -818,13 +1215,20 @@ pub async fn read_chunks_jsonl(path: &Path) -> Result<Vec<DocumentChunk>> {
     let mut chunks = Vec::new();
     for line in content.lines() {
         let line = line.trim();
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
         chunks.push(serde_json::from_str::<DocumentChunk>(line)?);
     }
     Ok(chunks)
 }
 
-pub async fn write_cleanup_manifest(path: &Path, source_id: &str, source_hash: &str, chunks: &[DocumentChunk]) -> Result<()> {
+pub async fn write_cleanup_manifest(
+    path: &Path,
+    source_id: &str,
+    source_hash: &str,
+    chunks: &[DocumentChunk],
+) -> Result<()> {
     let entries = chunks.iter()
         .filter(|chunk| chunk.clean_status.as_deref() == Some("needs_llm_cleanup"))
         .map(|chunk| json!({
@@ -852,13 +1256,29 @@ pub async fn write_cleanup_manifest(path: &Path, source_id: &str, source_hash: &
 pub fn pages_from_chunks(chunks: &[DocumentChunk]) -> Vec<PageText> {
     let mut pages: BTreeMap<u32, String> = BTreeMap::new();
     for chunk in chunks {
-        let page = chunk.page_numbers.first().copied().unwrap_or(chunk.chunk_id.rsplit('_').next().and_then(|v| v.parse().ok()).unwrap_or(1));
-        let body = if chunk.full_text.trim().is_empty() { &chunk.text } else { &chunk.full_text };
+        let page = chunk.page_numbers.first().copied().unwrap_or(
+            chunk
+                .chunk_id
+                .rsplit('_')
+                .next()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1),
+        );
+        let body = if chunk.full_text.trim().is_empty() {
+            &chunk.text
+        } else {
+            &chunk.full_text
+        };
         let entry = pages.entry(page).or_default();
-        if !entry.is_empty() { entry.push_str("\n\n"); }
+        if !entry.is_empty() {
+            entry.push_str("\n\n");
+        }
         entry.push_str(body.trim());
     }
-    pages.into_iter().map(|(page, text)| PageText { page, text }).collect()
+    pages
+        .into_iter()
+        .map(|(page, text)| PageText { page, text })
+        .collect()
 }
 
 pub fn normalize_pdf_text(input: &str) -> String {
@@ -880,7 +1300,6 @@ pub fn clean_extracted_spacing(input: &str) -> String {
     text = re_after_open.replace_all(&text, "$1").to_string();
     text.trim().to_string()
 }
-
 
 /// Rust regex does not support backreferences. Collapse lines such as
 /// "逃向沙漠 逃向沙漠" without using a backref regex, preserving normal prose.
@@ -907,8 +1326,16 @@ fn collapse_repeated_phrase_line(line: &str) -> String {
         if !chars[sep_idx].is_whitespace() {
             continue;
         }
-        let left = chars[..sep_idx].iter().collect::<String>().trim().to_string();
-        let right = chars[sep_idx + 1..].iter().collect::<String>().trim().to_string();
+        let left = chars[..sep_idx]
+            .iter()
+            .collect::<String>()
+            .trim()
+            .to_string();
+        let right = chars[sep_idx + 1..]
+            .iter()
+            .collect::<String>()
+            .trim()
+            .to_string();
         if !left.is_empty() && left == right {
             return left;
         }
@@ -919,7 +1346,9 @@ fn collapse_repeated_phrase_line(line: &str) -> String {
 fn split_heading_context(input: &str, clean_mode: ExtractionCleanMode) -> Vec<String> {
     let cleaned = match clean_mode {
         ExtractionCleanMode::Raw => input.trim().to_string(),
-        ExtractionCleanMode::Heuristic | ExtractionCleanMode::LlmReady => clean_extracted_spacing(input),
+        ExtractionCleanMode::Heuristic | ExtractionCleanMode::LlmReady => {
+            clean_extracted_spacing(input)
+        }
     };
     cleaned
         .split(|c| matches!(c, '>' | '/' | '»'))
@@ -929,7 +1358,13 @@ fn split_heading_context(input: &str, clean_mode: ExtractionCleanMode) -> Vec<St
         .collect()
 }
 
-fn detect_oxidize_cleanup_reasons(text: &str, full_text: &str, _is_oversized: bool, _heading_context: Option<&str>, _token_estimate: usize) -> Vec<String> {
+fn detect_oxidize_cleanup_reasons(
+    text: &str,
+    full_text: &str,
+    _is_oversized: bool,
+    _heading_context: Option<&str>,
+    _token_estimate: usize,
+) -> Vec<String> {
     // v1.15.4: keep ingest cleanup flags high-leverage. Semantic boundary,
     // noise, heading, and CJK spacing issues are handled by the parser's
     // source-unit conditioner. LLM budget should not be spent on cosmetic
@@ -982,15 +1417,19 @@ pub fn source_index_from_book(doc: &SourceDocument, book: &PlainTextBook) -> Sou
         source_hash: doc.source_hash.clone(),
         file_path: Some(doc.file_path.clone()),
     };
-    let mut anchors: Vec<SourceAnchor> = book.pages.iter().map(|p| SourceAnchor {
-        anchor_id: format!("{}.p{:04}", book.source_id, p.page),
-        source_id: book.source_id.clone(),
-        page: Some(p.page),
-        section_path: vec![],
-        char_start: None,
-        char_end: None,
-        text_hash: Some(sha256_hex(&p.text)),
-    }).collect();
+    let mut anchors: Vec<SourceAnchor> = book
+        .pages
+        .iter()
+        .map(|p| SourceAnchor {
+            anchor_id: format!("{}.p{:04}", book.source_id, p.page),
+            source_id: book.source_id.clone(),
+            page: Some(p.page),
+            section_path: vec![],
+            char_start: None,
+            char_end: None,
+            text_hash: Some(sha256_hex(&p.text)),
+        })
+        .collect();
     anchors.extend(book.chunks.iter().map(|c| SourceAnchor {
         anchor_id: c.chunk_id.clone(),
         source_id: book.source_id.clone(),
@@ -1000,7 +1439,10 @@ pub fn source_index_from_book(doc: &SourceDocument, book: &PlainTextBook) -> Sou
         char_end: None,
         text_hash: c.text_hash.clone(),
     }));
-    SourceIndex { sources: vec![source_ref], anchors }
+    SourceIndex {
+        sources: vec![source_ref],
+        anchors,
+    }
 }
 
 #[cfg(test)]
@@ -1018,23 +1460,42 @@ mod mineru_smoke {
         let chunks = extract_mineru_chunks_blocking(PathBuf::from(&pdf), "smoke_coc".to_string())
             .expect("mineru extraction failed");
         assert!(!chunks.is_empty(), "no chunks produced");
-        let table_chunks: Vec<&DocumentChunk> = chunks.iter()
-            .filter(|c| c.element_types.iter().any(|t| t == "table")).collect();
-        println!("chunks={} table_chunks={}", chunks.len(), table_chunks.len());
+        let table_chunks: Vec<&DocumentChunk> = chunks
+            .iter()
+            .filter(|c| c.element_types.iter().any(|t| t == "table"))
+            .collect();
+        println!(
+            "chunks={} table_chunks={}",
+            chunks.len(),
+            table_chunks.len()
+        );
         for c in &chunks {
-            println!("--- {} page={:?} types={:?} chars={}",
-                c.chunk_id, c.page_numbers, c.element_types, c.text.len());
+            println!(
+                "--- {} page={:?} types={:?} chars={}",
+                c.chunk_id,
+                c.page_numbers,
+                c.element_types,
+                c.text.len()
+            );
         }
         assert!(!table_chunks.is_empty(), "no table-typed chunk found");
-        let all_table_text: String = table_chunks.iter().map(|c| c.text.as_str()).collect::<Vec<_>>().join("\n");
+        let all_table_text: String = table_chunks
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         // CLEAN table => structured HTML rows, weapon name + damage dice together on a row.
-        assert!(all_table_text.contains("<table") || all_table_text.contains("<tr"),
-            "table chunk has no HTML structure (collapsed?)");
+        assert!(
+            all_table_text.contains("<table") || all_table_text.contains("<tr"),
+            "table chunk has no HTML structure (collapsed?)"
+        );
         let has_weapon = all_table_text.to_lowercase().contains("revolver")
             || all_table_text.to_lowercase().contains("automatic");
         assert!(has_weapon, "weapon rows not found in table text");
-        println!("\n=== first 1200 chars of table text ===\n{}",
-            &all_table_text.chars().take(1200).collect::<String>());
+        println!(
+            "\n=== first 1200 chars of table text ===\n{}",
+            &all_table_text.chars().take(1200).collect::<String>()
+        );
     }
 }
 
@@ -1050,19 +1511,35 @@ mod oxidize_partition_smoke {
         use oxidize_pdf::pipeline::{Element, PartitionConfig, ReadingOrderStrategy};
         let pdf = std::env::var("TRPG_TEST_PDF").expect("set TRPG_TEST_PDF");
         let doc = PdfDocument::open(&pdf).expect("open pdf");
-        let cfg = PartitionConfig::default().with_reading_order(ReadingOrderStrategy::XYCut { min_gap: 10.0 });
+        let cfg = PartitionConfig::default()
+            .with_reading_order(ReadingOrderStrategy::XYCut { min_gap: 10.0 });
         let t = std::time::Instant::now();
         let els = doc.partition_with(cfg).expect("partition");
         let elapsed = t.elapsed();
         let mut counts: std::collections::BTreeMap<&str, usize> = Default::default();
-        for el in &els { *counts.entry(el.type_name()).or_default() += 1; }
-        println!("[oxidize partition] elements={} elapsed={:?} types={:?}", els.len(), elapsed, counts);
+        for el in &els {
+            *counts.entry(el.type_name()).or_default() += 1;
+        }
+        println!(
+            "[oxidize partition] elements={} elapsed={:?} types={:?}",
+            els.len(),
+            elapsed,
+            counts
+        );
         // print any Table whose rows mention a firearm => clean weapon table?
         for el in &els {
             if let Element::Table(td) = el {
                 let b = el.bbox();
-                println!("TABLE page={} bbox=(x={:.1},y={:.1},w={:.1},h={:.1}) rows={} conf={:.2}",
-                    el.page(), b.x, b.y, b.width, b.height, td.rows.len(), el.metadata().confidence);
+                println!(
+                    "TABLE page={} bbox=(x={:.1},y={:.1},w={:.1},h={:.1}) rows={} conf={:.2}",
+                    el.page(),
+                    b.x,
+                    b.y,
+                    b.width,
+                    b.height,
+                    td.rows.len(),
+                    el.metadata().confidence
+                );
             }
         }
         // reading-order sample: first 30 elements as type:text
@@ -1158,14 +1635,20 @@ mod decolumn_tests {
             "                                        们会坐在加油站宽敞的顶棚底下抽烟喝啤酒。",
         ].join("\n") + "\n";
         let out = decolumnize_layout_page(&layout).expect("ragged 双栏页应检出两栏");
-        let l_first = out.find("你们隐约").unwrap();      // 左栏首行
+        let l_first = out.find("你们隐约").unwrap(); // 左栏首行
         let l_last = out.find("德克萨斯州阿巴托尔镇").unwrap(); // 左栏末行
-        let r_first = out.find("如果再不用").unwrap();      // 右栏首行
-        let r_empty_left = out.find("斯，内特").unwrap();    // 左栏为空那行的右栏文本
-        // 左栏整段（含末行）应排在右栏首行之前——右栏没有被左移错填到左栏开头。
+        let r_first = out.find("如果再不用").unwrap(); // 右栏首行
+        let r_empty_left = out.find("斯，内特").unwrap(); // 左栏为空那行的右栏文本
+                                                          // 左栏整段（含末行）应排在右栏首行之前——右栏没有被左移错填到左栏开头。
         assert!(l_last < r_first, "左栏末行应在右栏首行之前（右栏整体在后）");
-        assert!(l_first < r_empty_left, "左栏为空那行的右栏文本应落在右栏块，未左移到开头");
-        assert!(r_first < r_empty_left, "右栏内部顺序：先 '如果再不用' 后 '斯，内特'");
+        assert!(
+            l_first < r_empty_left,
+            "左栏为空那行的右栏文本应落在右栏块，未左移到开头"
+        );
+        assert!(
+            r_first < r_empty_left,
+            "右栏内部顺序：先 '如果再不用' 后 '斯，内特'"
+        );
     }
 
     // fail-closed：整页带统一缩进的单栏页（无内部空白河）不应被误切。
@@ -1182,9 +1665,13 @@ mod decolumn_tests {
             "          第四行内容第五行内容第六行内容",
             "          第五行补足行数让其通过下限判定",
             "          第六行结尾仍然是缩进单栏无第二栏",
-        ].join("\n") + "\n";
-        assert!(decolumnize_layout_page(&layout).is_none(),
-            "缩进单栏页无内部空白河，应 fail-closed 返回 None");
+        ]
+        .join("\n")
+            + "\n";
+        assert!(
+            decolumnize_layout_page(&layout).is_none(),
+            "缩进单栏页无内部空白河，应 fail-closed 返回 None"
+        );
     }
 
     // 三栏（血色公路目录式）：两条空白河 → 切成 3 块，列内上→下、列间左→右顺序对。
@@ -1222,7 +1709,10 @@ mod decolumn_tests {
 45      50      65      70\n\
 80      40      55      50\n\
 60      65      45      75\n";
-        assert!(is_duotext_table_page(table), "多列表格应被识别为表页（保留 -layout 对齐）");
+        assert!(
+            is_duotext_table_page(table),
+            "多列表格应被识别为表页（保留 -layout 对齐）"
+        );
         let prose = "\
 漫无止境的沥青带仍在    然后你们看到了它\n\
 浪使人无法目测距离只    正在阳光下熠熠生\n\
@@ -1230,6 +1720,9 @@ mod decolumn_tests {
 温就已经超过了百华氏    纪五十年代的风格\n\
 如蒸笼一般你们每个人    泡上面写你就快到\n\
 是跟刚从游泳池里爬出    个模糊不堪的标志\n";
-        assert!(!is_duotext_table_page(prose), "2 栏散文不应被误判为表格（应走去栏）");
+        assert!(
+            !is_duotext_table_page(prose),
+            "2 栏散文不应被误判为表格（应走去栏）"
+        );
     }
 }

@@ -58,7 +58,10 @@ fn relationship_delta_is_bounded() {
     .unwrap();
     assert_eq!(rel.trust, CHANNEL_SIGNED_MIN);
     assert_eq!(rel.debt, CHANNEL_SIGNED_MIN);
-    assert_eq!(rel.fear, CHANNEL_UNIPOLAR_MIN, "unipolar floor is 0, never negative");
+    assert_eq!(
+        rel.fear, CHANNEL_UNIPOLAR_MIN,
+        "unipolar floor is 0, never negative"
+    );
     assert_eq!(rel.hostility, CHANNEL_UNIPOLAR_MIN);
     assert_eq!(rel.talkativeness, CHANNEL_UNIPOLAR_MIN);
 }
@@ -96,7 +99,10 @@ fn help_increases_trust_or_debt() {
         .apply_to(&mut rel)
         .unwrap();
     assert!(rel.trust > 0, "helping should raise trust");
-    assert!(rel.debt > 0, "helping should raise debt (NPC now feels indebted)");
+    assert!(
+        rel.debt > 0,
+        "helping should raise debt (NPC now feels indebted)"
+    );
     assert!(rel.respect > 0, "helping should raise respect");
     assert!(rel.evidence_event_ids.contains(&"evt_helped".to_string()));
 }

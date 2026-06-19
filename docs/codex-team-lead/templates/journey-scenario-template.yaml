@@ -1,0 +1,52 @@
+id: JRNY-<AREA>-<NN>
+version: 1
+acceptance_ids: []
+ruleset_id: <ruleset>
+module_id: <module>
+
+setup:
+  database: isolated
+  assets: current_verified_bundle
+  character:
+    create_via: cli
+    preferences: <natural player preferences>
+    auto_complete: true
+    require_persisted: true
+    require_session_binding: true
+  session:
+    start_via: created_character_session
+    require_playable_scene: true
+
+player:
+  mode: adaptive_script
+  persona: <short persona>
+  knowledge_source: player_view_only
+  max_trigger_attempts: 2
+
+chapters:
+  - id: <checkpoint>
+    when: <public precondition>
+    actions:
+      - <natural player action>
+      - if_not_triggered: <natural clarification>
+    trigger:
+      reachability: []
+      mechanism: []
+      require_dice: false
+      require_check_resolution: false
+    assert:
+      player_text_requires_semantic: []
+      player_text_forbids: []
+      state: []
+      continuity: []
+
+modes:
+  deterministic:
+    provider: cassette_or_controlled
+    dice: seeded
+  live:
+    provider: configured_real_llm
+    dice: real_or_recorded
+  replay:
+    provider: accepted_live_cassette
+    no_live_fallback: true

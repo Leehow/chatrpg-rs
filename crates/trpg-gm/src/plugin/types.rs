@@ -144,12 +144,10 @@ impl PluginContributionKind {
             PluginContributionKind::ContextFilter(f) => {
                 format!("drop {} block(s)", f.drop_block_ids.len())
             }
-            PluginContributionKind::VerifierFinding(vf) => {
-                serde_json::to_value(vf.kind)
-                    .ok()
-                    .and_then(|v| v.as_str().map(|s| s.to_string()))
-                    .unwrap_or_else(|| format!("{:?}", vf.kind))
-            }
+            PluginContributionKind::VerifierFinding(vf) => serde_json::to_value(vf.kind)
+                .ok()
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_else(|| format!("{:?}", vf.kind)),
         }
     }
 }

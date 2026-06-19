@@ -11,9 +11,7 @@
 //! No LLM ever sets final values: callers may only propose an [`NpcRelationshipDelta`],
 //! which still passes through the bounded clamp and the non-empty-evidence gate.
 use trpg_db::Db;
-use trpg_model::{
-    NpcRelationship, NpcRelationshipDelta, NpcRelationshipTarget, RelationshipError,
-};
+use trpg_model::{NpcRelationship, NpcRelationshipDelta, NpcRelationshipTarget, RelationshipError};
 
 /// Pure store-update step. Given the currently persisted relationship (or `None` for a
 /// first interaction) plus identity and a delta, produce the next relationship to
@@ -93,9 +91,15 @@ mod tests {
             &NpcRelationshipDelta::threat(vec!["e2".into()]),
         )
         .unwrap();
-        assert!(second.trust < trust_after_help, "threat after help lowers trust");
+        assert!(
+            second.trust < trust_after_help,
+            "threat after help lowers trust"
+        );
         assert!(second.fear > 0);
-        assert_eq!(second.evidence_event_ids, vec!["e1".to_string(), "e2".to_string()]);
+        assert_eq!(
+            second.evidence_event_ids,
+            vec!["e1".to_string(), "e2".to_string()]
+        );
     }
 
     #[test]
