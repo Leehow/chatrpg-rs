@@ -1,4 +1,5 @@
 pub mod check;
+pub mod clarify;
 pub mod effect;
 pub mod frame;
 pub mod mechanic;
@@ -85,6 +86,18 @@ pub struct AwaitingPlayerRoll {
     pub prompt_public: String,
 }
 
+/// P2 工具能力位（设计4 附录C-#2 "只有 runtime-owned typed services 能 commit"）。
+/// 严格二分、fail-closed：未显式声明只读的工具一律按 `Mutating`，杜绝漏标。
+/// 仅用于派生 Narrator-safe 子集（narrator_safe()）+ 守卫测试；不改任何 dispatch 行为。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolCapability {
+    /// 零副作用（不写 DB / ledger / obligation / frame）：仅 retrieve_rules / get_actor /
+    /// lookup_mechanic + 无状态 ask_clarification。
+    ReadOnly,
+    /// 可变更机械/世界状态（默认）。其余 12 个标准工具全部落此类。
+    Mutating,
+}
+
 /// 单个 GM 工具。Err 由 dispatch 统一转结构化 ToolError JSON 回填（绝不 panic、
 /// 不静默、不中断 loop）；工具实现内用 ToolError::recoverable/fatal 构造类型化错误。
 #[async_trait]
@@ -96,6 +109,12 @@ pub trait GmTool: Send + Sync {
         ledger: &mut TurnLedger,
         args: Value,
     ) -> Result<ToolOutput>;
+
+    /// P2 能力标注（默认 Mutating = fail-closed）。仅已核实零副作用的工具 override 为
+    /// ReadOnly：retrieve_rules / get_actor / lookup_mechanic / ask_clarification。
+    fn capability(&self) -> ToolCapability {
+        ToolCapability::Mutating
+    }
 }
 
 /// 结构化工具错误（spec §5/§7：fail-closed 但 agent 可见可修复）。
@@ -184,6 +203,17 @@ fn extra_tool_by_name(name: &str) -> Option<Box<dyn GmTool>> {
     }
 }
 
+/// P2 narrator_safe() 重建 ReadOnly 工具实例（零状态 unit struct，按权威 name 查表）。
+/// 锁定集合 = {retrieve_rules, get_actor, lookup_mechanic}；任何其他名 → None（fail-closed）。
+fn readonly_tool_by_name(name: &str) -> Option<Box<dyn GmTool>> {
+    match name {
+        "retrieve_rules" => Some(Box::new(world::RetrieveRulesTool)),
+        "get_actor" => Some(Box::new(npc::GetActorTool)),
+        "lookup_mechanic" => Some(Box::new(mechanic::LookupMechanicTool)),
+        _ => None,
+    }
+}
+
 /// 一次 dispatch 的产物：tool role 回填消息 + 可能的回合终态信号。
 pub struct ToolDispatchOutcome {
     pub tool_call_id: String,
@@ -244,6 +274,28 @@ impl ToolRegistry {
             registry.tools.push(tool);
         }
         Ok(registry)
+    }
+
+    /// P2 步骤3（设计4 §9.5 Narrator 无状态工具集，additive）：从当前 registry 派生一个
+    /// Narrator-safe 子集——过滤掉全部 `capability()==Mutating` 工具（剩 ReadOnly 子集），
+    /// 再尾部追加无状态 `ask_clarification`（仅在此出现，**不**进 standard()，故 standard()
+    /// 的 15 工具 schema 字节稳定性不受影响）。本阶段只产出"能力"：不改 run_agent_loop
+    /// 现行 self.tools / mode_tools 使用，Narrator 真实接线由后续阶段调用此方法。
+    pub fn narrator_safe(&self) -> Self {
+        let mut tools: Vec<Box<dyn GmTool>> = Vec::new();
+        for t in &self.tools {
+            if t.capability() != ToolCapability::ReadOnly {
+                continue;
+            }
+            // ReadOnly 工具是零状态 unit struct（retrieve_rules / get_actor / lookup_mechanic）；
+            // 按权威 name 重建实例（避免给 GmTool 加 clone bound）。未知 ReadOnly 名 fail-closed
+            // 跳过（杜绝臆造工具进 Narrator 集），由守卫测试钉死集合恒为这三个。
+            if let Some(rebuilt) = readonly_tool_by_name(t.spec().name) {
+                tools.push(rebuilt);
+            }
+        }
+        tools.push(Box::new(clarify::AskClarificationTool));
+        Self { tools }
     }
 
     /// turn_loop 单测注入脚本化 GmTool 替身用（tools 字段私有，跨模块测试只能经此构造）。
@@ -434,6 +486,124 @@ mod tests {
         assert_eq!(
             v.pointer("/error/code").and_then(Value::as_str),
             Some("invalid_arguments")
+        );
+    }
+}
+
+#[cfg(test)]
+mod capability_guard_tests {
+    use super::*;
+
+    /// P2 ReadOnly 白名单 = 锁定常量。任何 widening 都强制改这里（= 显式人审点）。
+    const READONLY_WHITELIST: [&str; 3] = ["retrieve_rules", "get_actor", "lookup_mechanic"];
+
+    /// 12 个有副作用的标准工具（均 capability()==Mutating）。
+    const MUTATING_NAMES: [&str; 12] = [
+        "roll_check",
+        "request_player_roll",
+        "apply_effect",
+        "change_track",
+        "ensure_npc_param",
+        "navigate_scene",
+        "advance_time",
+        "remember",
+        "waive_obligation",
+        "enter_mode",
+        "exit_mode",
+        "reveal_fact",
+    ];
+
+    /// standard() 恰好 3 ReadOnly + 12 Mutating；ReadOnly 集合逐名锁定。
+    #[test]
+    fn standard_has_exactly_three_readonly_twelve_mutating() {
+        let reg = ToolRegistry::standard();
+        let mut readonly: Vec<&str> = reg
+            .tools
+            .iter()
+            .filter(|t| t.capability() == ToolCapability::ReadOnly)
+            .map(|t| t.spec().name)
+            .collect();
+        let mutating: Vec<&str> = reg
+            .tools
+            .iter()
+            .filter(|t| t.capability() == ToolCapability::Mutating)
+            .map(|t| t.spec().name)
+            .collect();
+        assert_eq!(reg.tools.len(), 15, "standard() must register 15 tools");
+        assert_eq!(readonly.len(), 3, "exactly 3 ReadOnly tools");
+        assert_eq!(mutating.len(), 12, "exactly 12 Mutating tools");
+        readonly.sort();
+        let mut expected = READONLY_WHITELIST.to_vec();
+        expected.sort();
+        assert_eq!(
+            readonly, expected,
+            "ReadOnly set must equal locked whitelist"
+        );
+    }
+
+    /// 每个 Mutating 工具名都在 ReadOnly 白名单之外（防新增 mutation 工具误标 ReadOnly）。
+    #[test]
+    fn every_mutating_tool_is_outside_readonly_whitelist() {
+        for name in MUTATING_NAMES {
+            assert!(
+                !READONLY_WHITELIST.contains(&name),
+                "mutating tool {name} must not appear in ReadOnly whitelist"
+            );
+        }
+        // 反向：standard() 的 Mutating 名集合恰为 MUTATING_NAMES。
+        let reg = ToolRegistry::standard();
+        let mut got: Vec<&str> = reg
+            .tools
+            .iter()
+            .filter(|t| t.capability() == ToolCapability::Mutating)
+            .map(|t| t.spec().name)
+            .collect();
+        got.sort();
+        let mut want = MUTATING_NAMES.to_vec();
+        want.sort();
+        assert_eq!(
+            got, want,
+            "Mutating tool set must equal the locked 12-name list"
+        );
+    }
+
+    /// narrator_safe(): 不含任何 Mutating 工具；含 3 ReadOnly + ask_clarification（共 4）。
+    #[test]
+    fn narrator_safe_excludes_all_mutating_and_appends_ask_clarification() {
+        let safe = ToolRegistry::standard().narrator_safe();
+        let names: Vec<&str> = safe.tools.iter().map(|t| t.spec().name).collect();
+        assert_eq!(safe.tools.len(), 4, "3 ReadOnly + ask_clarification");
+        for n in MUTATING_NAMES {
+            assert!(
+                !names.contains(&n),
+                "narrator_safe must exclude mutating {n}"
+            );
+        }
+        for n in READONLY_WHITELIST {
+            assert!(names.contains(&n), "narrator_safe must keep ReadOnly {n}");
+        }
+        assert!(
+            names.contains(&"ask_clarification"),
+            "narrator_safe must append ask_clarification"
+        );
+        // 没有任何 Mutating 工具残留。
+        assert!(
+            safe.tools
+                .iter()
+                .all(|t| t.capability() == ToolCapability::ReadOnly),
+            "narrator_safe registry must contain only ReadOnly tools"
+        );
+    }
+
+    /// ask_clarification **不**进 standard()（保 15 工具 schema 字节稳定）。
+    #[test]
+    fn standard_does_not_contain_ask_clarification() {
+        let reg = ToolRegistry::standard();
+        assert!(
+            !reg.tools
+                .iter()
+                .any(|t| t.spec().name == "ask_clarification"),
+            "ask_clarification must NOT be in standard()"
         );
     }
 }

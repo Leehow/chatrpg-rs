@@ -90,6 +90,9 @@ impl GmTool for RetrieveRulesTool {
             schema: json!({"type":"function","function":{"name":"retrieve_rules","description":"Retrieve source-backed rule snippets.","parameters":{"type":"object","properties":{"query":{"type":"string"},"k":{"type":"integer"}},"required":["query"]}}}),
         }
     }
+    fn capability(&self) -> crate::tools::ToolCapability {
+        crate::tools::ToolCapability::ReadOnly
+    }
     async fn call(
         &self,
         ctx: &ToolCtx<'_>,

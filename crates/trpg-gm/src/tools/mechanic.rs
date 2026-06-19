@@ -49,6 +49,9 @@ impl GmTool for LookupMechanicTool {
             schema: json!({"type":"function","function":{"name":"lookup_mechanic","description":"Fetch the full mechanics-catalog entry (procedure, hooks, followups, sources) by id from the BP1 index.","parameters":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}}}),
         }
     }
+    fn capability(&self) -> crate::tools::ToolCapability {
+        crate::tools::ToolCapability::ReadOnly
+    }
 
     async fn call(
         &self,

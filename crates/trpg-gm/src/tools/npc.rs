@@ -28,6 +28,9 @@ impl GmTool for GetActorTool {
             schema: json!({"type":"function","function":{"name":"get_actor","description":"Return GM-visible actor sheet and mechanical profile.","parameters":{"type":"object","properties":{"actor_id":{"type":"string"}},"required":["actor_id"]}}}),
         }
     }
+    fn capability(&self) -> crate::tools::ToolCapability {
+        crate::tools::ToolCapability::ReadOnly
+    }
     async fn call(
         &self,
         ctx: &ToolCtx<'_>,
