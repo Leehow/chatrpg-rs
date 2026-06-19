@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use rand::Rng;
+use rand::{Rng, SeedableRng};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -121,6 +121,7 @@ use context_blocks::{
     world_events_since_block, world_state_block, world_time_block,
 };
 
+pub mod event_fold;
 pub mod scene_navigation;
 pub use scene_navigation::{
     build_nav_prompt, extract_module_scenes, prefetch_frontier, scene_navigator,
@@ -2258,7 +2259,22 @@ impl RuntimeEngine {
                 json!({"mode":"reported_components", "die": die, "components": components, "total": total})
             }
             ParsedRollText::DiceExpression(expr) => {
-                let rolled = roll_dice(&expr)?;
+                // P6.6 同种子掷骰（flag OFF==baseline）：ON 时用 (session:turn:check:roller:expr)
+                // 派生 seed **掷骰前** 计算（只含输入、EXCLUDE result_json ⇒ 重试/回放稳定），
+                // 走 roll_dice_seeded；OFF 时不变——既有 thread_rng 路径（字节等价 baseline）。
+                let rolled = if seeded_rolls_enabled() {
+                    let seed = stable_u64(&format!(
+                        "{}:{}:{}:{}:{}",
+                        session_id,
+                        turn_id,
+                        check_id.unwrap_or("none"),
+                        contract.initiator.actor_id,
+                        expr
+                    ));
+                    roll_dice_seeded(&expr, seed)?
+                } else {
+                    roll_dice(&expr)?
+                };
                 json!({"mode":"rolled", "expression": rolled.expression, "rolls": rolled.rolls, "modifier": rolled.modifier, "total": rolled.total})
             }
         };
@@ -2336,7 +2352,16 @@ impl RuntimeEngine {
                         .map(str::to_string)
                 })
                 .unwrap_or_else(|| contract.dice_expression.clone());
-            let rolled = roll_dice(&def_expr)?;
+            // P6.6 同种子（防御方 :defender: salt）：ON 时掷骰前派生 seed；OFF 不变。
+            let rolled = if seeded_rolls_enabled() {
+                let seed = stable_u64(&format!(
+                    "{}:{}:defender:{}:{}",
+                    contract.session_id, contract.turn_id, contract.check_id, def_expr
+                ));
+                roll_dice_seeded(&def_expr, seed)?
+            } else {
+                roll_dice(&def_expr)?
+            };
             let seed_material = format!(
                 "{}:{}:defender:{}",
                 contract.session_id, contract.turn_id, contract.check_id
@@ -4560,6 +4585,75 @@ pub trait DiceRollerPlugin: Send + Sync {
     // 调用不可复现。P6 将加 seed 通道实现同种子确定性——改本签名前先看
     // crates/trpg-gm/src/arch_gates_tests.rs 的 #[ignore] seedable 测试（去 ignore 即绿门）。
     fn roll(&self, expression: &str) -> Result<DiceRoll>;
+
+    /// P6.6 同种子掷骰（设计4 §19-#9 同种子确定性）：用 `seed` 播种 `StdRng` 掷同一
+    /// 表达式，**同 seed ⇒ 同 rolls 序列 ⇒ 同 total**（可复现 / 可回放）。默认实现用
+    /// `StdRng::seed_from_u64`，与无 seed 的 `roll`（thread_rng）并存——OFF 路径不受影响。
+    fn roll_seeded(&self, expression: &str, seed: u64) -> Result<DiceRoll> {
+        let (n, sides, modifier) = parse_dice_expr(expression)?;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+        let rolls: Vec<i32> = (0..n).map(|_| rng.gen_range(1..=sides)).collect();
+        let total = rolls.iter().sum::<i32>() + modifier;
+        Ok(DiceRoll {
+            expression: expression.to_string(),
+            rolls,
+            modifier,
+            total,
+        })
+    }
+}
+
+/// 解析 `NdM±K` 骰式为 `(n, sides, modifier)`，含安全边界（与 `roll` 同一契约）。
+/// 抽出共享，使 `roll`（thread_rng）与 `roll_seeded`（StdRng）只差 RNG、不差解析。
+fn parse_dice_expr(expression: &str) -> Result<(i32, i32, i32)> {
+    let re = Regex::new(r"(?i)^\s*(\d*)d(\d+)([+-]\d+)?\s*$").unwrap();
+    let caps = re
+        .captures(expression)
+        .ok_or_else(|| anyhow!("unsupported dice expression: {expression}"))?;
+    let n = caps.get(1).map(|m| m.as_str()).unwrap_or("1");
+    let n: i32 = if n.is_empty() { 1 } else { n.parse()? };
+    let sides: i32 = caps.get(2).unwrap().as_str().parse()?;
+    let modifier: i32 = caps
+        .get(3)
+        .map(|m| m.as_str().parse())
+        .transpose()?
+        .unwrap_or(0);
+    if n <= 0 || n > 100 || sides <= 1 || sides > 1000 {
+        return Err(anyhow!(
+            "dice expression outside safety bounds: {expression}"
+        ));
+    }
+    Ok((n, sides, modifier))
+}
+
+/// P6.6 稳定 seed：取 sha256(s) 前 8 字节按 little-endian 组 u64。纯输入派生 ⇒ 同串同
+/// seed，跨进程/跨机稳定（不用 DefaultHasher，那是 per-process 随机化的）。
+///
+/// 复用 `trpg_model::sha256_hex`（返回 `"sha256:<64 hex>"`）解出前 16 hex（= 前 8 字节）
+/// 再按 little-endian 组 u64——避免给 trpg-runtime 加 sha2 直依赖（零新 dep 边）。
+pub fn stable_u64(s: &str) -> u64 {
+    let hex = trpg_model::sha256_hex(s);
+    // 去掉 "sha256:" 前缀，取前 16 个 hex 字符 = 摘要前 8 字节。
+    let hex = hex.strip_prefix("sha256:").unwrap_or(&hex);
+    let mut bytes = [0u8; 8];
+    for (i, b) in bytes.iter_mut().enumerate() {
+        let lo = i * 2;
+        *b = u8::from_str_radix(&hex[lo..lo + 2], 16).unwrap_or(0);
+    }
+    u64::from_le_bytes(bytes)
+}
+
+/// P6.6 同种子掷骰自由函数（镜像 `roll_dice`，走 `PseudoRandomDiceRoller::roll_seeded`）。
+pub fn roll_dice_seeded(expression: &str, seed: u64) -> Result<DiceRoll> {
+    PseudoRandomDiceRoller.roll_seeded(expression, seed)
+}
+
+/// P6.6 OFF==baseline 闸门：`TRPG_SEEDED_ROLLS` 为 truthy（`1`/`true`）时启用同种子
+/// 掷骰路径；默认（unset/其它）OFF ⇒ 保持既有 thread_rng 路径、与 baseline 字节一致。
+fn seeded_rolls_enabled() -> bool {
+    std::env::var("TRPG_SEEDED_ROLLS")
+        .map(|v| v == "1" || v.to_lowercase() == "true")
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -4571,23 +4665,7 @@ impl DiceRollerPlugin for PseudoRandomDiceRoller {
     }
 
     fn roll(&self, expression: &str) -> Result<DiceRoll> {
-        let re = Regex::new(r"(?i)^\s*(\d*)d(\d+)([+-]\d+)?\s*$").unwrap();
-        let caps = re
-            .captures(expression)
-            .ok_or_else(|| anyhow!("unsupported dice expression: {expression}"))?;
-        let n = caps.get(1).map(|m| m.as_str()).unwrap_or("1");
-        let n: i32 = if n.is_empty() { 1 } else { n.parse()? };
-        let sides: i32 = caps.get(2).unwrap().as_str().parse()?;
-        let modifier: i32 = caps
-            .get(3)
-            .map(|m| m.as_str().parse())
-            .transpose()?
-            .unwrap_or(0);
-        if n <= 0 || n > 100 || sides <= 1 || sides > 1000 {
-            return Err(anyhow!(
-                "dice expression outside safety bounds: {expression}"
-            ));
-        }
+        let (n, sides, modifier) = parse_dice_expr(expression)?;
         let mut rng = rand::thread_rng();
         let rolls: Vec<i32> = (0..n).map(|_| rng.gen_range(1..=sides)).collect();
         let total = rolls.iter().sum::<i32>() + modifier;

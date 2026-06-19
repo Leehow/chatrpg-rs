@@ -125,19 +125,28 @@ fn binding_plan_carries_execution_tier() {
     );
 }
 
-// ── 4. P6 占位锚（#[ignore]）：§19-#8 replay parity / §19-#9 同种子确定性 ───────
-// 这些测试把 P6 的目标断言**先写成代码**。当前缺 event-fold/replay 引擎与 seedable
-// 掷骰通道，故 `#[ignore]`（被 skip 非 fail）。P6 实现时去掉 `#[ignore]` 即变绿门。
+// ── 4. P6 绿门：§19-#8 replay parity / §19-#9 同种子确定性 ─────────────────────
+// P6.4/P6.5/P6.6 实现后，这 4 条从 `#[ignore]` 占位锚翻面为绿门：用真
+// `trpg_runtime::event_fold::Projection::fold` 与 `DiceRollerPlugin::roll_seeded`。
 // 见 设计4 §19-#8/#9 与 docs/superpowers/plans/2026-06-19-layered-runtime-architecture.md P6。
 
-fn fixed_event(kind: DomainEventKind, idx: usize) -> DomainEvent {
-    // 固定时间戳构造（不依赖 Utc::now），保证 replay 序列确定性。
+fn fixed_entity_event(
+    kind: DomainEventKind,
+    idx: usize,
+    entity: Option<(&str, &str)>,
+) -> DomainEvent {
+    // 固定时间戳构造（不依赖 Utc::now），保证 replay 序列确定性。entity=Some 时给
+    // data.entity_id/entity_kind（fold 据此抽元素）；None 给 Null（生命周期事件无实体）。
+    let data = match entity {
+        Some((id, ekind)) => serde_json::json!({"entity_id": id, "entity_kind": ekind}),
+        None => serde_json::Value::Null,
+    };
     DomainEvent {
         event_id: format!("de_test_{idx}_{}", kind.as_str()),
         session_id: "sess_replay".into(),
         turn_id: "turn_1".into(),
         kind,
-        data: serde_json::Value::Null,
+        data,
         source_refs: Vec::new(),
         created_at: chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000 + idx as i64, 0)
             .expect("fixed ts"),
@@ -145,63 +154,90 @@ fn fixed_event(kind: DomainEventKind, idx: usize) -> DomainEvent {
 }
 
 /// §19-#8 目标①：replay 同序事件 → 重建 projection 逐字段相等（确定性 fold）。
-/// P6 锚：当前用占位 fold（kind token 序列）代替真 projection 引擎；P6 接真引擎后去 ignore。
-#[ignore = "P6: 待 event-fold/replay 引擎（设计4 §19-#8）。去掉 #[ignore] 即绿门"]
+/// P6.4/P6.5：接真 `Projection::fold`（trpg-runtime/src/event_fold.rs）。同序事件折两次
+/// 必逐字段相等——BTreeSet ⇒ 字节稳定。ContextSurfaced 不混入玩家暴露投影。
 #[test]
 fn replay_same_events_rebuild_identical_projection() {
-    let events = [
-        fixed_event(DomainEventKind::TurnStarted, 0),
-        fixed_event(DomainEventKind::ContextSurfaced, 1),
-        fixed_event(DomainEventKind::PlayerExposed, 2),
-        fixed_event(DomainEventKind::PlayerLearnedFact, 3),
-        fixed_event(DomainEventKind::TurnFinalized, 4),
-    ];
-    // TARGET(P6): projection_a = engine.fold(&events); projection_b = engine.fold(&events);
-    //             assert_eq!(projection_a, projection_b)  // 逐字段相等
-    let fold = |evs: &[DomainEvent]| -> Vec<String> {
-        evs.iter().map(|e| e.kind.as_str().to_string()).collect()
+    use trpg_runtime::event_fold::{
+        ContextSurfacedProjection, PlayerExposureProjection, Projection,
     };
-    assert_eq!(fold(&events), fold(&events));
+    let events = [
+        fixed_entity_event(DomainEventKind::TurnStarted, 0, None),
+        fixed_entity_event(
+            DomainEventKind::ContextSurfaced,
+            1,
+            Some(("npc_hidden", "npc")),
+        ),
+        fixed_entity_event(DomainEventKind::PlayerExposed, 2, Some(("npc_seen", "npc"))),
+        fixed_entity_event(
+            DomainEventKind::EntitySurfaced,
+            3,
+            Some(("sc_room", "scene")),
+        ),
+        fixed_entity_event(DomainEventKind::TurnFinalized, 4, None),
+    ];
+    let exposure_a = PlayerExposureProjection::fold(&events);
+    let exposure_b = PlayerExposureProjection::fold(&events);
+    assert_eq!(exposure_a, exposure_b, "玩家暴露投影折两次必逐字段相等");
+    // ContextSurfaced 是隐藏 context 装载，绝不进玩家暴露集。
+    assert!(
+        !exposure_a.entities.iter().any(|(id, _)| id == "npc_hidden"),
+        "ContextSurfaced 不混入玩家暴露投影"
+    );
+    let ctx_a = ContextSurfacedProjection::fold(&events);
+    let ctx_b = ContextSurfacedProjection::fold(&events);
+    assert_eq!(ctx_a, ctx_b, "context 投影折两次必逐字段相等");
+    assert_eq!(
+        ctx_a.entities.len(),
+        1,
+        "context 投影只含 ContextSurfaced（npc_hidden）"
+    );
 }
 
 /// §19-#8 目标②：projection 对重复投递幂等（同事件 id 二次 fold 不改投影）。
-#[ignore = "P6: 待 event-fold/replay 引擎（设计4 §19-#8）。去掉 #[ignore] 即绿门"]
+/// P6.5：真 `Projection::fold` 按 event_id 去重——重复投递与单次折叠逐字段相等。
 #[test]
 fn replay_projection_idempotent_on_redelivery() {
-    let base = [
-        fixed_event(DomainEventKind::PlayerLearnedFact, 0),
-        fixed_event(DomainEventKind::PlayerLearnedFact, 0), // 同 idx → 同 event_id（重复投递）
+    use trpg_runtime::event_fold::{PlayerExposureProjection, Projection};
+    let single = [fixed_entity_event(
+        DomainEventKind::PlayerExposed,
+        0,
+        Some(("npc_seen", "npc")),
+    )];
+    // 同 idx ⇒ 同 event_id（重复投递）。
+    let redelivered = [
+        fixed_entity_event(DomainEventKind::PlayerExposed, 0, Some(("npc_seen", "npc"))),
+        fixed_entity_event(DomainEventKind::PlayerExposed, 0, Some(("npc_seen", "npc"))),
     ];
-    // TARGET(P6): engine.fold 应按 event_id 去重，重复投递后投影与单次相等。
-    let dedup: std::collections::BTreeSet<&str> =
-        base.iter().map(|e| e.event_id.as_str()).collect();
-    assert_eq!(dedup.len(), 1, "同 event_id 应折叠为一（幂等）");
+    assert_eq!(
+        PlayerExposureProjection::fold(&single),
+        PlayerExposureProjection::fold(&redelivered),
+        "同 event_id 重复投递 → 投影与单次相等（幂等去重）"
+    );
 }
 
-/// §19-#9 目标①：同 (state, seed, action) → roll() 返回相同 rolls 序列。
-/// 当前 roll() 无 seed 入参、用 thread_rng（trpg-runtime/src/lib.rs:4552），故今日不成立 →
-/// #[ignore]。P6 加 seed 通道后去 ignore 即绿门。
-#[ignore = "P6: 待 seedable 掷骰（设计4 §19-#9）。去掉 #[ignore] 即绿门"]
+/// §19-#9 目标①：同 (check_id-scoped) seed → roll_seeded 返回相同 rolls 序列。
+/// P6.6 精确声明（codex#5）：同种子-同结果对**同一 check 的重掷/回放**成立（check_id 是
+/// 每个新 action 的新 UUID，故"同 action 永远同 seed"**不**成立）；且不声称整行字节相等
+/// （roll_id/created_at 仍是 UUID/now）。§24-#9 的范围是 runtime check-roll 路径；
+/// `roll_amount_dice`（trpg-mechanics）仍 thread_rng = 已记债。
 #[test]
 fn same_seed_same_roll_sequence() {
     use trpg_runtime::{DiceRollerPlugin, PseudoRandomDiceRoller};
     let roller = PseudoRandomDiceRoller;
-    // TARGET(P6): roller.roll_with_seed("3d6", seed) 两次 → rolls 相等。
-    let a = roller.roll("3d6").expect("roll a");
-    let b = roller.roll("3d6").expect("roll b");
-    assert_eq!(
-        a.rolls, b.rolls,
-        "同种子应得相同 rolls 序列（P6 seed 通道）"
-    );
+    let seed = trpg_runtime::stable_u64("sess1:turn1:check_abc:player:3d6");
+    let a = roller.roll_seeded("3d6", seed).expect("roll a");
+    let b = roller.roll_seeded("3d6", seed).expect("roll b");
+    assert_eq!(a.rolls, b.rolls, "同种子应得相同 rolls 序列");
 }
 
-/// §19-#9 目标②：同 (state, seed, action) → roll() 返回相同 total。
-#[ignore = "P6: 待 seedable 掷骰（设计4 §19-#9）。去掉 #[ignore] 即绿门"]
+/// §19-#9 目标②：同种子 → roll_seeded 返回相同 total。
 #[test]
 fn same_seed_same_roll_total() {
     use trpg_runtime::{DiceRollerPlugin, PseudoRandomDiceRoller};
     let roller = PseudoRandomDiceRoller;
-    let a = roller.roll("2d20+3").expect("roll a");
-    let b = roller.roll("2d20+3").expect("roll b");
-    assert_eq!(a.total, b.total, "同种子应得相同 total（P6 seed 通道）");
+    let seed = trpg_runtime::stable_u64("sess1:turn1:check_abc:player:2d20+3");
+    let a = roller.roll_seeded("2d20+3", seed).expect("roll a");
+    let b = roller.roll_seeded("2d20+3", seed).expect("roll b");
+    assert_eq!(a.total, b.total, "同种子应得相同 total");
 }
