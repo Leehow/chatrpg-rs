@@ -1535,40 +1535,59 @@ impl GmLoop {
             .await
             .unwrap_or_default();
         let targets = [trpg_model::NpcRelationshipTarget::PlayerParty];
-        let mut blocks: Vec<String> = Vec::new();
+        // P4.6 Part A: route NPC guidance THROUGH the typed World layer, byte-identically.
+        // Same DB loads as the legacy per-NPC path (one `load_npc_profile` + one
+        // `load_active_npc_guidance` per active NPC, same skip semantics) — FRAMEWORK §2
+        // reflection ①: DB-load count == baseline. We pre-load profiles here (identical to
+        // before), keep only the active ids that have a durable profile, then hand the
+        // matched (ids, profiles) to `load_world_reaction_plans`, which calls the SAME
+        // `load_active_npc_guidance` per NPC in the SAME order.
+        let mut npc_ids: Vec<String> = Vec::new();
+        let mut profiles: Vec<trpg_model::NpcProfile> = Vec::new();
         for npc_id in active {
-            let profile = match self.engine.db.load_npc_profile(session_id, npc_id).await {
-                Ok(Some(p)) => p,
+            match self.engine.db.load_npc_profile(session_id, npc_id).await {
+                Ok(Some(p)) => {
+                    npc_ids.push(npc_id.clone());
+                    profiles.push(p);
+                }
                 Ok(None) => {
                     tracing::debug!(npc_id = %npc_id, "npc_behavior_guidance: no durable profile, skipping NPC guidance");
-                    continue;
                 }
                 Err(err) => {
                     tracing::warn!(error = %err, npc_id = %npc_id, "npc_behavior_guidance: profile load failed, skipping NPC guidance");
-                    continue;
-                }
-            };
-            match trpg_runtime::load_active_npc_guidance(
-                &self.engine.db,
-                session_id,
-                npc_id,
-                &profile,
-                &targets,
-                &player_known,
-            )
-            .await
-            {
-                Ok(plan) => blocks.push(plan.to_guidance_block()),
-                Err(err) => {
-                    tracing::warn!(error = %err, npc_id = %npc_id, "npc_behavior_guidance: plan load failed, skipping NPC guidance");
                 }
             }
         }
-        if blocks.is_empty() {
-            None
-        } else {
-            Some(blocks.join("\n\n"))
+        let (mut reaction_set, plans) = trpg_runtime::world::load_world_reaction_plans(
+            &self.engine.db,
+            session_id,
+            &npc_ids,
+            &profiles,
+            &targets,
+            &player_known,
+        )
+        .await;
+        // P4.6 Part B (flag-gated, default OFF): when an active NPC's reaction implies an
+        // Attack intent, the World layer EMITS the typed intent (it resolves nothing). The
+        // Rules/Kernel path settles it downstream via `resolve_check_with_input` (the SAME
+        // entry the GM `roll_check` tool uses). OFF ⇒ no-op ⇒ byte-identical turn. The
+        // resolution is committed to the check_result store (mechanical proof in Rules);
+        // it never aborts the turn nor mutates the player-visible guidance bytes.
+        if crate::npc_action::world_npc_action_enabled() {
+            trpg_runtime::world::derive_attack_intents(&plans, &mut reaction_set);
+            let _ = crate::npc_action::resolve_world_attack_intents(
+                &self.engine,
+                session_id,
+                &input.request.turn_id,
+                &input.request.ruleset_id,
+                &reaction_set,
+            )
+            .await;
         }
+        // The GM-context guidance bytes render from the retained (lossless) plans via the
+        // SAME `to_guidance_block` method as before — provably byte-identical (locked by
+        // `render_is_byte_identical_to_legacy_join`).
+        trpg_runtime::world::render_world_reaction_block(&plans)
     }
 
     /// 流后校验（spec §4 第 5 步）：NarrationVerifier 对账已流出全文 → 勘误记忆

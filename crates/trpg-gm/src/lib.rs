@@ -4,6 +4,7 @@ pub mod gate;
 pub mod ledger;
 pub mod mode;
 pub mod mode_catalog;
+pub mod npc_action;
 pub mod obligations;
 pub mod opposed_prepass;
 pub mod packet;

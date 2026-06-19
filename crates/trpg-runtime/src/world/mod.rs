@@ -15,7 +15,10 @@
 //! None of this is wired into the turn loop yet (that is P4.6).
 
 pub mod reaction;
-pub use reaction::{assemble_world_reaction_set, load_world_reaction_set};
+pub use reaction::{
+    assemble_world_reaction_set, derive_attack_intents, load_world_reaction_plans,
+    load_world_reaction_set, render_world_reaction_block,
+};
 
 pub mod clock;
 pub use clock::derive_clock_proposals;

@@ -76,8 +76,8 @@ pub use npc_behavior::{
     derive_npc_behavior_plan, load_active_npc_guidance, load_npc_behavior_plan,
     viewer_behavior_context,
 };
-pub mod world;
 pub mod knowledge_leak_verifier;
+pub mod world;
 pub use knowledge_leak_verifier::{
     behavior_finding_to_verifier_finding, to_verifier_finding, to_verifier_findings,
     verify_npc_asserted_facts, verify_npc_behavior_consistency, verify_npc_disclosure,
