@@ -20,6 +20,11 @@ pub enum PluginHook {
     ContextAssembly,
     /// LLM 念白成形后：挂 VerifierFinding。
     AfterLlmStream,
+    /// 重处理阶段（save_turn 后的 heavy postprocess，见 设计3.md §12 step 11）：
+    /// memory extraction / relationship inference / knowledge graph update 等。
+    /// 此 hook 的插件**只提案**（`Proposal` 贡献），由 runtime 验证后落事件/投影；
+    /// 插件自身绝不落库（propose-not-commit）。
+    HeavyPostprocess,
 }
 
 impl PluginHook {
@@ -28,6 +33,7 @@ impl PluginHook {
         match self {
             PluginHook::ContextAssembly => "context_assembly",
             PluginHook::AfterLlmStream => "after_llm_stream",
+            PluginHook::HeavyPostprocess => "heavy_postprocess",
         }
     }
 }
@@ -116,7 +122,7 @@ pub struct SecretTerm {
     pub fact_id: Option<String>,
 }
 
-/// 贡献载荷（3 类，对应防剧透三段）。
+/// 贡献载荷（4 类：防剧透三段 + HeavyPostprocess 提案）。
 ///
 /// 不派生 `Serialize`：`ContextBlock` / `VerifierFinding` 用 trace 摘要落
 /// Flight Recorder（见 `PluginContribution::to_trace`），契约本身只需 `Clone+Debug`。
@@ -125,6 +131,10 @@ pub enum PluginContributionKind {
     PromptBlock(trpg_model::ContextBlock),
     ContextFilter(ContextFilterSpec),
     VerifierFinding(trpg_agent::VerifierFinding),
+    /// HeavyPostprocess **提案**：复用 model 层 `MemoryExtractionProposal`，可承载
+    /// WorldFact / KnowledgeUpdate / NpcRelationshipDelta / MemoryFact 候选。插件只
+    /// 提案，不落库；runtime 验证后才落事件/投影（propose-not-commit）。
+    Proposal(trpg_model::MemoryExtractionProposal),
 }
 
 impl PluginContributionKind {
@@ -134,10 +144,15 @@ impl PluginContributionKind {
             PluginContributionKind::PromptBlock(_) => "prompt_block",
             PluginContributionKind::ContextFilter(_) => "context_filter",
             PluginContributionKind::VerifierFinding(_) => "verifier_finding",
+            PluginContributionKind::Proposal(_) => "proposal",
         }
     }
 
-    /// 人读摘要（block 标题 / 删除块数 / finding 种类）。
+    /// 人读摘要（block 标题 / 删除块数 / finding 种类 / 提案种类+身份）。
+    ///
+    /// **安全约束**：摘要绝不夹带 secret 正文。提案摘要只暴露稳定的
+    /// proposal_kind + 身份引用（fact_id / holder token / npc_id 这类稳定 id），
+    /// 绝不回显事实正文（subject/predicate/object）。
     pub fn summary(&self) -> String {
         match self {
             PluginContributionKind::PromptBlock(b) => b.title.clone(),
@@ -148,7 +163,26 @@ impl PluginContributionKind {
                 .ok()
                 .and_then(|v| v.as_str().map(|s| s.to_string()))
                 .unwrap_or_else(|| format!("{:?}", vf.kind)),
+            PluginContributionKind::Proposal(p) => proposal_summary(p),
         }
+    }
+}
+
+/// 提案的安全摘要：只暴露 proposal_kind + 稳定身份 id，绝不回显事实正文。
+///
+/// - WorldFact → `world_fact:<fact_id>`（fact_id 是稳定引用，非真相正文）。
+/// - KnowledgeUpdate → `knowledge_update:<holder_token>:<fact_id>`。
+/// - NpcRelationshipDelta → `npc_relationship_delta:<npc_id>`。
+/// - MemoryFact → 仅 `memory_fact`（其 subject/predicate triple 可能敏感，不暴露）。
+fn proposal_summary(p: &trpg_model::MemoryExtractionProposal) -> String {
+    use trpg_model::MemoryExtractionProposal as P;
+    match p {
+        P::WorldFact(c) => format!("world_fact:{}", c.fact_id),
+        P::KnowledgeUpdate(c) => {
+            format!("knowledge_update:{}:{}", c.holder.token(), c.fact_id)
+        }
+        P::NpcRelationshipDelta(c) => format!("npc_relationship_delta:{}", c.npc_id),
+        P::MemoryFact(_) => "memory_fact".to_string(),
     }
 }
 

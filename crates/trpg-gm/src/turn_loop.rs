@@ -1331,6 +1331,9 @@ impl GmLoop {
                 }
                 // VerifierFinding 不在 ContextAssembly hook 产出（见 AfterLlmStream）。
                 crate::plugin::PluginContributionKind::VerifierFinding(_) => {}
+                // Proposal 仅在 HeavyPostprocess hook 产出；即便误挂到此 hook 也只记 trace
+                // （上方已 push）、不应用、绝不落库（propose-not-commit），fail-safe no-op。
+                crate::plugin::PluginContributionKind::Proposal(_) => {}
             }
         }
         // ContextFilter 应用（fail-soft）：删命中块 + 经 runtime 同渲染路径重算受影响 band

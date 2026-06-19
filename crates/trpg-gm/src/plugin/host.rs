@@ -80,8 +80,24 @@ mod tests {
     };
     use trpg_agent::{VerifierFinding, VerifierFindingKind, VerifierSeverity};
     use trpg_model::{
-        BlockContent, BlockKind, CacheZone, ContextBlock, Scope, SourceRef, Stability, Visibility,
+        BlockContent, BlockKind, CacheZone, ContextBlock, MemoryExtractionProposal, Scope,
+        SourceRef, Stability, Visibility, WorldFactCandidate,
     };
+
+    /// 一个最小的 WorldFact 提案：subject/object 故意夹"秘密"正文，用来证明
+    /// trace 摘要只暴露稳定的 fact_id、绝不回显 secret 正文。
+    fn secret_world_fact_proposal() -> MemoryExtractionProposal {
+        MemoryExtractionProposal::WorldFact(WorldFactCandidate {
+            fact_id: "fact.king_identity".to_string(),
+            subject: "the beggar".to_string(),
+            predicate: "is".to_string(),
+            object: "the hidden king".to_string(),
+            summary: "secret twist prose".to_string(),
+            confidence: Some(0.9),
+            source_event_ids: vec!["evt-1".to_string()],
+            turn_id: Some("t-1".to_string()),
+        })
+    }
 
     fn meta(id: &str, safety: SafetyClass, prio: i32, hook: PluginHook) -> ContributionMeta {
         ContributionMeta {
@@ -115,7 +131,7 @@ mod tests {
         priority: i32,
         hooks: &'static [PluginHook],
         emit_hook: PluginHook,
-        kind: &'static str, // "prompt" | "filter" | "finding"
+        kind: &'static str, // "prompt" | "filter" | "finding" | "proposal"
     }
 
     #[async_trait]
@@ -144,6 +160,7 @@ mod tests {
                     severity: VerifierSeverity::Warning,
                     detail: "leak".to_string(),
                 }),
+                "proposal" => PluginContributionKind::Proposal(secret_world_fact_proposal()),
                 _ => PluginContributionKind::PromptBlock(prompt_block(
                     self.plugin_id,
                     "anti_spoiler",
@@ -219,6 +236,62 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(host.run_hook(&stream_ctx).await.len(), 1);
+    }
+
+    /// HeavyPostprocess hook：声明该 hook 的假插件产出一条 Proposal 贡献，
+    /// host 正常收集；其它 hook 不触发它。
+    #[tokio::test]
+    async fn host_runs_heavy_postprocess_proposal_plugin() {
+        let mut host = PluginHost::new();
+        host.register(Box::new(FakePlugin {
+            plugin_id: "play.memory_extractor",
+            safety: SafetyClass::Experience,
+            priority: 100,
+            hooks: &[PluginHook::HeavyPostprocess],
+            emit_hook: PluginHook::HeavyPostprocess,
+            kind: "proposal",
+        }));
+
+        // 非 HeavyPostprocess hook：不调用该插件。
+        let assembly_ctx = PluginContext {
+            hook: PluginHook::ContextAssembly,
+            ..Default::default()
+        };
+        assert!(host.run_hook(&assembly_ctx).await.is_empty());
+
+        // HeavyPostprocess hook：产出 1 条 Proposal 贡献。
+        let heavy_ctx = PluginContext {
+            hook: PluginHook::HeavyPostprocess,
+            ..Default::default()
+        };
+        let out = host.run_hook(&heavy_ctx).await;
+        assert_eq!(out.len(), 1);
+        assert!(matches!(out[0].kind, PluginContributionKind::Proposal(_)));
+        assert_eq!(out[0].meta.hook.as_str(), "heavy_postprocess");
+    }
+
+    /// Proposal 贡献的 trace：kind = "proposal"，summary 只暴露稳定 proposal_kind +
+    /// fact_id，**绝不**回显 secret 正文（subject/predicate/object/summary）。
+    #[test]
+    fn proposal_contribution_trace_is_secret_safe() {
+        let c = PluginContribution {
+            meta: meta(
+                "play.memory_extractor",
+                SafetyClass::Experience,
+                0,
+                PluginHook::HeavyPostprocess,
+            ),
+            kind: PluginContributionKind::Proposal(secret_world_fact_proposal()),
+        };
+        let t = c.to_trace();
+        assert_eq!(t.kind, "proposal");
+        assert_eq!(t.hook, "heavy_postprocess");
+        // 安全身份：只露 proposal_kind + fact_id。
+        assert_eq!(t.summary, "world_fact:fact.king_identity");
+        // 绝不夹带 secret 正文。
+        assert!(!t.summary.contains("beggar"));
+        assert!(!t.summary.contains("hidden king"));
+        assert!(!t.summary.contains("secret twist prose"));
     }
 
     #[test]
