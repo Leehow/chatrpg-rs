@@ -133,6 +133,10 @@ pub struct TurnOrchestratorInput<'a> {
     pub user_input: &'a str,
 }
 
+// ARCHITECTURE-ANCHOR (层化迁移 INV-2): 此 `TurnOrchestrator` **不是** 设计4 §4 控制平面。
+// 同名异职——它干 gate / lifecycle（reduce_turn 做回合准入与生命周期裁决）。事实上的
+// 控制平面（Turn Orchestrator）是 trpg-gm `execute.rs` 的 `run_pipeline`。控制平面相关
+// 迁移落到那里，勿投射到本同名类型。详见 docs/architecture/layered-runtime-invariants.md INV-2。
 #[derive(Clone)]
 pub struct TurnOrchestrator {
     pub db: Db,

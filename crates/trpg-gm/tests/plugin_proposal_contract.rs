@@ -42,6 +42,7 @@ impl RuntimePlugin for FakeMemoryExtractor {
             confidence: Some(0.9),
             source_event_ids: vec!["evt-1".to_string()],
             turn_id: Some(ctx.turn_id.clone()),
+            truth_status: None, // 设计3 §4 加性可空字段缺省（基线编译修复，测试专用，零运行时行为变更）
         });
         vec![PluginContribution {
             meta: ContributionMeta {

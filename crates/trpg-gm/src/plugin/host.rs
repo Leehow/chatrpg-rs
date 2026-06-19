@@ -96,6 +96,7 @@ mod tests {
             confidence: Some(0.9),
             source_event_ids: vec!["evt-1".to_string()],
             turn_id: Some("t-1".to_string()),
+            truth_status: None, // 设计3 §4 加性可空字段缺省（基线编译修复，测试专用，零运行时行为变更）
         })
     }
 

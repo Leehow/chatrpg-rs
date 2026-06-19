@@ -124,6 +124,7 @@ cargo test -p trpg-model
 cargo test -p trpg-db
 cargo test -p trpg-runtime --lib
 cargo test -p trpg-gm
+bash scripts/arch_gates.sh  # 层化迁移护栏：每次改动必跑（P0 立；后续阶段往里加门）
 ```
 
 Use focused tests when a full workspace run is too broad. Live tests that need

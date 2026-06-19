@@ -104,6 +104,10 @@ pub fn execute_turn(
 /// await；发 TurnComplete 后把 owned gm/ctx/req move 进**另起**的 `tokio::spawn` 跑
 /// heavy（memory/audit + 到场深抽/frontier + carryover），后台、失败隔离（D2）。
 /// 任何尾部 phase 失败由 gm.phase_* 内部 warn 吞错（D2 错误后置勘误不中断）。
+// ARCHITECTURE-ANCHOR (层化迁移 INV-2): 这是**事实上的 Turn Orchestrator / 控制平面**
+// （设计4 §4），串起 15-phase CANONICAL_TURN_PLAN。目标态控制平面概念落于此——勿投到
+// trpg-orchestrator 的同名类型 `TurnOrchestrator`（后者干 gate/lifecycle）。
+// 详见 docs/architecture/layered-runtime-invariants.md INV-2。
 async fn run_pipeline(
     mut gm: GmLoop,
     req: OwnedTurnRequest,

@@ -4549,6 +4549,10 @@ pub struct DiceRoll {
 /// small interface and preserving the returned `DiceRoll` contract.
 pub trait DiceRollerPlugin: Send + Sync {
     fn plugin_id(&self) -> &'static str;
+    // ARCHITECTURE-ANCHOR (层化迁移 §19-#9 同种子确定性目标): `roll` 当前**无 seed 入参**、
+    // 默认实现用 thread_rng（见下方 PseudoRandomDiceRoller::roll），故同 (state, action) 两次
+    // 调用不可复现。P6 将加 seed 通道实现同种子确定性——改本签名前先看
+    // crates/trpg-gm/src/arch_gates_tests.rs 的 #[ignore] seedable 测试（去 ignore 即绿门）。
     fn roll(&self, expression: &str) -> Result<DiceRoll>;
 }
 

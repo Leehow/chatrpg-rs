@@ -22,6 +22,11 @@ pub(crate) mod turn_trace;
 #[path = "plugin_mechanism_tests.rs"]
 mod plugin_mechanism_tests;
 
+// 层化迁移架构门（P0 护栏，零运行时行为变更）——设计4 §19 Rust 侧基线门 + P6 占位锚。
+#[cfg(test)]
+#[path = "arch_gates_tests.rs"]
+mod arch_gates_tests;
+
 pub use errata::{ErrataEntry, ErrataMemory};
 pub use execute::{execute_turn, OwnedTurnRequest};
 pub use gate::GateResolverFn;
