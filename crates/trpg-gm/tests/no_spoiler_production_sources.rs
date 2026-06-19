@@ -209,3 +209,118 @@ async fn no_spoiler_finding_does_not_echo_secret_term() {
         }
     }
 }
+
+// ===================== R3：GmAdjudication 隐藏真相喂 GM 内部勘误（设计3 §11/§13，契约 C3）=====================
+//
+// 这些测试走真实生产投影链 `Db::gm_truth_view` + `Db::player_knowledge_view`
+// → `project_for_gm_adjudication` → `hidden_truth_fact_ids()` →
+// `annotate_findings_with_hidden_truth`（生产消费者），证明运行时 GM 真相账本确认的隐藏真相
+// 确实抵达 GM 内部消费者并标注泄漏 finding（仅 GM-only），且绝不进玩家可见集。
+// DB 缺失（DATABASE_URL 未设）时跳过——与既有 DB-backed 集成测试同惯例。
+#[cfg(test)]
+mod gm_adjudication_hidden_truth_db {
+    use trpg_agent::{VerifierFinding, VerifierFindingKind, VerifierSeverity};
+    use trpg_gm::turn_loop::{annotate_findings_with_hidden_truth, GM_HIDDEN_TRUTH_MARK};
+
+    async fn connect_or_skip() -> Option<trpg_db::Db> {
+        let url = match std::env::var("DATABASE_URL") {
+            Ok(u) => u,
+            Err(_) => {
+                eprintln!("SKIP: DATABASE_URL unset");
+                return None;
+            }
+        };
+        let db = match trpg_db::Db::connect(&url).await {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("SKIP: connect failed: {e}");
+                return None;
+            }
+        };
+        if let Err(e) = db.migrate().await {
+            eprintln!("SKIP: migrate failed: {e}");
+            return None;
+        }
+        Some(db)
+    }
+
+    async fn purge(db: &trpg_db::Db, session: &str) {
+        let _ = sqlx::query("delete from knowledge_edges where session_id=$1")
+            .bind(session)
+            .execute(&db.pool)
+            .await;
+    }
+
+    async fn edge(db: &trpg_db::Db, session: &str, holder_kind: &str, fact: &str) {
+        db.upsert_knowledge_edge(trpg_db::KnowledgeEdgeInput {
+            session_id: session,
+            holder_kind,
+            holder_id: "",
+            fact_id: fact,
+            knowledge_state: "knows_true",
+            confidence: None,
+            learned_at_turn_id: None,
+            disclosure_policy: None,
+            source_event_id: None,
+            reason: None,
+        })
+        .await
+        .unwrap();
+    }
+
+    fn leak_finding(fact_id: &str) -> VerifierFinding {
+        VerifierFinding {
+            kind: VerifierFindingKind::SecretLeak,
+            severity: VerifierSeverity::Blocker,
+            detail: format!("player-visible narration exposes player-unknown fact '{fact_id}'"),
+        }
+    }
+
+    /// 生产投影链：运行时 GM 真相账本确认的隐藏真相（gm_truth − player_known）抵达 GM 内部
+    /// 消费者，给账本确认的泄漏 finding 追加 GM-internal 标记；玩家已知 fact 的泄漏不带标记，
+    /// 且隐藏真相绝不进玩家可见集（player_narration_view 不含它）。
+    #[tokio::test]
+    async fn hidden_truth_from_ledger_reaches_gm_internal_consumer() {
+        let Some(db) = connect_or_skip().await else {
+            return;
+        };
+        let session = "sess_r3_gm_adjudication";
+        purge(&db, session).await;
+        // GM 账本：fact_confirmed 与 fact_shared 为真；玩家只知道 fact_shared。
+        edge(&db, session, "gm", "fact_confirmed").await;
+        edge(&db, session, "gm", "fact_shared").await;
+        edge(&db, session, "player_party", "fact_shared").await;
+
+        let proj = trpg_runtime::project_for_gm_adjudication(&db, session)
+            .await
+            .expect("生产 GM 裁决投影链应成功");
+        // 隐藏真相 = gm_truth − player_known = {fact_confirmed}。
+        let hidden = proj.hidden_truth_fact_ids();
+        assert!(hidden.contains("fact_confirmed"));
+        assert!(
+            !hidden.contains("fact_shared"),
+            "玩家已知 fact 不属隐藏真相"
+        );
+        // 玩家可见集绝不含隐藏真相（契约 C3 隔离）。
+        let player_view = proj.player_narration_view();
+        assert!(player_view.allows("fact_shared"));
+        assert!(
+            !player_view.allows("fact_confirmed"),
+            "隐藏真相绝不进玩家可见集"
+        );
+
+        // GM 内部消费者：账本确认的泄漏带标记，玩家已知 fact 的泄漏不带标记。
+        let findings = vec![leak_finding("fact_confirmed"), leak_finding("fact_shared")];
+        let annotated = annotate_findings_with_hidden_truth(&findings, &hidden);
+        assert!(
+            annotated[0].detail.contains(GM_HIDDEN_TRUTH_MARK),
+            "账本确认隐藏真相的泄漏应带 GM-internal 标记：{}",
+            annotated[0].detail
+        );
+        assert!(
+            !annotated[1].detail.contains(GM_HIDDEN_TRUTH_MARK),
+            "玩家已知 fact 的泄漏不带 GM-internal 隐藏真相标记"
+        );
+        purge(&db, session).await;
+    }
+}

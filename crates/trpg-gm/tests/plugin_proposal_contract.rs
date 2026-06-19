@@ -42,6 +42,7 @@ impl RuntimePlugin for FakeMemoryExtractor {
             confidence: Some(0.9),
             source_event_ids: vec!["evt-1".to_string()],
             turn_id: Some(ctx.turn_id.clone()),
+            truth_status: None,
         });
         vec![PluginContribution {
             meta: ContributionMeta {

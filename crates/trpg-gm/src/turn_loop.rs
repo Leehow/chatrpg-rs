@@ -1572,6 +1572,14 @@ impl GmLoop {
             &plugin_ctx.player_known_fact_ids,
             &plugin_findings,
         );
+        // R3（设计3 §11/§13，契约 C3）：GM 裁决投影的**隐藏真相集**喂 GM 内部勘误推理。
+        // 载 project_for_gm_adjudication（fail-soft，与 npc_consistency_after_stream 同形：
+        // DB 抖动 → 跳过、不改 finding），取 hidden_truth_fact_ids()（gm_truth − player_known，
+        // 运行时账本权威），给账本确认的泄漏 finding 追加 GM-internal 标记。隐藏真相**只**进
+        // GM-only 勘误 detail（下游 errata 块 Visibility::GmOnly），绝不进玩家叙事/NPC-safe 集。
+        let projection_new = self
+            .annotate_player_leaks_with_hidden_truth(request, projection_new)
+            .await;
         // TC-D3-06：活动 NPC 一致性校验（确定性、fail-soft）。复用本回合已采集的同一私有
         // secret_terms + 玩家已知集——对每个活动 NPC 载其自身 durable profile → NPC 言谈投影
         // （project_for_npc_speech，只读该 NPC 自有 mind/plan，绝不读 GM 世界真相进 NPC 投影），
@@ -1667,6 +1675,40 @@ impl GmLoop {
         let mut findings = npc_consistency_findings(visible_text, &npcs, secret_terms, existing);
         findings.extend(npc_behavior_consistency_findings(visible_text, &npcs, existing));
         findings
+    }
+
+    /// R3（设计3 §11/§13，契约 C3）：用 GM 裁决投影的隐藏真相集给玩家泄漏 findings 做 GM 内部
+    /// 标注的生产装载半边（async、fail-soft）。经 [`trpg_runtime::project_for_gm_adjudication`]
+    /// 投出本会话 GM 真相 + 玩家已知集（结构分离），取 `hidden_truth_fact_ids()`（gm_truth −
+    /// player_known），交纯函数 [`annotate_findings_with_hidden_truth`] 给账本确认的泄漏追加
+    /// GM-internal 标记。空 findings → 直接返回（不读 DB）；投影载入失败 → trace why 并原样返回
+    /// （fail-soft，旧行为零变更）。隐藏真相**只**流入 GM-only 勘误 detail，绝不进 player-safe 集。
+    async fn annotate_player_leaks_with_hidden_truth(
+        &self,
+        request: &ContextRequest,
+        findings: Vec<trpg_agent::VerifierFinding>,
+    ) -> Vec<trpg_agent::VerifierFinding> {
+        if findings.is_empty() {
+            return findings;
+        }
+        let proj = match trpg_runtime::project_for_gm_adjudication(
+            &self.engine.db,
+            &request.session_id,
+        )
+        .await
+        {
+            Ok(p) => p,
+            Err(err) => {
+                tracing::warn!(error = %err, "gm_adjudication: projection load failed, leaving leak findings unannotated");
+                return findings;
+            }
+        };
+        let hidden = proj.hidden_truth_fact_ids();
+        if hidden.is_empty() {
+            tracing::debug!("gm_adjudication: no hidden truth on ledger, leak findings unchanged");
+            return findings;
+        }
+        annotate_findings_with_hidden_truth(&findings, &hidden)
     }
 
     /// 采集本会话模组的私有泄漏术语表（生产源，TC-D3-00）。无 module_id（自由场景）或图谱
@@ -2095,6 +2137,39 @@ pub(crate) fn projection_after_stream_findings(
         .collect()
 }
 
+/// GM 内部隐藏真相确认标记（**仅** GM-only 勘误推理可见；契约 C3）。追加到泄漏 finding 的
+/// detail 末尾，标明该泄漏的 fact 已被运行时 GM 真相账本确认为已确立的隐藏真相（gm_truth −
+/// player_known）——区别于未声明/红鲱鱼术语。绝不进玩家叙事/NPC 言谈/任何 player-safe 集。
+pub const GM_HIDDEN_TRUTH_MARK: &str = " [gm-internal: ledger-confirmed hidden truth]";
+
+/// R3（设计3 §11/§13，契约 C3）：用 GM 裁决投影的**隐藏真相集**给玩家泄漏 finding 做 GM 内部
+/// 标注。`hidden_truth_fact_ids` = `GmAdjudicationProjection::hidden_truth_fact_ids()`
+/// （gm_truth − player_known）：某泄漏 finding 的 fact_id 若被该运行时账本确认为已确立隐藏真相，
+/// 则在其 detail 追加 [`GM_HIDDEN_TRUTH_MARK`]，强化 GM 自洽推理（账本确认 ≠ 未声明红鲱鱼）。
+///
+/// 隔离不变量（C3）：隐藏真相**只**进 GM 内部 finding detail（流向 GM-only 勘误块），**绝不**
+/// 改泄漏判定（kind/severity/数量不动）、绝不进玩家叙事/NPC-safe 集。纯函数、确定性、无 IO。
+pub fn annotate_findings_with_hidden_truth(
+    findings: &[trpg_agent::VerifierFinding],
+    hidden_truth_fact_ids: &std::collections::HashSet<String>,
+) -> Vec<trpg_agent::VerifierFinding> {
+    findings
+        .iter()
+        .map(|f| {
+            let confirmed = secret_leak_fact_key(&f.detail)
+                .map(|fid| hidden_truth_fact_ids.contains(fid))
+                .unwrap_or(false);
+            if confirmed && !f.detail.ends_with(GM_HIDDEN_TRUTH_MARK) {
+                let mut annotated = f.clone();
+                annotated.detail.push_str(GM_HIDDEN_TRUTH_MARK);
+                annotated
+            } else {
+                f.clone()
+            }
+        })
+        .collect()
+}
+
 /// 从 SecretLeak finding 的 detail 抽稳定 fact-key（首对单引号内 token）。NoSpoiler 插件与
 /// projection verifier 的 detail 都把 fact_id 包在单引号里，故可据此跨来源去重同一 fact 的泄漏。
 fn secret_leak_fact_key(detail: &str) -> Option<&str> {
@@ -2368,6 +2443,82 @@ mod projection_verifier_tests {
             Some("fact_x")
         );
         assert_eq!(secret_leak_fact_key("no quotes here"), None);
+    }
+
+    /// R3（设计3 §11/§13，契约 C3）：GM 裁决投影的**隐藏真相集**（gm_truth − player_known）
+    /// 喂 GM 内部勘误推理——某玩家泄漏 finding 的 fact_id 若被运行时 GM 真相账本确认为
+    /// 已确立的隐藏真相，则在 finding detail 追加 **GM-internal** 确认标记（强化 GM 自洽推理：
+    /// 这是账本确认的真·剧透，而非未声明/红鲱鱼术语）。隐藏真相**只**进 GM 内部 detail，
+    /// 绝不改泄漏判定本身、绝不进玩家叙事/NPC-safe 集。
+    #[test]
+    fn hidden_truth_annotation_marks_ledger_confirmed_leak_for_gm_only() {
+        let findings = vec![
+            VerifierFinding {
+                kind: VerifierFindingKind::SecretLeak,
+                severity: VerifierSeverity::Blocker,
+                detail: "player-visible narration exposes player-unknown fact 'fact_confirmed'"
+                    .into(),
+            },
+            VerifierFinding {
+                kind: VerifierFindingKind::SecretLeak,
+                severity: VerifierSeverity::Blocker,
+                detail: "player-visible narration exposes player-unknown fact 'fact_redherring'"
+                    .into(),
+            },
+        ];
+        // 运行时 GM 真相账本：fact_confirmed 是已确立隐藏真相，fact_redherring 不在账本里。
+        let proj = trpg_runtime::GmAdjudicationProjection::from_views(
+            ["fact_confirmed", "fact_shared"],
+            ["fact_shared"],
+        );
+        let hidden = proj.hidden_truth_fact_ids();
+        let annotated = annotate_findings_with_hidden_truth(&findings, &hidden);
+
+        // 账本确认的隐藏真相泄漏 → detail 追加 GM-internal 确认标记。
+        assert!(
+            annotated[0].detail.contains(GM_HIDDEN_TRUTH_MARK),
+            "账本确认的隐藏真相泄漏应带 GM-internal 标记"
+        );
+        assert!(annotated[0].detail.contains("fact_confirmed"));
+        // 非账本确认（红鲱鱼/未声明）→ detail 不变。
+        assert_eq!(
+            annotated[1].detail, findings[1].detail,
+            "未被账本确认的 fact 不追加标记"
+        );
+        // 泄漏判定本身不变（kind/severity/数量不动）。
+        assert_eq!(annotated.len(), findings.len());
+        assert_eq!(annotated[0].kind, VerifierFindingKind::SecretLeak);
+        assert_eq!(annotated[0].severity, VerifierSeverity::Blocker);
+    }
+
+    /// 隔离不变量（契约 C3）：隐藏真相注解**绝不**把隐藏真相 fact_id 注入玩家叙事放行集，
+    /// 也绝不改玩家可见集——它只在 GM 内部 finding detail 起作用。
+    #[test]
+    fn hidden_truth_annotation_never_touches_player_safe_set() {
+        // 玩家叙事投影只含玩家已知集；隐藏真相绝不在内。
+        let proj = trpg_runtime::GmAdjudicationProjection::from_views(
+            ["fact_hidden", "fact_shared"],
+            ["fact_shared"],
+        );
+        let player_view = proj.player_narration_view();
+        assert!(player_view.allows("fact_shared"));
+        assert!(
+            !player_view.allows("fact_hidden"),
+            "隐藏真相绝不进玩家叙事放行集"
+        );
+        // 注解函数不产生任何含隐藏真相 fact_id 的「放行」语义——它只追加 GM-internal 标记，
+        // 且对玩家已知 fact 的泄漏（不在隐藏真相集）不追加。
+        let findings = vec![VerifierFinding {
+            kind: VerifierFindingKind::SecretLeak,
+            severity: VerifierSeverity::Blocker,
+            detail: "player-visible narration exposes player-unknown fact 'fact_shared'".into(),
+        }];
+        let annotated =
+            annotate_findings_with_hidden_truth(&findings, &proj.hidden_truth_fact_ids());
+        assert!(
+            !annotated[0].detail.contains(GM_HIDDEN_TRUTH_MARK),
+            "玩家已知 fact（非隐藏真相）的泄漏不带 GM-internal 隐藏真相标记"
+        );
     }
 }
 
