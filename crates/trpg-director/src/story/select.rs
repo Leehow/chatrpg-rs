@@ -129,7 +129,7 @@ pub fn build_director_brief_packet(
     }
 
     // §二十四-#2 graceful empty-story playability: a non-empty pool but NO selectable
-    // primary thread (empty `active_threads`, or every thread rejected/terminal) means
+    // primary thread (empty `active_threads`, or every candidate thread rejected) means
     // normal thread-driven selection produced nothing to spotlight. Rather than emit a
     // bare Respond with zero affordances, fold in the pure `fallback_beat_plan` — its
     // allowed beat_kind (Respond/Consequence/Choice) + ≥2 open_player_affordances + zero

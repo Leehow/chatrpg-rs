@@ -127,11 +127,11 @@ pub fn rejected_thread_ids(story: &StoryState) -> Vec<String> {
 /// idempotent upsert (same packet replay ⇒ same single row). Returns the DB error untouched
 /// so the caller's turn-commit path decides fatality (story persistence is non-blocking).
 ///
-/// P6: production writer (thread extraction) will call `apply_story_proposals`; P5 wires the
-/// READ side only (`load_story_state` in `prepare_director_brief` is load-bearing). This write
-/// loop has no P5 production caller by the honest narrowing — it is NOT dead code: the
-/// round-trip tests prove it works and P6's thread-extraction step is its caller. Do not
-/// remove it.
+/// TODO(P6): wire the production thread-extraction caller for `apply_story_proposals`.
+/// P5 wires the READ side only (`load_story_state` in `prepare_director_brief` is the
+/// load-bearing path). This write loop has NO P5 production caller by the honest narrowing;
+/// it is exercised only by round-trip tests today. Keep it (do not remove) — P6's thread
+/// extraction will be its first real caller — but it is not yet load-bearing in production.
 pub async fn apply_story_proposals(
     db: &Db,
     session_id: &str,
