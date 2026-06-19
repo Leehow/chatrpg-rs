@@ -39,7 +39,7 @@ fn getter_direct_calls_removed_from_kernel() {
 fn projection_calls_and_memory_preserved_in_kernel() {
     let body = prepare_turn_context_body();
     for required in [
-        "self.memory_blocks_for_turn(", // 本期非目标，必须保留
+        ".memory_blocks_for_turn(", // 本期非目标，必须保留（容忍 match self\n .method( 链式换行）
         "self.state_frame_blocks_for_turn(",
         "self.world_time_blocks_for_turn(",
         "self.object_blocks_for_turn(",
