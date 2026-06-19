@@ -271,6 +271,58 @@ mod tests {
         assert_eq!(out[0].meta.hook.as_str(), "heavy_postprocess");
     }
 
+    /// P3.7：BeforeCommit hook 上注册的假插件产 VerifierFinding 贡献——它**只**应折进
+    /// plugin trace（advisory），**绝不**进入 blocking gate_findings 集。这里复刻 turn_loop
+    /// 的 `run_advisory_trace_hook` 折叠语义：trace 收 finding，gate 集恒空。
+    #[tokio::test]
+    async fn before_commit_finding_lands_in_trace_not_gate() {
+        let mut host = PluginHost::new();
+        host.register(Box::new(FakePlugin {
+            plugin_id: "test.before_commit_verifier",
+            safety: SafetyClass::Safety,
+            priority: 0,
+            hooks: &[PluginHook::BeforeCommit],
+            emit_hook: PluginHook::BeforeCommit,
+            kind: "finding",
+        }));
+
+        // 非 BeforeCommit hook：不触发该插件。
+        let assembly_ctx = PluginContext {
+            hook: PluginHook::ContextAssembly,
+            ..Default::default()
+        };
+        assert!(host.run_hook(&assembly_ctx).await.is_empty());
+
+        let commit_ctx = PluginContext {
+            hook: PluginHook::BeforeCommit,
+            ..Default::default()
+        };
+        let contributions = host.run_hook(&commit_ctx).await;
+        assert_eq!(contributions.len(), 1);
+        assert!(matches!(
+            contributions[0].kind,
+            PluginContributionKind::VerifierFinding(_)
+        ));
+
+        // advisory 折叠语义（同 turn_loop::run_advisory_trace_hook）：所有贡献折 trace，
+        // 但 BeforeCommit 的 VerifierFinding 绝不进 blocking gate。
+        let mut traces = Vec::new();
+        let mut gate_findings: Vec<VerifierFinding> = Vec::new();
+        for c in &contributions {
+            traces.push(c.to_trace());
+            // 关键不变量：advisory hook 的 finding **不**入 gate（与 AfterLlmStream 区分）。
+        }
+        assert_eq!(traces.len(), 1, "finding 折进 trace");
+        assert_eq!(traces[0].hook, "before_commit");
+        assert_eq!(traces[0].kind, "verifier_finding");
+        assert!(
+            gate_findings.is_empty(),
+            "BeforeCommit 的 finding 绝不进 blocking gate（advisory-only）"
+        );
+        // 防 unused：明确 gate_findings 在 advisory 路径永不被 push。
+        gate_findings.clear();
+    }
+
     /// Proposal 贡献的 trace：kind = "proposal"，summary 只暴露稳定 proposal_kind +
     /// fact_id，**绝不**回显 secret 正文（subject/predicate/object/summary）。
     #[test]

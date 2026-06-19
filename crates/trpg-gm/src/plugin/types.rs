@@ -25,6 +25,13 @@ pub enum PluginHook {
     /// 此 hook 的插件**只提案**（`Proposal` 贡献），由 runtime 验证后落事件/投影；
     /// 插件自身绝不落库（propose-not-commit）。
     HeavyPostprocess,
+    /// 机械状态落账前（P3.7，**advisory/trace-only**）：在 `save_turn` 之前的检查点。
+    /// v1 仅 trace（插件可挂 VerifierFinding，但只折进 plugin trace、**绝不**进 blocking
+    /// gate_findings）。真正的 mechanics-commit 阻断门控推迟到 P6。
+    BeforeCommit,
+    /// 玩家可见叙事产出前（P3.7，**advisory/trace-only**）：仅 Narrator-split 路径有干净
+    /// 切点。v1 仅 trace，不阻断任何行为。
+    BeforeNarration,
 }
 
 impl PluginHook {
@@ -34,6 +41,8 @@ impl PluginHook {
             PluginHook::ContextAssembly => "context_assembly",
             PluginHook::AfterLlmStream => "after_llm_stream",
             PluginHook::HeavyPostprocess => "heavy_postprocess",
+            PluginHook::BeforeCommit => "before_commit",
+            PluginHook::BeforeNarration => "before_narration",
         }
     }
 }
@@ -244,5 +253,32 @@ pub struct PluginContext {
 impl Default for PluginHook {
     fn default() -> Self {
         PluginHook::ContextAssembly
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// P3.7：全部 5 个 PluginHook 变体的 serde round-trip + as_str 锚定。**锁住**老 3 个
+    /// token（`context_assembly` / `after_llm_stream` / `heavy_postprocess`）逐字不变，
+    /// 新增 2 个 token（`before_commit` / `before_narration`）确定性。
+    #[test]
+    fn plugin_hook_serde_roundtrip_all_five_variants_tokens_locked() {
+        let cases = [
+            (PluginHook::ContextAssembly, "context_assembly"),
+            (PluginHook::AfterLlmStream, "after_llm_stream"),
+            (PluginHook::HeavyPostprocess, "heavy_postprocess"),
+            (PluginHook::BeforeCommit, "before_commit"),
+            (PluginHook::BeforeNarration, "before_narration"),
+        ];
+        for (hook, token) in cases {
+            // as_str 与 serde 同 token（snake_case），二者一致。
+            assert_eq!(hook.as_str(), token, "as_str token 锚定");
+            let json = serde_json::to_string(&hook).unwrap();
+            assert_eq!(json, format!("\"{token}\""), "serde token 锚定");
+            let back: PluginHook = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, hook, "round-trip 还原同变体");
+        }
     }
 }

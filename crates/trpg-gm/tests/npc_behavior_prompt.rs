@@ -236,8 +236,9 @@ mod npc_behavior {
         const TERM: &str = "the portal in the cellar";
         let terms = vec![secret_term(TERM, "hidden_fact")];
         // Lars knows `hidden_fact`; the party knows nothing → it is a withheld secret.
+        // Display name ("Lars") rides on the projection's persona safe-view, so no tuple.
         let proj = speech_proj(&[entry("hidden_fact")], &[]);
-        let npcs = vec![("Lars".to_string(), proj)];
+        let npcs = vec![proj];
         // Narration plausibly involves Lars (name) and surfaces the secret term.
         let narration = format!("Lars leans in: {TERM} hums faintly.");
 
@@ -319,7 +320,7 @@ mod npc_behavior {
                 .any(|a| a == &format!("raise taboo topic: {TABOO}")),
             "precondition: plan forbids the taboo topic"
         );
-        let npcs = vec![("Lars".to_string(), proj)];
+        let npcs = vec![proj];
         let narration = format!("Lars loudly brings up {TABOO} in front of everyone.");
         let out = npc_behavior_consistency_findings(&narration, &npcs, &[]);
         assert_eq!(
@@ -346,7 +347,7 @@ mod npc_behavior {
     fn active_npc_consistent_behavior_and_visibility_gate_pass() {
         const TABOO: &str = "the duke's downfall";
         let proj = taboo_speech_proj(TABOO);
-        let npcs = vec![("Lars".to_string(), proj)];
+        let npcs = vec![proj];
         // Names Lars but never raises the taboo topic → no contradiction.
         let ok = npc_behavior_consistency_findings(
             "Lars greets the party and offers them tea.",
@@ -372,7 +373,7 @@ mod npc_behavior {
         let player_known = vec!["shared_fact".to_string()];
         // Lars knows only `own_fact`; he does NOT hold `shared_fact` at all.
         let proj = speech_proj(&[entry("own_fact")], &player_known);
-        let npcs = vec![("Lars".to_string(), proj)];
+        let npcs = vec![proj];
         let narration = format!("Lars confides: {TERM} walks among us.");
 
         // No existing SecretLeak (the player projection allows a player-known fact), yet the

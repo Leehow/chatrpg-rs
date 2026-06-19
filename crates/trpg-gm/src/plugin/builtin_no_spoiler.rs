@@ -248,6 +248,9 @@ impl RuntimePlugin for NoSpoilerGuard {
             // 本守卫不挂 HeavyPostprocess（不在 hooks()），host 不会以此 hook 调用它；
             // 防御性返回空贡献。
             PluginHook::HeavyPostprocess => vec![],
+            // P3.7：BeforeCommit / BeforeNarration 是 advisory/trace-only 检查点，本守卫不挂
+            // （不在 hooks()）；防御性返回空贡献（NoSpoilerGuard 在这两个 hook 不贡献任何东西）。
+            PluginHook::BeforeCommit | PluginHook::BeforeNarration => vec![],
         }
     }
 }

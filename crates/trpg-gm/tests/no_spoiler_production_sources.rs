@@ -12,8 +12,9 @@
 
 use serde_json::json;
 use trpg_gm::plugin::{
-    builtin_no_spoiler::NO_SPOILER_GUARD_ID, derive_scene_block_view, harvest_module_secret_terms,
-    PluginContext, PluginContributionKind, PluginHook, RuntimePlugin,
+    builtin_no_spoiler::{private_block_view, NO_SPOILER_GUARD_ID, TAG_FUTURE_SCENE, TAG_SECRET},
+    derive_scene_block_view, harvest_module_secret_terms, PluginContext, PluginContributionKind,
+    PluginHook, RuntimePlugin,
 };
 use trpg_gm::NoSpoilerGuard;
 use trpg_model::{
@@ -208,4 +209,111 @@ async fn no_spoiler_finding_does_not_echo_secret_term() {
             );
         }
     }
+}
+
+/// 显式 tag 标注的生产形态块（走 production `private_block_view`，§24-#8 块级 fail-closed）。
+fn tagged_block(block_id: &str, visibility: Visibility, tags: &[&str]) -> ContextBlock {
+    let mut b = ContextBlock::new(
+        block_id,
+        BlockKind::SceneStatic,
+        block_id,
+        BlockContent::Text("块正文".into()),
+        visibility,
+        Stability::SceneStable,
+        CacheZone::DynamicTail,
+        Scope::global(),
+        60,
+    );
+    b.tags = tags.iter().map(|s| s.to_string()).collect();
+    b
+}
+
+/// P3.8 边界 (c)：`future_scene ∧ GmOnly` 且 fact 未 player-known 的块 → 装配前被删。
+/// 走 production `private_block_view`（显式 tag 派生）+ 真实 `NoSpoilerGuard.on_hook`。
+#[tokio::test]
+async fn no_spoiler_drops_future_scene_gm_only_block() {
+    // future_scene + GmOnly，无 fact 绑定（或未 known）→ should_drop 命中 future-scene 分支。
+    let block = tagged_block(
+        "module.mod_manor.scene.sc_future",
+        Visibility::GmOnly,
+        &[TAG_FUTURE_SCENE],
+    );
+    let view = private_block_view(&block);
+    assert!(view.future_scene, "tag 派生：future_scene 应为真");
+    assert_eq!(view.visibility, Visibility::GmOnly);
+
+    let mut ctx = PluginContext {
+        module_id: Some("mod_manor".into()),
+        hook: PluginHook::ContextAssembly,
+        ..Default::default()
+    };
+    ctx.private_blocks = vec![view];
+    ctx.player_known_fact_ids = vec![];
+
+    let out = NoSpoilerGuard.on_hook(&ctx).await;
+    assert_eq!(
+        drop_ids(&out),
+        vec!["module.mod_manor.scene.sc_future".to_string()],
+        "future_scene ∧ GmOnly 未揭示块必须被删"
+    );
+
+    // 对照：同为 future_scene 但玩家可见（PlayerVisible）→ 不删（未来场景非 GM-only 不剧透）。
+    let mut pub_block = tagged_block(
+        "module.mod_manor.scene.sc_future_pub",
+        Visibility::PlayerVisible,
+        &[TAG_FUTURE_SCENE],
+    );
+    pub_block.visibility = Visibility::PlayerVisible;
+    let pub_view = private_block_view(&pub_block);
+    ctx.private_blocks = vec![pub_view];
+    assert!(
+        drop_ids(&NoSpoilerGuard.on_hook(&ctx).await).is_empty(),
+        "future_scene 但玩家可见 → 不属 GM-only 剧透，放行"
+    );
+}
+
+/// P3.8 边界 (d)：无剧透标注的普通玩家可见块（非 secret、非 future_scene）→ 经 ContextFilter
+/// 放行。`NoSpoilerGuard::should_drop` 只看 `fact_id` / `secret` / `future_scene` / `visibility`
+/// 与 `player_known`——**绝不**读 `surfaced_entities`，故此测试验证的是「无剧透标注的可见块不被
+/// fail-closed 误删」这一块级 passthrough，而非任何 surfaced-entity 驱动的放行路径
+/// （production 过滤路径里并不存在后者）。
+#[tokio::test]
+async fn no_spoiler_passes_plain_player_visible_block_without_secret_or_future_tag() {
+    // 普通玩家可见块：无 secret / future_scene tag → should_drop 恒 false。
+    let visible = tagged_block(
+        "module.mod_manor.entity.npc_innkeeper",
+        Visibility::PlayerVisible,
+        &[],
+    );
+    let view = private_block_view(&visible);
+    assert!(!view.secret && !view.future_scene, "普通可见块无剧透标注");
+
+    let mut ctx = PluginContext {
+        module_id: Some("mod_manor".into()),
+        hook: PluginHook::ContextAssembly,
+        ..Default::default()
+    };
+    ctx.private_blocks = vec![view];
+    ctx.player_known_fact_ids = vec![];
+
+    assert!(
+        drop_ids(&NoSpoilerGuard.on_hook(&ctx).await).is_empty(),
+        "无剧透标注的玩家可见块必放行（should_drop 恒 false）"
+    );
+
+    // 进一步：同一实体块即便标了 secret，但其 fact 已 player-known（已揭示）→ 仍放行。
+    let mut known_secret = tagged_block(
+        "module.mod_manor.entity.npc_butler",
+        Visibility::GmOnly,
+        &[TAG_SECRET, "fact:npc_butler"],
+    );
+    known_secret.tags = vec![TAG_SECRET.into(), "fact:npc_butler".into()];
+    let ks_view = private_block_view(&known_secret);
+    assert_eq!(ks_view.fact_id.as_deref(), Some("npc_butler"));
+    ctx.private_blocks = vec![ks_view];
+    ctx.player_known_fact_ids = vec!["npc_butler".into()]; // 已揭示。
+    assert!(
+        drop_ids(&NoSpoilerGuard.on_hook(&ctx).await).is_empty(),
+        "已 player-known 的 fact 块放行优先于 secret 标注（揭示后允许）"
+    );
 }

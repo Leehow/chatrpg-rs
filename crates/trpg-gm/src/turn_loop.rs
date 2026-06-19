@@ -981,6 +981,15 @@ impl GmLoop {
     ) {
         // buffer 模式下，adjudicator 自由文本已（私骰已 redact）累积在 ctx.visible_text。
         let adjudicator_prose = ctx.visible_text.clone();
+        // P3.7 BeforeNarration（advisory/trace-only）：Narrator-split 路径的干净切点——玩家
+        // 散文产出前。仅 trace，不阻断任何行为。非 split 路径无干净切点 → 不接（见 §P3.7）。
+        self.run_advisory_trace_hook(
+            ctx,
+            input.request,
+            crate::plugin::PluginHook::BeforeNarration,
+            Some(&adjudicator_prose),
+        )
+        .await;
         let adj = crate::packet::AdjudicationPacket::project(
             input.user_input,
             ctx.ledger.snapshot(),
@@ -1682,20 +1691,43 @@ impl GmLoop {
             .list_surfaced_entities(&request.session_id)
             .await
             .unwrap_or_default();
-        // 玩家已知 fact 集：放行已揭示术语（已揭示可自由复述，不算泄漏）。DB 抖动 → 空集。
-        let player_known_fact_ids = self
-            .engine
-            .db
-            .list_player_known_fact_ids(&request.session_id)
-            .await
-            .unwrap_or_default();
+        // P3.6 单一来源（behavior-preserving）：流后玩家已知 fact 集经
+        // [`trpg_runtime::build_verifier_private_view`] 的 player_known 投影**单点**取数
+        // （= `project_for_player_narration` = `list_player_known_fact_ids`，字段独立 fail-closed
+        // → DB 抖动空集）。**保留**本回合流后新鲜读取的时机（绝不复用 ContextAssembly ~1423
+        // 的快照）。等价性：投影内部用 HashSet，`known_fact_ids_sorted()` 与旧的未排序
+        // `list_player_known_fact_ids` 喂下游（projection_after_stream_findings 走 HashSet
+        // from_player_known；project_for_npc_speech → viewer_behavior_context 也走 HashSet）
+        // 均 order-independent，故 findings/trace/gate 逐字节等价。
+        // NPC 言谈投影也由本 view 单源装配（npc_speech_views），下游 npc_consistency_after_stream
+        // 直接消费——不再二次载入 NPC profile/投影。展示名取自投影自身的 persona safe-view
+        // （`mind.persona.name` = 旧 `profile.name`），可见性门匹配逐字节等价；且 build 的
+        // NPC 装载与旧 npc_consistency_after_stream 循环同序同跳过语义（同迭代 active_npc_ids、
+        // Ok(None)→skip / Err→skip-with-warn、targets=[PlayerParty]、同 player_known_fact_ids）。
+        // 净效果：每回合 NPC load 循环数从 2 回到 baseline 的 1，npc_speech_views 不再是死字段。
+        //
+        // P3.6 DB-load 等价性（load-equivalence）：旧 `npc_consistency_after_stream` 在
+        // `active_npc_ids.is_empty() || visible_text.is_empty() || secret_terms.is_empty()` 时
+        // **提前返回、绝不载入任何 NPC profile/mind**。故必须先采集 secret_terms，再据**同一条件**
+        // 门控 NPC 装载：满足早返条件 → 传空 npc_ids（零 NPC DB 读，与 baseline 逐次相等），否则
+        // 传完整 active_npc_ids（与旧路径同集合同序）。player_known **每回合照读**（旧 hook 恒读
+        // `list_player_known_fact_ids`），只有 NPC 载入是条件性的。如此 findings/trace **与** DB-load
+        // 计数同时与 baseline 逐字节等价。
+        let secret_terms = self
+            .harvest_session_secret_terms(request.module_id.as_deref())
+            .await;
         // 私有泄漏术语表（生产源，TC-D3-00）：从本会话模组图谱的权威 SpoilerMeta（场景级 +
         // 实体级 secret_terms）采集，每条绑 fact_id（node_id / entity id）。只取显式声明，不做
         // 正文模糊扫描。图谱缺失/DB 抖动 → 空 = 不检测（fail-soft，绝不 panic/拦流）。已揭示的
         // 由 verifier 侧按 fact_id 过滤放行。**绝不**渲染进 prompt（只活在本私有 verifier 输入）。
-        let secret_terms = self
-            .harvest_session_secret_terms(request.module_id.as_deref())
-            .await;
+        let load_npcs = should_load_npc_views(active_npc_ids, visible_text, &secret_terms);
+        let private_view = trpg_runtime::build_verifier_private_view(
+            &self.engine.db,
+            &request.session_id,
+            if load_npcs { active_npc_ids } else { &[] },
+        )
+        .await;
+        let player_known_fact_ids = private_view.player_known.known_fact_ids_sorted();
         let plugin_ctx = crate::plugin::PluginContext {
             session_id: request.session_id.clone(),
             turn_id: request.turn_id.clone(),
@@ -1740,16 +1772,12 @@ impl GmLoop {
         // 一致性校验。与既有 SecretLeak（NoSpoiler + projection）按 fact 去重。绝不回显 secret 正文。
         let mut existing_leaks = plugin_findings.clone();
         existing_leaks.extend(projection_new.iter().cloned());
-        let npc_new = self
-            .npc_consistency_after_stream(
-                request,
-                visible_text,
-                active_npc_ids,
-                &plugin_ctx.secret_terms,
-                &plugin_ctx.player_known_fact_ids,
-                &existing_leaks,
-            )
-            .await;
+        let npc_new = self.npc_consistency_after_stream(
+            visible_text,
+            &private_view.npc_speech_views,
+            &plugin_ctx.secret_terms,
+            &existing_leaks,
+        );
         // errata：插件 findings + projection + NPC 一致性去重后的新 findings（同口径持久化）。
         let mut all_findings = plugin_findings;
         all_findings.extend(projection_new.iter().cloned());
@@ -1776,63 +1804,67 @@ impl GmLoop {
         (traces, all_findings)
     }
 
-    /// TC-D3-06：活动 NPC 知识一致性校验的生产装载半边（async、fail-soft）。为每个 `active_npc_ids`
-    /// 载其自身 durable profile（缺失/读失败 → 跳过该 NPC 并 trace why，绝不臆造），经
-    /// [`trpg_runtime::project_for_npc_speech`] 投出该 NPC 自有言谈投影（只读该 NPC 自己的边——GM
-    /// 世界真相绝不进 NPC-owned 投影），再交纯函数 [`npc_consistency_findings`] 出 findings。
-    /// 无活动 NPC / 无 secret_terms / 空念白 → 空（fail-soft，旧行为零变更）。
-    async fn npc_consistency_after_stream(
+    /// TC-D3-06：活动 NPC 知识/行为一致性校验的生产半边（纯接线、fail-soft）。**不再**自行载入
+    /// NPC profile/投影——调用方已通过 [`trpg_runtime::build_verifier_private_view`] 一次性装配好每个
+    /// 活动 NPC 的自有言谈投影（只读该 NPC 自己的边——GM 世界真相绝不进 NPC-owned 投影），此处直接把
+    /// 这批投影交两个纯函数 [`npc_consistency_findings`] / [`npc_behavior_consistency_findings`] 出
+    /// findings。投影里已携带展示名（`mind.persona.name`），可见性门据此匹配，与旧的 `profile.name`
+    /// 路径逐字节等价。无 NPC 投影 / 无 secret_terms / 空念白 → 空（fail-soft，旧行为零变更）。
+    fn npc_consistency_after_stream(
         &self,
-        request: &ContextRequest,
         visible_text: &str,
-        active_npc_ids: &[String],
+        npc_speech_views: &[trpg_runtime::NpcSpeechProjection],
         secret_terms: &[crate::plugin::SecretTerm],
-        player_known_fact_ids: &[String],
         existing: &[trpg_agent::VerifierFinding],
     ) -> Vec<trpg_agent::VerifierFinding> {
-        if active_npc_ids.is_empty() || visible_text.is_empty() || secret_terms.is_empty() {
+        if npc_speech_views.is_empty() || visible_text.is_empty() || secret_terms.is_empty() {
             return Vec::new();
         }
-        let session_id = &request.session_id;
-        let targets = [trpg_model::NpcRelationshipTarget::PlayerParty];
-        let mut npcs: Vec<(String, trpg_runtime::NpcSpeechProjection)> = Vec::new();
-        for npc_id in active_npc_ids {
-            let profile = match self.engine.db.load_npc_profile(session_id, npc_id).await {
-                Ok(Some(p)) => p,
-                Ok(None) => {
-                    tracing::debug!(npc_id = %npc_id, "npc_consistency: no durable profile, skipping NPC check");
-                    continue;
-                }
-                Err(err) => {
-                    tracing::warn!(error = %err, npc_id = %npc_id, "npc_consistency: profile load failed, skipping NPC check");
-                    continue;
-                }
-            };
-            match trpg_runtime::project_for_npc_speech(
-                &self.engine.db,
-                session_id,
-                npc_id,
-                &profile,
-                &targets,
-                player_known_fact_ids,
-            )
-            .await
-            {
-                Ok(proj) => npcs.push((profile.name.clone(), proj)),
-                Err(err) => {
-                    tracing::warn!(error = %err, npc_id = %npc_id, "npc_consistency: speech projection failed, skipping NPC check");
-                }
-            }
-        }
         // 知识一致性（既有）+ 行为一致性（设计3 §13-P3，新增 advisory）同口径折叠返回。
-        // 行为检查与知识检查共用已载入的 `npcs`（纯加性：不新增 DB 读、不改既有知识 findings）。
-        let mut findings = npc_consistency_findings(visible_text, &npcs, secret_terms, existing);
+        // 两检查共用同一批预装载投影（单源 build_verifier_private_view，无额外 DB 读）。
+        let mut findings =
+            npc_consistency_findings(visible_text, npc_speech_views, secret_terms, existing);
         findings.extend(npc_behavior_consistency_findings(
             visible_text,
-            &npcs,
+            npc_speech_views,
             existing,
         ));
         findings
+    }
+
+    /// P3.7：advisory/trace-only 检查点（BeforeCommit / BeforeNarration）。构造最小只读
+    /// PluginContext（narration 可选），跑内置 policy host，把**每条**贡献折成 plugin trace
+    /// 推进 `ctx.plugin_contributions`。**绝不**把任何 VerifierFinding 折进 blocking gate——
+    /// 这两个 hook 是纯 advisory（真正的 mechanics-commit 阻断门控推迟到 P6）。
+    /// 内置守卫都不挂这两个 hook，故生产路径恒空贡献 → trace 计数零行为变更。fail-soft。
+    async fn run_advisory_trace_hook(
+        &self,
+        ctx: &mut TurnContext,
+        request: &ContextRequest,
+        hook: crate::plugin::PluginHook,
+        narration: Option<&str>,
+    ) {
+        let plugin_ctx = crate::plugin::PluginContext {
+            session_id: request.session_id.clone(),
+            turn_id: request.turn_id.clone(),
+            ruleset_id: request.ruleset_id.clone(),
+            module_id: request.module_id.clone(),
+            hook,
+            surfaced_entities: vec![],
+            narration: narration.map(str::to_string),
+            compiled_block_ids: vec![],
+            player_known_fact_ids: vec![],
+            private_blocks: vec![],
+            secret_terms: vec![],
+            config: json!({}),
+        };
+        let contributions = crate::plugin::builtin_plugin_host()
+            .run_hook(&plugin_ctx)
+            .await;
+        // 只折 trace（含 VerifierFinding 类）——绝不进 gate_findings/errata（advisory-only）。
+        for c in &contributions {
+            ctx.plugin_contributions.push(c.to_trace());
+        }
     }
 
     /// 采集本会话模组的私有泄漏术语表（生产源，TC-D3-00）。无 module_id（自由场景）或图谱
@@ -2077,6 +2109,15 @@ impl GmLoop {
         status: &str,
     ) {
         let assistant_output = ctx.heavy_assistant_output();
+        // P3.7 BeforeCommit（advisory/trace-only）：紧贴 save_turn 前的检查点。仅 trace，
+        // 绝不阻断落账（真正的 mechanics-commit 门控推迟到 P6）。
+        self.run_advisory_trace_hook(
+            ctx,
+            input.request,
+            crate::plugin::PluginHook::BeforeCommit,
+            None,
+        )
+        .await;
         self.finalize_save_turn(
             input.request,
             &ctx.compiled,
@@ -2413,6 +2454,22 @@ pub(crate) fn surface_verifier_finding_trace(
     }
 }
 
+/// P3.6 load-equivalence 门控：流后是否需要载入活动 NPC 言谈投影。
+///
+/// **与旧 [`TurnLoop::npc_consistency_after_stream`] 的提前返回条件互为否定**：旧路径在
+/// `npc_speech_views.is_empty() || visible_text.is_empty() || secret_terms.is_empty()` 时直接
+/// 返回空、绝不载入任何 NPC profile/mind（`npc_speech_views.is_empty()` 当且仅当 baseline 的
+/// `active_npc_ids.is_empty()`——空 npc_ids → 空投影）。故唯有三者**全非空**才值得载入；任何一项
+/// 为空 → 零 NPC DB 读，与 baseline 逐次相等。这一门只省「确定产不出 finding」的 NPC 载入，
+/// findings/trace 不受影响（被门掉的场景旧路径本就返回空）。
+fn should_load_npc_views(
+    active_npc_ids: &[String],
+    visible_text: &str,
+    secret_terms: &[crate::plugin::SecretTerm],
+) -> bool {
+    !active_npc_ids.is_empty() && !visible_text.is_empty() && !secret_terms.is_empty()
+}
+
 /// TC-D3-05：AfterLlmStream 玩家叙事 projection verifier（确定性、纯、fail-soft）。
 ///
 /// 把本会话私有 `secret_terms` 折成 [`FactSurfaceMarker`]（每词一 marker，绑其 fact_id；
@@ -2507,7 +2564,7 @@ fn projection_verifier_finding_trace(
 /// **已知**（projection 放行）但该 NPC 自身**不知道/不该说**（NPC 是说话者时仍属人设穿帮）。
 pub fn npc_consistency_findings(
     narration: &str,
-    npcs: &[(String, trpg_runtime::NpcSpeechProjection)],
+    npcs: &[trpg_runtime::NpcSpeechProjection],
     secret_terms: &[crate::plugin::SecretTerm],
     existing: &[trpg_agent::VerifierFinding],
 ) -> Vec<trpg_agent::VerifierFinding> {
@@ -2524,10 +2581,13 @@ pub fn npc_consistency_findings(
         .filter_map(|f| npc_finding_fact_key(&f.detail).map(str::to_string))
         .collect();
     let mut out = Vec::new();
-    for (name, proj) in npcs {
+    for proj in npcs {
+        // 展示名取自该 NPC 自有投影的 persona safe-view（= 旧 `profile.name`，见 safe_view），
+        // crate-clean 投影已携带展示名，无需另载 profile。
+        let name = proj.0.mind.persona.name.as_str();
         // 可见性门（v1）：念白未 plausibly 点到该 NPC ⇒ 跳过（降低误报）。
         let involves = narration.contains(proj.npc_id.as_str())
-            || (!name.is_empty() && narration.contains(name.as_str()));
+            || (!name.is_empty() && narration.contains(name));
         if !involves {
             continue;
         }
@@ -2579,7 +2639,7 @@ pub fn npc_consistency_findings(
 /// 无活动 NPC / 空念白 → 空（fail-soft，旧行为零变更）。
 pub fn npc_behavior_consistency_findings(
     narration: &str,
-    npcs: &[(String, trpg_runtime::NpcSpeechProjection)],
+    npcs: &[trpg_runtime::NpcSpeechProjection],
     _existing: &[trpg_agent::VerifierFinding],
 ) -> Vec<trpg_agent::VerifierFinding> {
     if narration.is_empty() || npcs.is_empty() {
@@ -2587,10 +2647,12 @@ pub fn npc_behavior_consistency_findings(
     }
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut out = Vec::new();
-    for (name, proj) in npcs {
+    for proj in npcs {
+        // 展示名取自该 NPC 自有投影的 persona safe-view（= 旧 `profile.name`，见知识检查）。
+        let name = proj.0.mind.persona.name.as_str();
         // 可见性门（v1）：念白未 plausibly 点到该 NPC ⇒ 跳过（降低误报）。
         let involves = narration.contains(proj.npc_id.as_str())
-            || (!name.is_empty() && narration.contains(name.as_str()));
+            || (!name.is_empty() && narration.contains(name));
         if !involves {
             continue;
         }
@@ -2726,6 +2788,76 @@ mod projection_verifier_tests {
             Some("fact_x")
         );
         assert_eq!(secret_leak_fact_key("no quotes here"), None);
+    }
+
+    /// P3.6 等价性守卫：流后 verify 路径单一来源（build_verifier_private_view 的 player_known
+    /// 投影，已 sorted）喂下游，与旧的散读 `list_player_known_fact_ids`（未排序）逐字节等价。
+    /// 核心论证：下游对 player_known 全部经 HashSet 消费（order-independent）。这里证明
+    /// projection_after_stream_findings 对 player_known 的**顺序无关**：同一集合的任意排列
+    /// 产出完全相同的 findings（kind/severity/detail/顺序）。
+    #[test]
+    fn p3_6_player_known_findings_are_order_independent() {
+        const S_A: &str = "线索甲秘密";
+        const S_B: &str = "线索乙秘密";
+        let terms = vec![secret_term(S_A, "fact_a"), secret_term(S_B, "fact_b")];
+        let narration = format!("旁白：{S_A}与{S_B}同时现身。");
+
+        // 玩家已知集的两种排列（旧散读未排序 vs 新投影 sorted）——视作同一逻辑集合。
+        let unsorted = vec!["fact_b".to_string(), "fact_a".to_string()];
+        let sorted = {
+            let proj = trpg_runtime::PlayerNarrationProjection::from_player_known(unsorted.clone());
+            proj.known_fact_ids_sorted()
+        };
+        assert_eq!(sorted, vec!["fact_a".to_string(), "fact_b".to_string()]);
+
+        let from_unsorted = projection_after_stream_findings(&narration, &terms, &unsorted, &[]);
+        let from_sorted = projection_after_stream_findings(&narration, &terms, &sorted, &[]);
+        // 两者均放行（fact_a/fact_b 都已知）→ 空，且严格相等（逐字节等价的最强形态）。
+        assert_eq!(
+            from_unsorted, from_sorted,
+            "player_known 排列不应改变 findings（单一来源 sorted 与旧散读等价）"
+        );
+
+        // 仅部分已知时同样顺序无关：只知 fact_a，fact_b 仍泄漏。
+        let only_a_unsorted = vec!["fact_a".to_string()];
+        let only_a_sorted =
+            trpg_runtime::PlayerNarrationProjection::from_player_known(only_a_unsorted.clone())
+                .known_fact_ids_sorted();
+        let f1 = projection_after_stream_findings(&narration, &terms, &only_a_unsorted, &[]);
+        let f2 = projection_after_stream_findings(&narration, &terms, &only_a_sorted, &[]);
+        assert_eq!(f1, f2, "部分已知时 findings 仍顺序无关");
+        assert_eq!(f1.len(), 1, "未知的 fact_b 应泄漏一条");
+        assert!(f1[0].detail.contains("fact_b"));
+    }
+
+    /// P3.6 load-equivalence：NPC 载入门 `should_load_npc_views` 必须与旧
+    /// `npc_consistency_after_stream` 的提前返回条件**逐组合互为否定**。空 secret_terms / 空念白 /
+    /// 空 active_npc 任一成立 → 不载入（baseline 零 NPC DB 读）；三者全非空才载入。
+    /// 这同时锁定 `npc_behavior_consistency` 在 secret_terms 空时仍被门掉（旧路径同样早返跳过）。
+    #[test]
+    fn p3_6_npc_load_gate_matches_old_early_return() {
+        let npc_ids = vec!["npc_a".to_string()];
+        let terms = vec![secret_term("线索甲秘密", "fact_a")];
+        let text = "旁白：线索甲秘密现身。";
+
+        // 旧早返条件：active_npc 空 || 念白空 || secret_terms 空。门 = 该条件的否定。
+        let cases: &[(&[String], &str, &[SecretTerm], bool)] = &[
+            (&npc_ids, text, &terms, true), // 三者全非空 → 载入
+            (&[], text, &terms, false),     // 无活动 NPC → 跳过
+            (&npc_ids, "", &terms, false),  // 空念白 → 跳过
+            (&npc_ids, text, &[], false),   // 无 secret_terms → 跳过（旧路径早返，故行为一致性也被门掉）
+            (&[], "", &[], false),          // 全空 → 跳过
+        ];
+        for (ids, vis, st, expected) in cases {
+            let load = should_load_npc_views(ids, vis, st);
+            assert_eq!(load, *expected, "门 ({ids:?}, {vis:?}, {} terms)", st.len());
+            // 与旧早返条件逐字节互为否定（即旧路径会提前返回 ⇔ 不该载入）。
+            let old_would_early_return = ids.is_empty() || vis.is_empty() || st.is_empty();
+            assert_eq!(
+                load, !old_would_early_return,
+                "门必须是旧 npc_consistency_after_stream 早返条件的精确否定"
+            );
+        }
     }
 }
 

@@ -107,7 +107,9 @@ pub fn verify_npc_asserted_facts(
 /// severity (advisory), matching how the NPC asserted-fact consistency check bridges.
 /// Pure and deterministic; copies the already-redacted `detail` verbatim (it references
 /// the npc_id + action label only, never the matched narration substring).
-pub fn behavior_finding_to_verifier_finding(finding: &BehaviorConsistencyFinding) -> VerifierFinding {
+pub fn behavior_finding_to_verifier_finding(
+    finding: &BehaviorConsistencyFinding,
+) -> VerifierFinding {
     VerifierFinding {
         kind: VerifierFindingKind::InventedEffect,
         severity: VerifierSeverity::Warning,
@@ -263,15 +265,16 @@ mod tests {
             "never harm a child",
             vec!["strikes the child".into()],
         )];
-        let out =
-            verify_npc_behavior_consistency(&proj.0, "Lars strikes the child.", &markers);
+        let out = verify_npc_behavior_consistency(&proj.0, "Lars strikes the child.", &markers);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].kind, VerifierFindingKind::InventedEffect);
         assert_eq!(out[0].severity, VerifierSeverity::Warning);
         assert!(out[0].detail.contains("never harm a child"));
         assert!(!out[0].detail.contains("strikes the child"));
         // No markers → fail-soft empty.
-        assert!(verify_npc_behavior_consistency(&proj.0, "Lars strikes the child.", &[]).is_empty());
+        assert!(
+            verify_npc_behavior_consistency(&proj.0, "Lars strikes the child.", &[]).is_empty()
+        );
     }
 
     #[test]

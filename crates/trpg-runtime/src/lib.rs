@@ -83,6 +83,9 @@ pub use knowledge_leak_verifier::{
     verify_player_narration_leak,
 };
 
+pub mod verifier_private_view;
+pub use verifier_private_view::{build_verifier_private_view, VerifierPrivateView};
+
 mod scene_projection;
 pub use scene_projection::{contract_is_opposed, module_entry_scene_id, stamp_opposed_check};
 use scene_projection::{map_check_param_need, resolve_turn_scene_id};
