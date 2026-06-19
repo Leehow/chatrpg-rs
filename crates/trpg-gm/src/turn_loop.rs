@@ -184,6 +184,10 @@ pub(crate) struct TurnContext {
     // policy 插件本回合贡献的 Flight Recorder 折叠（context_assembly 经 PluginHost 填，
     // build_turn_trace 拷进 TurnTrace.plugin_contributions）。advisory、零行为变更。
     plugin_contributions: Vec<trpg_model::PluginContributionTrace>,
+    // P2 步骤6：本回合 PresentationGate 判定（verify_after_stream 算出，execute.rs 的
+    // VerifyAfterStream 处理读）。默认 Allow；TRPG_PRESENTATION_GATE OFF 时仅记 trace，
+    // 零行为变更。ON + buffered-narration 就位时 Block 触发 repair ladder。
+    presentation_gate: crate::presentation_gate::PresentationGate,
     // —— T4 agent_loop 产物（run_agent_loop 填，尾部 phase 读）——
     visible_text: String,
     awaiting_gate: Option<AwaitingPlayerRoll>,
@@ -209,6 +213,7 @@ impl TurnContext {
             messages: None,
             rule_kernel: None,
             plugin_contributions: Vec::new(),
+            presentation_gate: crate::presentation_gate::PresentationGate::Allow,
             visible_text: String::new(),
             awaiting_gate: None,
         }
@@ -241,6 +246,12 @@ impl TurnContext {
     /// build_turn_trace 拷进 TurnTrace.plugin_contributions（advisory，零行为变更）。
     pub(crate) fn plugin_contributions(&self) -> &[trpg_model::PluginContributionTrace] {
         &self.plugin_contributions
+    }
+
+    /// P2 本回合 PresentationGate 判定（verify_after_stream 填）。execute.rs 的
+    /// VerifyAfterStream 处理读它 emit gate 决策事件（OFF 时仅观测）。
+    pub(crate) fn presentation_gate(&self) -> &crate::presentation_gate::PresentationGate {
+        &self.presentation_gate
     }
 
     /// 测试 seam（kernel-facets 单测）：直接植入已解析 kernel，让 build_turn_trace 单测覆盖
@@ -1567,7 +1578,7 @@ impl GmLoop {
         ledger: &TurnLedger,
         visible_text: &str,
         active_npc_ids: &[String],
-    ) -> Vec<trpg_model::PluginContributionTrace> {
+    ) -> VerifyAfterStreamOutcome {
         let verifier = trpg_agent::NarrationVerifier;
         // B7 语义决策：agent 不显式声明引用，引擎代填"已落账事实全集"
         // （ledger_id_set 物化，排序保证确定性）——结构化核对退化为"声称的
@@ -1626,11 +1637,30 @@ impl GmLoop {
         //     贡献既 record 进 trace、又喂进既有 ErrataMemory 路径（NoSpoilerGuard v2 即此路径）。
         //     secret_terms 源已接入生产（见 run_after_llm_stream_hook 从模组图谱采集）：有声明
         //     secret 即参与泄漏校验；无声明 / 图谱缺失 → 空 = 不检测（fail-soft）。
-        traces.extend(
-            self.run_after_llm_stream_hook(request, visible_text, active_npc_ids)
-                .await,
-        );
-        traces
+        let (hook_traces, hook_findings) = self
+            .run_after_llm_stream_hook(request, visible_text, active_npc_ids)
+            .await;
+        traces.extend(hook_traces);
+
+        // —— P2 步骤5/6：PresentationGate 判定（纯函数，advisory）——
+        // gate 输入 = NarrationVerifier 结构核对 findings（InventedEffect/ManualRollRequest 等）
+        // ∪ AfterLlmStream hook findings（SecretLeak 来源：NoSpoiler/projection/NPC 一致性）。
+        // 仅 Blocker × {SecretLeak,InventedEffect,ManualRollRequest} → Block。本方法只**计算**
+        // gate，repair ladder 的真正执行在 phase_verify_after_stream（需 tx/cancel/buffer 就位）。
+        let mut gate_findings = result.findings.clone();
+        gate_findings.extend(hook_findings);
+        let gate_input = trpg_agent::NarrationVerifierResult {
+            accepted: gate_findings
+                .iter()
+                .all(|f| f.severity != trpg_agent::VerifierSeverity::Blocker),
+            findings: gate_findings,
+            next_required_action: None,
+        };
+        let gate = crate::presentation_gate::presentation_gate_decision(&gate_input);
+        // gate 决策折一条 advisory trace（OFF/ON 都记，零行为变更；§20 explain --plugins 可见）。
+        traces.push(presentation_gate_trace(&gate));
+
+        VerifyAfterStreamOutcome { traces, gate }
     }
 
     /// AfterLlmStream hook 接线（fail-soft）。构造只读 PluginContext（narration=visible_text），
@@ -1642,7 +1672,10 @@ impl GmLoop {
         request: &ContextRequest,
         visible_text: &str,
         active_npc_ids: &[String],
-    ) -> Vec<trpg_model::PluginContributionTrace> {
+    ) -> (
+        Vec<trpg_model::PluginContributionTrace>,
+        Vec<trpg_agent::VerifierFinding>,
+    ) {
         let surfaced_entities = self
             .engine
             .db
@@ -1739,7 +1772,8 @@ impl GmLoop {
         for f in &npc_new {
             traces.push(npc_consistency_finding_trace(f));
         }
-        traces
+        // findings（含 SecretLeak）一并返回，供 PresentationGate 判定（SecretLeak 来源在此 hook）。
+        (traces, all_findings)
     }
 
     /// TC-D3-06：活动 NPC 知识一致性校验的生产装载半边（async、fail-soft）。为每个 `active_npc_ids`
@@ -1944,15 +1978,18 @@ impl GmLoop {
         &mut self,
         ctx: &mut TurnContext,
         input: &GmTurnInput<'_>,
+        tx: &tokio::sync::mpsc::Sender<crate::turn_event::TurnEvent>,
+        cancel: Option<&CancellationToken>,
+        buffered_narration: bool,
     ) {
         if ctx.visible_text.trim().is_empty() && ctx.awaiting_gate.is_some() {
             return;
         }
         let visible = std::mem::take(&mut ctx.visible_text);
         // 流后校验返回 plugin trace 记录（NarrationVerifier findings 折成的 no_mechanical_invention
-        // 贡献 + AfterLlmStream hook 贡献）。push 进 ctx.plugin_contributions —— 本 phase 在
-        // execute.rs 跑于成功路径 build_turn_trace 之前，故这些 AfterLlmStream 贡献也进 TurnTrace。
-        let traces = self
+        // 贡献 + AfterLlmStream hook 贡献）+ PresentationGate 判定。push 进 ctx.plugin_contributions
+        // —— 本 phase 在 execute.rs 跑于成功路径 build_turn_trace 之前，故 AfterLlmStream 贡献也进 TurnTrace。
+        let outcome = self
             .verify_after_stream(
                 input.request,
                 &ctx.ledger,
@@ -1960,8 +1997,74 @@ impl GmLoop {
                 &input.state.active_npc_ids,
             )
             .await;
-        ctx.plugin_contributions.extend(traces);
+        ctx.plugin_contributions.extend(outcome.traces);
+        ctx.presentation_gate = outcome.gate;
         ctx.visible_text = visible;
+
+        // —— P2 步骤6：repair ladder（feature-gated + buffered-narration 前置）——
+        // 两 env flag 正交：TRPG_PRESENTATION_GATE 默认 OFF ⇒ gate 仅记 trace（上方已记），
+        // 零行为变更，**不**进 repair。ON 且 buffered_narration 就位（= TRPG_NARRATOR_SPLIT ON、
+        // 文字在校验前经 Narrator 缓冲）时，Block ⇒ 跑修复阶梯；ON 但文字已实时流出（buffer 不在位）
+        // ⇒ 退化为仅 trace（回收已流出文字无意义）。绝不回滚已 commit 的 ledger/DB。
+        if presentation_gate_enabled() && buffered_narration && ctx.presentation_gate.is_block() {
+            self.run_presentation_repair_ladder(ctx, input, tx, cancel)
+                .await;
+        }
+    }
+
+    /// P2 Block 修复阶梯（§18，仅 buffered-narration 在位时调用）：
+    /// (1) 带收窄 forbidden_reveals 重生 narration 一次（bounded retry=1，re-run Narrator）；
+    /// (2) 若仍 Block / LLM 失败 ⇒ 确定性 committed-facts 模板叙事（never blank）。
+    /// 全程不回滚已 commit 的机械状态——只重写 ctx.visible_text（assistant_output 单一事实源）。
+    async fn run_presentation_repair_ladder(
+        &mut self,
+        ctx: &mut TurnContext,
+        input: &GmTurnInput<'_>,
+        tx: &tokio::sync::mpsc::Sender<crate::turn_event::TurnEvent>,
+        cancel: Option<&CancellationToken>,
+    ) {
+        // 收窄 forbidden_reveals：把触发 Block 的 finding detail 作为禁揭示约束喂回 Narrator。
+        let forbidden: Vec<String> = match &ctx.presentation_gate {
+            crate::presentation_gate::PresentationGate::Block(findings) => {
+                findings.iter().map(|f| f.detail.clone()).collect()
+            }
+            crate::presentation_gate::PresentationGate::Allow => Vec::new(),
+        };
+        // (1) 重生一次：从本回合 ledger/ctx 投影 NarrationPacket（带收窄 forbidden_reveals）→ Narrator。
+        let adj = crate::packet::AdjudicationPacket::project(
+            input.user_input,
+            ctx.ledger.snapshot(),
+            &ctx.resolved_gate_facts,
+            &ctx.visible_text,
+            None,
+        );
+        let narration = crate::packet::NarrationPacket::project(&adj, "", &forbidden);
+        let private_tokens = ctx.ledger.private_roll_tokens();
+        let regenerated = self
+            .run_narrator(&narration, &private_tokens, tx, cancel)
+            .await;
+        if let Some(text) = regenerated {
+            if !text.trim().is_empty() {
+                // 重新校验重生文本：若已不再 Block ⇒ 采纳；否则落入确定性模板兜底。
+                let recheck = self
+                    .verify_after_stream(
+                        input.request,
+                        &ctx.ledger,
+                        &text,
+                        &input.state.active_npc_ids,
+                    )
+                    .await;
+                ctx.plugin_contributions.extend(recheck.traces);
+                if !recheck.gate.is_block() {
+                    ctx.presentation_gate = recheck.gate;
+                    ctx.visible_text = text;
+                    return;
+                }
+                ctx.presentation_gate = recheck.gate;
+            }
+        }
+        // (2) 确定性 committed-facts 模板叙事（§18，never blank）。
+        ctx.visible_text = deterministic_committed_facts_narration(&narration);
     }
 
     /// PhaseId::Finalize（R5 critical）— 只持久化回合记录 + status（save_turn）。
@@ -2217,6 +2320,76 @@ fn drain_redactor(
 /// 把一条既算出的 NarrationVerifier finding 折成 plugin trace 记录，使 de-facto 的
 /// `core.no_mechanical_invention` verifier 在 `trpg explain --plugins` 可见。**纯映射，不重跑
 /// 检查、不改 errata 行为**——summary = finding kind（snake_case）+ 截断 detail。
+/// P2 步骤6 env flag：`TRPG_PRESENTATION_GATE`（默认 OFF）。OFF ⇒ gate 仅记 trace，零行为
+/// 变更（与 TRPG_NARRATOR_SPLIT 正交）。ON ⇒ Block 触发 repair ladder，但仅在 buffered-narration
+/// 在位时真正生效（调用方再加 buffer 前置守卫）。
+pub(crate) fn presentation_gate_enabled() -> bool {
+    std::env::var("TRPG_PRESENTATION_GATE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// P2 §18 确定性 committed-facts 模板叙事（Block 修复阶梯末端，never blank）。纯函数：
+/// 只用 NarrationPacket 已收窄的玩家可见机械事实摘要 + player_input 拼模板，绝不含 secret /
+/// adjudicator_prose / 规则原文。无任何机械事实时回一句中性兜底（绝不空白）。
+pub(crate) fn deterministic_committed_facts_narration(
+    packet: &crate::packet::NarrationPacket,
+) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    for happened in &packet.what_happened {
+        lines.push(format!("· {happened}"));
+    }
+    for changed in &packet.what_changed {
+        lines.push(format!("· {changed}"));
+    }
+    for fact in &packet.player_perceivable_facts {
+        lines.push(format!("· {fact}"));
+    }
+    if lines.is_empty() {
+        "（本回合按已落账的机械结果继续；无新增可公开的机械事实。）".to_string()
+    } else {
+        format!("根据本回合已确认的结果：\n{}", lines.join("\n"))
+    }
+}
+
+/// P2：verify_after_stream 的产物——既有 plugin trace 记录 + 本回合 PresentationGate 判定。
+pub(crate) struct VerifyAfterStreamOutcome {
+    pub traces: Vec<trpg_model::PluginContributionTrace>,
+    pub gate: crate::presentation_gate::PresentationGate,
+}
+
+/// P2 步骤8：把 PresentationGate 决策折成 advisory plugin trace（`trpg explain --plugins` 可见
+/// "Policy 本回合是否阻断、阻断了哪些 finding"）。零行为变更，仅多记一条 trace。
+pub(crate) fn presentation_gate_trace(
+    gate: &crate::presentation_gate::PresentationGate,
+) -> trpg_model::PluginContributionTrace {
+    let summary = match gate {
+        crate::presentation_gate::PresentationGate::Allow => "gate=Allow".to_string(),
+        crate::presentation_gate::PresentationGate::Block(findings) => {
+            let mut kinds: Vec<String> = findings
+                .iter()
+                .map(|f| {
+                    serde_json::to_value(f.kind)
+                        .ok()
+                        .and_then(|v| v.as_str().map(str::to_string))
+                        .unwrap_or_else(|| format!("{:?}", f.kind))
+                })
+                .collect();
+            kinds.sort();
+            kinds.dedup();
+            format!("gate=Block kinds=[{}]", kinds.join(","))
+        }
+    };
+    trpg_model::PluginContributionTrace {
+        plugin_id: "core.presentation_gate".to_string(),
+        hook: crate::plugin::PluginHook::AfterLlmStream
+            .as_str()
+            .to_string(),
+        kind: "presentation_gate".to_string(),
+        summary,
+    }
+}
+
 pub(crate) fn surface_verifier_finding_trace(
     f: &trpg_agent::VerifierFinding,
 ) -> trpg_model::PluginContributionTrace {

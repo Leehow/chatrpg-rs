@@ -263,7 +263,32 @@ async fn run_pipeline(
                 PhaseId::VerifyAfterStream => {
                     phases_run.push(format!("{:?}", PhaseId::VerifyAfterStream));
                     let _ = tx.send(TurnEvent::PostprocessScheduled).await;
-                    gm.phase_verify_after_stream(&mut ctx, &input).await;
+                    // P2：buffered-narration 就位 = TRPG_NARRATOR_SPLIT ON 且 Narration 终态
+                    //（与上方 Narrator phase 触发条件一致——文字经 Narrator 缓冲，gate Block 时
+                    // repair ladder 真正生效；否则 gate ON 也只记 trace）。
+                    let buffered_narration = narrator_split && signal == AgentSignal::Narration;
+                    gm.phase_verify_after_stream(
+                        &mut ctx,
+                        &input,
+                        tx,
+                        req.cancel.as_ref(),
+                        buffered_narration,
+                    )
+                    .await;
+                    // P2 步骤7：emit 一条 gate 决策事件（OFF/ON 都 emit，不阻断；§13 PresentationCommit
+                    // 的真正扣留留待 P1 收口实时流后接 Block 分支）。TurnWarning 复用 verify phase 通道。
+                    if let crate::presentation_gate::PresentationGate::Block(findings) =
+                        ctx.presentation_gate()
+                    {
+                        let kinds: Vec<String> =
+                            findings.iter().map(|f| format!("{:?}", f.kind)).collect();
+                        let _ = tx
+                            .send(TurnEvent::TurnWarning {
+                                phase: "presentation_gate".to_string(),
+                                message: format!("gate=Block kinds={kinds:?}"),
+                            })
+                            .await;
+                    }
                 }
                 PhaseId::Finalize => {
                     phases_run.push(format!("{:?}", PhaseId::Finalize));

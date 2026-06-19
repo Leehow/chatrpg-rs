@@ -9,6 +9,7 @@ pub mod opposed_prepass;
 pub mod packet;
 pub mod plugin;
 pub mod plugins;
+pub mod presentation_gate;
 pub mod prompts;
 pub mod scene_policy;
 pub mod stimulus;
@@ -42,14 +43,15 @@ pub use opposed_prepass::{detect_attack_target, opposed_prepass_enabled, Opposed
 pub use packet::{AdjudicationPacket, MechanicalFact, MechanicalFactKind, NarrationPacket};
 pub use plugin::*;
 pub use plugins::{load_gm_skill_with_plugins, load_plugins};
+pub use presentation_gate::{presentation_gate_decision, PresentationGate, BLOCKING_KINDS};
 pub use prompts::{
     load_gm_skill, load_gm_skill_with_mode, validate_compiled_budget, DynamicTailInput,
     TurnMessages,
 };
 pub use stream::RedactingBuffer;
 pub use tools::{
-    AwaitingPlayerRoll, GmTool, SceneDeepExtractFn, ToolCtx, ToolDispatchOutcome, ToolError,
-    ToolOutput, ToolRegistry, ToolSpec,
+    AwaitingPlayerRoll, GmTool, SceneDeepExtractFn, ToolCapability, ToolCtx, ToolDispatchOutcome,
+    ToolError, ToolOutput, ToolRegistry, ToolSpec,
 };
 pub use turn_event::TurnEvent;
 pub use turn_loop::{CtxProviderFn, GmLoop, GmTurnInput, LoopConfig, TurnOutcome};
