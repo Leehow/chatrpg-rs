@@ -3,6 +3,13 @@
 //! memory_facts**（低置信项 fail-closed 丢弃），且**后续回合可经 retrieve_memory /
 //! list_memory_facts 召回**（带 turn_id 溯源 + EntitySurfaced 溯源）。
 //!
+//! TC-D3-03 起，heavy 尾段不再 raw `db.upsert_memory_fact`：抽出的三元组先经
+//! `relationship_facts_to_proposals` 转 `MemoryExtractionProposal`，再由 runtime-owned
+//! `review_and_commit_proposals` 复跑模型门 + 会话授权门后，沿 `LegacyFact` 路 upsert
+//! 进 `memory_facts`。`extract_relationship_facts` 的返回值即 `CommitReport` 的 Done 数，
+//! 因此下面对 `written` 的断言同时证明「确实经 proposal review/commit 路落库」——可观测
+//! 结果（行落 memory_facts + 可召回）与旧 raw-upsert 路完全一致。
+//!
 //! 另含**成本闸**端到端验证：只在**本回合 surface 了新实体**时才调 LLM——没有新实体的
 //! 回合（已知实体集没变）直接跳过、一次 LLM 都不烧；再 surface 新实体则闸重新打开。
 //! 「新实体」经 append 时**冻结**在 `EntitySurfaced` 事件的 turn_id 上判定（append 是
@@ -159,7 +166,7 @@ async fn relationship_triple_written_and_gated_by_new_surface() {
         .await;
     assert_eq!(
         written, 1,
-        "high-confidence triple persists (low-conf dropped, fail-closed)"
+        "high-confidence triple persists via proposal commit (CommitReport Done==1; low-conf dropped, fail-closed)"
     );
     assert_eq!(
         llm.calls(),

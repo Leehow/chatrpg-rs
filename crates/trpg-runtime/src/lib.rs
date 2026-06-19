@@ -922,21 +922,43 @@ impl RuntimeEngine {
             should_run, // 成本闸：闸关则函数内 fail-closed 返回空（与上面早退一致）。
         )
         .await;
-        let mut written = 0usize;
-        for f in &facts {
-            match self.db.upsert_memory_fact(f).await {
-                Ok(()) => written += 1,
-                Err(err) => {
-                    tracing::warn!(error = %err, fact_id = %f.fact_id, "relationship fact upsert failed (fail-soft)")
-                }
+        // TC-D3-03 proposal contract: the extractor only *proposes*. The heavy postprocess
+        // path no longer writes `memory_facts` directly — it converts each extracted triple
+        // into a validated `MemoryExtractionProposal` and hands the batch to the single
+        // runtime-owned review/commit entry point. `review_and_commit_proposals` re-runs the
+        // model gate + the session-authority guard before any write, then routes each
+        // surviving fact through the same `memory_facts` upsert (as a `LegacyFact`) the old
+        // loop used — so live behavior (rows in `memory_facts`, later retrievable) is
+        // unchanged, but the only durable path is now the proposal commit pipeline.
+        let proposals = memory_proposal::relationship_facts_to_proposals(&facts);
+        let report = match memory_proposal::review_and_commit_proposals(
+            &self.db,
+            &memory_proposal::CommitContext {
+                session_id,
+                turn_id,
+            },
+            &proposals,
+        )
+        .await
+        {
+            Ok(report) => report,
+            // Fail-soft: a proposal-commit error must never affect TurnComplete. Warn (no
+            // fact prose — the error string is a DB/plumbing message) and report zero writes.
+            Err(err) => {
+                tracing::warn!(error = %err, session_id, turn_id, "relationship proposal commit failed (fail-soft)");
+                return 0;
             }
-        }
+        };
+        let written = report.committed();
         if written > 0 {
+            // Only identity counts are logged, never fact bodies (see CommitOutcome docs).
             tracing::info!(
                 session_id,
                 turn_id,
-                written,
-                "relationship triples written to memory_facts"
+                committed = written,
+                rejected = report.rejected(),
+                skipped = report.skipped(),
+                "relationship triples committed to memory_facts via proposal pipeline"
             );
         }
         written
