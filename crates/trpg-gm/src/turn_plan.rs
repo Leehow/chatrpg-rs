@@ -52,7 +52,11 @@ pub const CANONICAL_TURN_PLAN: &[TurnPhasePlan] = &[
     det(PhaseId::ModeInference),
     det(PhaseId::DebtLoad),
     det(PhaseId::ContextAssembly),
-    TurnPhasePlan { id: PhaseId::AgentLoop, kind: PhaseKind::AgentLoop, conditional: false },
+    TurnPhasePlan {
+        id: PhaseId::AgentLoop,
+        kind: PhaseKind::AgentLoop,
+        conditional: false,
+    },
     post(PhaseId::VerifyAfterStream, false),
     post(PhaseId::Finalize, false),
     post(PhaseId::AuditLearning, false),
@@ -61,10 +65,18 @@ pub const CANONICAL_TURN_PLAN: &[TurnPhasePlan] = &[
 ];
 
 const fn det(id: PhaseId) -> TurnPhasePlan {
-    TurnPhasePlan { id, kind: PhaseKind::Deterministic, conditional: false }
+    TurnPhasePlan {
+        id,
+        kind: PhaseKind::Deterministic,
+        conditional: false,
+    }
 }
 const fn post(id: PhaseId, conditional: bool) -> TurnPhasePlan {
-    TurnPhasePlan { id, kind: PhaseKind::Postprocess, conditional }
+    TurnPhasePlan {
+        id,
+        kind: PhaseKind::Postprocess,
+        conditional,
+    }
 }
 
 #[cfg(test)]
@@ -85,7 +97,12 @@ mod tests {
     #[test]
     fn head_nine_are_deterministic() {
         for p in &CANONICAL_TURN_PLAN[0..9] {
-            assert_eq!(p.kind, PhaseKind::Deterministic, "head phase {:?} must be Deterministic", p.id);
+            assert_eq!(
+                p.kind,
+                PhaseKind::Deterministic,
+                "head phase {:?} must be Deterministic",
+                p.id
+            );
         }
     }
 
@@ -94,35 +111,60 @@ mod tests {
         // 第 10 项（index 9）是唯一 AgentLoop body。
         assert_eq!(CANONICAL_TURN_PLAN[9].id, PhaseId::AgentLoop);
         assert_eq!(CANONICAL_TURN_PLAN[9].kind, PhaseKind::AgentLoop);
-        let agent_count = CANONICAL_TURN_PLAN.iter().filter(|p| p.kind == PhaseKind::AgentLoop).count();
+        let agent_count = CANONICAL_TURN_PLAN
+            .iter()
+            .filter(|p| p.kind == PhaseKind::AgentLoop)
+            .count();
         assert_eq!(agent_count, 1, "exactly one AgentLoop body");
     }
 
     #[test]
     fn tail_five_are_postprocess() {
         for p in &CANONICAL_TURN_PLAN[10..15] {
-            assert_eq!(p.kind, PhaseKind::Postprocess, "tail phase {:?} must be Postprocess", p.id);
+            assert_eq!(
+                p.kind,
+                PhaseKind::Postprocess,
+                "tail phase {:?} must be Postprocess",
+                p.id
+            );
         }
     }
 
     #[test]
     fn only_scene_navigate_and_carryover_debt_are_conditional() {
         for p in CANONICAL_TURN_PLAN {
-            let expect_conditional = matches!(p.id, PhaseId::SceneNavigate | PhaseId::CarryoverDebt);
-            assert_eq!(p.conditional, expect_conditional, "phase {:?} conditional flag wrong", p.id);
+            let expect_conditional =
+                matches!(p.id, PhaseId::SceneNavigate | PhaseId::CarryoverDebt);
+            assert_eq!(
+                p.conditional, expect_conditional,
+                "phase {:?} conditional flag wrong",
+                p.id
+            );
         }
     }
 
     #[test]
     fn plan_order_matches_phase_id_declaration() {
         let ids: Vec<PhaseId> = CANONICAL_TURN_PLAN.iter().map(|p| p.id).collect();
-        assert_eq!(ids, vec![
-            PhaseId::RecordPlayerAction, PhaseId::RefreshLiveDerived, PhaseId::Reconcile,
-            PhaseId::Gate, PhaseId::StimulusPass, PhaseId::OpposedPrepass,
-            PhaseId::ModeInference, PhaseId::DebtLoad, PhaseId::ContextAssembly,
-            PhaseId::AgentLoop,
-            PhaseId::VerifyAfterStream, PhaseId::Finalize, PhaseId::AuditLearning,
-            PhaseId::SceneNavigate, PhaseId::CarryoverDebt,
-        ]);
+        assert_eq!(
+            ids,
+            vec![
+                PhaseId::RecordPlayerAction,
+                PhaseId::RefreshLiveDerived,
+                PhaseId::Reconcile,
+                PhaseId::Gate,
+                PhaseId::StimulusPass,
+                PhaseId::OpposedPrepass,
+                PhaseId::ModeInference,
+                PhaseId::DebtLoad,
+                PhaseId::ContextAssembly,
+                PhaseId::AgentLoop,
+                PhaseId::VerifyAfterStream,
+                PhaseId::Finalize,
+                PhaseId::AuditLearning,
+                PhaseId::SceneNavigate,
+                PhaseId::CarryoverDebt,
+            ]
+        );
     }
 }

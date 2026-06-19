@@ -1,0 +1,48 @@
+{
+  "identity": {
+    "scenario_id": "JRNY-HOME-03-memory-failbranch",
+    "scenario_version": "1",
+    "evidence_schema_version": "tc-jrny-02.evidence.v1"
+  },
+  "recorded_mode": "deterministic",
+  "turns": [
+    {
+      "user_input": "我只是随口跟那位技术中间人寒暄了几句，没谈正事。",
+      "count_delta": {},
+      "newest_contest_row": null,
+      "player_visible_body": "你和她寒暄了几句，没有谈成任何实质内容。",
+      "memory": {
+        "memory_fact_id": "mf_rel_fixer_owes_player",
+        "proposal_present": false,
+        "from_committed_turn": false,
+        "direct_commit_without_proposal": false,
+        "proposal_evidence_event_ids": [],
+        "committed_fact_ids": [],
+        "duplicate_commit_on_retry": false,
+        "player_known_fact_ids": [],
+        "player_memory_summary": "（暂无可记录的人情往来。）",
+        "trace_links": ["player_action"]
+      }
+    },
+    {
+      "user_input": "我答应帮她，但这条记录没有任何来源凭据被记下来。",
+      "count_delta": {
+        "memory_facts": 1
+      },
+      "newest_contest_row": null,
+      "player_visible_body": "你答应帮她，但这条所谓的记录没有任何凭据支撑。",
+      "memory": {
+        "memory_fact_id": "mf_rel_fixer_owes_player",
+        "proposal_present": true,
+        "from_committed_turn": true,
+        "direct_commit_without_proposal": false,
+        "proposal_evidence_event_ids": [],
+        "committed_fact_ids": ["mf_rel_fixer_owes_player"],
+        "duplicate_commit_on_retry": false,
+        "player_known_fact_ids": [],
+        "player_memory_summary": "（记录缺少来源凭据。）",
+        "trace_links": ["player_action", "memory_proposal"]
+      }
+    }
+  ]
+}

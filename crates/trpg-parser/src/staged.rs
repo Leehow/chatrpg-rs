@@ -38,7 +38,10 @@ pub struct StagedParse {
 
 impl StagedParse {
     async fn report(&self, st: &JobStatus, status: &str) {
-        let _ = self.db.update_background_job(&self.job_id, status, st.to_value(), st.error.as_deref()).await;
+        let _ = self
+            .db
+            .update_background_job(&self.job_id, status, st.to_value(), st.error.as_deref())
+            .await;
     }
 
     /// Run all stages, returning the final `JobStatus`. Always reports the
@@ -72,7 +75,11 @@ impl StagedParse {
 
         // Stage 2 is non-fatal: stage1 success => job 'done' even if deep partially fails.
         self.stage2_deep(&mut st, &plan, &char_slice, budget).await;
-        let final_status = if st.error.is_some() && st.progress_pct < 35 { "failed" } else { "done" };
+        let final_status = if st.error.is_some() && st.progress_pct < 35 {
+            "failed"
+        } else {
+            "done"
+        };
         self.report(&st, final_status).await;
         st
     }
@@ -90,7 +97,8 @@ impl StagedParse {
             version: "v1_staged".into(),
             ..Default::default()
         };
-        kernel.game_identity = serde_json::json!({"summary": plan.identity, "hypothesis": plan.hypothesis});
+        kernel.game_identity =
+            serde_json::json!({"summary": plan.identity, "hypothesis": plan.hypothesis});
         self.db.upsert_rule_kernel(&kernel).await.ok();
         st.finish("identity", &plan.identity);
         self.report(st, "running").await;
@@ -99,11 +107,27 @@ impl StagedParse {
 
     /// Stage 1 — character slice: read the buildable sheet, coerce + persist it
     /// into the kernel (`character_sheet_schema`) and onboarding artifacts.
-    async fn stage1_character(&self, st: &mut JobStatus, plan: &reader::Plan, budget: usize) -> Result<reader::CharacterSlice> {
+    async fn stage1_character(
+        &self,
+        st: &mut JobStatus,
+        plan: &reader::Plan,
+        budget: usize,
+    ) -> Result<reader::CharacterSlice> {
         st.begin("character");
         self.report(st, "running").await;
-        let slice = reader::read_character_slice(self.llm.as_ref(), &self.units, &self.ruleset_id, plan, budget).await?;
-        let template = crate::coerce_character_template(slice.character_template.clone(), &self.ruleset_id, &self.title);
+        let slice = reader::read_character_slice(
+            self.llm.as_ref(),
+            &self.units,
+            &self.ruleset_id,
+            plan,
+            budget,
+        )
+        .await?;
+        let template = crate::coerce_character_template(
+            slice.character_template.clone(),
+            &self.ruleset_id,
+            &self.title,
+        );
         let mut kernel = self
             .db
             .load_rule_kernel(&self.ruleset_id)
@@ -118,7 +142,16 @@ impl StagedParse {
             });
         kernel.character_sheet_schema = serde_json::to_value(&template).unwrap_or_default();
         self.db.upsert_rule_kernel(&kernel).await.ok();
-        crate::persist_stage1_character_artifacts(&self.db, &self.data_dir, &self.ruleset_id, &self.title, &template, &slice.option_catalogs).await.ok();
+        crate::persist_stage1_character_artifacts(
+            &self.db,
+            &self.data_dir,
+            &self.ruleset_id,
+            &self.title,
+            &template,
+            &slice.option_catalogs,
+        )
+        .await
+        .ok();
         st.finish("character", "character sheet ready");
         self.report(st, "running").await;
         Ok(slice)
@@ -127,37 +160,65 @@ impl StagedParse {
     /// Stage 2 — deep background. Each sub-step is independent and non-fatal:
     /// resolution+gm, chargen formula compile, object-category discover, full
     /// kernel persist, then a best-effort module + index hook.
-    async fn stage2_deep(&self, st: &mut JobStatus, plan: &reader::Plan, char_slice: &reader::CharacterSlice, budget: usize) {
+    async fn stage2_deep(
+        &self,
+        st: &mut JobStatus,
+        plan: &reader::Plan,
+        char_slice: &reader::CharacterSlice,
+        budget: usize,
+    ) {
         st.begin("deep");
         st.note("resolution + gm");
         self.report(st, "running").await;
         let compiler = crate::build_compiler_llm().unwrap_or_else(|| self.llm.clone());
 
         // 2a resolution + gm (concurrent inside the slice fn).
-        let mut rg = reader::read_resolution_and_gm(self.llm.as_ref(), &self.units, &self.ruleset_id, plan, budget).await.ok();
+        let mut rg = reader::read_resolution_and_gm(
+            self.llm.as_ref(),
+            &self.units,
+            &self.ruleset_id,
+            plan,
+            budget,
+        )
+        .await
+        .ok();
 
         // 2b chargen compile (derived value formulas) — backfill into the template.
         st.note("compiling character formulas");
         self.report(st, "running").await;
-        let mut template = crate::coerce_character_template(char_slice.character_template.clone(), &self.ruleset_id, &self.title);
+        let mut template = crate::coerce_character_template(
+            char_slice.character_template.clone(),
+            &self.ruleset_id,
+            &self.title,
+        );
         let skills = crate::skill_ids(&template, &char_slice.option_catalogs);
-        let tracks = rg.as_ref().map(|r| crate::track_ids(&r.core.resource_tracks)).unwrap_or_default();
+        let tracks = rg
+            .as_ref()
+            .map(|r| crate::track_ids(&r.core.resource_tracks))
+            .unwrap_or_default();
         let ctx = reader::CompileCtx {
             units: &self.units,
             sidecar_text: self.sidecar_text.clone(),
             located_pages: String::new(),
             skill_names: skills.clone(),
         };
-        let _ = reader::compile_chargen_formulas(compiler.as_ref(), &mut template, ctx, budget).await;
+        let _ =
+            reader::compile_chargen_formulas(compiler.as_ref(), &mut template, ctx, budget).await;
 
         // 2b-bis 行为层对齐：把 chargen 公式层 id 与 kernel resource_tracks 行为层按 id 对齐
         // （落 derived_from 链接 + 缺 track 建 stub，fail-closed，不臆造行为）。确定性、无 LLM。
         if let Some(rg) = rg.as_mut() {
-            let dvs: Vec<serde_json::Value> = template.derived_values.iter()
-                .filter_map(|d| serde_json::to_value(d).ok()).collect();
+            let dvs: Vec<serde_json::Value> = template
+                .derived_values
+                .iter()
+                .filter_map(|d| serde_json::to_value(d).ok())
+                .collect();
             let report = reader::align(&dvs, &mut rg.core.resource_tracks);
             if !report.behavior_gaps.is_empty() {
-                st.note(&format!("行为对齐缺口(待 override/LLM 补): {:?}", report.behavior_gaps));
+                st.note(&format!(
+                    "行为对齐缺口(待 override/LLM 补): {:?}",
+                    report.behavior_gaps
+                ));
                 // 三级兜底：override 数据是主源，本路默认关(TRPG_BEHAVIOR_ALIGN_LLM=1 才开)。
                 // fail-closed：内部校验 =field、绝不覆盖既有/override 行为、prose 缺则省略。
                 reader::fill_behavior_from_prose(
@@ -188,10 +249,24 @@ impl StagedParse {
             skills,
             resource_tracks: tracks,
         };
-        let object_schemas = reader::compile_object_schemas(compiler.as_ref(), &obj_ctx, budget).await;
+        let object_schemas =
+            reader::compile_object_schemas(compiler.as_ref(), &obj_ctx, budget).await;
 
         // 2d assemble + persist the full kernel.
-        if let Err(e) = crate::persist_stage2_kernel(&self.db, &self.ruleset_id, &self.title, rg.as_ref(), &template, &char_slice.option_catalogs, object_schemas, &self.units, self.sidecar_text.clone(), &self.llm).await {
+        if let Err(e) = crate::persist_stage2_kernel(
+            &self.db,
+            &self.ruleset_id,
+            &self.title,
+            rg.as_ref(),
+            &template,
+            &char_slice.option_catalogs,
+            object_schemas,
+            &self.units,
+            self.sidecar_text.clone(),
+            &self.llm,
+        )
+        .await
+        {
             st.note(&format!("kernel persist failed: {e}"));
         }
 
@@ -203,7 +278,13 @@ impl StagedParse {
         let role_field = template
             .fields
             .iter()
-            .find(|f| matches!(f.field_type.as_str(), "role" | "class") || matches!(f.field_id.as_str(), "role" | "class" | "occupation" | "profession" | "career" | "arc"))
+            .find(|f| {
+                matches!(f.field_type.as_str(), "role" | "class")
+                    || matches!(
+                        f.field_id.as_str(),
+                        "role" | "class" | "occupation" | "profession" | "career" | "arc"
+                    )
+            })
             .map(|f| f.field_id.clone());
         let skill_fields: Vec<String> = template
             .fields
@@ -218,8 +299,18 @@ impl StagedParse {
             skill_fields,
             option_catalogs: char_slice.option_catalogs.clone(),
         };
-        let starter_pack = reader::compile_starter_pack(compiler.as_ref(), &onboarding_ctx, budget).await;
-        if let Err(e) = crate::persist_stage2_onboarding(&self.db, &self.ruleset_id, &self.title, &template, &char_slice.option_catalogs, &starter_pack).await {
+        let starter_pack =
+            reader::compile_starter_pack(compiler.as_ref(), &onboarding_ctx, budget).await;
+        if let Err(e) = crate::persist_stage2_onboarding(
+            &self.db,
+            &self.ruleset_id,
+            &self.title,
+            &template,
+            &char_slice.option_catalogs,
+            &starter_pack,
+        )
+        .await
+        {
             st.note(&format!("onboarding persist failed: {e}"));
         }
 
@@ -256,17 +347,32 @@ mod tests {
         st.begin("character");
         st.finish("character", "character sheet ready");
         // After stage 1 the character stage is done and progress is partial.
-        assert!(st.stages.iter().any(|s| s.name == "character" && s.status == "done"));
+        assert!(st
+            .stages
+            .iter()
+            .any(|s| s.name == "character" && s.status == "done"));
         let after_stage1 = st.progress_pct;
-        assert!(after_stage1 >= 35 && after_stage1 < 100, "stage1 leaves partial progress");
+        assert!(
+            after_stage1 >= 35 && after_stage1 < 100,
+            "stage1 leaves partial progress"
+        );
 
         // A stage-2 sub-step failure records an error but must NOT roll back stage 1,
         // and (since progress_pct >= 35) the final status would still be "done".
         st.begin("deep");
         st.note("kernel persist failed: boom");
         // Simulate the orchestrator's terminal-status rule without failing the stage.
-        let final_status = if st.error.is_some() && st.progress_pct < 35 { "failed" } else { "done" };
+        let final_status = if st.error.is_some() && st.progress_pct < 35 {
+            "failed"
+        } else {
+            "done"
+        };
         assert_eq!(final_status, "done");
-        assert!(st.stages.iter().any(|s| s.name == "character" && s.status == "done"), "stage1 intact after deep note");
+        assert!(
+            st.stages
+                .iter()
+                .any(|s| s.name == "character" && s.status == "done"),
+            "stage1 intact after deep note"
+        );
     }
 }

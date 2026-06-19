@@ -8,7 +8,8 @@ use trpg_runtime::RuntimeEngine;
 
 /// 头部 gate 结算注入 seam（单测合成 open gate 绕开真 DB；生产装配恒 None）。
 /// None ⇒ 无 open gate；Some(Ok) ⇒ 结算成功（契约+结果）；Some(Err) ⇒ 结算失败。
-pub type GateResolverFn = Arc<dyn Fn(&str) -> Option<Result<(CheckContract, CheckResultRecord)>> + Send + Sync>;
+pub type GateResolverFn =
+    Arc<dyn Fn(&str) -> Option<Result<(CheckContract, CheckResultRecord)>> + Send + Sync>;
 
 /// 确定性头部第 4 步（spec §4）：玩家输入若是 open gate 的骰值/掷骰应答，
 /// 在 LLM 看到输入前先结算，产物入账 + 折成 [roll] 事实注入 dynamic tail。
@@ -35,10 +36,26 @@ pub(crate) async fn resolve_pending_gate(
     let (session_id, turn_id) = (request.session_id.as_str(), request.turn_id.as_str());
     let resolution = match gate_resolver {
         Some(resolver) => resolver(user_input),
-        None => match engine.db.get_open_pending_check(session_id).await.ok().flatten() {
+        None => match engine
+            .db
+            .get_open_pending_check(session_id)
+            .await
+            .ok()
+            .flatten()
+        {
             Some(pending) => {
                 let contract = pending.contract.clone();
-                Some(engine.resolve_check_with_input(session_id, turn_id, &pending.contract, user_input).await.map(|result| (contract, result)))
+                Some(
+                    engine
+                        .resolve_check_with_input(
+                            session_id,
+                            turn_id,
+                            &pending.contract,
+                            user_input,
+                        )
+                        .await
+                        .map(|result| (contract, result)),
+                )
             }
             None => None,
         },
@@ -47,10 +64,23 @@ pub(crate) async fn resolve_pending_gate(
         Some(Ok((contract, result))) => {
             ledger.record_contract(&contract);
             ledger.record_result(&result);
-            resolved_gate_facts.push(format!("[roll]Resolved pending check {}: {}[/roll]", result.check_id, serde_json::to_string(&result.outcome).unwrap_or_default()));
+            resolved_gate_facts.push(format!(
+                "[roll]Resolved pending check {}: {}[/roll]",
+                result.check_id,
+                serde_json::to_string(&result.outcome).unwrap_or_default()
+            ));
             // C7：盖章契约结算后 effect_policy 由 Rust 强制执行（spec §6"效果不留给
             // 叙事"在玩家亲掷路径同样成立）——失败折事实，绝不炸回合。
-            run_policy_after_gate(engine, request, current_scene_id, &contract, &result.outcome, ledger, resolved_gate_facts).await;
+            run_policy_after_gate(
+                engine,
+                request,
+                current_scene_id,
+                &contract,
+                &result.outcome,
+                ledger,
+                resolved_gate_facts,
+            )
+            .await;
         }
         Some(Err(err)) => {
             tracing::warn!(error = %err, session_id = %session_id, "pending check resolution failed; folded into turn context");
@@ -63,7 +93,9 @@ pub(crate) async fn resolve_pending_gate(
 /// PURE：盖章解析——advice_refs 中 `scene_mechanic:<intent_id>`（stamp_scene_intent
 /// 写入，此处恢复；盖章每契约至多一枚，取首个）。
 pub(crate) fn scene_mechanic_ref(advice_refs: &[String]) -> Option<&str> {
-    advice_refs.iter().find_map(|r| r.strip_prefix("scene_mechanic:"))
+    advice_refs
+        .iter()
+        .find_map(|r| r.strip_prefix("scene_mechanic:"))
 }
 
 /// gate 结算后 effect_policy 强制执行：契约盖章引用 → module graph 找回 intent →
@@ -80,13 +112,25 @@ async fn run_policy_after_gate(
     ledger: &mut TurnLedger,
     facts: &mut Vec<String>,
 ) {
-    let Some(intent_id) = scene_mechanic_ref(&contract.advice_refs) else { return };
+    let Some(intent_id) = scene_mechanic_ref(&contract.advice_refs) else {
+        return;
+    };
     // fail-closed：outcome 无 success 布尔不执行（对齐 run_policy_after_settlement）。
     let Some(success) = outcome.get("success").and_then(Value::as_bool) else {
         facts.push(format!("[scene_policy]Scene mechanic {intent_id} not enforced: outcome has no success field.[/scene_policy]"));
         return;
     };
-    match locate_and_apply(engine, request, current_scene_id, contract, intent_id, success, ledger).await {
+    match locate_and_apply(
+        engine,
+        request,
+        current_scene_id,
+        contract,
+        intent_id,
+        success,
+        ledger,
+    )
+    .await
+    {
         Ok(patches) => {
             let branch = if success { "success" } else { "failure" };
             facts.push(format!("[scene_policy]Scene mechanic {intent_id} consequences enforced by the engine ({branch}): {}. Narrate these effects as already applied; do not re-apply or invent others.[/scene_policy]", crate::scene_policy::patches_summary(&patches)));
@@ -110,12 +154,24 @@ async fn locate_and_apply(
     success: bool,
     ledger: &mut TurnLedger,
 ) -> Result<Vec<StatePatch>> {
-    let mid = request.module_id.as_deref().or(contract.module_id.as_deref())
+    let mid = request
+        .module_id
+        .as_deref()
+        .or(contract.module_id.as_deref())
         .ok_or_else(|| anyhow::anyhow!("no module bound to session or contract"))?;
-    let graph = engine.db.load_module_graph(mid).await?
+    let graph = engine
+        .db
+        .load_module_graph(mid)
+        .await?
         .ok_or_else(|| anyhow::anyhow!("module graph not loaded: {mid}"))?;
     let intent = crate::scene_policy::find_scene_intent(&graph, current_scene_id, intent_id)
-        .or_else(|| graph.scenes.iter().flat_map(|s| &s.scene_mechanics).find(|i| i.intent_id == intent_id))
+        .or_else(|| {
+            graph
+                .scenes
+                .iter()
+                .flat_map(|s| &s.scene_mechanics)
+                .find(|i| i.intent_id == intent_id)
+        })
         .ok_or_else(|| anyhow::anyhow!("scene mechanic not found in module graph: {intent_id}"))?
         .clone();
     crate::scene_policy::apply_effect_policy(engine, request, &intent, success, ledger).await
@@ -127,31 +183,93 @@ async fn locate_and_apply(
 pub(crate) mod fixtures {
     use chrono::Utc;
     use serde_json::json;
-    use trpg_model::{ActorKind, ActorRef, CheckContract, CheckResultRecord, CheckStakes, CheckTargetModel, DiceRollRecord, OppositionModel, RollAuthority, RollDisclosurePolicy, RollVisibility, RulingConfidence, RulingStatus};
+    use trpg_model::{
+        ActorKind, ActorRef, CheckContract, CheckResultRecord, CheckStakes, CheckTargetModel,
+        DiceRollRecord, OppositionModel, RollAuthority, RollDisclosurePolicy, RollVisibility,
+        RulingConfidence, RulingStatus,
+    };
 
     pub(crate) fn gate_contract(check_id: &str) -> CheckContract {
         CheckContract {
-            check_id: check_id.into(), session_id: "s".into(), turn_id: "t".into(), ruleset_id: "rs".into(), module_id: None,
-            initiator: ActorRef { actor_id: "pc.current".into(), actor_kind: ActorKind::PlayerCharacter, display_name: Some("PC".into()) },
-            target_actor: None, opposition: OppositionModel::NoMechanicalOpposition,
-            action_summary: "climb".into(), intent_kind: "athletics".into(), check_label: "Climb".into(),
-            dice_expression: "1d100".into(), modifiers: vec![],
-            target: CheckTargetModel::StaticNumber { value: 50, label: "skill".into() },
-            tested_parameter: None, opponent_tested_parameter: None, actor_snapshot_ids: vec![], source_refs: vec![], learned_packet_ids: vec![],
-            roll_visibility: RollVisibility::PublicGmRoll, roll_authority: RollAuthority::System,
+            check_id: check_id.into(),
+            session_id: "s".into(),
+            turn_id: "t".into(),
+            ruleset_id: "rs".into(),
+            module_id: None,
+            initiator: ActorRef {
+                actor_id: "pc.current".into(),
+                actor_kind: ActorKind::PlayerCharacter,
+                display_name: Some("PC".into()),
+            },
+            target_actor: None,
+            opposition: OppositionModel::NoMechanicalOpposition,
+            action_summary: "climb".into(),
+            intent_kind: "athletics".into(),
+            check_label: "Climb".into(),
+            dice_expression: "1d100".into(),
+            modifiers: vec![],
+            target: CheckTargetModel::StaticNumber {
+                value: 50,
+                label: "skill".into(),
+            },
+            tested_parameter: None,
+            opponent_tested_parameter: None,
+            actor_snapshot_ids: vec![],
+            source_refs: vec![],
+            learned_packet_ids: vec![],
+            roll_visibility: RollVisibility::PublicGmRoll,
+            roll_authority: RollAuthority::System,
             disclosure: RollDisclosurePolicy::for_visibility(RollVisibility::PublicGmRoll),
-            stakes: CheckStakes { before_roll_public: "risky".into(), success_public: "ok".into(), failure_public: "bad".into(), critical_public: None, fumble_public: None, success_patches_allowed: vec![], failure_patches_allowed: vec![], irreversible: false },
-            confidence: RulingConfidence::High, ruling_status: RulingStatus::SourceBacked, advice_refs: vec![], expires_at_turn: Some("t".into()),
+            stakes: CheckStakes {
+                before_roll_public: "risky".into(),
+                success_public: "ok".into(),
+                failure_public: "bad".into(),
+                critical_public: None,
+                fumble_public: None,
+                success_patches_allowed: vec![],
+                failure_patches_allowed: vec![],
+                irreversible: false,
+            },
+            confidence: RulingConfidence::High,
+            ruling_status: RulingStatus::SourceBacked,
+            advice_refs: vec![],
+            expires_at_turn: Some("t".into()),
         }
     }
 
     pub(crate) fn gate_result(check_id: &str) -> CheckResultRecord {
-        let roll = DiceRollRecord { roll_id: format!("roll_{check_id}"), session_id: "s".to_string(), turn_id: "t".to_string(), check_id: Some(check_id.to_string()), roller_kind: ActorKind::PlayerCharacter, roller_id: Some("pc.current".to_string()), visibility: RollVisibility::PublicGmRoll, expression: "1d100".to_string(), result: json!({"total": 27}), seed_commitment: "seed".to_string(), revealed_at: None, created_at: Utc::now() };
-        CheckResultRecord { check_id: check_id.to_string(), roll, outcome: json!({"success": true}), committed_patches: vec![], created_at: Utc::now() }
+        let roll = DiceRollRecord {
+            roll_id: format!("roll_{check_id}"),
+            session_id: "s".to_string(),
+            turn_id: "t".to_string(),
+            check_id: Some(check_id.to_string()),
+            roller_kind: ActorKind::PlayerCharacter,
+            roller_id: Some("pc.current".to_string()),
+            visibility: RollVisibility::PublicGmRoll,
+            expression: "1d100".to_string(),
+            result: json!({"total": 27}),
+            seed_commitment: "seed".to_string(),
+            revealed_at: None,
+            created_at: Utc::now(),
+        };
+        CheckResultRecord {
+            check_id: check_id.to_string(),
+            roll,
+            outcome: json!({"success": true}),
+            committed_patches: vec![],
+            created_at: Utc::now(),
+        }
     }
 
     pub(crate) fn gate_request(module_id: Option<&str>) -> trpg_model::ContextRequest {
-        trpg_model::ContextRequest { ruleset_id: "rs".to_string(), module_id: module_id.map(str::to_string), session_id: "s".to_string(), turn_id: "t".to_string(), viewer: trpg_model::VisibilityProfile::gm(), token_budget: trpg_model::TokenBudget::default() }
+        trpg_model::ContextRequest {
+            ruleset_id: "rs".to_string(),
+            module_id: module_id.map(str::to_string),
+            session_id: "s".to_string(),
+            turn_id: "t".to_string(),
+            viewer: trpg_model::VisibilityProfile::gm(),
+            token_budget: trpg_model::TokenBudget::default(),
+        }
     }
 }
 
@@ -165,7 +283,9 @@ mod tests {
     use trpg_db::Db;
 
     fn engine() -> RuntimeEngine {
-        let pool = PgPoolOptions::new().connect_lazy("postgres://chatrpg:chatrpg@localhost:54347/chatrpg").expect("lazy pool");
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://chatrpg:chatrpg@localhost:54347/chatrpg")
+            .expect("lazy pool");
         RuntimeEngine::new(Db { pool })
     }
 
@@ -175,12 +295,30 @@ mod tests {
         // 产物入账 + gate 事实入通道。
         let called = Arc::new(Mutex::new(false));
         let flag = called.clone();
-        let resolver: GateResolverFn = Arc::new(move |input| { assert_eq!(input, "roll"); *flag.lock().unwrap() = true; Some(Ok((gate_contract("check_gate"), gate_result("check_gate")))) });
+        let resolver: GateResolverFn = Arc::new(move |input| {
+            assert_eq!(input, "roll");
+            *flag.lock().unwrap() = true;
+            Some(Ok((gate_contract("check_gate"), gate_result("check_gate"))))
+        });
         let (mut ledger, mut facts) = (TurnLedger::new(), Vec::new());
-        resolve_pending_gate(&engine(), Some(&resolver), &gate_request(None), None, "roll", &mut ledger, &mut facts).await;
-        assert!(*called.lock().unwrap(), "gate resolution path was not taken for bare roll reply");
+        resolve_pending_gate(
+            &engine(),
+            Some(&resolver),
+            &gate_request(None),
+            None,
+            "roll",
+            &mut ledger,
+            &mut facts,
+        )
+        .await;
+        assert!(
+            *called.lock().unwrap(),
+            "gate resolution path was not taken for bare roll reply"
+        );
         assert_eq!(ledger.snapshot().check_results.len(), 1);
-        assert!(facts.iter().any(|f| f.contains("Resolved pending check check_gate")));
+        assert!(facts
+            .iter()
+            .any(|f| f.contains("Resolved pending check check_gate")));
     }
 
     #[tokio::test]
@@ -188,9 +326,21 @@ mod tests {
         // 守卫另一侧：普通叙事输入既非骰值也非代掷请求 ⇒ 结算路径不进入。
         let called = Arc::new(Mutex::new(false));
         let flag = called.clone();
-        let resolver: GateResolverFn = Arc::new(move |_| { *flag.lock().unwrap() = true; None });
+        let resolver: GateResolverFn = Arc::new(move |_| {
+            *flag.lock().unwrap() = true;
+            None
+        });
         let (mut ledger, mut facts) = (TurnLedger::new(), Vec::new());
-        resolve_pending_gate(&engine(), Some(&resolver), &gate_request(None), None, "我推开加油站的门走进去。", &mut ledger, &mut facts).await;
+        resolve_pending_gate(
+            &engine(),
+            Some(&resolver),
+            &gate_request(None),
+            None,
+            "我推开加油站的门走进去。",
+            &mut ledger,
+            &mut facts,
+        )
+        .await;
         assert!(!*called.lock().unwrap());
         assert!(facts.is_empty());
     }
@@ -198,15 +348,23 @@ mod tests {
     // C7 纯函数面：盖章解析是 stamp_scene_intent 的逆操作。
     #[test]
     fn scene_mechanic_ref_recovers_stamp() {
-        let refs = vec!["gm_agent.roll_check".to_string(), "scene_mechanic:cut_cable".to_string()];
+        let refs = vec![
+            "gm_agent.roll_check".to_string(),
+            "scene_mechanic:cut_cable".to_string(),
+        ];
         assert_eq!(scene_mechanic_ref(&refs), Some("cut_cable"));
-        assert_eq!(scene_mechanic_ref(&["gm_agent.roll_check".to_string()]), None);
+        assert_eq!(
+            scene_mechanic_ref(&["gm_agent.roll_check".to_string()]),
+            None
+        );
     }
 
     fn stamped_resolver(outcome: serde_json::Value) -> GateResolverFn {
         Arc::new(move |_| {
             let mut contract = gate_contract("check_gate");
-            contract.advice_refs.push("scene_mechanic:cut_cable".to_string());
+            contract
+                .advice_refs
+                .push("scene_mechanic:cut_cable".to_string());
             let mut result = gate_result("check_gate");
             result.outcome = outcome.clone();
             Some(Ok((contract, result)))
@@ -219,19 +377,47 @@ mod tests {
         // 执行失败折成可观测 [scene_policy] 事实（fail-closed 不静默、不炸回合）。
         let resolver = stamped_resolver(json!({"success": true}));
         let (mut ledger, mut facts) = (TurnLedger::new(), Vec::new());
-        resolve_pending_gate(&engine(), Some(&resolver), &gate_request(None), None, "roll", &mut ledger, &mut facts).await;
-        let fact = facts.iter().find(|f| f.contains("[scene_policy]")).expect("stamped contract must surface a scene_policy fact after settlement");
-        assert!(fact.contains("cut_cable"), "fact must name the intent: {fact}");
+        resolve_pending_gate(
+            &engine(),
+            Some(&resolver),
+            &gate_request(None),
+            None,
+            "roll",
+            &mut ledger,
+            &mut facts,
+        )
+        .await;
+        let fact = facts
+            .iter()
+            .find(|f| f.contains("[scene_policy]"))
+            .expect("stamped contract must surface a scene_policy fact after settlement");
+        assert!(
+            fact.contains("cut_cable"),
+            "fact must name the intent: {fact}"
+        );
     }
 
     #[tokio::test]
     async fn gate_settlement_without_stamp_adds_no_scene_policy_fact() {
         // 无盖章的普通 gate：结算照旧，绝不多出 scene_policy 动作。
-        let resolver: GateResolverFn = Arc::new(|_| Some(Ok((gate_contract("check_gate"), gate_result("check_gate")))));
+        let resolver: GateResolverFn =
+            Arc::new(|_| Some(Ok((gate_contract("check_gate"), gate_result("check_gate")))));
         let (mut ledger, mut facts) = (TurnLedger::new(), Vec::new());
-        resolve_pending_gate(&engine(), Some(&resolver), &gate_request(None), None, "roll", &mut ledger, &mut facts).await;
+        resolve_pending_gate(
+            &engine(),
+            Some(&resolver),
+            &gate_request(None),
+            None,
+            "roll",
+            &mut ledger,
+            &mut facts,
+        )
+        .await;
         assert!(facts.iter().any(|f| f.contains("Resolved pending check")));
-        assert!(!facts.iter().any(|f| f.contains("[scene_policy]")), "unstamped gate must not trigger scene policy: {facts:?}");
+        assert!(
+            !facts.iter().any(|f| f.contains("[scene_policy]")),
+            "unstamped gate must not trigger scene policy: {facts:?}"
+        );
     }
 
     #[tokio::test]
@@ -240,8 +426,23 @@ mod tests {
         //（对齐 run_policy_after_settlement 的同款守卫）。
         let resolver = stamped_resolver(json!({}));
         let (mut ledger, mut facts) = (TurnLedger::new(), Vec::new());
-        resolve_pending_gate(&engine(), Some(&resolver), &gate_request(None), None, "roll", &mut ledger, &mut facts).await;
-        let fact = facts.iter().find(|f| f.contains("[scene_policy]")).expect("skip must still be observable");
-        assert!(fact.contains("no success"), "skip fact must state the reason: {fact}");
+        resolve_pending_gate(
+            &engine(),
+            Some(&resolver),
+            &gate_request(None),
+            None,
+            "roll",
+            &mut ledger,
+            &mut facts,
+        )
+        .await;
+        let fact = facts
+            .iter()
+            .find(|f| f.contains("[scene_policy]"))
+            .expect("skip must still be observable");
+        assert!(
+            fact.contains("no success"),
+            "skip fact must state the reason: {fact}"
+        );
     }
 }

@@ -166,7 +166,10 @@ mod tests {
         let red = m.redact("他其实是连环杀手，真名莫里亚蒂教授。");
         assert!(!red.contains("连环杀手"), "secret_term 必被抹: {red}");
         assert!(!red.contains("莫里亚蒂教授"), "secret_term 必被抹: {red}");
-        assert!(red.contains(SPOILER_REDACTION_PLACEHOLDER), "应留占位符: {red}");
+        assert!(
+            red.contains(SPOILER_REDACTION_PLACEHOLDER),
+            "应留占位符: {red}"
+        );
         // 非剧透内容保留（别太严：只动标了的词）。
         assert!(red.contains("他其实是"), "非剧透文本保留: {red}");
     }
@@ -178,7 +181,11 @@ mod tests {
             ..Default::default()
         };
         let text = "他是个普通的管家。";
-        assert_eq!(m.redact(text), text, "无 secret_terms → 原样（不裁可玩内容）");
+        assert_eq!(
+            m.redact(text),
+            text,
+            "无 secret_terms → 原样（不裁可玩内容）"
+        );
     }
 
     #[test]
@@ -197,7 +204,11 @@ mod tests {
             public_aliases: vec!["  ".into(), "管家詹姆斯".into()],
             ..Default::default()
         };
-        assert_eq!(with_alias.safe_name("莫里亚蒂"), "管家詹姆斯", "首个非空别名优先");
+        assert_eq!(
+            with_alias.safe_name("莫里亚蒂"),
+            "管家詹姆斯",
+            "首个非空别名优先"
+        );
         let no_alias = SpoilerMeta {
             secret_terms: vec!["凶手".into()],
             ..Default::default()

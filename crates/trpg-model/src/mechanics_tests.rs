@@ -81,12 +81,22 @@ fn mechanics_catalog_round_trips() {
     assert_eq!(e.name, "Sanity check");
     assert_eq!(e.kind, MechanicKind::SubsystemProcedure);
     assert_eq!(e.tested_parameter.as_deref(), Some("sanity"));
-    assert_eq!(e.procedure.len(), 4, "all 4 structured procedure forms survive");
+    assert_eq!(
+        e.procedure.len(),
+        4,
+        "all 4 structured procedure forms survive"
+    );
     assert_eq!(e.hooks.len(), 2, "hooks incl. Calendar survive");
     assert_eq!(e.followup_links.len(), 1);
     assert_eq!(e.followup_links[0].procedure_id, "coc.temporary_insanity");
-    assert_eq!(e.passive_projection.as_deref(), Some("信用评级 {value}：{band}"));
-    assert_eq!(e.locked_until.as_deref(), Some("after the first bout of madness"));
+    assert_eq!(
+        e.passive_projection.as_deref(),
+        Some("信用评级 {value}：{band}")
+    );
+    assert_eq!(
+        e.locked_until.as_deref(),
+        Some("after the first bout of madness")
+    );
     assert_eq!(e.source_refs.len(), 1);
     assert_eq!(e.source_refs[0].page, Some(155));
 }
@@ -100,7 +110,11 @@ fn mechanic_kind_other_fallback() {
     assert_eq!(k, MechanicKind::SkillCheck);
     let e: MechanicEntry =
         serde_json::from_value(json!({"id": "x", "name": "X"})).expect("kind field omitted");
-    assert_eq!(e.kind, MechanicKind::Other(String::new()), "missing kind takes default");
+    assert_eq!(
+        e.kind,
+        MechanicKind::Other(String::new()),
+        "missing kind takes default"
+    );
 }
 
 #[test]
@@ -113,7 +127,10 @@ fn procedure_step_unknown_shape_preserved() {
         other => panic!("expected ProcedureStep::Other, got {other:?}"),
     }
     let back = serde_json::to_value(&step).expect("serialize downgraded step");
-    assert_eq!(back, raw, "downgraded step round-trips without losing a byte");
+    assert_eq!(
+        back, raw,
+        "downgraded step round-trips without losing a byte"
+    );
 }
 
 #[test]
@@ -126,7 +143,10 @@ fn followup_condition_other_preserved() {
         other => panic!("expected FollowupCondition::Other, got {other:?}"),
     }
     let back = serde_json::to_value(&cond).expect("serialize downgraded condition");
-    assert_eq!(back, raw, "downgraded condition round-trips without losing a byte");
+    assert_eq!(
+        back, raw,
+        "downgraded condition round-trips without losing a byte"
+    );
 }
 
 #[test]
@@ -181,13 +201,28 @@ fn granularity_seconds_units() {
 
 #[test]
 fn expressiveness_tier_priority() {
-    let mut e = MechanicEntry { id: "m".into(), name: "M".into(), ..Default::default() };
-    e.procedure = vec![ProcedureStep::Gate { condition: "x".into(), note: None }];
+    let mut e = MechanicEntry {
+        id: "m".into(),
+        name: "M".into(),
+        ..Default::default()
+    };
+    e.procedure = vec![ProcedureStep::Gate {
+        condition: "x".into(),
+        note: None,
+    }];
     e.hooks = vec![EngineHook::TurnStart];
     e.passive_projection = Some("p".into());
-    assert_eq!(expressiveness_tier(&e), ExpressivenessTier::Procedure, "procedure wins first");
+    assert_eq!(
+        expressiveness_tier(&e),
+        ExpressivenessTier::Procedure,
+        "procedure wins first"
+    );
     e.procedure = vec![];
-    assert_eq!(expressiveness_tier(&e), ExpressivenessTier::Hook, "then hooks");
+    assert_eq!(
+        expressiveness_tier(&e),
+        ExpressivenessTier::Hook,
+        "then hooks"
+    );
     e.hooks = vec![];
     assert_eq!(
         expressiveness_tier(&e),
@@ -195,7 +230,11 @@ fn expressiveness_tier_priority() {
         "then passive_projection alone"
     );
     e.passive_projection = None;
-    assert_eq!(expressiveness_tier(&e), ExpressivenessTier::Semantic, "all empty -> Semantic");
+    assert_eq!(
+        expressiveness_tier(&e),
+        ExpressivenessTier::Semantic,
+        "all empty -> Semantic"
+    );
 }
 
 #[test]
@@ -210,7 +249,10 @@ fn track_semantic_line_renders_threshold_zone() {
     });
     let line = track_semantic_line(&track, 38).expect("semantic line for a track with thresholds");
     assert!(line.contains("sanity"), "line names the track: {line}");
-    assert!(line.contains("38"), "line carries the current value: {line}");
+    assert!(
+        line.contains("38"),
+        "line carries the current value: {line}"
+    );
     assert!(
         line.contains("永久疯狂") || line.contains("临时疯狂"),
         "line carries locatable threshold semantics: {line}"

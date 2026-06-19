@@ -1,0 +1,116 @@
+{
+  "identity": {
+    "scenario_id": "JRNY-HOME-02-odessa-social-memory",
+    "scenario_version": "1",
+    "evidence_schema_version": "tc-jrny-02.evidence.v1"
+  },
+  "recorded_mode": "live",
+  "_provenance_note": "Seeded live-shaped cassette (recorded_mode=live) mirroring the accepted deterministic shape, like fixtures/JRNY-HOME-01-athena-knowledge-reveal.replay.json. The replay mechanism (identity + provenance + no-live-fallback + same NPC-social evidence schema) is real and tested; replace this with a genuine recording via `--mode live --record-fixture` once DB+provider exist. No accepted live cassette has been recorded yet because TRPG_LLM_API_KEY is unset.",
+  "turns": [
+    {
+      "user_input": "我顺着现场的线索找到那位本地技术中间人，先礼貌地打个招呼，问她现在方不方便聊两句。",
+      "count_delta": {},
+      "newest_contest_row": null,
+      "player_visible_body": "你找到那位技术中间人。她靠在工作台边，警惕地打量你，语气不冷不热：“说吧，找我什么事。”她显然认得这一带的门道，但还没打算多说。",
+      "npc_social": {
+        "npc_id": "npc.fixer_contact",
+        "profile_present": true,
+        "behavior_plan_present": true,
+        "npc_known_fact_ids": ["homecoming.fixer.safe_shutdown_sequence"],
+        "player_known_fact_ids": [],
+        "disclosure_changed": false,
+        "relationship_reload": false,
+        "npc_knowledge_reload": false
+      }
+    },
+    {
+      "user_input": "我把我看到的现场情况告诉她，问她认不认得这台设备，以及她愿意告诉我多少。",
+      "count_delta": {},
+      "newest_contest_row": null,
+      "player_visible_body": "她打量着那台设备，慢条斯理地说：“这东西我见过，处理它有讲究。不过有些门道，得看你是什么人，我才肯细说。”她没有把话挑明，只是把价码摆在那里。",
+      "npc_social": {
+        "npc_id": "npc.fixer_contact",
+        "profile_present": true,
+        "behavior_plan_present": true,
+        "npc_known_fact_ids": ["homecoming.fixer.safe_shutdown_sequence"],
+        "player_known_fact_ids": [],
+        "disclosure_changed": false,
+        "relationship_reload": false,
+        "npc_knowledge_reload": false
+      }
+    },
+    {
+      "user_input": "我先不逼她。我把现场细节和我愿意帮忙的条件说清楚，答应先帮她处理眼前的风险，问她需要我做什么。",
+      "count_delta": {
+        "npc_relationships": 1,
+        "domain_events": 1
+      },
+      "newest_contest_row": null,
+      "player_visible_body": "你把条件讲清楚，答应先替她挡住眼前的麻烦。她神色松动了一些，点了点头：“行，算你识相。这份人情我记下了。”",
+      "npc_social": {
+        "npc_id": "npc.fixer_contact",
+        "profile_present": true,
+        "behavior_plan_present": true,
+        "npc_known_fact_ids": ["homecoming.fixer.safe_shutdown_sequence"],
+        "player_known_fact_ids": [],
+        "relationship_delta": {
+          "proposed": true,
+          "committed": true,
+          "evidence_event_ids": ["evt_player_help_offer_t3"],
+          "observed_this_turn": true,
+          "stance": "cordial"
+        },
+        "disclosure_changed": false,
+        "relationship_reload": false,
+        "npc_knowledge_reload": false
+      }
+    },
+    {
+      "user_input": "我帮她稳住了眼前的麻烦，然后再问一次：现在你愿意具体告诉我什么？",
+      "count_delta": {
+        "domain_events": 1,
+        "knowledge_edges": 1
+      },
+      "newest_contest_row": null,
+      "player_visible_body": "她态度松了下来：“既然你帮了忙，我就直说——关键在那套安全关机序列，先接旁路接口，别硬来，否则会出人命。”这一次她讲得很具体，跟之前的含糊完全不同。",
+      "npc_social": {
+        "npc_id": "npc.fixer_contact",
+        "profile_present": true,
+        "behavior_plan_present": true,
+        "npc_known_fact_ids": ["homecoming.fixer.safe_shutdown_sequence"],
+        "player_known_fact_ids": ["homecoming.fixer.safe_shutdown_sequence"],
+        "relationship_delta": {
+          "proposed": true,
+          "committed": true,
+          "evidence_event_ids": ["evt_player_help_offer_t3"],
+          "stance": "cordial"
+        },
+        "disclosure_changed": true,
+        "relationship_reload": false,
+        "npc_knowledge_reload": false
+      }
+    },
+    {
+      "user_input": "我们上次谈到这里。她现在对我是什么态度，还愿意继续谈吗？",
+      "count_delta": {},
+      "newest_contest_row": null,
+      "player_visible_body": "她一眼认出你：“上次那事之后，我记着你的人情。还想接着聊就坐下——我答应过的，自然算数。”",
+      "npc_social": {
+        "npc_id": "npc.fixer_contact",
+        "profile_present": true,
+        "behavior_plan_present": true,
+        "npc_known_fact_ids": ["homecoming.fixer.safe_shutdown_sequence"],
+        "player_known_fact_ids": ["homecoming.fixer.safe_shutdown_sequence"],
+        "relationship_delta": {
+          "proposed": true,
+          "committed": true,
+          "evidence_event_ids": ["evt_player_help_offer_t3"],
+          "stance": "cordial"
+        },
+        "disclosure_changed": false,
+        "relationship_reload": true,
+        "npc_knowledge_reload": true
+      }
+    }
+  ]
+}

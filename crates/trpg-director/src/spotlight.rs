@@ -37,12 +37,18 @@ pub(crate) fn build_spotlight(input: DirectorInput<'_>) -> Vec<SpotlightState> {
     resolve_roster(input)
         .into_iter()
         .map(|p| {
-            let prior = input.prior_spotlights.iter().find(|s| s.player_id == p.player_id);
+            let prior = input
+                .prior_spotlights
+                .iter()
+                .find(|s| s.player_id == p.player_id);
             let prior_count = prior.map(|s| s.spotlight_count).unwrap_or(0);
             let (spotlight_count, last_spotlight_turn) = if p.acted_this_turn {
                 (prior_count.saturating_add(1), Some(turn_id.clone()))
             } else {
-                (prior_count, prior.and_then(|s| s.last_spotlight_turn.clone()))
+                (
+                    prior_count,
+                    prior.and_then(|s| s.last_spotlight_turn.clone()),
+                )
             };
             // Fresh character colour wins; otherwise carry whatever we knew before
             // so it persists across turns even when not re-supplied this turn.
@@ -51,16 +57,28 @@ pub(crate) fn build_spotlight(input: DirectorInput<'_>) -> Vec<SpotlightState> {
                 character_id: p.character_id,
                 last_spotlight_turn,
                 spotlight_count,
-                character_strengths: pick_vec(p.character_strengths, prior.map(|s| &s.character_strengths)),
-                preferred_playstyle: pick_vec(p.preferred_playstyle, prior.map(|s| &s.preferred_playstyle)),
-                pending_personal_hook: p.pending_personal_hook.or_else(|| prior.and_then(|s| s.pending_personal_hook.clone())),
+                character_strengths: pick_vec(
+                    p.character_strengths,
+                    prior.map(|s| &s.character_strengths),
+                ),
+                preferred_playstyle: pick_vec(
+                    p.preferred_playstyle,
+                    prior.map(|s| &s.preferred_playstyle),
+                ),
+                pending_personal_hook: p
+                    .pending_personal_hook
+                    .or_else(|| prior.and_then(|s| s.pending_personal_hook.clone())),
             }
         })
         .collect()
 }
 
 fn pick_vec(fresh: Vec<String>, prior: Option<&Vec<String>>) -> Vec<String> {
-    if !fresh.is_empty() { fresh } else { prior.cloned().unwrap_or_default() }
+    if !fresh.is_empty() {
+        fresh
+    } else {
+        prior.cloned().unwrap_or_default()
+    }
 }
 
 /// Resolve the real player roster. Explicit participants take precedence; otherwise
@@ -87,7 +105,9 @@ fn resolve_roster(input: DirectorInput<'_>) -> Vec<SpotlightParticipant> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use trpg_model::{CompiledContext, ContextRequest, RuntimeState, TokenBudget, VisibilityProfile};
+    use trpg_model::{
+        CompiledContext, ContextRequest, RuntimeState, TokenBudget, VisibilityProfile,
+    };
 
     fn req(turn: &str) -> ContextRequest {
         ContextRequest {
@@ -99,8 +119,15 @@ mod tests {
             token_budget: TokenBudget::default(),
         }
     }
-    fn state() -> RuntimeState { RuntimeState { ruleset_id: "coc".into(), ..Default::default() } }
-    fn compiled() -> CompiledContext { CompiledContext::default() }
+    fn state() -> RuntimeState {
+        RuntimeState {
+            ruleset_id: "coc".into(),
+            ..Default::default()
+        }
+    }
+    fn compiled() -> CompiledContext {
+        CompiledContext::default()
+    }
 
     fn input<'a>(
         r: &'a ContextRequest,
@@ -144,26 +171,61 @@ mod tests {
             },
         ];
         let prior = vec![
-            SpotlightState { player_id: "player.alice".into(), character_id: Some("pc.alice".into()), last_spotlight_turn: Some("t0".into()), spotlight_count: 2, ..Default::default() },
-            SpotlightState { player_id: "player.bob".into(), character_id: Some("pc.bob".into()), last_spotlight_turn: Some("t0".into()), spotlight_count: 1, ..Default::default() },
+            SpotlightState {
+                player_id: "player.alice".into(),
+                character_id: Some("pc.alice".into()),
+                last_spotlight_turn: Some("t0".into()),
+                spotlight_count: 2,
+                ..Default::default()
+            },
+            SpotlightState {
+                player_id: "player.bob".into(),
+                character_id: Some("pc.bob".into()),
+                last_spotlight_turn: Some("t0".into()),
+                spotlight_count: 1,
+                ..Default::default()
+            },
         ];
         let out = build_spotlight(input(&r, &s, &c, &parts, &prior));
 
         assert_eq!(out.len(), 2, "one SpotlightState per real player");
-        assert!(out.iter().all(|x| x.player_id != "current_player"), "no placeholder player_id literal");
-        assert!(out.iter().all(|x| x.character_id.as_deref() != Some("pc.current")), "no placeholder character_id literal");
+        assert!(
+            out.iter().all(|x| x.player_id != "current_player"),
+            "no placeholder player_id literal"
+        );
+        assert!(
+            out.iter()
+                .all(|x| x.character_id.as_deref() != Some("pc.current")),
+            "no placeholder character_id literal"
+        );
 
-        let alice = out.iter().find(|x| x.player_id == "player.alice").expect("alice present");
+        let alice = out
+            .iter()
+            .find(|x| x.player_id == "player.alice")
+            .expect("alice present");
         assert_eq!(alice.character_id.as_deref(), Some("pc.alice"));
         assert_eq!(alice.spotlight_count, 3, "acted this turn → prior 2 + 1");
         assert_eq!(alice.last_spotlight_turn.as_deref(), Some("t1"));
         assert_eq!(alice.character_strengths, vec!["medicine".to_string()]);
         assert_eq!(alice.preferred_playstyle, vec!["cautious".to_string()]);
-        assert_eq!(alice.pending_personal_hook.as_deref(), Some("find her brother"));
+        assert_eq!(
+            alice.pending_personal_hook.as_deref(),
+            Some("find her brother")
+        );
 
-        let bob = out.iter().find(|x| x.player_id == "player.bob").expect("bob present");
-        assert_eq!(bob.spotlight_count, 1, "did not act → count carried forward");
-        assert_eq!(bob.last_spotlight_turn.as_deref(), Some("t0"), "carried prior turn, not bumped");
+        let bob = out
+            .iter()
+            .find(|x| x.player_id == "player.bob")
+            .expect("bob present");
+        assert_eq!(
+            bob.spotlight_count, 1,
+            "did not act → count carried forward"
+        );
+        assert_eq!(
+            bob.last_spotlight_turn.as_deref(),
+            Some("t0"),
+            "carried prior turn, not bumped"
+        );
     }
 
     // Solo: no explicit roster → derive a single participant from real viewer ids.
@@ -174,7 +236,11 @@ mod tests {
         let s = state();
         let c = compiled();
         let out = build_spotlight(input(&r, &s, &c, &[], &[]));
-        assert_eq!(out.len(), 1, "solo session still produces a valid spotlight");
+        assert_eq!(
+            out.len(),
+            1,
+            "solo session still produces a valid spotlight"
+        );
         assert_eq!(out[0].player_id, "player.solo");
         assert_eq!(out[0].character_id.as_deref(), Some("pc.solo"));
         assert_ne!(out[0].player_id, "current_player");
@@ -188,7 +254,12 @@ mod tests {
         let r = req("t2");
         let s = state();
         let c = compiled();
-        let parts = vec![SpotlightParticipant { player_id: "p1".into(), character_id: Some("pc1".into()), acted_this_turn: true, ..Default::default() }];
+        let parts = vec![SpotlightParticipant {
+            player_id: "p1".into(),
+            character_id: Some("pc1".into()),
+            acted_this_turn: true,
+            ..Default::default()
+        }];
         let prior = vec![SpotlightState {
             player_id: "p1".into(),
             character_id: Some("pc1".into()),
@@ -200,7 +271,11 @@ mod tests {
         }];
         let out = build_spotlight(input(&r, &s, &c, &parts, &prior));
         assert_eq!(out[0].spotlight_count, 2);
-        assert_eq!(out[0].character_strengths, vec!["stealth".to_string()], "carried from prior state");
+        assert_eq!(
+            out[0].character_strengths,
+            vec!["stealth".to_string()],
+            "carried from prior state"
+        );
         assert_eq!(out[0].preferred_playstyle, vec!["aggressive".to_string()]);
         assert_eq!(out[0].pending_personal_hook.as_deref(), Some("old debt"));
     }
@@ -212,6 +287,9 @@ mod tests {
         let s = state();
         let c = compiled();
         let out = build_spotlight(input(&r, &s, &c, &[], &[]));
-        assert!(out.is_empty(), "no real identity → no spotlight, never a 'current_player' placeholder");
+        assert!(
+            out.is_empty(),
+            "no real identity → no spotlight, never a 'current_player' placeholder"
+        );
     }
 }

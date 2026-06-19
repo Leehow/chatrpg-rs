@@ -49,8 +49,7 @@ fn plugins_fixture(suffix: &str) -> std::path::PathBuf {
 
 #[test]
 fn parse_frontmatter_strips_block_and_reads_applies_when() {
-    let (applies, body) =
-        parse_plugin_frontmatter("---\napplies_when: module\n---\nhello\nworld");
+    let (applies, body) = parse_plugin_frontmatter("---\napplies_when: module\n---\nhello\nworld");
     assert_eq!(applies, AppliesWhen::AnyModule);
     assert_eq!(body, "hello\nworld");
 }
@@ -103,7 +102,10 @@ fn load_plugins_non_module_session_excludes_module_scoped() {
     // module（任意模组）/ module:blood_highway / off 全不命中。
     let dir = plugins_fixture("non_module");
     let out = load_plugins(&dir, "call_of_cthulhu_7e", None).unwrap();
-    assert_eq!(out, "ALWAYS-BODY\n\n---\n\nRULESET-COC-BODY\n\n---\n\nNO-FM-BODY");
+    assert_eq!(
+        out,
+        "ALWAYS-BODY\n\n---\n\nRULESET-COC-BODY\n\n---\n\nNO-FM-BODY"
+    );
     assert!(!out.contains("MODULE-BODY"));
     assert!(!out.contains("MODULE-SPECIFIC-BODY"));
     fs::remove_dir_all(dir).ok();
@@ -115,7 +117,10 @@ fn load_plugins_different_ruleset_excludes_ruleset_scoped() {
     // always / module / 无frontmatter 命中。
     let dir = plugins_fixture("other_ruleset");
     let out = load_plugins(&dir, "dnd5e", Some("some_other_module")).unwrap();
-    assert_eq!(out, "ALWAYS-BODY\n\n---\n\nMODULE-BODY\n\n---\n\nNO-FM-BODY");
+    assert_eq!(
+        out,
+        "ALWAYS-BODY\n\n---\n\nMODULE-BODY\n\n---\n\nNO-FM-BODY"
+    );
     assert!(!out.contains("RULESET-COC-BODY"));
     assert!(!out.contains("MODULE-SPECIFIC-BODY"));
     fs::remove_dir_all(dir).ok();
@@ -152,7 +157,8 @@ fn with_plugins_no_match_is_byte_identical_to_gm_skill() {
     let dir = gm_skill_fixture("nomatch");
     let baseline = load_gm_skill(&dir, "call_of_cthulhu_7e").unwrap();
     let with_plugins =
-        load_gm_skill_with_plugins(&dir, "call_of_cthulhu_7e", None, Some("blood_highway")).unwrap();
+        load_gm_skill_with_plugins(&dir, "call_of_cthulhu_7e", None, Some("blood_highway"))
+            .unwrap();
     assert_eq!(
         baseline.as_bytes(),
         with_plugins.as_bytes(),
@@ -176,8 +182,7 @@ fn with_plugins_present_dir_but_no_filter_match_still_byte_identical() {
     .unwrap();
     let baseline = load_gm_skill(&dir, "call_of_cthulhu_7e").unwrap();
     // 非模组、非 dnd5e ⇒ 两条都不命中。
-    let with_plugins =
-        load_gm_skill_with_plugins(&dir, "call_of_cthulhu_7e", None, None).unwrap();
+    let with_plugins = load_gm_skill_with_plugins(&dir, "call_of_cthulhu_7e", None, None).unwrap();
     assert_eq!(baseline.as_bytes(), with_plugins.as_bytes());
     fs::remove_dir_all(dir).ok();
 }
@@ -193,14 +198,25 @@ fn with_plugins_matching_plugin_is_appended() {
     )
     .unwrap();
     // 模组 session ⇒ 命中 module 插件，追加在 gm_skill 之后。
-    let out =
-        load_gm_skill_with_plugins(&dir, "call_of_cthulhu_7e", None, Some("blood_highway")).unwrap();
-    assert!(out.starts_with("BASE-SKILL"), "gm_skill must come first: {out}");
-    assert!(out.contains("ANTI-SPOILER-BODY"), "matching plugin body must be appended");
+    let out = load_gm_skill_with_plugins(&dir, "call_of_cthulhu_7e", None, Some("blood_highway"))
+        .unwrap();
+    assert!(
+        out.starts_with("BASE-SKILL"),
+        "gm_skill must come first: {out}"
+    );
+    assert!(
+        out.contains("ANTI-SPOILER-BODY"),
+        "matching plugin body must be appended"
+    );
     assert!(out.contains("BASE-SKILL\n\n---\n\nANTI-SPOILER-BODY"));
     // 非模组 session ⇒ 不命中 ⇒ 与基线一致。
     let no_match = load_gm_skill_with_plugins(&dir, "call_of_cthulhu_7e", None, None).unwrap();
-    assert_eq!(no_match.as_bytes(), load_gm_skill(&dir, "call_of_cthulhu_7e").unwrap().as_bytes());
+    assert_eq!(
+        no_match.as_bytes(),
+        load_gm_skill(&dir, "call_of_cthulhu_7e")
+            .unwrap()
+            .as_bytes()
+    );
     fs::remove_dir_all(dir).ok();
 }
 

@@ -48,7 +48,8 @@ impl ParameterNeedResolver {
             .await;
 
         // §10.1 LIVE linkage（与 RuntimeEngine::refresh_actor_live_derived 共用单一实现）
-        let _ = chargen::refresh_actor_live_derived_db(&self.db, &need.scopes.session_id, actor_id).await;
+        let _ = chargen::refresh_actor_live_derived_db(&self.db, &need.scopes.session_id, actor_id)
+            .await;
 
         // ensure NPC 参数（等价旧 active_frame_exists || mentions_npc 分支）
         let active_frame_exists = self
@@ -77,7 +78,10 @@ impl ParameterNeedResolver {
         let block = service
             .actor_parameters_context_block(&need.scopes.session_id, world_tick)
             .await?;
-        Ok(NeedOutcome { blocks: vec![block], source_refs: vec![] })
+        Ok(NeedOutcome {
+            blocks: vec![block],
+            source_refs: vec![],
+        })
     }
 }
 
@@ -85,10 +89,24 @@ impl ParameterNeedResolver {
 /// 必须与 lib.rs 中的定义保持一致（关键词集合相同、顺序无关）。
 fn mentions_runtime_npc(input: &str) -> bool {
     let lower = input.to_lowercase();
-    ["npc", "scav", "guard", "守卫", "敌", "无人机", "警察", "帮派", "对方", "他", "她",
-     "drone", "enemy", "opposition"]
-        .iter()
-        .any(|t| lower.contains(t))
+    [
+        "npc",
+        "scav",
+        "guard",
+        "守卫",
+        "敌",
+        "无人机",
+        "警察",
+        "帮派",
+        "对方",
+        "他",
+        "她",
+        "drone",
+        "enemy",
+        "opposition",
+    ]
+    .iter()
+    .any(|t| lower.contains(t))
 }
 
 #[async_trait]

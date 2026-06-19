@@ -15,27 +15,43 @@ struct ScriptClient {
 
 impl ScriptClient {
     fn new(responses: Vec<Value>) -> Self {
-        Self { responses: Mutex::new(responses.into()), seen: Mutex::new(Vec::new()) }
+        Self {
+            responses: Mutex::new(responses.into()),
+            seen: Mutex::new(Vec::new()),
+        }
     }
 }
 
 #[async_trait::async_trait]
 impl LlmClient for ScriptClient {
-    async fn complete_text(&self, _m: Vec<trpg_model::ChatMessage>, _t: f32) -> anyhow::Result<String> {
+    async fn complete_text(
+        &self,
+        _m: Vec<trpg_model::ChatMessage>,
+        _t: f32,
+    ) -> anyhow::Result<String> {
         Ok(String::new())
     }
-    async fn complete_json(&self, _m: Vec<trpg_model::ChatMessage>, _t: f32) -> anyhow::Result<Value> {
+    async fn complete_json(
+        &self,
+        _m: Vec<trpg_model::ChatMessage>,
+        _t: f32,
+    ) -> anyhow::Result<Value> {
         Ok(json!({}))
     }
     async fn stream_chat(
         &self,
         _m: Vec<trpg_model::ChatMessage>,
         _t: f32,
-    ) -> anyhow::Result<std::pin::Pin<Box<dyn futures_core::Stream<Item = anyhow::Result<String>> + Send>>>
-    {
+    ) -> anyhow::Result<
+        std::pin::Pin<Box<dyn futures_core::Stream<Item = anyhow::Result<String>> + Send>>,
+    > {
         anyhow::bail!("unused")
     }
-    async fn complete_with_tools(&self, messages: Vec<Value>, _tools: Vec<Value>) -> anyhow::Result<Value> {
+    async fn complete_with_tools(
+        &self,
+        messages: Vec<Value>,
+        _tools: Vec<Value>,
+    ) -> anyhow::Result<Value> {
         self.seen.lock().unwrap().push(messages);
         let next = self.responses.lock().unwrap().pop_front();
         Ok(next.unwrap_or_else(|| json!({"choices":[{"message":{"content":"done"}}]})))
@@ -100,7 +116,10 @@ async fn submit_two_rounds_merge_by_id() {
         .expect("entry x.a present");
     assert_eq!(a.name, "v2", "later round wins, case-insensitive merge");
     assert!(
-        kernel.mechanics_catalog.iter().any(|e| e.id.eq_ignore_ascii_case("x.b")),
+        kernel
+            .mechanics_catalog
+            .iter()
+            .any(|e| e.id.eq_ignore_ascii_case("x.b")),
         "x.b kept (union)"
     );
 }
@@ -114,7 +133,10 @@ async fn no_submit_keeps_catalog_empty() {
     let gaps = compile_mechanics_catalog(&client, &mut kernel, mech_ctx(&[]), 0).await;
     assert!(kernel.mechanics_catalog.is_empty());
     assert!(!gaps.is_empty());
-    assert!(gaps.iter().any(|g| g.contains("produced nothing")), "got: {gaps:?}");
+    assert!(
+        gaps.iter().any(|g| g.contains("produced nothing")),
+        "got: {gaps:?}"
+    );
     assert_eq!(
         serde_json::to_string(&kernel.resource_tracks).unwrap(),
         before_tracks,
@@ -135,9 +157,16 @@ async fn uncoercible_entry_becomes_gap_not_panic() {
     ]))]);
     let mut kernel = kernel_fixture();
     let gaps = compile_mechanics_catalog(&client, &mut kernel, mech_ctx(&[]), 0).await;
-    assert_eq!(kernel.mechanics_catalog.len(), 1, "valid entry enters the catalog");
+    assert_eq!(
+        kernel.mechanics_catalog.len(),
+        1,
+        "valid entry enters the catalog"
+    );
     assert_eq!(kernel.mechanics_catalog[0].id, "x.good");
-    assert!(gaps.iter().any(|g| g.contains("x.bad")), "garbage entry becomes a gap note: {gaps:?}");
+    assert!(
+        gaps.iter().any(|g| g.contains("x.bad")),
+        "garbage entry becomes a gap note: {gaps:?}"
+    );
 }
 
 #[tokio::test]
@@ -151,10 +180,20 @@ async fn read_layout_without_sidecar_degrades() {
     let seen = client.seen.lock().unwrap();
     let degraded = seen.iter().flatten().any(|m| {
         m.get("role").and_then(Value::as_str) == Some("tool")
-            && m.get("content").and_then(Value::as_str).unwrap_or("").contains("[no layout view available")
+            && m.get("content")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .contains("[no layout view available")
     });
-    assert!(degraded, "read_layout without sidecar returns the degraded hint text");
-    assert_eq!(kernel.mechanics_catalog.len(), 1, "loop continued (not aborted) after the degraded tool result");
+    assert!(
+        degraded,
+        "read_layout without sidecar returns the degraded hint text"
+    );
+    assert_eq!(
+        kernel.mechanics_catalog.len(),
+        1,
+        "loop continued (not aborted) after the degraded tool result"
+    );
 }
 
 /// （A3 集成半边）ReplayClient submit 坏条目 → kernel.validation_report.warnings
@@ -167,11 +206,16 @@ async fn validation_messages_written_to_kernel_report() {
     ]))]);
     let mut kernel = kernel_fixture();
     let _gaps = compile_mechanics_catalog(&client, &mut kernel, mech_ctx(&[]), 0).await;
-    assert_eq!(kernel.mechanics_catalog.len(), 1, "only the good entry enters");
+    assert_eq!(
+        kernel.mechanics_catalog.len(),
+        1,
+        "only the good entry enters"
+    );
     assert_eq!(kernel.mechanics_catalog[0].id, "x.good");
     assert!(
         kernel.validation_report.warnings.iter().any(|w| {
-            w.code == "mechanic_dropped_unknown_parameter" && w.target.as_deref() == Some("x.bad_param")
+            w.code == "mechanic_dropped_unknown_parameter"
+                && w.target.as_deref() == Some("x.bad_param")
         }),
         "warnings: {:?}",
         kernel.validation_report.warnings
@@ -190,17 +234,25 @@ async fn on_outcome_guard_runs_even_without_submissions() {
     })];
     let gaps = compile_mechanics_catalog(&client, &mut kernel, mech_ctx(&[]), 0).await;
     assert!(
-        kernel.resource_tracks[0]["on_outcome"].as_array().unwrap().is_empty(),
+        kernel.resource_tracks[0]["on_outcome"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
         "dead rule dropped: {:?}",
         kernel.resource_tracks
     );
     assert!(
-        kernel.validation_report.warnings.iter().any(|w| w.code == "on_outcome_dropped_unknown_outcome_field"),
+        kernel
+            .validation_report
+            .warnings
+            .iter()
+            .any(|w| w.code == "on_outcome_dropped_unknown_outcome_field"),
         "warnings: {:?}",
         kernel.validation_report.warnings
     );
     assert!(
-        gaps.iter().any(|g| g.contains("on_outcome_dropped_unknown_outcome_field")),
+        gaps.iter()
+            .any(|g| g.contains("on_outcome_dropped_unknown_outcome_field")),
         "echoed as gap note: {gaps:?}"
     );
 }

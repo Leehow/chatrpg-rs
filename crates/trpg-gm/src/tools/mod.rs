@@ -65,8 +65,18 @@ pub struct ToolOutput {
 }
 
 impl ToolOutput {
-    pub fn ok(result: Value) -> Self { Self { result, awaiting_player_roll: None } }
-    pub fn awaiting(result: Value, gate: AwaitingPlayerRoll) -> Self { Self { result, awaiting_player_roll: Some(gate) } }
+    pub fn ok(result: Value) -> Self {
+        Self {
+            result,
+            awaiting_player_roll: None,
+        }
+    }
+    pub fn awaiting(result: Value, gate: AwaitingPlayerRoll) -> Self {
+        Self {
+            result,
+            awaiting_player_roll: Some(gate),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,7 +90,12 @@ pub struct AwaitingPlayerRoll {
 #[async_trait]
 pub trait GmTool: Send + Sync {
     fn spec(&self) -> ToolSpec;
-    async fn call(&self, ctx: &ToolCtx<'_>, ledger: &mut TurnLedger, args: Value) -> Result<ToolOutput>;
+    async fn call(
+        &self,
+        ctx: &ToolCtx<'_>,
+        ledger: &mut TurnLedger,
+        args: Value,
+    ) -> Result<ToolOutput>;
 }
 
 /// 结构化工具错误（spec §5/§7：fail-closed 但 agent 可见可修复）。
@@ -119,12 +134,26 @@ pub struct ToolError {
 }
 
 impl ToolError {
-    pub fn recoverable(code: &str, message: impl Into<String>, hint: Option<String>) -> anyhow::Error {
-        anyhow::Error::new(Self { code: code.to_string(), message: message.into(), recoverable: true, hint })
+    pub fn recoverable(
+        code: &str,
+        message: impl Into<String>,
+        hint: Option<String>,
+    ) -> anyhow::Error {
+        anyhow::Error::new(Self {
+            code: code.to_string(),
+            message: message.into(),
+            recoverable: true,
+            hint,
+        })
     }
 
     pub fn fatal(code: &str, message: impl Into<String>) -> anyhow::Error {
-        anyhow::Error::new(Self { code: code.to_string(), message: message.into(), recoverable: false, hint: None })
+        anyhow::Error::new(Self {
+            code: code.to_string(),
+            message: message.into(),
+            recoverable: false,
+            hint: None,
+        })
     }
 
     /// dispatch 出口：任意 anyhow::Error → `{"error":{...}}` 序列化文本
@@ -133,7 +162,12 @@ impl ToolError {
         let error = if let Some(tool) = err.downcast_ref::<ToolError>() {
             tool.clone()
         } else {
-            ToolError { code: "internal_error".to_string(), message: err.to_string(), recoverable: false, hint: None }
+            ToolError {
+                code: "internal_error".to_string(),
+                message: err.to_string(),
+                recoverable: false,
+                hint: None,
+            }
         };
         serde_json::to_string(&json!({"error": error})).unwrap_or_else(|_| "{\"error\":{\"code\":\"internal_error\",\"message\":\"serialization failed\",\"recoverable\":false}}".to_string())
     }
@@ -173,23 +207,25 @@ impl ToolRegistry {
     /// exit_mode（13→14，任何姿态下均可用 = 基础 14）；Knowledge P0a 尾部追加
     /// reveal_fact（15，显式 GM 揭示 = 基础 15）。
     pub fn standard() -> Self {
-        Self { tools: vec![
-            Box::new(check::RollCheckTool),
-            Box::new(check::RequestPlayerRollTool),
-            Box::new(effect::ApplyEffectTool),
-            Box::new(effect::ChangeTrackTool),
-            Box::new(world::RetrieveRulesTool),
-            Box::new(npc::GetActorTool),
-            Box::new(npc::EnsureNpcParamTool),
-            Box::new(world::NavigateSceneTool),
-            Box::new(world::AdvanceTimeTool),
-            Box::new(world::RememberTool),
-            Box::new(mechanic::LookupMechanicTool),
-            Box::new(mechanic::WaiveObligationTool),
-            Box::new(crate::mode::EnterModeTool),
-            Box::new(crate::mode::ExitModeTool),
-            Box::new(world::RevealFactTool),
-        ] }
+        Self {
+            tools: vec![
+                Box::new(check::RollCheckTool),
+                Box::new(check::RequestPlayerRollTool),
+                Box::new(effect::ApplyEffectTool),
+                Box::new(effect::ChangeTrackTool),
+                Box::new(world::RetrieveRulesTool),
+                Box::new(npc::GetActorTool),
+                Box::new(npc::EnsureNpcParamTool),
+                Box::new(world::NavigateSceneTool),
+                Box::new(world::AdvanceTimeTool),
+                Box::new(world::RememberTool),
+                Box::new(mechanic::LookupMechanicTool),
+                Box::new(mechanic::WaiveObligationTool),
+                Box::new(crate::mode::EnterModeTool),
+                Box::new(crate::mode::ExitModeTool),
+                Box::new(world::RevealFactTool),
+            ],
+        }
     }
 
     /// 三期 §4.3 工具按 mode 组装：基础 15（任何姿态可用）+ manifest.extra_tools
@@ -197,7 +233,9 @@ impl ToolRegistry {
     /// 完全等同（schema 字节回归测试护）。
     pub fn for_mode(data_dir: &Path, mode: Option<&str>) -> Result<Self> {
         let mut registry = Self::standard();
-        let Some(mode) = mode else { return Ok(registry) };
+        let Some(mode) = mode else {
+            return Ok(registry);
+        };
         let manifest = crate::mode::load_mode_manifest(data_dir, mode)?;
         for name in &manifest.extra_tools {
             let tool = extra_tool_by_name(name).ok_or_else(|| anyhow::anyhow!(
@@ -209,7 +247,9 @@ impl ToolRegistry {
     }
 
     /// turn_loop 单测注入脚本化 GmTool 替身用（tools 字段私有，跨模块测试只能经此构造）。
-    pub fn from_tools(tools: Vec<Box<dyn GmTool>>) -> Self { Self { tools } }
+    pub fn from_tools(tools: Vec<Box<dyn GmTool>>) -> Self {
+        Self { tools }
+    }
 
     /// 传给 stream_chat_with_tools 的 function schemas（确定性顺序）。
     pub fn schemas(&self) -> Vec<Value> {
@@ -225,19 +265,47 @@ impl ToolRegistry {
         call: &AggregatedToolCall,
     ) -> ToolDispatchOutcome {
         let Some(tool) = self.tools.iter().find(|t| t.spec().name == call.name) else {
-            let err = ToolError::recoverable("unknown_tool", format!("unknown GM tool: {}", call.name), Some("Use one of the advertised function schemas.".to_string()));
-            return ToolDispatchOutcome { tool_call_id: call.id.clone(), name: call.name.clone(), content: ToolError::to_tool_content(&err), awaiting_player_roll: None };
+            let err = ToolError::recoverable(
+                "unknown_tool",
+                format!("unknown GM tool: {}", call.name),
+                Some("Use one of the advertised function schemas.".to_string()),
+            );
+            return ToolDispatchOutcome {
+                tool_call_id: call.id.clone(),
+                name: call.name.clone(),
+                content: ToolError::to_tool_content(&err),
+                awaiting_player_roll: None,
+            };
         };
         let args = match serde_json::from_str::<Value>(&call.arguments) {
             Ok(v) => v,
             Err(e) => {
-                let err = ToolError::recoverable("invalid_arguments", format!("arguments are not valid JSON: {e}"), Some("Emit a valid JSON object matching the tool schema.".to_string()));
-                return ToolDispatchOutcome { tool_call_id: call.id.clone(), name: call.name.clone(), content: ToolError::to_tool_content(&err), awaiting_player_roll: None };
+                let err = ToolError::recoverable(
+                    "invalid_arguments",
+                    format!("arguments are not valid JSON: {e}"),
+                    Some("Emit a valid JSON object matching the tool schema.".to_string()),
+                );
+                return ToolDispatchOutcome {
+                    tool_call_id: call.id.clone(),
+                    name: call.name.clone(),
+                    content: ToolError::to_tool_content(&err),
+                    awaiting_player_roll: None,
+                };
             }
         };
         match tool.call(ctx, ledger, args).await {
-            Ok(output) => ToolDispatchOutcome { tool_call_id: call.id.clone(), name: call.name.clone(), content: serde_json::to_string(&output.result).unwrap_or_else(|_| "{}".to_string()), awaiting_player_roll: output.awaiting_player_roll },
-            Err(err) => ToolDispatchOutcome { tool_call_id: call.id.clone(), name: call.name.clone(), content: ToolError::to_tool_content(&err), awaiting_player_roll: None },
+            Ok(output) => ToolDispatchOutcome {
+                tool_call_id: call.id.clone(),
+                name: call.name.clone(),
+                content: serde_json::to_string(&output.result).unwrap_or_else(|_| "{}".to_string()),
+                awaiting_player_roll: output.awaiting_player_roll,
+            },
+            Err(err) => ToolDispatchOutcome {
+                tool_call_id: call.id.clone(),
+                name: call.name.clone(),
+                content: ToolError::to_tool_content(&err),
+                awaiting_player_roll: None,
+            },
         }
     }
 }
@@ -259,19 +327,41 @@ mod tests {
     #[async_trait]
     impl GmTool for EchoTool {
         fn spec(&self) -> ToolSpec {
-            ToolSpec { name: "echo", schema: json!({"type":"function","function":{"name":"echo","description":"echo","parameters":{"type":"object","properties":{"x":{"type":"string"}},"required":["x"]}}}) }
+            ToolSpec {
+                name: "echo",
+                schema: json!({"type":"function","function":{"name":"echo","description":"echo","parameters":{"type":"object","properties":{"x":{"type":"string"}},"required":["x"]}}}),
+            }
         }
 
-        async fn call(&self, _ctx: &ToolCtx<'_>, _ledger: &mut TurnLedger, args: Value) -> Result<ToolOutput> {
-            Ok(ToolOutput::ok(json!({"x": args.get("x").and_then(Value::as_str).unwrap_or("")})))
+        async fn call(
+            &self,
+            _ctx: &ToolCtx<'_>,
+            _ledger: &mut TurnLedger,
+            args: Value,
+        ) -> Result<ToolOutput> {
+            Ok(ToolOutput::ok(
+                json!({"x": args.get("x").and_then(Value::as_str).unwrap_or("")}),
+            ))
         }
     }
 
     fn dummy_ctx() -> (RuntimeEngine, ContextRequest, RuntimeState) {
-        let pool = PgPoolOptions::new().connect_lazy("postgres://chatrpg:chatrpg@localhost:54347/chatrpg").expect("lazy pool");
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://chatrpg:chatrpg@localhost:54347/chatrpg")
+            .expect("lazy pool");
         let engine = RuntimeEngine::new(Db { pool });
-        let request = ContextRequest { ruleset_id: "rs".to_string(), module_id: None, session_id: "s".to_string(), turn_id: "t".to_string(), viewer: VisibilityProfile::gm(), token_budget: TokenBudget::default() };
-        let state = RuntimeState { ruleset_id: "rs".to_string(), ..Default::default() };
+        let request = ContextRequest {
+            ruleset_id: "rs".to_string(),
+            module_id: None,
+            session_id: "s".to_string(),
+            turn_id: "t".to_string(),
+            viewer: VisibilityProfile::gm(),
+            token_budget: TokenBudget::default(),
+        };
+        let state = RuntimeState {
+            ruleset_id: "rs".to_string(),
+            ..Default::default()
+        };
         (engine, request, state)
     }
 
@@ -279,23 +369,72 @@ mod tests {
     async fn dispatch_unknown_tool_returns_structured_error() {
         let registry = ToolRegistry::standard();
         let (engine, request, state) = dummy_ctx();
-        let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: None, data_dir: None, current_mode: None, opposed_binding: None };
+        let ctx = ToolCtx {
+            engine: &engine,
+            request: &request,
+            state: &state,
+            scene_extractor: None,
+            obligations: None,
+            data_dir: None,
+            current_mode: None,
+            opposed_binding: None,
+        };
         let mut ledger = TurnLedger::new();
-        let outcome = registry.dispatch(&ctx, &mut ledger, &trpg_llm::AggregatedToolCall { id: "c1".to_string(), name: "missing".to_string(), arguments: "{}".to_string() }).await;
+        let outcome = registry
+            .dispatch(
+                &ctx,
+                &mut ledger,
+                &trpg_llm::AggregatedToolCall {
+                    id: "c1".to_string(),
+                    name: "missing".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            )
+            .await;
         let v: Value = serde_json::from_str(&outcome.content).unwrap();
-        assert_eq!(v.pointer("/error/code").and_then(Value::as_str), Some("unknown_tool"));
-        assert_eq!(v.pointer("/error/recoverable").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            v.pointer("/error/code").and_then(Value::as_str),
+            Some("unknown_tool")
+        );
+        assert_eq!(
+            v.pointer("/error/recoverable").and_then(Value::as_bool),
+            Some(true)
+        );
     }
 
     #[tokio::test]
     async fn dispatch_invalid_arguments_returns_structured_error() {
-        let registry = ToolRegistry { tools: vec![Box::new(EchoTool)] };
+        let registry = ToolRegistry {
+            tools: vec![Box::new(EchoTool)],
+        };
         let (engine, request, state) = dummy_ctx();
-        let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: None, data_dir: None, current_mode: None, opposed_binding: None };
+        let ctx = ToolCtx {
+            engine: &engine,
+            request: &request,
+            state: &state,
+            scene_extractor: None,
+            obligations: None,
+            data_dir: None,
+            current_mode: None,
+            opposed_binding: None,
+        };
         let mut ledger = TurnLedger::new();
-        let outcome = registry.dispatch(&ctx, &mut ledger, &trpg_llm::AggregatedToolCall { id: "c2".to_string(), name: "echo".to_string(), arguments: "not-json".to_string() }).await;
+        let outcome = registry
+            .dispatch(
+                &ctx,
+                &mut ledger,
+                &trpg_llm::AggregatedToolCall {
+                    id: "c2".to_string(),
+                    name: "echo".to_string(),
+                    arguments: "not-json".to_string(),
+                },
+            )
+            .await;
         let v: Value = serde_json::from_str(&outcome.content).unwrap();
-        assert_eq!(v.pointer("/error/code").and_then(Value::as_str), Some("invalid_arguments"));
+        assert_eq!(
+            v.pointer("/error/code").and_then(Value::as_str),
+            Some("invalid_arguments")
+        );
     }
 }
 
@@ -316,7 +455,10 @@ mod schema_stability_tests {
         let dir = std::env::temp_dir().join(format!(
             "schema_mode_test_{}_{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().subsec_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_nanos()
         ));
         let mode_dir = dir.join("agent/gm_skill/modes").join(mode);
         fs::create_dir_all(&mode_dir).unwrap();
@@ -333,15 +475,27 @@ mod schema_stability_tests {
             "combat",
             r#"{"mode_id":"combat","frame_kind":"combat","extra_tools":["open_combat_frame","close_frame"]}"#,
         );
-        let schemas_none   = serde_json::to_vec(&ToolRegistry::for_mode(&dir, None).unwrap().schemas()).unwrap();
-        let schemas_combat = serde_json::to_vec(&ToolRegistry::for_mode(&dir, Some("combat")).unwrap().schemas()).unwrap();
+        let schemas_none =
+            serde_json::to_vec(&ToolRegistry::for_mode(&dir, None).unwrap().schemas()).unwrap();
+        let schemas_combat = serde_json::to_vec(
+            &ToolRegistry::for_mode(&dir, Some("combat"))
+                .unwrap()
+                .schemas(),
+        )
+        .unwrap();
         // mode=None → 15 工具；mode=combat → 17 工具（extra_tools 追加）。
         assert_ne!(schemas_none, schemas_combat,
             "mode switch with extra_tools must produce different schema bytes (justified cache invalidation)");
-        let count_none   = ToolRegistry::for_mode(&dir, None).unwrap().schemas().len();
-        let count_combat = ToolRegistry::for_mode(&dir, Some("combat")).unwrap().schemas().len();
+        let count_none = ToolRegistry::for_mode(&dir, None).unwrap().schemas().len();
+        let count_combat = ToolRegistry::for_mode(&dir, Some("combat"))
+            .unwrap()
+            .schemas()
+            .len();
         assert_eq!(count_none, 15, "base registry must have exactly 15 tools");
-        assert_eq!(count_combat, 17, "combat mode with two extra_tools must have 17 tools");
+        assert_eq!(
+            count_combat, 17,
+            "combat mode with two extra_tools must have 17 tools"
+        );
         fs::remove_dir_all(dir).ok();
     }
 
@@ -353,10 +507,22 @@ mod schema_stability_tests {
             "combat",
             r#"{"mode_id":"combat","frame_kind":"combat","extra_tools":["open_combat_frame","close_frame"]}"#,
         );
-        let a = serde_json::to_vec(&ToolRegistry::for_mode(&dir, Some("combat")).unwrap().schemas()).unwrap();
-        let b = serde_json::to_vec(&ToolRegistry::for_mode(&dir, Some("combat")).unwrap().schemas()).unwrap();
-        assert_eq!(a, b, "same mode must produce deterministic tool schema bytes across calls");
+        let a = serde_json::to_vec(
+            &ToolRegistry::for_mode(&dir, Some("combat"))
+                .unwrap()
+                .schemas(),
+        )
+        .unwrap();
+        let b = serde_json::to_vec(
+            &ToolRegistry::for_mode(&dir, Some("combat"))
+                .unwrap()
+                .schemas(),
+        )
+        .unwrap();
+        assert_eq!(
+            a, b,
+            "same mode must produce deterministic tool schema bytes across calls"
+        );
         fs::remove_dir_all(dir).ok();
     }
 }
-

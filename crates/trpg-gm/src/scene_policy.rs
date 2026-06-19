@@ -6,9 +6,9 @@ use crate::tools::ToolError;
 use serde_json::{json, Value};
 use trpg_mechanics::RefereeCombatService;
 use trpg_model::{
-    CheckContract, CheckTargetModel, ContextRequest, EffectPatchIntent, EffectPolicy,
-    ModuleGraph, SceneExtractionStatus, SceneMechanicIntent, StatePatch, TimeAmount, TimeScale,
-    Visibility, WorldEventKind,
+    CheckContract, CheckTargetModel, ContextRequest, EffectPatchIntent, EffectPolicy, ModuleGraph,
+    SceneExtractionStatus, SceneMechanicIntent, StatePatch, TimeAmount, TimeScale, Visibility,
+    WorldEventKind,
 };
 use trpg_object::ObjectService;
 use trpg_runtime::RuntimeEngine;
@@ -17,14 +17,20 @@ use uuid::Uuid;
 
 /// PURE：按 outcome 选分支。
 pub(crate) fn select_intents(policy: &EffectPolicy, success: bool) -> &[EffectPatchIntent] {
-    if success { &policy.on_success } else { &policy.on_failure }
+    if success {
+        &policy.on_success
+    } else {
+        &policy.on_failure
+    }
 }
 
 /// PURE：difficulty Value → CheckTargetModel。认得的形态：{kind:"dv"|"static"|"target_number",
 /// value:<num>} → StaticNumber{value, label=原 JSON 紧凑串}。其余（CoC 难度档字符串等）→ None
 /// （保持 UnknownUntilLookup，交给 execute_system_roll_bundle 的 kernel defaults——fail-closed，
 /// 形态映射非规则集分支，零硬编码）。
-pub(crate) fn difficulty_to_target(difficulty: Option<&serde_json::Value>) -> Option<CheckTargetModel> {
+pub(crate) fn difficulty_to_target(
+    difficulty: Option<&serde_json::Value>,
+) -> Option<CheckTargetModel> {
     let v = difficulty?;
     let obj = v.as_object()?;
     let kind = obj.get("kind")?.as_str()?;
@@ -32,7 +38,10 @@ pub(crate) fn difficulty_to_target(difficulty: Option<&serde_json::Value>) -> Op
         return None;
     }
     let value = i32::try_from(obj.get("value")?.as_i64()?).ok()?;
-    Some(CheckTargetModel::StaticNumber { value, label: v.to_string() })
+    Some(CheckTargetModel::StaticNumber {
+        value,
+        label: v.to_string(),
+    })
 }
 
 /// PURE：当前场景查 intent。场景解析次序对标 module_scene_blocks_for_turn（runtime
@@ -53,7 +62,9 @@ pub(crate) fn find_scene_intent<'a>(
                 .find(|s| s.extraction_status == SceneExtractionStatus::DeepExtracted)
         })?;
     // 不跨场景兜底：当前场景没有就是没有，防把别处的 effect_policy 错绑。
-    node.scene_mechanics.iter().find(|i| i.intent_id == intent_id)
+    node.scene_mechanics
+        .iter()
+        .find(|i| i.intent_id == intent_id)
 }
 
 /// PURE：不可执行 intent → CreateFact 记 "unexecutable_intent" 事实（可观测不静默）。
@@ -73,10 +84,20 @@ pub(crate) fn patches_summary(patches: &[StatePatch]) -> Value {
         patches
             .iter()
             .map(|p| match p {
-                StatePatch::SetTrack { target, value, .. } => json!({"op":"set_track","target":target,"amount":value}),
-                StatePatch::ModifyTrack { target, amount, .. } => json!({"op":"modify_track","target":target,"amount":amount}),
-                StatePatch::ObjectPatch { object_id, patch_json, .. } => json!({"op":"set_object_state","target":object_id,"patch":patch_json}),
-                StatePatch::CreateFact { target, fact, .. } => json!({"op":"create_fact","target":target,"fact":fact}),
+                StatePatch::SetTrack { target, value, .. } => {
+                    json!({"op":"set_track","target":target,"amount":value})
+                }
+                StatePatch::ModifyTrack { target, amount, .. } => {
+                    json!({"op":"modify_track","target":target,"amount":amount})
+                }
+                StatePatch::ObjectPatch {
+                    object_id,
+                    patch_json,
+                    ..
+                } => json!({"op":"set_object_state","target":object_id,"patch":patch_json}),
+                StatePatch::CreateFact { target, fact, .. } => {
+                    json!({"op":"create_fact","target":target,"fact":fact})
+                }
                 other => serde_json::to_value(other).unwrap_or(Value::Null),
             })
             .collect(),
@@ -145,14 +166,31 @@ async fn execute_intent(
     ledger: &mut TurnLedger,
 ) -> anyhow::Result<StatePatch> {
     match item {
-        EffectPatchIntent::ModifyTrack { owner_id, track_id, op, amount, .. } => {
+        EffectPatchIntent::ModifyTrack {
+            owner_id,
+            track_id,
+            op,
+            amount,
+            ..
+        } => {
             let target_actor = owner_id.as_deref().unwrap_or("pc.current");
             // resources.{id}.current 是 resolve_resource_track_id 可解析的唯一前缀形
             // （对标 effect.rs effect_parameter_path）。
             let path = format!("resources.{track_id}.current");
             let operation = crate::tools::effect::op_from_str(op)?;
             let outcome = RefereeCombatService::new(engine.db.clone())
-                .apply_direct_effect(&request.session_id, &request.ruleset_id, request.module_id.as_deref(), "scene.policy", target_actor, &path, operation, *amount, reason, Visibility::GmOnly)
+                .apply_direct_effect(
+                    &request.session_id,
+                    &request.ruleset_id,
+                    request.module_id.as_deref(),
+                    "scene.policy",
+                    target_actor,
+                    &path,
+                    operation,
+                    *amount,
+                    reason,
+                    Visibility::GmOnly,
+                )
                 .await?;
             ledger.record_effect(&outcome.effect);
             for impact in &outcome.impacts {
@@ -166,7 +204,13 @@ async fn execute_intent(
                 .await?
                 .world_tick;
             ObjectService::new(engine.db.clone())
-                .apply_external_mechanical_patch(&request.session_id, object_id, patch.clone(), reason, world_tick)
+                .apply_external_mechanical_patch(
+                    &request.session_id,
+                    object_id,
+                    patch.clone(),
+                    reason,
+                    world_tick,
+                )
                 .await?;
             Ok(StatePatch::ObjectPatch {
                 patch_id: format!("scene_policy_{}", Uuid::new_v4().simple()),
@@ -180,7 +224,12 @@ async fn execute_intent(
             fact: fact.clone(),
             reason: reason.to_string(),
         }),
-        EffectPatchIntent::StartCountdown { label, amount, scale, payload } => {
+        EffectPatchIntent::StartCountdown {
+            label,
+            amount,
+            scale,
+            payload,
+        } => {
             let time_scale = crate::tools::world::parse_time_scale(scale)?;
             // scale→TimeAmount 构造映射对标 AdvanceTimeTool（world.rs L71-75）。
             let time_amount = match time_scale {
@@ -189,7 +238,14 @@ async fn execute_intent(
                 _ => TimeAmount::minutes(*amount),
             };
             let event = WorldTimeService::new(engine.db.clone())
-                .schedule_in(&request.session_id, time_amount, WorldEventKind::ClockTick, json!({"label": label, "intent_id": intent.intent_id, "payload": payload}), Visibility::GmOnly, None)
+                .schedule_in(
+                    &request.session_id,
+                    time_amount,
+                    WorldEventKind::ClockTick,
+                    json!({"label": label, "intent_id": intent.intent_id, "payload": payload}),
+                    Visibility::GmOnly,
+                    None,
+                )
                 .await?;
             Ok(StatePatch::CreateFact {
                 target: "scene.policy".to_string(),
@@ -206,12 +262,17 @@ async fn execute_intent(
 /// 形态 → StaticNumber target（认不出保持原 target，fail-closed）；结构化引用
 /// `scene_mechanic:<intent_id>` 进 advice_refs——gate 结算路径据此恢复绑定执行
 /// effect_policy。None → no-op。
-pub(crate) fn stamp_scene_intent(contract: &mut CheckContract, intent: Option<&SceneMechanicIntent>) {
+pub(crate) fn stamp_scene_intent(
+    contract: &mut CheckContract,
+    intent: Option<&SceneMechanicIntent>,
+) {
     let Some(intent) = intent else { return };
     if let Some(t) = difficulty_to_target(intent.difficulty.as_ref()) {
         contract.target = t;
     }
-    contract.advice_refs.push(format!("scene_mechanic:{}", intent.intent_id));
+    contract
+        .advice_refs
+        .push(format!("scene_mechanic:{}", intent.intent_id));
 }
 
 /// roll_check 接线辅助：scene_mechanic_id → 当前场景 intent（按 intent_id 精确匹配，
@@ -223,12 +284,22 @@ pub(crate) async fn resolve_scene_intent(
     current_scene_id: Option<&str>,
     scene_mechanic_id: Option<&str>,
 ) -> anyhow::Result<Option<SceneMechanicIntent>> {
-    let Some(id) = scene_mechanic_id else { return Ok(None) };
+    let Some(id) = scene_mechanic_id else {
+        return Ok(None);
+    };
     let mid = request.module_id.as_deref().ok_or_else(|| {
-        ToolError::recoverable("no_module_loaded", "scene_mechanic_id requires a module", None)
+        ToolError::recoverable(
+            "no_module_loaded",
+            "scene_mechanic_id requires a module",
+            None,
+        )
     })?;
     let graph = engine.db.load_module_graph(mid).await?.ok_or_else(|| {
-        ToolError::recoverable("no_module_loaded", format!("module graph not loaded: {mid}"), None)
+        ToolError::recoverable(
+            "no_module_loaded",
+            format!("module graph not loaded: {mid}"),
+            None,
+        )
     })?;
     Ok(Some(
         find_scene_intent(&graph, current_scene_id, id)
@@ -236,7 +307,10 @@ pub(crate) async fn resolve_scene_intent(
                 ToolError::recoverable(
                     "scene_mechanic_not_found",
                     format!("scene mechanic not found in current scene: {id}"),
-                    Some("Check the BP2 scene-mechanics block, or roll without scene_mechanic_id.".to_string()),
+                    Some(
+                        "Check the BP2 scene-mechanics block, or roll without scene_mechanic_id."
+                            .to_string(),
+                    ),
                 )
             })?
             .clone(),
@@ -262,7 +336,10 @@ pub(crate) async fn run_policy_after_settlement(
         }
         None => {
             if let Some(obj) = out.as_object_mut() {
-                obj.insert("effect_policy_skipped".into(), json!("outcome has no success field"));
+                obj.insert(
+                    "effect_policy_skipped".into(),
+                    json!("outcome has no success field"),
+                );
             }
         }
     }
@@ -270,14 +347,32 @@ pub(crate) async fn run_policy_after_settlement(
 }
 
 /// PURE：ModifyTrack 执行结果折 StatePatch（set→SetTrack，加减→ModifyTrack 带符号）。
-fn track_patch(target_actor: &str, track_id: &str, op: &str, amount: i64, reason: &str) -> StatePatch {
+fn track_patch(
+    target_actor: &str,
+    track_id: &str,
+    op: &str,
+    amount: i64,
+    reason: &str,
+) -> StatePatch {
     let target = format!("{target_actor}.{track_id}");
     let op_norm = op.trim().to_ascii_lowercase();
     if op_norm == "set" {
-        StatePatch::SetTrack { target, value: amount as i32, reason: reason.to_string() }
+        StatePatch::SetTrack {
+            target,
+            value: amount as i32,
+            reason: reason.to_string(),
+        }
     } else {
-        let signed = if op_norm == "subtract" { -(amount as i32) } else { amount as i32 };
-        StatePatch::ModifyTrack { target, amount: signed, reason: reason.to_string() }
+        let signed = if op_norm == "subtract" {
+            -(amount as i32)
+        } else {
+            amount as i32
+        };
+        StatePatch::ModifyTrack {
+            target,
+            amount: signed,
+            reason: reason.to_string(),
+        }
     }
 }
 
@@ -299,7 +394,10 @@ mod tests {
 
     #[test]
     fn select_intents_picks_branch() {
-        let policy = EffectPolicy { on_success: vec![mt("a"), mt("b")], on_failure: vec![mt("c")] };
+        let policy = EffectPolicy {
+            on_success: vec![mt("a"), mt("b")],
+            on_failure: vec![mt("c")],
+        };
         assert_eq!(select_intents(&policy, true).len(), 2);
         assert_eq!(select_intents(&policy, false).len(), 1);
     }
@@ -307,11 +405,23 @@ mod tests {
     #[test]
     fn difficulty_to_target_maps_dv_and_static() {
         let t = difficulty_to_target(Some(&json!({"kind":"dv","value":13})));
-        assert!(matches!(t, Some(CheckTargetModel::StaticNumber { value: 13, .. })), "dv 13 must map: {t:?}");
+        assert!(
+            matches!(t, Some(CheckTargetModel::StaticNumber { value: 13, .. })),
+            "dv 13 must map: {t:?}"
+        );
         let t = difficulty_to_target(Some(&json!({"kind":"target_number","value":50})));
-        assert!(matches!(t, Some(CheckTargetModel::StaticNumber { value: 50, .. })), "target_number 50 must map: {t:?}");
-        assert!(difficulty_to_target(Some(&json!("hard"))).is_none(), "bare string difficulty must stay None");
-        assert!(difficulty_to_target(Some(&json!({"kind":"dv","value":"thirteen"}))).is_none(), "non-numeric value must stay None");
+        assert!(
+            matches!(t, Some(CheckTargetModel::StaticNumber { value: 50, .. })),
+            "target_number 50 must map: {t:?}"
+        );
+        assert!(
+            difficulty_to_target(Some(&json!("hard"))).is_none(),
+            "bare string difficulty must stay None"
+        );
+        assert!(
+            difficulty_to_target(Some(&json!({"kind":"dv","value":"thirteen"}))).is_none(),
+            "non-numeric value must stay None"
+        );
     }
 
     fn scene(node_id: &str, intent_id: &str) -> trpg_model::ScenarioNode {
@@ -363,8 +473,22 @@ mod tests {
         };
         let mut contract = crate::gate::fixtures::gate_contract("c1");
         stamp_scene_intent(&mut contract, Some(&intent));
-        assert!(matches!(contract.target, CheckTargetModel::StaticNumber { value: 13, .. }), "dv 13 must become the target: {:?}", contract.target);
-        assert!(contract.advice_refs.iter().any(|r| r == "scene_mechanic:cut_cable"), "advice_refs must carry the stamp: {:?}", contract.advice_refs);
+        assert!(
+            matches!(
+                contract.target,
+                CheckTargetModel::StaticNumber { value: 13, .. }
+            ),
+            "dv 13 must become the target: {:?}",
+            contract.target
+        );
+        assert!(
+            contract
+                .advice_refs
+                .iter()
+                .any(|r| r == "scene_mechanic:cut_cable"),
+            "advice_refs must carry the stamp: {:?}",
+            contract.advice_refs
+        );
         // None → no-op（无意图调用零改动）。
         let before = crate::gate::fixtures::gate_contract("c2");
         let mut untouched = before.clone();
@@ -378,11 +502,22 @@ mod tests {
         let policy: EffectPolicy =
             serde_json::from_value(json!({"on_success":[raw.clone()],"on_failure":[]})).unwrap();
         let item = &select_intents(&policy, true)[0];
-        assert!(matches!(item, EffectPatchIntent::Other(_)), "must deserialize as Other: {item:?}");
+        assert!(
+            matches!(item, EffectPatchIntent::Other(_)),
+            "must deserialize as Other: {item:?}"
+        );
         match fold_unexecutable(item, "scene.policy test") {
-            StatePatch::CreateFact { target, fact, reason } => {
+            StatePatch::CreateFact {
+                target,
+                fact,
+                reason,
+            } => {
                 assert_eq!(target, "scene.policy");
-                assert_eq!(fact.pointer("/unexecutable_intent"), Some(&raw), "fact must carry the original JSON");
+                assert_eq!(
+                    fact.pointer("/unexecutable_intent"),
+                    Some(&raw),
+                    "fact must carry the original JSON"
+                );
                 assert_eq!(reason, "scene.policy test");
             }
             other => panic!("expected CreateFact, got {other:?}"),

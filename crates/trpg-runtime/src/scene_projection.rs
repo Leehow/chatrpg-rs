@@ -1,36 +1,65 @@
-use trpg_model::*;
 use crate::npc_synth;
+use trpg_model::*;
 
 /// SkeletonOnly 降级块内容（N2）：投影骨架元数据 + 禁编造指令，不含正文。
-pub(crate) fn skeleton_fallback_block(module_id: &str, n: &ScenarioNode, scenes: &[ScenarioNode]) -> ContextBlock {
-    let mut body = format!("【场景骨架·未深抽】status=SkeletonOnly\n标题：{}\n", n.title);
+pub(crate) fn skeleton_fallback_block(
+    module_id: &str,
+    n: &ScenarioNode,
+    scenes: &[ScenarioNode],
+) -> ContextBlock {
+    let mut body = format!(
+        "【场景骨架·未深抽】status=SkeletonOnly\n标题：{}\n",
+        n.title
+    );
     if !n.summary.trim().is_empty() {
         body.push_str(&format!("摘要：{}\n", n.summary));
     }
     match (n.page_start, n.page_end) {
         (Some(s), Some(e)) => body.push_str(&format!("页码：{s}–{e}\n")),
-        (Some(s), None)    => body.push_str(&format!("页码：{s}\n")),
-        _                  => {}
+        (Some(s), None) => body.push_str(&format!("页码：{s}\n")),
+        _ => {}
     }
     // 已知实体 id（骨架阶段 LLM 已识别的引用，供 GM 检索用）
     let mut refs: Vec<String> = Vec::new();
     refs.extend(n.referenced_npc_ids.iter().map(|id| format!("npc:{id}")));
     refs.extend(n.referenced_clue_ids.iter().map(|id| format!("clue:{id}")));
-    refs.extend(n.referenced_location_ids.iter().map(|id| format!("loc:{id}")));
-    refs.extend(n.referenced_encounter_ids.iter().map(|id| format!("enc:{id}")));
+    refs.extend(
+        n.referenced_location_ids
+            .iter()
+            .map(|id| format!("loc:{id}")),
+    );
+    refs.extend(
+        n.referenced_encounter_ids
+            .iter()
+            .map(|id| format!("enc:{id}")),
+    );
     if !refs.is_empty() {
         body.push_str(&format!("已知实体：{}\n", refs.join(", ")));
     }
     // 出口（与 DeepExtracted 路径相同的 fail-closed 投影）
-    let exits: Vec<String> = n.links.iter().filter_map(|l| {
-        let title = scenes.iter().find(|s| s.node_id == l.to_node_id).map(|s| s.title.as_str()).unwrap_or("");
-        if title.trim().is_empty() { None } else { Some(format!("- {title} → {}", l.reason)) }
-    }).collect();
+    let exits: Vec<String> = n
+        .links
+        .iter()
+        .filter_map(|l| {
+            let title = scenes
+                .iter()
+                .find(|s| s.node_id == l.to_node_id)
+                .map(|s| s.title.as_str())
+                .unwrap_or("");
+            if title.trim().is_empty() {
+                None
+            } else {
+                Some(format!("- {title} → {}", l.reason))
+            }
+        })
+        .collect();
     if !exits.is_empty() {
         body.push_str(&format!("【已知出口】\n{}\n", exits.join("\n")));
     }
     // GM 防编造指令
-    body.push_str("\n⚠️ 此场景尚未深抽：叙述具体内容前先检索源文档；不要编造 read_aloud/数值/人物细节。\n");
+    body.push_str(
+        "\n⚠️ 此场景尚未深抽：叙述具体内容前先检索源文档；不要编造 read_aloud/数值/人物细节。\n",
+    );
     let mut block = ContextBlock::new(
         format!("module.{module_id}.scene.{}.skeleton", n.node_id),
         BlockKind::SceneStatic,
@@ -39,12 +68,19 @@ pub(crate) fn skeleton_fallback_block(module_id: &str, n: &ScenarioNode, scenes:
         Visibility::GmOnly,
         Stability::SceneStable,
         CacheZone::DynamicTail,
-        Scope { scope_type: ScopeType::Scene, scope_id: n.node_id.clone() },
+        Scope {
+            scope_type: ScopeType::Scene,
+            scope_id: n.node_id.clone(),
+        },
         20, // 低 token：骨架块只有元数据，不占满 context
     );
     block.expires_at_scene = Some(n.node_id.clone());
     block.load_reason = Some("skeleton_fallback".into());
-    block.tags = vec!["module_scene".into(), "scene_skeleton".into(), "skeleton_only".into()];
+    block.tags = vec![
+        "module_scene".into(),
+        "scene_skeleton".into(),
+        "skeleton_only".into(),
+    ];
     block
 }
 
@@ -94,8 +130,11 @@ pub(crate) fn scene_node_to_blocks(
             let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("");
             // Deep-extracted entities (reader DEEP_SYS) carry prose in `body`;
             // shallow/index entities use `summary`. Prefer body, fall back.
-            let sum = v.get("body").or_else(|| v.get("summary"))
-                .and_then(|x| x.as_str()).unwrap_or("");
+            let sum = v
+                .get("body")
+                .or_else(|| v.get("summary"))
+                .and_then(|x| x.as_str())
+                .unwrap_or("");
             body.push_str(&format!("\n[NPC] {name}: {sum}"));
         }
     }
@@ -133,12 +172,19 @@ pub(crate) fn scene_node_to_blocks(
         // N3: 默认 DynamicTail（零变化）；TRPG_SCENE_DEEP_BLOCK_CACHE_ZONE=pinned_middle
         // 时落 PinnedMiddle，配合下方 expires_at_scene 让切场景才变 pinned_hash。
         scene_deep_block_cache_zone(),
-        Scope { scope_type: ScopeType::Scene, scope_id: n.node_id.clone() },
+        Scope {
+            scope_type: ScopeType::Scene,
+            scope_id: n.node_id.clone(),
+        },
         60,
     );
     block.expires_at_scene = Some(n.node_id.clone());
     block.load_reason = Some("current_scene_deep_projection".into());
-    block.tags = vec!["module_scene".into(), "scene_static".into(), "deep_extracted".into()];
+    block.tags = vec![
+        "module_scene".into(),
+        "scene_static".into(),
+        "deep_extracted".into(),
+    ];
     let mut blocks = vec![block];
     // C3：当前场景机制意图索引（BP2）。渲染纯函数在 trpg-model（scene_intents_text，
     // 每条一行 id|description|tested_parameter|difficulty 摘要，不含 effect_policy 全文
@@ -152,7 +198,10 @@ pub(crate) fn scene_node_to_blocks(
             Visibility::GmOnly,
             Stability::SceneStable,
             CacheZone::PinnedMiddle, // 骨架契约：pinned_hash 场景内稳定，场景切换换块
-            Scope { scope_type: ScopeType::Scene, scope_id: n.node_id.clone() },
+            Scope {
+                scope_type: ScopeType::Scene,
+                scope_id: n.node_id.clone(),
+            },
             58, // 略低于正文块（60）
         );
         b.expires_at_scene = Some(n.node_id.clone());
@@ -164,22 +213,42 @@ pub(crate) fn scene_node_to_blocks(
 }
 
 pub fn module_entry_scene_id(graph: &ModuleGraph) -> Option<String> {
-    if let Some(id) = graph.spine.get("entry_node_id").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(id) = graph
+        .spine
+        .get("entry_node_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         if graph.scenes.iter().any(|s| s.node_id == id) {
             return Some(id.to_string());
         }
     }
-    if let Some(s) = graph.scenes.iter().find(|s| s.extraction_status == SceneExtractionStatus::DeepExtracted) {
+    if let Some(s) = graph
+        .scenes
+        .iter()
+        .find(|s| s.extraction_status == SceneExtractionStatus::DeepExtracted)
+    {
         return Some(s.node_id.clone());
     }
     graph.scenes.first().map(|s| s.node_id.clone())
 }
 
 /// 决定本回合生效的 scene_id：已有非空则保留；否则仅当有 module 时用载入值。
-pub(crate) fn resolve_turn_scene_id(state_scene: Option<&str>, module_id: Option<&str>, loaded: Option<String>) -> Option<String> {
+pub(crate) fn resolve_turn_scene_id(
+    state_scene: Option<&str>,
+    module_id: Option<&str>,
+    loaded: Option<String>,
+) -> Option<String> {
     match state_scene {
         Some(s) if !s.trim().is_empty() => Some(s.to_string()),
-        _ => if module_id.is_some() { loaded } else { None },
+        _ => {
+            if module_id.is_some() {
+                loaded
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -200,15 +269,22 @@ pub(crate) fn resolve_turn_scene_id(state_scene: Option<&str>, module_id: Option
 ///
 /// Zero per-ruleset hardcoding: keys are generic semantic identifiers the npc_synth +
 /// contest layer resolve against the kernel; the only data-driven branch is kernel.compare.
-pub(crate) fn map_check_param_need(action_kind: &SituationActionKind, compare: &str) -> Option<(String, String)> {
+pub(crate) fn map_check_param_need(
+    action_kind: &SituationActionKind,
+    compare: &str,
+) -> Option<(String, String)> {
     use SituationActionKind::*;
     // 玩家主动攻击 NPC → 对手要防御 → 测它的防御值。
     let active_attack = matches!(action_kind, Attack | Counterattack | CastOrUsePower);
     // 玩家被动防御(NPC 在攻击你)→ 对手要命中 → 测它的攻击技能。
-    let passive_defense = matches!(action_kind,
-        Defend | Dodge | TakeCover | UnderAttack | EnemyInitiatedConflict | SceneEntersConflict);
-    let stealth_family = matches!(action_kind,
-        Hide | Hack | DisableDevice | Intimidate | Negotiate | InvestigateDuringConflict);
+    let passive_defense = matches!(
+        action_kind,
+        Defend | Dodge | TakeCover | UnderAttack | EnemyInitiatedConflict | SceneEntersConflict
+    );
+    let stealth_family = matches!(
+        action_kind,
+        Hide | Hack | DisableDevice | Intimidate | Negotiate | InvestigateDuringConflict
+    );
     if active_attack {
         return Some(if compare == "meet_or_beat" {
             ("stats".to_string(), "defense".to_string())
@@ -290,13 +366,16 @@ mod module_scene_proj_tests {
         n.extraction_status = SceneExtractionStatus::SkeletonOnly;
         // After N2: must return a SceneSkeleton fallback block, NOT empty.
         let blocks = scene_node_to_blocks("mod1", &n, &[], &[]);
-        assert!(!blocks.is_empty(), "N2: SkeletonOnly 场景应产出降级块（非空）");
+        assert!(
+            !blocks.is_empty(),
+            "N2: SkeletonOnly 场景应产出降级块（非空）"
+        );
     }
 
     /// N2: SkeletonOnly 降级块完整验收——不含编造内容，含骨架元数据与指令。
     #[test]
     fn skeleton_scene_fallback_block_has_no_readout_has_instruction() {
-        use trpg_model::{BlockKind, CacheZone, ScenarioLink, LinkType};
+        use trpg_model::{BlockKind, CacheZone, LinkType, ScenarioLink};
         let mut n = ScenarioNode::default();
         n.node_id = "sc02".into();
         n.title = "镇中心广场".into();
@@ -336,15 +415,27 @@ mod module_scene_proj_tests {
         assert!(text.contains("心脏"), "应含 summary: {text}");
         assert!(text.contains("12"), "应含 page_start: {text}");
         assert!(text.contains("14"), "应含 page_end: {text}");
-        assert!(text.contains("npc_mayor"), "应含 referenced_npc_ids: {text}");
-        assert!(text.contains("clue_letter"), "应含 referenced_clue_ids: {text}");
+        assert!(
+            text.contains("npc_mayor"),
+            "应含 referenced_npc_ids: {text}"
+        );
+        assert!(
+            text.contains("clue_letter"),
+            "应含 referenced_clue_ids: {text}"
+        );
         assert!(text.contains("邮局"), "应含出口目标标题: {text}");
-        assert!(text.contains("SkeletonOnly"), "应含 status=SkeletonOnly: {text}");
+        assert!(
+            text.contains("SkeletonOnly"),
+            "应含 status=SkeletonOnly: {text}"
+        );
         // 不含实际 read_aloud 内容——指令里提到 "read_aloud" 作关键词是允许的，
         // 但不应有 【可念】 标题（DeepExtracted 路径才产这个标题）。
         assert!(!text.contains("【可念】"), "不应含可念正文段落: {text}");
         // 含 GM 指令防编造
-        assert!(text.contains("先检索") || text.contains("检索"), "应含检索指令: {text}");
+        assert!(
+            text.contains("先检索") || text.contains("检索"),
+            "应含检索指令: {text}"
+        );
         assert!(text.contains("编造"), "应含禁止编造提示: {text}");
     }
 
@@ -362,11 +453,20 @@ mod module_scene_proj_tests {
         let blocks = scene_node_to_blocks("mod1", &n, &npcs, &[]);
         assert!(!blocks.is_empty());
         let text = blocks[0].content.render_text();
-        assert!(text.contains("褪色的广告牌"), "DeepExtracted read_aloud 应存在: {text}");
+        assert!(
+            text.contains("褪色的广告牌"),
+            "DeepExtracted read_aloud 应存在: {text}"
+        );
         assert!(text.contains("拉斯"), "DeepExtracted NPC 应存在: {text}");
         // 不含 SkeletonOnly 降级指令
-        assert!(!text.contains("先检索"), "DeepExtracted 不应含降级指令: {text}");
-        assert!(!text.contains("SkeletonOnly"), "DeepExtracted 不应含 status 标记: {text}");
+        assert!(
+            !text.contains("先检索"),
+            "DeepExtracted 不应含降级指令: {text}"
+        );
+        assert!(
+            !text.contains("SkeletonOnly"),
+            "DeepExtracted 不应含 status 标记: {text}"
+        );
     }
 
     #[test]
@@ -432,14 +532,27 @@ mod module_scene_proj_tests {
         let blocks = scene_node_to_blocks("mod1", &n, &[], &[]);
         assert_eq!(blocks.len(), 2, "正文块 + intents 块");
         let b = &blocks[1];
-        assert!(b.block_id.ends_with(".mechanics"), "block_id 应以 .mechanics 结尾: {}", b.block_id);
+        assert!(
+            b.block_id.ends_with(".mechanics"),
+            "block_id 应以 .mechanics 结尾: {}",
+            b.block_id
+        );
         assert_eq!(b.cache_zone, CacheZone::PinnedMiddle);
         assert_eq!(b.stability, trpg_model::Stability::SceneStable);
         assert_eq!(b.expires_at_scene.as_deref(), Some("loc1"));
         let text = b.content.render_text();
-        assert!(text.contains("homecoming.lawmen.cut_cable_force"), "内容应含 intent_id: {text}");
-        assert!(!text.contains("effect_policy"), "effect_policy 全文不投影: {text}");
-        assert!(!text.contains("on_success"), "on_success 全文不投影: {text}");
+        assert!(
+            text.contains("homecoming.lawmen.cut_cable_force"),
+            "内容应含 intent_id: {text}"
+        );
+        assert!(
+            !text.contains("effect_policy"),
+            "effect_policy 全文不投影: {text}"
+        );
+        assert!(
+            !text.contains("on_success"),
+            "on_success 全文不投影: {text}"
+        );
     }
 
     #[test]
@@ -447,9 +560,16 @@ mod module_scene_proj_tests {
         let mut n = deep_scene_with_intents("loc1");
         n.scene_mechanics = Vec::new(); // 旧模组：无 intents
         let blocks = scene_node_to_blocks("mod1", &n, &[], &[]);
-        assert_eq!(blocks.len(), 1, "空 intents → 仍单块（旧模组零变化=fail-closed）");
+        assert_eq!(
+            blocks.len(),
+            1,
+            "空 intents → 仍单块（旧模组零变化=fail-closed）"
+        );
         let text = blocks[0].content.render_text();
-        assert!(!text.contains("机制意图"), "首块内容不得混入机制意图: {text}");
+        assert!(
+            !text.contains("机制意图"),
+            "首块内容不得混入机制意图: {text}"
+        );
     }
 
     #[test]
@@ -459,7 +579,10 @@ mod module_scene_proj_tests {
         let second = scene_node_to_blocks("mod1", &n, &[], &[]);
         let a = serde_json::to_vec(&first[1]).expect("intents 块可序列化");
         let b = serde_json::to_vec(&second[1]).expect("intents 块可序列化");
-        assert_eq!(a, b, "同节点两次投影的 intents 块字节必须一致（pinned_hash 场景内稳定的函数级前提）");
+        assert_eq!(
+            a, b,
+            "同节点两次投影的 intents 块字节必须一致（pinned_hash 场景内稳定的函数级前提）"
+        );
     }
 
     // ===== N3: SceneStatic 缓存区可配 PinnedMiddle =====
@@ -531,8 +654,16 @@ mod module_scene_proj_tests {
         let n = deep_scene_node("loc1");
         let blocks = scene_node_to_blocks("mod1", &n, &[], &[]);
         let sb = &blocks[0];
-        assert_eq!(sb.cache_zone, CacheZone::PinnedMiddle, "pinned_middle 配置下正文块应进 PinnedMiddle");
-        assert_eq!(sb.expires_at_scene.as_deref(), Some("loc1"), "仍带 expires_at_scene（切场景才失效）");
+        assert_eq!(
+            sb.cache_zone,
+            CacheZone::PinnedMiddle,
+            "pinned_middle 配置下正文块应进 PinnedMiddle"
+        );
+        assert_eq!(
+            sb.expires_at_scene.as_deref(),
+            Some("loc1"),
+            "仍带 expires_at_scene（切场景才失效）"
+        );
         assert_eq!(sb.kind, BlockKind::SceneStatic);
         // 正文内容不变（仅缓存区变）
         let text = sb.content.render_text();
@@ -547,13 +678,21 @@ mod module_scene_proj_tests {
             let _g = DeepZoneEnvGuard::set("  Pinned_Middle  ");
             let n = deep_scene_node("loc1");
             let blocks = scene_node_to_blocks("mod1", &n, &[], &[]);
-            assert_eq!(blocks[0].cache_zone, CacheZone::PinnedMiddle, "大小写+空白容错");
+            assert_eq!(
+                blocks[0].cache_zone,
+                CacheZone::PinnedMiddle,
+                "大小写+空白容错"
+            );
         }
         {
             let _g = DeepZoneEnvGuard::set("garbage_value");
             let n = deep_scene_node("loc1");
             let blocks = scene_node_to_blocks("mod1", &n, &[], &[]);
-            assert_eq!(blocks[0].cache_zone, CacheZone::DynamicTail, "无法识别值 fail-closed 回退 DynamicTail");
+            assert_eq!(
+                blocks[0].cache_zone,
+                CacheZone::DynamicTail,
+                "无法识别值 fail-closed 回退 DynamicTail"
+            );
         }
     }
 
@@ -598,7 +737,10 @@ mod module_scene_proj_tests {
                 Visibility::GmOnly,
                 Stability::TurnDynamic,
                 CacheZone::DynamicTail,
-                Scope { scope_type: ScopeType::Global, scope_id: "*".into() },
+                Scope {
+                    scope_type: ScopeType::Global,
+                    scope_id: "*".into(),
+                },
                 10,
             )
         };
@@ -628,8 +770,14 @@ mod module_scene_proj_tests {
         let c3 = build(&pinned_b, input_block("我环顾四周")); // 切场景，输入回到原值
 
         // 1) 只改 DynamicTail 输入：pinned_hash 不变，dynamic_hash 变
-        assert_eq!(c1.pinned_hash, c2.pinned_hash, "普通输入只动 dynamic_hash，pinned_hash 应稳定");
-        assert_ne!(c1.dynamic_hash, c2.dynamic_hash, "输入变 → dynamic_hash 应变");
+        assert_eq!(
+            c1.pinned_hash, c2.pinned_hash,
+            "普通输入只动 dynamic_hash，pinned_hash 应稳定"
+        );
+        assert_ne!(
+            c1.dynamic_hash, c2.dynamic_hash,
+            "输入变 → dynamic_hash 应变"
+        );
         // 2) 切场景：pinned_hash 应变（场景正文进了 pinned 区）
         assert_ne!(c1.pinned_hash, c3.pinned_hash, "切场景 → pinned_hash 应变");
     }
@@ -653,16 +801,30 @@ mod module_scene_proj_tests {
         scene_b.read_aloud = Some("广场上人来人往。".into());
         let a = scene_node_to_blocks("mod1", &scene_a, &[], &[]);
         let b = scene_node_to_blocks("mod1", &scene_b, &[], &[]);
-        assert_eq!(a[0].cache_zone, CacheZone::DynamicTail, "默认正文在 dynamic 区");
+        assert_eq!(
+            a[0].cache_zone,
+            CacheZone::DynamicTail,
+            "默认正文在 dynamic 区"
+        );
 
         let build = |blk: &[ContextBlock]| {
-            let planned = crate::PlannedContext { prefix_blocks: vec![], pinned_blocks: vec![], dynamic_blocks: blk.to_vec() };
+            let planned = crate::PlannedContext {
+                prefix_blocks: vec![],
+                pinned_blocks: vec![],
+                dynamic_blocks: blk.to_vec(),
+            };
             builder.build(planned, &req).expect("compile ok")
         };
         let ca = build(&a);
         let cb = build(&b);
-        assert_eq!(ca.pinned_hash, cb.pinned_hash, "默认下切场景 pinned_hash 不变（正文不在 pinned 区）");
-        assert_ne!(ca.dynamic_hash, cb.dynamic_hash, "默认下切场景动 dynamic_hash");
+        assert_eq!(
+            ca.pinned_hash, cb.pinned_hash,
+            "默认下切场景 pinned_hash 不变（正文不在 pinned 区）"
+        );
+        assert_ne!(
+            ca.dynamic_hash, cb.dynamic_hash,
+            "默认下切场景动 dynamic_hash"
+        );
     }
 
     #[test]
@@ -680,32 +842,73 @@ mod module_scene_proj_tests {
             mk("prologue", SceneExtractionStatus::DeepExtracted),
         ];
         g.spine = serde_json::json!({"entry_node_id": "prologue"});
-        assert_eq!(module_entry_scene_id(&g).as_deref(), Some("prologue"), "spine.entry_node_id 优先");
+        assert_eq!(
+            module_entry_scene_id(&g).as_deref(),
+            Some("prologue"),
+            "spine.entry_node_id 优先"
+        );
         g.spine = serde_json::json!({});
-        assert_eq!(module_entry_scene_id(&g).as_deref(), Some("prologue"), "无 spine → 首个 deep");
+        assert_eq!(
+            module_entry_scene_id(&g).as_deref(),
+            Some("prologue"),
+            "无 spine → 首个 deep"
+        );
         g.scenes[1].extraction_status = SceneExtractionStatus::SkeletonOnly;
-        assert_eq!(module_entry_scene_id(&g).as_deref(), Some("preface"), "无 deep → scenes[0]");
-        assert_eq!(module_entry_scene_id(&ModuleGraph::default()), None, "空 → None");
+        assert_eq!(
+            module_entry_scene_id(&g).as_deref(),
+            Some("preface"),
+            "无 deep → scenes[0]"
+        );
+        assert_eq!(
+            module_entry_scene_id(&ModuleGraph::default()),
+            None,
+            "空 → None"
+        );
     }
 
     #[test]
     fn resolve_turn_scene_id_loads_when_absent_with_module() {
-        assert_eq!(resolve_turn_scene_id(Some("loc1"), Some("m"), Some("loaded".into())).as_deref(), Some("loc1"), "已有 scene → 不覆盖");
-        assert_eq!(resolve_turn_scene_id(None, Some("m"), Some("loaded".into())).as_deref(), Some("loaded"), "缺+有模组 → 载入");
-        assert_eq!(resolve_turn_scene_id(None, None, Some("loaded".into())), None, "无模组 → 不载");
-        assert_eq!(resolve_turn_scene_id(Some(""), Some("m"), Some("loaded".into())).as_deref(), Some("loaded"), "空串视为缺");
+        assert_eq!(
+            resolve_turn_scene_id(Some("loc1"), Some("m"), Some("loaded".into())).as_deref(),
+            Some("loc1"),
+            "已有 scene → 不覆盖"
+        );
+        assert_eq!(
+            resolve_turn_scene_id(None, Some("m"), Some("loaded".into())).as_deref(),
+            Some("loaded"),
+            "缺+有模组 → 载入"
+        );
+        assert_eq!(
+            resolve_turn_scene_id(None, None, Some("loaded".into())),
+            None,
+            "无模组 → 不载"
+        );
+        assert_eq!(
+            resolve_turn_scene_id(Some(""), Some("m"), Some("loaded".into())).as_deref(),
+            Some("loaded"),
+            "空串视为缺"
+        );
     }
 
     #[test]
     fn map_check_param_need_selects_by_compare() {
         use trpg_model::SituationActionKind::*;
         // meet_or_beat:攻击族 → 被动 defense DV。
-        assert_eq!(map_check_param_need(&Attack, "meet_or_beat"), Some(("stats".into(),"defense".into())));
+        assert_eq!(
+            map_check_param_need(&Attack, "meet_or_beat"),
+            Some(("stats".into(), "defense".into()))
+        );
         // roll_under:攻击族 → 对抗技能 dodge。
-        assert_eq!(map_check_param_need(&Attack, "roll_under"), Some(("skills".into(),"dodge".into())));
+        assert_eq!(
+            map_check_param_need(&Attack, "roll_under"),
+            Some(("skills".into(), "dodge".into()))
+        );
         // 潜行/盗窃/对抗社交/冲突中调查 → perception(两种 compare 一致)。
         for ak in [Hide, Hack, Intimidate, InvestigateDuringConflict] {
-            assert_eq!(map_check_param_need(&ak, "roll_under"), Some(("skills".into(),"perception".into())));
+            assert_eq!(
+                map_check_param_need(&ak, "roll_under"),
+                Some(("skills".into(), "perception".into()))
+            );
         }
         // 不需 NPC 参数 → None。
         for ak in [AskQuestion, Move, LeaveScene, Unknown] {
@@ -720,7 +923,14 @@ mod module_scene_proj_tests {
         // 被动防御:玩家防御/闪避/找掩护/被攻击时,是 NPC 在攻击你 → 对手该测的不是
         // 它的防御值,而是它的"攻击技能"(命中你的能力)。攻击在 roll_under 与
         // meet_or_beat 两套模型里都是技能桶,故两种 compare 一致;零规则集硬编码。
-        for ak in [Defend, Dodge, TakeCover, UnderAttack, EnemyInitiatedConflict, SceneEntersConflict] {
+        for ak in [
+            Defend,
+            Dodge,
+            TakeCover,
+            UnderAttack,
+            EnemyInitiatedConflict,
+            SceneEntersConflict,
+        ] {
             assert_eq!(
                 map_check_param_need(&ak, "meet_or_beat"),
                 Some(("skills".into(), "attack".into())),
@@ -733,10 +943,19 @@ mod module_scene_proj_tests {
             );
         }
         // 回归守卫:主动攻击仍测对手防御值,方向不反。
-        assert_eq!(map_check_param_need(&Attack, "meet_or_beat"), Some(("stats".into(), "defense".into())));
-        assert_eq!(map_check_param_need(&Counterattack, "roll_under"), Some(("skills".into(), "dodge".into())));
+        assert_eq!(
+            map_check_param_need(&Attack, "meet_or_beat"),
+            Some(("stats".into(), "defense".into()))
+        );
+        assert_eq!(
+            map_check_param_need(&Counterattack, "roll_under"),
+            Some(("skills".into(), "dodge".into()))
+        );
         // CastOrUsePower = 主动放有害异能 → 仍走主动支(对手防御)。
-        assert_eq!(map_check_param_need(&CastOrUsePower, "meet_or_beat"), Some(("stats".into(), "defense".into())));
+        assert_eq!(
+            map_check_param_need(&CastOrUsePower, "meet_or_beat"),
+            Some(("stats".into(), "defense".into()))
+        );
     }
 }
 
@@ -784,7 +1003,10 @@ mod stamp_tests {
             Some("npc.opposition")
         );
         assert_eq!(
-            check.opponent_tested_parameter.as_ref().map(|t| t.key.as_str()),
+            check
+                .opponent_tested_parameter
+                .as_ref()
+                .map(|t| t.key.as_str()),
             Some("perception")
         );
     }
@@ -811,9 +1033,17 @@ mod opposed_tests {
             "confidence":"medium","ruling_status":"provisional","advice_refs":[],"expires_at_turn":null
         })).unwrap();
         assert!(!contract_is_opposed(&c));
-        c.target_actor = Some(ActorRef { actor_id: "npc.opposition".into(), actor_kind: ActorKind::Npc, display_name: None });
+        c.target_actor = Some(ActorRef {
+            actor_id: "npc.opposition".into(),
+            actor_kind: ActorKind::Npc,
+            display_name: None,
+        });
         assert!(!contract_is_opposed(&c), "只有 target_actor 还不够");
-        c.opponent_tested_parameter = Some(TestedParameter { domain: None, key: "perception".into(), label: "perception".into() });
+        c.opponent_tested_parameter = Some(TestedParameter {
+            domain: None,
+            key: "perception".into(),
+            label: "perception".into(),
+        });
         assert!(contract_is_opposed(&c));
     }
 }

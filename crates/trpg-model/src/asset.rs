@@ -208,10 +208,7 @@ mod tests {
         };
         let facet = AssetFacet {
             facet_kind: "check".to_string(),
-            binding_candidates: vec![
-                CAP_CHECK_ROLL_UNDER.to_string(),
-                CAP_ROLL_DICE.to_string(),
-            ],
+            binding_candidates: vec![CAP_CHECK_ROLL_UNDER.to_string(), CAP_ROLL_DICE.to_string()],
             confidence: 0.82,
             source_refs: vec![source_ref.clone()],
         };
@@ -231,8 +228,7 @@ mod tests {
         };
 
         let value = serde_json::to_value(&envelope).expect("serialize AssetEnvelope");
-        let back: AssetEnvelope =
-            serde_json::from_value(value).expect("deserialize AssetEnvelope");
+        let back: AssetEnvelope = serde_json::from_value(value).expect("deserialize AssetEnvelope");
         assert_eq!(envelope, back);
     }
 

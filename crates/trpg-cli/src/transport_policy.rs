@@ -18,7 +18,11 @@ pub enum WaitMode {
 /// `is_one_shot` = true  → `trpg turn`（脚本/测试，需确定性落账）。
 /// `is_one_shot` = false → `trpg play`（交互循环，下一轮守卫兜）。
 pub fn cli_wait_mode(is_one_shot: bool) -> WaitMode {
-    if is_one_shot { WaitMode::WaitHeavy } else { WaitMode::NoWait }
+    if is_one_shot {
+        WaitMode::WaitHeavy
+    } else {
+        WaitMode::NoWait
+    }
 }
 
 #[cfg(test)]

@@ -80,6 +80,42 @@ pub struct ContextFilterSpec {
     pub reason: String,
 }
 
+/// 私有 block 元数据快照（**仅供 Safety 插件做 fail-closed 上下文过滤判断**）。
+///
+/// 绝不渲染进模型 prompt：只承载分类所需的元数据（block_id/visibility/cache_zone/
+/// tags/source_refs/load_reason + 显式 secret/future/fact_id 标注），**不含 secret 正文**。
+/// 分类靠显式元数据/标注驱动（保守删），不做模糊正文扫描。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PrivateBlockView {
+    pub block_id: String,
+    pub visibility: trpg_model::Visibility,
+    pub cache_zone: trpg_model::CacheZone,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub source_refs: Vec<trpg_model::SourceRef>,
+    #[serde(default)]
+    pub load_reason: Option<String>,
+    /// 该块绑定的事实 id（若有）。已 player-known 的 fact 必放行（不删已揭示）。
+    #[serde(default)]
+    pub fact_id: Option<String>,
+    /// 显式标注：玩家未知的隐藏真相 → 未 player-known 时保守删。
+    #[serde(default)]
+    pub secret: bool,
+    /// 显式标注：未来场景内容 → 与 GM-only 合取时保守删。
+    #[serde(default)]
+    pub future_scene: bool,
+}
+
+/// 私有泄漏检测项（**仅供 AfterLlmStream verifier**；绝不进 prompt）。
+/// `term` 是私密术语，若其 `fact_id` 尚未 player-known/revealed 且出现在玩家可见念白即疑似泄漏。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SecretTerm {
+    pub term: String,
+    #[serde(default)]
+    pub fact_id: Option<String>,
+}
+
 /// 贡献载荷（3 类，对应防剧透三段）。
 ///
 /// 不派生 `Serialize`：`ContextBlock` / `VerifierFinding` 用 trace 摘要落
@@ -108,12 +144,10 @@ impl PluginContributionKind {
             PluginContributionKind::ContextFilter(f) => {
                 format!("drop {} block(s)", f.drop_block_ids.len())
             }
-            PluginContributionKind::VerifierFinding(vf) => {
-                serde_json::to_value(vf.kind)
-                    .ok()
-                    .and_then(|v| v.as_str().map(|s| s.to_string()))
-                    .unwrap_or_else(|| format!("{:?}", vf.kind))
-            }
+            PluginContributionKind::VerifierFinding(vf) => serde_json::to_value(vf.kind)
+                .ok()
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_else(|| format!("{:?}", vf.kind)),
         }
     }
 }
@@ -157,6 +191,17 @@ pub struct PluginContext {
     /// 当前可见 block id 列表（ContextFilter 从中择块删除）。
     #[serde(default)]
     pub compiled_block_ids: Vec<String>,
+    /// 玩家方已知/已揭示的 fact_id 集（DB player_knowledge 投影：holder=player_party,
+    /// state=knows_true）。ContextFilter/verifier 据此放行已揭示事实；默认空 = 全按未知
+    /// （fail-closed，宁可多删/多报，不赌 DB）。
+    #[serde(default)]
+    pub player_known_fact_ids: Vec<String>,
+    /// 私有 block 元数据快照（Safety 插件据此 fail-closed 删块；**不进 prompt**，默认空）。
+    #[serde(default)]
+    pub private_blocks: Vec<PrivateBlockView>,
+    /// 私有泄漏术语表（AfterLlmStream verifier 用；**不进 prompt**，默认空 = 不检测）。
+    #[serde(default)]
+    pub secret_terms: Vec<SecretTerm>,
     /// 插件自配置（applies_when 余项 / 行为参数）。
     #[serde(default)]
     pub config: serde_json::Value,

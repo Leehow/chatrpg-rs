@@ -54,7 +54,10 @@ fn verdict_partial_when_registered_no_source() {
 #[test]
 fn verdict_guided_when_candidate_unregistered_but_sourced() {
     let reg = CapabilityRegistry::with_defaults();
-    let facets = vec![facet(vec!["check.bogus_unregistered"], vec![a_source_ref()])];
+    let facets = vec![facet(
+        vec!["check.bogus_unregistered"],
+        vec![a_source_ref()],
+    )];
     let plan = resolve_binding("rule", &facets, &reg);
     assert_eq!(plan.verdict, BindingVerdict::Guided);
     assert!(plan.capability.is_none());
@@ -105,10 +108,7 @@ fn resolve_binding_is_deterministic() {
 #[test]
 fn shadow_bind_over_need_traces() {
     let reg = CapabilityRegistry::with_defaults();
-    let traces = vec![
-        trace("rule", vec![a_source_ref()]),
-        trace("scene", vec![]),
-    ];
+    let traces = vec![trace("rule", vec![a_source_ref()]), trace("scene", vec![])];
     let plans = shadow_bind(&traces, &reg);
     assert_eq!(plans.len(), 2);
 
@@ -151,7 +151,11 @@ fn kernel_with(
         version: "1".into(),
         dice_core,
         resource_tracks,
-        source_refs: if sourced { vec![a_source_ref()] } else { vec![] },
+        source_refs: if sourced {
+            vec![a_source_ref()]
+        } else {
+            vec![]
+        },
         ..Default::default()
     }
 }
@@ -162,10 +166,19 @@ fn facets_from_kernel_roll_under_yields_check_roll_under() {
     let reg = CapabilityRegistry::with_defaults();
     let kernel = kernel_with(Some("roll_under"), true, vec![]);
     let facets = facets_from_kernel(&kernel);
-    let check = facets.iter().find(|f| f.facet_kind == "check_model").expect("check facet");
-    assert_eq!(check.binding_candidates, vec![CAP_CHECK_ROLL_UNDER.to_string()]);
+    let check = facets
+        .iter()
+        .find(|f| f.facet_kind == "check_model")
+        .expect("check facet");
+    assert_eq!(
+        check.binding_candidates,
+        vec![CAP_CHECK_ROLL_UNDER.to_string()]
+    );
     assert_eq!(check.confidence, 0.9);
-    assert!(!check.source_refs.is_empty(), "facet 必须透传 kernel source_refs");
+    assert!(
+        !check.source_refs.is_empty(),
+        "facet 必须透传 kernel source_refs"
+    );
 
     let plan = resolve_binding("ruleset_check", &facets, &reg);
     assert_eq!(plan.verdict, BindingVerdict::Exact);
@@ -200,26 +213,39 @@ fn facets_from_kernel_count_faces_yields_check_count_faces() {
 fn facets_from_kernel_empty_kernel_yields_no_check_facet() {
     let no_compare = kernel_with(None, true, vec![]);
     assert!(
-        !facets_from_kernel(&no_compare).iter().any(|f| f.facet_kind == "check_model"),
+        !facets_from_kernel(&no_compare)
+            .iter()
+            .any(|f| f.facet_kind == "check_model"),
         "无 compare → 无 check facet",
     );
     let bogus = kernel_with(Some("totally_unknown"), true, vec![]);
     assert!(
-        !facets_from_kernel(&bogus).iter().any(|f| f.facet_kind == "check_model"),
+        !facets_from_kernel(&bogus)
+            .iter()
+            .any(|f| f.facet_kind == "check_model"),
         "未知 compare → 无 check facet",
     );
     // 完全空 kernel（无 dice_core / 无 resource）→ 空 Vec。
     let empty = kernel_with(None, false, vec![]);
-    assert!(facets_from_kernel(&empty).is_empty(), "空 kernel → 空 facet（fail-soft）");
+    assert!(
+        facets_from_kernel(&empty).is_empty(),
+        "空 kernel → 空 facet（fail-soft）"
+    );
 }
 
 // resource_tracks 非空 → 一条聚合 resource facet[CAP_RESOURCE_DELTA]。
 #[test]
 fn facets_from_kernel_resource_tracks_yield_resource_facet() {
-    let tracks = vec![serde_json::json!({"id":"hp","kind":"health"}), serde_json::json!({"id":"san"})];
+    let tracks = vec![
+        serde_json::json!({"id":"hp","kind":"health"}),
+        serde_json::json!({"id":"san"}),
+    ];
     let kernel = kernel_with(Some("roll_under"), true, tracks);
     let facets = facets_from_kernel(&kernel);
-    let res = facets.iter().find(|f| f.facet_kind == "resource").expect("resource facet");
+    let res = facets
+        .iter()
+        .find(|f| f.facet_kind == "resource")
+        .expect("resource facet");
     assert_eq!(res.binding_candidates, vec![CAP_RESOURCE_DELTA.to_string()]);
     assert_eq!(res.confidence, 0.8);
     assert_eq!(
@@ -234,19 +260,33 @@ fn facets_from_kernel_resource_tracks_yield_resource_facet() {
 fn shadow_bind_with_kernel_appends_kernel_plan() {
     let reg = CapabilityRegistry::with_defaults();
     let traces = vec![trace("scene", vec![])];
-    let kernel = kernel_with(Some("roll_under"), true, vec![serde_json::json!({"id":"hp","kind":"health"})]);
+    let kernel = kernel_with(
+        Some("roll_under"),
+        true,
+        vec![serde_json::json!({"id":"hp","kind":"health"})],
+    );
 
     let base = shadow_bind(&traces, &reg);
     assert_eq!(base.len(), 1, "无 kernel → 仅 need-trace 计划");
 
     let plans = shadow_bind_with_kernel(&traces, Some(&kernel), &reg);
-    assert_eq!(plans.len(), 3, "need-trace + ruleset_check + ruleset_resource");
+    assert_eq!(
+        plans.len(),
+        3,
+        "need-trace + ruleset_check + ruleset_resource"
+    );
 
-    let check = plans.iter().find(|p| p.need_kind == "ruleset_check").expect("ruleset_check plan");
+    let check = plans
+        .iter()
+        .find(|p| p.need_kind == "ruleset_check")
+        .expect("ruleset_check plan");
     assert_eq!(check.verdict, BindingVerdict::Exact, "kernel 有据 → Exact");
     assert_eq!(check.capability.as_deref(), Some(CAP_CHECK_ROLL_UNDER));
 
-    let res = plans.iter().find(|p| p.need_kind == "ruleset_resource").expect("ruleset_resource plan");
+    let res = plans
+        .iter()
+        .find(|p| p.need_kind == "ruleset_resource")
+        .expect("ruleset_resource plan");
     assert_eq!(res.verdict, BindingVerdict::Exact);
     assert_eq!(res.capability.as_deref(), Some(CAP_RESOURCE_DELTA));
 

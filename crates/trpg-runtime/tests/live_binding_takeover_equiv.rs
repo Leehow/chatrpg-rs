@@ -28,7 +28,11 @@ fn spot_hidden_contract(check_id: &str) -> CheckContract {
         turn_id: "turn_test".into(),
         ruleset_id: RULESET.into(),
         module_id: None,
-        initiator: ActorRef { actor_id: ACTOR.into(), actor_kind: ActorKind::PlayerCharacter, display_name: None },
+        initiator: ActorRef {
+            actor_id: ACTOR.into(),
+            actor_kind: ActorKind::PlayerCharacter,
+            display_name: None,
+        },
         target_actor: None,
         opposition: OppositionModel::NoMechanicalOpposition,
         action_summary: "Spot Hidden".into(),
@@ -37,7 +41,11 @@ fn spot_hidden_contract(check_id: &str) -> CheckContract {
         dice_expression: "1d100".into(),
         modifiers: vec![],
         target: CheckTargetModel::UnknownUntilLookup,
-        tested_parameter: Some(TestedParameter { domain: None, key: "Spot Hidden".into(), label: "Spot Hidden".into() }),
+        tested_parameter: Some(TestedParameter {
+            domain: None,
+            key: "Spot Hidden".into(),
+            label: "Spot Hidden".into(),
+        }),
         opponent_tested_parameter: None,
         actor_snapshot_ids: vec![],
         source_refs: vec![],
@@ -68,17 +76,46 @@ fn mech_fields(outcome: &Value) -> Value {
 
 #[tokio::test]
 async fn binding_takeover_check_resolution_is_byte_equivalent() {
-    let url = match std::env::var("DATABASE_URL") { Ok(u) => u, Err(_) => { eprintln!("SKIP: DATABASE_URL unset"); return; } };
-    let db = match Db::connect(&url).await { Ok(d) => d, Err(e) => { eprintln!("SKIP: connect failed: {e}"); return; } };
+    let url = match std::env::var("DATABASE_URL") {
+        Ok(u) => u,
+        Err(_) => {
+            eprintln!("SKIP: DATABASE_URL unset");
+            return;
+        }
+    };
+    let db = match Db::connect(&url).await {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("SKIP: connect failed: {e}");
+            return;
+        }
+    };
     // 闸门：库内须有 CoC roll_under kernel + Spot Hidden 测试角色，否则 SKIP。
     let kernel = db.load_rule_kernel(RULESET).await.ok().flatten();
-    let is_roll_under = kernel.as_ref().and_then(|k| k.dice_core.get("compare").and_then(|v| v.as_str())) == Some("roll_under");
-    if !is_roll_under { eprintln!("SKIP: 本库无 call_of_cthulhu_7e roll_under kernel（需 :54347）"); return; }
+    let is_roll_under = kernel
+        .as_ref()
+        .and_then(|k| k.dice_core.get("compare").and_then(|v| v.as_str()))
+        == Some("roll_under");
+    if !is_roll_under {
+        eprintln!("SKIP: 本库无 call_of_cthulhu_7e roll_under kernel（需 :54347）");
+        return;
+    }
     let has_fixture = trpg_params::RuntimeParameterService::new(db.clone())
-        .load_actor_parameters(SESSION, ACTOR).await.ok().flatten()
-        .and_then(|p| p.mechanical_profile.get("skills").and_then(|s| s.get("Spot Hidden")).cloned())
+        .load_actor_parameters(SESSION, ACTOR)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|p| {
+            p.mechanical_profile
+                .get("skills")
+                .and_then(|s| s.get("Spot Hidden"))
+                .cloned()
+        })
         .is_some();
-    if !has_fixture { eprintln!("SKIP: 本库无 CoC 测试角色 Spot Hidden fixture"); return; }
+    if !has_fixture {
+        eprintln!("SKIP: 本库无 CoC 测试角色 Spot Hidden fixture");
+        return;
+    }
 
     // 确定性掷骰：player-reported total，输入 "30" → ReportedTotal(30)（见 parse_roll_text）。
     std::env::set_var("TRPG_PLAYER_REPORTED_ROLL_TOTALS", "1");
@@ -87,26 +124,47 @@ async fn binding_takeover_check_resolution_is_byte_equivalent() {
     // —— ① 关（显式 0：直调权威 resolve_outcome 原路径。默认已 ON，故此处必须显式关）。
     std::env::set_var("TRPG_BINDING_TAKEOVER", "0");
     let c_off = spot_hidden_contract("check_takeover_off");
-    let res_off = engine.resolve_check_with_input(SESSION, "turn_off", &c_off, "30").await.expect("resolve OFF");
+    let res_off = engine
+        .resolve_check_with_input(SESSION, "turn_off", &c_off, "30")
+        .await
+        .expect("resolve OFF");
     let off = mech_fields(&res_off.outcome);
     println!("[OFF] {}", serde_json::to_string(&off).unwrap());
 
     // —— ② 开（经 BindingResolver → ExecutionTier 路由 → capability executor）。
     std::env::set_var("TRPG_BINDING_TAKEOVER", "1");
     let c_on = spot_hidden_contract("check_takeover_on");
-    let res_on = engine.resolve_check_with_input(SESSION, "turn_on", &c_on, "30").await.expect("resolve ON");
+    let res_on = engine
+        .resolve_check_with_input(SESSION, "turn_on", &c_on, "30")
+        .await
+        .expect("resolve ON");
     let on = mech_fields(&res_on.outcome);
     println!("[ON ] {}", serde_json::to_string(&on).unwrap());
 
     // —— ③ 逐字段等价：takeover 路径与原路径零行为变更。
-    assert_eq!(off, on, "binding takeover ON 的机械结果必须与 OFF 逐字段相等（零行为变更）");
+    assert_eq!(
+        off, on,
+        "binding takeover ON 的机械结果必须与 OFF 逐字段相等（零行为变更）"
+    );
     // —— ④ ON 路径确实驱动了真实结算（非回退/provisional）：Spot Hidden=75，roll 30 → 成功。
-    assert_eq!(on.get("target").and_then(|v| v.as_i64()), Some(75), "ON 路径须读到真实 Spot Hidden=75（证明 takeover 真结算）");
-    assert_eq!(on.get("success").and_then(|v| v.as_bool()), Some(true), "30 <= 75 必成功");
+    assert_eq!(
+        on.get("target").and_then(|v| v.as_i64()),
+        Some(75),
+        "ON 路径须读到真实 Spot Hidden=75（证明 takeover 真结算）"
+    );
+    assert_eq!(
+        on.get("success").and_then(|v| v.as_bool()),
+        Some(true),
+        "30 <= 75 必成功"
+    );
 
     // 清理自建 check_result（仅删本测两条，不动 fixture 其他数据）。
     for cid in ["check_takeover_off", "check_takeover_on"] {
-        sqlx::query("delete from check_results where check_id = $1").bind(cid).execute(&db.pool).await.ok();
+        sqlx::query("delete from check_results where check_id = $1")
+            .bind(cid)
+            .execute(&db.pool)
+            .await
+            .ok();
     }
     std::env::remove_var("TRPG_BINDING_TAKEOVER");
     std::env::remove_var("TRPG_PLAYER_REPORTED_ROLL_TOTALS");

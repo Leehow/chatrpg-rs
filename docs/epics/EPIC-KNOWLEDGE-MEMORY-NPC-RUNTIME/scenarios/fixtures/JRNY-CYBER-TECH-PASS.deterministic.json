@@ -1,0 +1,31 @@
+{
+  "identity": {
+    "scenario_id": "JRNY-CYBER-TECH-PASS",
+    "scenario_version": "1",
+    "evidence_schema_version": "tc-jrny-02.evidence.v1"
+  },
+  "recorded_mode": "deterministic",
+  "turns": [
+    {
+      "user_input": "我拆开墙边的接线盒，动手切断公寓外露的供电电缆。",
+      "count_delta": {
+        "roll_plans": 1,
+        "dice_rolls": 1,
+        "contest_resolution_events": 1
+      },
+      "newest_contest_row": {
+        "target_value": 14,
+        "success": true,
+        "degree": "success",
+        "total": 18,
+        "outcome_json": {
+          "target": 14,
+          "success": true,
+          "degree": "success",
+          "source_refs": ["module_config:technical_option_table:dv=14"]
+        }
+      },
+      "player_visible_body": "你成功切断了公寓的供电电缆，房间陷入黑暗，安保系统随之瘫痪。"
+    }
+  ]
+}

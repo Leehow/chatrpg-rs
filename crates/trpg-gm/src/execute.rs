@@ -55,10 +55,9 @@ pub(crate) fn select_phases(
             PhaseKind::Deterministic => true, // 头部确定性步
             PhaseKind::AgentLoop => true,     // body 必跑
             PhaseKind::Postprocess => match signal {
-                AgentSignal::AwaitingPlayerRoll => matches!(
-                    p.id,
-                    PhaseId::VerifyAfterStream | PhaseId::Finalize
-                ),
+                AgentSignal::AwaitingPlayerRoll => {
+                    matches!(p.id, PhaseId::VerifyAfterStream | PhaseId::Finalize)
+                }
                 AgentSignal::Narration => match p.id {
                     PhaseId::SceneNavigate => module_present,
                     PhaseId::CarryoverDebt => has_pending_obligations,
@@ -157,12 +156,30 @@ async fn run_pipeline(
                 // 否则 CLI `turn` 收到 TurnFailed 即 bail! → 进程退出 → tokio runtime 关闭，
                 // 会在 emit 之后、upsert 之前杀掉本任务，失败 trace 永不落库（live e2e 实测）。
                 // 先落库再发终态事件，保证无论 transport 如何 bail，可观测记录都已持久化。
-                if let Err(e) = gm.engine.db.set_turn_failure_kind(&req.request.turn_id, kind).await {
+                if let Err(e) = gm
+                    .engine
+                    .db
+                    .set_turn_failure_kind(&req.request.turn_id, kind)
+                    .await
+                {
                     tracing::warn!(error = %e, turn_id = %req.request.turn_id, "set_turn_failure_kind failed (non-fatal)");
                 }
                 // 失败 TurnTrace（pp_lifecycle="failed"、failure=Some、narration=None、phases=已尝试）。
-                let failure = TurnFailureRecord { phase: phase_label.clone(), message: f.message.clone(), failure_kind: kind.to_string() };
-                let trace = build_turn_trace(&req, &ctx, "aborted".to_string(), phases_run.clone(), None, Some(failure), vec![], "failed");
+                let failure = TurnFailureRecord {
+                    phase: phase_label.clone(),
+                    message: f.message.clone(),
+                    failure_kind: kind.to_string(),
+                };
+                let trace = build_turn_trace(
+                    &req,
+                    &ctx,
+                    "aborted".to_string(),
+                    phases_run.clone(),
+                    None,
+                    Some(failure),
+                    vec![],
+                    "failed",
+                );
                 if let Err(e) = gm.engine.db.upsert_turn_trace(&trace).await {
                     tracing::warn!(error = %e, turn_id = %req.request.turn_id, "upsert_turn_trace (failure path) failed (non-fatal)");
                 }
@@ -177,7 +194,11 @@ async fn run_pipeline(
                 .await;
                 // DB 已落账后再发失败事件代替空 TurnComplete——客户端能区分"失败"与"成功的空白回合"。
                 let _ = tx
-                    .send(TurnEvent::TurnFailed { phase: phase_label, message: f.message, recoverable: false })
+                    .send(TurnEvent::TurnFailed {
+                        phase: phase_label,
+                        message: f.message,
+                        recoverable: false,
+                    })
                     .await;
                 return;
             }
@@ -187,7 +208,9 @@ async fn run_pipeline(
         phases_run.push(format!("{:?}", PhaseId::AgentLoop));
         // P1-3 follow-up：把取消令牌穿进 agent loop——客户端在状态变更前断开时 driver fire 它，
         // run_agent_loop 在 LLM 流边界 break、放弃在途生成（不再续烧 token）。
-        signal = gm.run_agent_loop(&mut ctx, &input, tx, req.cancel.as_ref()).await;
+        signal = gm
+            .run_agent_loop(&mut ctx, &input, tx, req.cancel.as_ref())
+            .await;
 
         // P1-3 follow-up：令牌已 fire ⇒ run_agent_loop 已放弃在途生成。此处同样短路尾段——
         // 不跑 verify/finalize/save_turn、不 spawn heavy，绝不持久化半截回合（兑现 driver
@@ -211,7 +234,9 @@ async fn run_pipeline(
         let has_pending = gm.has_pending_obligations();
         selected = select_phases(plan, signal, module_present, has_pending);
         for phase in &selected {
-            if phase.kind != PhaseKind::Postprocess { continue; }
+            if phase.kind != PhaseKind::Postprocess {
+                continue;
+            }
             match phase.id {
                 PhaseId::VerifyAfterStream => {
                     phases_run.push(format!("{:?}", PhaseId::VerifyAfterStream));
@@ -230,7 +255,13 @@ async fn run_pipeline(
                 PhaseId::SceneNavigate => {
                     phases_run.push(format!("{:?}", PhaseId::SceneNavigate));
                     if let Some(t) = gm.phase_scene_navigate_critical(&ctx, &input).await {
-                        let _ = tx.send(TurnEvent::SceneTransition { from: t.from.clone(), to: t.to.clone(), reason: t.reason.clone() }).await;
+                        let _ = tx
+                            .send(TurnEvent::SceneTransition {
+                                from: t.from.clone(),
+                                to: t.to.clone(),
+                                reason: t.reason.clone(),
+                            })
+                            .await;
                         // domain event write-through：SceneTransitioned（fail-soft，SceneTransition emit 之后）。
                         append_lifecycle_event(
                             &gm,
@@ -257,7 +288,12 @@ async fn run_pipeline(
         let _ = tx.send(TurnEvent::TurnComplete { outcome }).await;
         // R5 高水位锚点：critical 组已落账（save_turn + 切场景），标 pp_lifecycle=critical_done，
         // 让下一回合入口守卫可放行（heavy 仍后台跑、不阻塞）。失败仅 log，绝不影响已发的 TurnComplete。
-        if let Err(e) = gm.engine.db.set_turn_pp_lifecycle(&req.request.turn_id, trpg_model::PP_CRITICAL_DONE).await {
+        if let Err(e) = gm
+            .engine
+            .db
+            .set_turn_pp_lifecycle(&req.request.turn_id, trpg_model::PP_CRITICAL_DONE)
+            .await
+        {
             tracing::warn!(error = %e, turn_id = %req.request.turn_id, "set pp_lifecycle=critical_done failed (non-fatal)");
         }
         // —— 5. 成功路径 TurnTrace（write-through，fail-soft）——
@@ -341,7 +377,24 @@ fn spawn_heavy(
         // turn 摘要 memory + learning audit（原 finalize_turn 的 memory/audit 半边）。
         // assistant_output 用 take_outcome 清空 ctx **之前**于 run_pipeline 快照的 owned 值
         // （非现读 ctx——此刻 ctx.visible_text/awaiting_gate 已被 take_outcome 清空）。
-        gm.phase_finalize_heavy_memory(&heavy_assistant_output, &input).await;
+        gm.phase_finalize_heavy_memory(&heavy_assistant_output, &input)
+            .await;
+        // 玩家暴露 TruthGraph：用当前/初始转入场景的 referenced 实体 + 玩家可见念白
+        // 写 `PlayerExposed`。这必须在 relationship extraction 前执行，否则关系抽取会因
+        // 玩家暴露集为空而跳过。
+        let fallback_scene_id = req
+            .state
+            .scene_id
+            .as_deref()
+            .or(scene_commit.as_ref().map(|commit| commit.to.as_str()));
+        gm.engine
+            .record_player_exposed_entities_for_narration(
+                &req.request,
+                &req.state,
+                fallback_scene_id,
+                &heavy_assistant_output,
+            )
+            .await;
         // 子项目2 知识图谱：对本局已 surface 的实体之间，按本回合念白语义抽关系三元组
         // 写入 memory_facts（fail-soft、env 门控、复用既有 gm.llm 句柄）。后续回合经
         // retrieve_memory 召回。失败/无实体 → no-op，绝不影响已发的 TurnComplete（D2）。
@@ -352,6 +405,10 @@ fn spawn_heavy(
                 &req.request.turn_id,
                 req.module_id.as_deref(),
                 &heavy_assistant_output,
+                // TC-D3-04 社交闸信号：active NPC + 本回合玩家输入，让无新实体但有明确社交
+                // 互动（威胁/讨价/帮助…）的回合也能抽关系；普通非社交回合仍跳过。
+                &req.state.active_npc_ids,
+                &req.user_input,
             )
             .await;
         // 到场深抽 + frontier（仅 critical 真切了场景时）。
@@ -372,7 +429,12 @@ fn spawn_heavy(
         // R5 高水位锚点：heavy 组（memory/audit + 到场深抽/frontier + carryover）全跑完，
         // 标 pp_lifecycle=complete（无论 carryover 是否触发，都是 heavy 末态）。失败仅 log——
         // heavy 在独立 spawn、TurnComplete 早已发，此写失败不回退、不 panic（D2 失败隔离）。
-        if let Err(e) = gm.engine.db.set_turn_pp_lifecycle(&req.request.turn_id, trpg_model::PP_COMPLETE).await {
+        if let Err(e) = gm
+            .engine
+            .db
+            .set_turn_pp_lifecycle(&req.request.turn_id, trpg_model::PP_COMPLETE)
+            .await
+        {
             tracing::warn!(error = %e, turn_id = %req.request.turn_id, "set pp_lifecycle=complete failed (non-fatal)");
         }
     });
@@ -397,14 +459,20 @@ async fn dispatch_deterministic(
         PhaseId::ModeInference => {
             if let Err(err) = gm.phase_mode_inference(ctx, input).await {
                 tracing::warn!(error = %err, "mode_inference failed; aborting turn");
-                return Err(PhaseFailure { phase: PhaseId::ModeInference, message: err.to_string() });
+                return Err(PhaseFailure {
+                    phase: PhaseId::ModeInference,
+                    message: err.to_string(),
+                });
             }
         }
         PhaseId::DebtLoad => gm.phase_debt_load(ctx, input).await,
         PhaseId::ContextAssembly => {
             if let Err(err) = gm.phase_context_assembly(ctx, input).await {
                 tracing::warn!(error = %err, "context_assembly failed; aborting turn");
-                return Err(PhaseFailure { phase: PhaseId::ContextAssembly, message: err.to_string() });
+                return Err(PhaseFailure {
+                    phase: PhaseId::ContextAssembly,
+                    message: err.to_string(),
+                });
             }
         }
         // AgentLoop / Postprocess 不经此路径（解释器分流）；fail-closed no-op。

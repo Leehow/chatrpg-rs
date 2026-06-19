@@ -10,9 +10,9 @@
 //! 理念守卫：trace 只存 hash + need 来源元数据，**不存私密 prompt 正文**（避免 explain
 //! 泄底，spec §5.4）；narration_hash 是念白的稳定 hash，非念白原文。
 
+use crate::execute::OwnedTurnRequest;
 use crate::turn_loop::TurnContext;
 use crate::turn_plan::PhaseId;
-use crate::execute::OwnedTurnRequest;
 use std::sync::LazyLock;
 use trpg_model::{PhaseErrorPolicy, TurnFailureRecord, TurnTrace};
 
@@ -57,7 +57,11 @@ pub(crate) fn failure_kind_for(phase: PhaseId) -> &'static str {
 
 /// 空串 hash → None（CompiledContext::default() 的 hash 为空串；TurnTrace 用 Option 表"无"）。
 fn hash_opt(h: &str) -> Option<String> {
-    if h.is_empty() { None } else { Some(h.to_string()) }
+    if h.is_empty() {
+        None
+    } else {
+        Some(h.to_string())
+    }
 }
 
 /// 组装一条 TurnTrace（成功/失败两路径共用）。
@@ -84,8 +88,11 @@ pub(crate) fn build_turn_trace(
     // 从已解析 RuleKernel 派生的权威 ruleset_check/ruleset_resource 绑定（dice_core→检定 capability +
     // 资源轨，有据 → Exact）记进 Flight Recorder。纯函数、确定性、零行为变更——不改任何
     // emit/结算/状态，仅充实 trace。kernel=None（载失败/无）→ 退化为仅 need_kind 启发式。
-    trace.binding_trace =
-        trpg_runtime::shadow_bind_with_kernel(&compiled.need_trace, ctx.rule_kernel(), &SHADOW_REGISTRY);
+    trace.binding_trace = trpg_runtime::shadow_bind_with_kernel(
+        &compiled.need_trace,
+        ctx.rule_kernel(),
+        &SHADOW_REGISTRY,
+    );
     // Policy 插件贡献（T2）：context_assembly 经 PluginHost 折好的 trace，拷进 TurnTrace
     // （advisory，零行为变更——供 `trpg explain --plugins`）。
     trace.plugin_contributions = ctx.plugin_contributions().to_vec();
@@ -120,7 +127,10 @@ mod tests {
                 viewer: VisibilityProfile::gm(),
                 token_budget: TokenBudget::default(),
             },
-            state: RuntimeState { ruleset_id: "rs".into(), ..Default::default() },
+            state: RuntimeState {
+                ruleset_id: "rs".into(),
+                ..Default::default()
+            },
             user_input: "go".into(),
             history: vec![],
             recent_transcript: None,
@@ -133,8 +143,16 @@ mod tests {
     // 三分支：critical(Abort) / verify(WarnContinue) / heavy(BackgroundWarn)。
     #[test]
     fn phase_error_policy_three_branches() {
-        for p in [PhaseId::ModeInference, PhaseId::ContextAssembly, PhaseId::Finalize] {
-            assert_eq!(phase_error_policy(p), PhaseErrorPolicy::AbortTurn, "{p:?} must AbortTurn");
+        for p in [
+            PhaseId::ModeInference,
+            PhaseId::ContextAssembly,
+            PhaseId::Finalize,
+        ] {
+            assert_eq!(
+                phase_error_policy(p),
+                PhaseErrorPolicy::AbortTurn,
+                "{p:?} must AbortTurn"
+            );
         }
         assert_eq!(
             phase_error_policy(PhaseId::VerifyAfterStream),
@@ -212,7 +230,10 @@ mod tests {
         assert_eq!(trace.phases_run, vec!["context_assembly".to_string()]);
         // narration_hash 必须是稳定 hash（非原文）。
         let h = trace.narration_hash.expect("narration hash present");
-        assert!(h.starts_with("sha256:"), "narration hash 必须是 sha256: 前缀: {h}");
+        assert!(
+            h.starts_with("sha256:"),
+            "narration hash 必须是 sha256: 前缀: {h}"
+        );
         assert_eq!(h, trpg_model::sha256_hex("念白正文。"), "确定性 hash");
     }
 
@@ -248,10 +269,18 @@ mod tests {
             "complete",
         );
 
-        assert_eq!(trace.binding_trace.len(), 1, "rule need 应产一条 BindingPlan");
+        assert_eq!(
+            trace.binding_trace.len(),
+            1,
+            "rule need 应产一条 BindingPlan"
+        );
         let plan = &trace.binding_trace[0];
         assert_eq!(plan.need_kind, "rule");
-        assert_eq!(plan.verdict, BindingVerdict::Exact, "候选命中 registry + 有来源 → Exact");
+        assert_eq!(
+            plan.verdict,
+            BindingVerdict::Exact,
+            "候选命中 registry + 有来源 → Exact"
+        );
         assert!(plan.capability.is_some(), "Exact 必带命中的 capability");
     }
 
@@ -267,18 +296,35 @@ mod tests {
             ruleset_id: "rs".into(),
             version: "1".into(),
             dice_core: serde_json::json!({ "compare": "roll_under" }),
-            source_refs: vec![SourceRef { source_id: "coc_rulebook".into(), page: Some(82), ..Default::default() }],
+            source_refs: vec![SourceRef {
+                source_id: "coc_rulebook".into(),
+                page: Some(82),
+                ..Default::default()
+            }],
             ..Default::default()
         });
 
         let trace = build_turn_trace(
-            &req, &ctx, "TurnComplete".into(), vec!["context_assembly".into()],
-            None, None, vec![], "complete",
+            &req,
+            &ctx,
+            "TurnComplete".into(),
+            vec!["context_assembly".into()],
+            None,
+            None,
+            vec![],
+            "complete",
         );
 
-        let plan = trace.binding_trace.iter().find(|p| p.need_kind == "ruleset_check")
+        let plan = trace
+            .binding_trace
+            .iter()
+            .find(|p| p.need_kind == "ruleset_check")
             .expect("kernel 派生 ruleset_check 计划");
-        assert_eq!(plan.verdict, BindingVerdict::Exact, "kernel dice_core 有据 → Exact");
+        assert_eq!(
+            plan.verdict,
+            BindingVerdict::Exact,
+            "kernel dice_core 有据 → Exact"
+        );
         assert_eq!(plan.capability.as_deref(), Some("check.roll_under"));
     }
 
@@ -297,6 +343,9 @@ mod tests {
             vec![],
             "failed",
         );
-        assert!(trace.binding_trace.is_empty(), "空 need_trace → binding_trace 必空");
+        assert!(
+            trace.binding_trace.is_empty(),
+            "空 need_trace → binding_trace 必空"
+        );
     }
 }

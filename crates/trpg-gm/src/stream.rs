@@ -9,16 +9,30 @@ pub struct RedactingBuffer {
 
 impl RedactingBuffer {
     pub fn new(private_tokens: Vec<String>) -> Self {
-        let mut tokens = private_tokens.into_iter().map(|s| s.to_ascii_lowercase()).filter(|s| !s.trim().is_empty()).collect::<Vec<_>>();
+        let mut tokens = private_tokens
+            .into_iter()
+            .map(|s| s.to_ascii_lowercase())
+            .filter(|s| !s.trim().is_empty())
+            .collect::<Vec<_>>();
         tokens.sort();
         tokens.dedup();
-        let holdback = tokens.iter().map(|s| s.len().saturating_sub(1)).max().unwrap_or(0);
-        Self { tokens, tail: String::new(), holdback }
+        let holdback = tokens
+            .iter()
+            .map(|s| s.len().saturating_sub(1))
+            .max()
+            .unwrap_or(0);
+        Self {
+            tokens,
+            tail: String::new(),
+            holdback,
+        }
     }
 
     /// 喂入一个 delta，返回此刻可安全下发的文本（可能为空串：尾窗暂扣中）。
     pub fn push(&mut self, delta: &str) -> String {
-        if self.tokens.is_empty() { return delta.to_string(); }
+        if self.tokens.is_empty() {
+            return delta.to_string();
+        }
         let mut joined = String::new();
         joined.push_str(&self.tail);
         joined.push_str(delta);
@@ -42,7 +56,9 @@ impl RedactingBuffer {
 
     /// 流结束：排空尾窗，返回最后一段安全文本。
     pub fn finish(&mut self) -> String {
-        if self.tokens.is_empty() { return String::new(); }
+        if self.tokens.is_empty() {
+            return String::new();
+        }
         let tail = std::mem::take(&mut self.tail);
         self.redact(&tail)
     }
@@ -56,11 +72,17 @@ impl RedactingBuffer {
                 // to_ascii_lowercase 仅改写 ASCII，字节布局与 out 完全一致，
                 // pos/end 可直接用于 out 的 replace_range。
                 let lower = out.to_ascii_lowercase();
-                let Some(rel) = lower[from..].find(token.as_str()) else { break };
+                let Some(rel) = lower[from..].find(token.as_str()) else {
+                    break;
+                };
                 let pos = from + rel;
                 let end = pos + token.len();
                 if numeric && !numeric_boundary(&out, pos, end) {
                     from = pos + 1; // 跳过本误命中点继续扫（token 首字节是 ASCII 数字，pos+1 必为 char boundary）
+                    continue;
+                }
+                if numeric && numeric_public_target_context(&out, pos) {
+                    from = pos + 1;
                     continue;
                 }
                 out.replace_range(pos..end, "■");
@@ -75,9 +97,30 @@ impl RedactingBuffer {
 /// "1934" 里的 "34"、"roll345" 里的 "34" 不涂；CJK 紧邻数字（"掷出34点"）
 /// 仍命中（CJK 不延伸数字字面量，漏放才是泄密方向）。
 fn numeric_boundary(text: &str, pos: usize, end: usize) -> bool {
-    let before_ok = text[..pos].chars().next_back().map_or(true, |c| !c.is_ascii_alphanumeric());
-    let after_ok = text[end..].chars().next().map_or(true, |c| !c.is_ascii_alphanumeric());
+    let before_ok = text[..pos]
+        .chars()
+        .next_back()
+        .map_or(true, |c| !c.is_ascii_alphanumeric());
+    let after_ok = text[end..]
+        .chars()
+        .next()
+        .map_or(true, |c| !c.is_ascii_alphanumeric());
     before_ok && after_ok
+}
+
+fn numeric_public_target_context(text: &str, pos: usize) -> bool {
+    let before = text[..pos]
+        .chars()
+        .rev()
+        .take(18)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    let before = before.to_ascii_lowercase();
+    ["目标", "target", "tn", "dv", "dc", "difficulty", "难度"]
+        .iter()
+        .any(|cue| before.contains(cue))
 }
 
 #[cfg(test)]
@@ -108,7 +151,10 @@ mod tests {
         let e = b.finish();
         let out = format!("{a}{c}{d}{e}");
         assert!(!out.contains("91"), "token at delta boundary leaked: {out}");
-        assert!(!out.contains("1d100"), "long token at delta boundary leaked: {out}");
+        assert!(
+            !out.contains("1d100"),
+            "long token at delta boundary leaked: {out}"
+        );
         assert!(out.contains("■"));
         assert!(out.contains(" in secret."));
     }
@@ -134,7 +180,10 @@ mod tests {
         let c = b.push("then the hidden die showed 34 exactly.");
         let d = b.finish();
         let out = format!("{a}{c}{d}");
-        assert_eq!(out, "He successfully recalled the year 1934, then the hidden die showed ■ exactly.");
+        assert_eq!(
+            out,
+            "He successfully recalled the year 1934, then the hidden die showed ■ exactly."
+        );
     }
 
     #[test]
@@ -145,8 +194,24 @@ mod tests {
         let a = b.push("你掷出34点，骰子停了。");
         let d = b.finish();
         let out = format!("{a}{d}");
-        assert!(!out.contains("34"), "CJK-adjacent point value leaked: {out}");
+        assert!(
+            !out.contains("34"),
+            "CJK-adjacent point value leaked: {out}"
+        );
         assert!(out.contains("■"));
+    }
+
+    #[test]
+    fn numeric_token_does_not_redact_public_roll_target_context() {
+        let mut b = RedactingBuffer::new(vec!["40".to_string()]);
+        let a = b.push("[roll]Stealth：1d100 = 90，目标 40，失败。[/roll]");
+        let d = b.finish();
+        let out = format!("{a}{d}");
+        assert!(
+            out.contains("目标 40"),
+            "public target values must remain visible: {out}"
+        );
+        assert!(!out.contains("目标 ■"));
     }
 
     #[test]

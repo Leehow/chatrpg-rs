@@ -36,6 +36,31 @@ cargo run -p trpg-harness -- suite --dir harness/cases --bin ./target/debug/trpg
 }
 ```
 
+## Golden cases (TC-P2-03)
+
+Three representative golden cases live under `harness/cases/` and cover the
+main play styles with phrasing-drift-resistant assertions (event names, fact
+ids, and short forbidden terms — never long prose):
+
+- `homecoming_no_spoiler_golden.json` — Cyberpunk RED Homecoming, with a
+  no-spoiler `forbidden_terms` guard.
+- `triangle_required_events_golden.json` — Triangle Agency, with a required
+  `phase:conflict_agent` stream event plus a `required_event_contains` check.
+- `coc_investigation_golden.json` — CoC-style investigation, with a
+  clue/reveal no-spoiler `forbidden_terms` guard.
+
+The case schema, JSONL parser, and assertion evaluator are exported from the
+`trpg_harness` library so they can be exercised offline. `crates/trpg-harness/tests/golden_cases.rs`
+validates that these cases parse and that the shared evaluator catches a spoiler
+leak and a missing required event — with no `trpg` process, network, or LLM:
+
+```bash
+cargo test -p trpg-harness
+```
+
+Running the cases live (against a real `trpg` binary and provider) still uses the
+`suite` command shown above.
+
 ## Design rule
 
 All future automated playtest harnesses should be Rust crates or Rust integration tests. Shell is acceptable for orchestration. Python is not part of the project runtime or regression surface.

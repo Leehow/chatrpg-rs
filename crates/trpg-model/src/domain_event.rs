@@ -31,9 +31,28 @@ pub enum DomainEventKind {
     DiceRolled,
     /// 检定结算落库（insert_check_result 写穿）。
     CheckResolved,
-    /// 模组实体（线索/NPC）首次进入本回合 GM context 即被"surfaced"——玩家已被
-    /// 暴露给该实体（反剧透 TruthGraph 起步切片，观测层；幂等 per-session）。
+    /// 模组实体（线索/NPC）首次进入本回合 GM context 即被"surfaced"——**遗留语义**
+    /// （P0c 前把"进 context"误等同"玩家见过"）。保留仅为向后兼容旧账本；新写路径用
+    /// 语义三分的 [`DomainEventKind::ContextSurfaced`] / [`DomainEventKind::PlayerExposed`]。
     EntitySurfaced,
+    /// P0c 语义三分①：实体/事实**进入 GM/runtime context**（当前场景投影把线索/NPC
+    /// 喂给回合上下文）。这是隐藏的内部装载，**不**代表玩家已见——故不计入玩家暴露
+    /// 投影、不触发关系抽取。幂等 per-session。
+    ContextSurfaced,
+    /// P0c 语义三分②：实体被实际**暴露进玩家可见虚构**（玩家在念白里真见到了它）。
+    /// 计入"玩家暴露"投影（与遗留 EntitySurfaced 并列），可触发关系抽取。
+    PlayerExposed,
+    /// P0c 语义三分③：player_party **习得/确认了某条事实**。这是写穿
+    /// `KnowledgeEdge(player_party, knows_true)` 的事件（取代旧 FactRevealed 写路径），
+    /// 由 GM/玩家显式驱动；幂等 per-session+fact。
+    PlayerLearnedFact,
+    /// P0c 语义三分④：某个**具体 NPC**（按 stable actor id）习得/确认了某条事实。
+    /// 这是 NPC 心智的知识输入，**只**作用于目标 NPC holder，绝不触碰 player_party。
+    /// 当前阶段 durable NPC holder 投影（knowledge_edges.holder_kind='npc'）尚未开放
+    /// （schema CHECK 仅 gm/player_party；NPC actor-id 契约见 TC-KNOW-00 actor 身份门），
+    /// 故本事件**只落 domain_events 事件账本**并按 npc_actor_id 投影、对 knowledge_edges
+    /// fail-closed。幂等 per-session+npc+fact。
+    NpcLearnedFact,
     /// 客户端在 SSE 回合流中途断开，且断开发生在本回合状态已变更之后——引擎续跑
     /// critical finalize 保一致后，在该回合上记此标记（P1-3）。幂等 per-turn。
     ClientDisconnected,
@@ -56,6 +75,10 @@ impl DomainEventKind {
             DomainEventKind::DiceRolled => "DiceRolled",
             DomainEventKind::CheckResolved => "CheckResolved",
             DomainEventKind::EntitySurfaced => "EntitySurfaced",
+            DomainEventKind::ContextSurfaced => "ContextSurfaced",
+            DomainEventKind::PlayerExposed => "PlayerExposed",
+            DomainEventKind::PlayerLearnedFact => "PlayerLearnedFact",
+            DomainEventKind::NpcLearnedFact => "NpcLearnedFact",
             DomainEventKind::ClientDisconnected => "ClientDisconnected",
             DomainEventKind::FactRevealed => "FactRevealed",
         }
@@ -72,6 +95,10 @@ impl DomainEventKind {
             "DiceRolled" => DomainEventKind::DiceRolled,
             "CheckResolved" => DomainEventKind::CheckResolved,
             "EntitySurfaced" => DomainEventKind::EntitySurfaced,
+            "ContextSurfaced" => DomainEventKind::ContextSurfaced,
+            "PlayerExposed" => DomainEventKind::PlayerExposed,
+            "PlayerLearnedFact" => DomainEventKind::PlayerLearnedFact,
+            "NpcLearnedFact" => DomainEventKind::NpcLearnedFact,
             "ClientDisconnected" => DomainEventKind::ClientDisconnected,
             "FactRevealed" => DomainEventKind::FactRevealed,
             _ => DomainEventKind::TurnStarted,
@@ -223,9 +250,54 @@ mod tests {
         assert_eq!(k.as_str(), "FactRevealed");
         assert_eq!(DomainEventKind::from_str_token("FactRevealed"), k);
         let v = serde_json::to_value(k).unwrap();
-        assert_eq!(v.as_str(), Some("FactRevealed"), "serde token 必与 as_str 一致");
+        assert_eq!(
+            v.as_str(),
+            Some("FactRevealed"),
+            "serde token 必与 as_str 一致"
+        );
         let back: DomainEventKind = serde_json::from_value(v).unwrap();
         assert_eq!(back, k);
+    }
+
+    #[test]
+    fn semantic_split_kinds_token_and_serde_roundtrip() {
+        // P0c 语义三分：ContextSurfaced（进 GM/context）≠ PlayerExposed（暴露给玩家可见
+        // 虚构）≠ PlayerLearnedFact（玩家确知事实，写穿 KnowledgeEdge）。三者 token 稳定 +
+        // serde 闭环；旧 EntitySurfaced/FactRevealed 保留不删（见上别测）。
+        for k in [
+            DomainEventKind::ContextSurfaced,
+            DomainEventKind::PlayerExposed,
+            DomainEventKind::PlayerLearnedFact,
+            DomainEventKind::NpcLearnedFact,
+        ] {
+            assert_eq!(DomainEventKind::from_str_token(k.as_str()), k);
+            let v = serde_json::to_value(k).unwrap();
+            assert_eq!(v.as_str(), Some(k.as_str()), "serde token 必与 as_str 一致");
+            let back: DomainEventKind = serde_json::from_value(v).unwrap();
+            assert_eq!(back, k);
+        }
+        // 钉死 token 字面量，防日后改名悄悄破坏 db 兼容。
+        assert_eq!(DomainEventKind::ContextSurfaced.as_str(), "ContextSurfaced");
+        assert_eq!(DomainEventKind::PlayerExposed.as_str(), "PlayerExposed");
+        assert_eq!(
+            DomainEventKind::PlayerLearnedFact.as_str(),
+            "PlayerLearnedFact"
+        );
+        assert_eq!(DomainEventKind::NpcLearnedFact.as_str(), "NpcLearnedFact");
+        // 四个新 variant 互不相等、且与旧 EntitySurfaced/FactRevealed 区分。
+        assert_ne!(
+            DomainEventKind::ContextSurfaced,
+            DomainEventKind::EntitySurfaced
+        );
+        assert_ne!(
+            DomainEventKind::PlayerLearnedFact,
+            DomainEventKind::FactRevealed
+        );
+        // NpcLearnedFact 是独立的 NPC 心智输入，绝不等同玩家习得事实。
+        assert_ne!(
+            DomainEventKind::NpcLearnedFact,
+            DomainEventKind::PlayerLearnedFact
+        );
     }
 
     #[test]

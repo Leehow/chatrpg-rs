@@ -18,7 +18,10 @@ use trpg_search::SearchService;
 /// No IO, no side effects — keeps the field-for-field contract unit-testable and
 /// makes the resolver a trivial wrapper around `assist`.
 pub(crate) fn rule_assist_to_outcome(assist: RuleAssist) -> NeedOutcome {
-    NeedOutcome { blocks: assist.context_blocks, source_refs: assist.source_refs }
+    NeedOutcome {
+        blocks: assist.context_blocks,
+        source_refs: assist.source_refs,
+    }
 }
 
 /// Where the steward looks for parsed/markdown source artifacts (rg fallback).
@@ -37,7 +40,9 @@ pub(crate) struct RuleNeedResolver {
 
 impl RuleNeedResolver {
     pub(crate) fn new(db: Db, search: SearchService, data_dir: PathBuf) -> Self {
-        Self { steward: RuleStewardAgent::new(db, search, data_dir) }
+        Self {
+            steward: RuleStewardAgent::new(db, search, data_dir),
+        }
     }
 }
 
@@ -86,11 +91,18 @@ mod tests {
     fn assist_blocks_and_refs_map_verbatim_into_outcome() {
         let assist = RuleAssist {
             context_blocks: vec![sample_block("a"), sample_block("b")],
-            source_refs: vec![SourceRef { source_id: "rulebook".into(), ..Default::default() }],
+            source_refs: vec![SourceRef {
+                source_id: "rulebook".into(),
+                ..Default::default()
+            }],
             ..Default::default()
         };
         let outcome = rule_assist_to_outcome(assist);
-        assert_eq!(outcome.blocks.len(), 2, "two assist blocks must survive into outcome");
+        assert_eq!(
+            outcome.blocks.len(),
+            2,
+            "two assist blocks must survive into outcome"
+        );
         assert_eq!(outcome.blocks[0].block_id, "a");
         assert_eq!(outcome.blocks[1].block_id, "b");
         assert!(

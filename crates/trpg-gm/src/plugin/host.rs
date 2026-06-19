@@ -29,7 +29,9 @@ pub struct PluginHost {
 
 impl PluginHost {
     pub fn new() -> Self {
-        Self { plugins: Vec::new() }
+        Self {
+            plugins: Vec::new(),
+        }
     }
 
     /// 注册一个插件（链式）。

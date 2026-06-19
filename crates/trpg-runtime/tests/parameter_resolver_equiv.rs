@@ -30,11 +30,10 @@ async fn parameter_resolver_produces_blocks() {
     };
 
     // Pick any active session from the DB; SKIP gracefully if none found.
-    let session_id: Option<String> =
-        sqlx::query_scalar("select session_id from sessions limit 1")
-            .fetch_optional(&db.pool)
-            .await
-            .unwrap_or(None);
+    let session_id: Option<String> = sqlx::query_scalar("select session_id from sessions limit 1")
+        .fetch_optional(&db.pool)
+        .await
+        .unwrap_or(None);
     let session_id = match session_id {
         Some(s) => s,
         None => {
@@ -106,6 +105,13 @@ async fn parameter_resolver_fail_closed() {
     }));
     let outcomes = bus.resolve_all().await;
     // fail-closed: 返回 vec，长度=1，不 panic
-    assert_eq!(outcomes.len(), 1, "fail-closed: must return 1 outcome entry");
-    eprintln!("[parameter_fail_closed] PASS: {} outcome(s) returned", outcomes.len());
+    assert_eq!(
+        outcomes.len(),
+        1,
+        "fail-closed: must return 1 outcome entry"
+    );
+    eprintln!(
+        "[parameter_fail_closed] PASS: {} outcome(s) returned",
+        outcomes.len()
+    );
 }

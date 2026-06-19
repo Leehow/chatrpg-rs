@@ -10,9 +10,16 @@ pub enum TurnEvent {
     /// 逐 token 真流式叙事增量（直通不缓冲）。
     Delta(String),
     /// 桌面骰 gate：玩家须手摇，回合在此早返。
-    AwaitingPlayerRoll { check_id: String, prompt_public: String },
+    AwaitingPlayerRoll {
+        check_id: String,
+        prompt_public: String,
+    },
     /// scene_navigate 产出的场景切换。
-    SceneTransition { from: String, to: String, reason: String },
+    SceneTransition {
+        from: String,
+        to: String,
+        reason: String,
+    },
     /// 后置勘误条目（不阻塞叙事，注入下一轮上下文）。
     Errata(ErrataEntry),
     /// 叙事完成、尾部 phase 开始——transport 据此决定前台/后台执行尾部。
@@ -23,7 +30,11 @@ pub enum TurnEvent {
     /// 阶段失败（obs slice T2，P1-1）：fail-closed 阶段（mode_inference/context_assembly/
     /// finalize）失败时发此事件**代替**空 TurnComplete，回合在此终止——失败不再伪装成空白成功。
     /// `recoverable=false` ⇒ 无 TurnComplete；`recoverable=true` 预留 partial（当前未用）。
-    TurnFailed { phase: String, message: String, recoverable: bool },
+    TurnFailed {
+        phase: String,
+        message: String,
+        recoverable: bool,
+    },
     /// 阶段警告（obs slice T2）：WarnContinue 阶段（verify/memory/audit）失败时发此事件
     /// 并继续主流程。当前为类型 + transport 映射占位，verify/memory 全量接线见后续切片。
     TurnWarning { phase: String, message: String },
@@ -49,14 +60,30 @@ mod tests {
         };
         let events = vec![
             TurnEvent::Delta("hi".into()),
-            TurnEvent::AwaitingPlayerRoll { check_id: "c1".into(), prompt_public: "roll".into() },
-            TurnEvent::SceneTransition { from: "a".into(), to: "b".into(), reason: "moved".into() },
+            TurnEvent::AwaitingPlayerRoll {
+                check_id: "c1".into(),
+                prompt_public: "roll".into(),
+            },
+            TurnEvent::SceneTransition {
+                from: "a".into(),
+                to: "b".into(),
+                reason: "moved".into(),
+            },
             TurnEvent::Errata(errata),
             TurnEvent::PostprocessScheduled,
             TurnEvent::HeavyPostprocessDone,
-            TurnEvent::TurnFailed { phase: "context_assembly".into(), message: "over budget".into(), recoverable: false },
-            TurnEvent::TurnWarning { phase: "verify_after_stream".into(), message: "verifier lag".into() },
-            TurnEvent::TurnComplete { outcome: TurnOutcome::Narration("done".into()) },
+            TurnEvent::TurnFailed {
+                phase: "context_assembly".into(),
+                message: "over budget".into(),
+                recoverable: false,
+            },
+            TurnEvent::TurnWarning {
+                phase: "verify_after_stream".into(),
+                message: "verifier lag".into(),
+            },
+            TurnEvent::TurnComplete {
+                outcome: TurnOutcome::Narration("done".into()),
+            },
         ];
         for e in &events {
             let cloned = e.clone();
@@ -68,10 +95,15 @@ mod tests {
     #[test]
     fn turn_complete_carries_awaiting_outcome() {
         let e = TurnEvent::TurnComplete {
-            outcome: TurnOutcome::AwaitingPlayerRoll { check_id: "c1".into(), prompt_public: "roll".into() },
+            outcome: TurnOutcome::AwaitingPlayerRoll {
+                check_id: "c1".into(),
+                prompt_public: "roll".into(),
+            },
         };
         match e {
-            TurnEvent::TurnComplete { outcome: TurnOutcome::AwaitingPlayerRoll { check_id, .. } } => {
+            TurnEvent::TurnComplete {
+                outcome: TurnOutcome::AwaitingPlayerRoll { check_id, .. },
+            } => {
                 assert_eq!(check_id, "c1");
             }
             _ => panic!("expected TurnComplete with AwaitingPlayerRoll"),

@@ -29,15 +29,29 @@ async fn smoke_complete_with_tools_multi_turn(client: &OpenAiCompatibleClient) -
         json!({"role":"system","content":"You are a relay smoke test. Call echo_probe exactly once, then answer normally after the tool result."}),
         json!({"role":"user","content":"Call echo_probe with probe='relay-multi-turn-ok'."}),
     ];
-    let first = client.complete_with_tools(messages.clone(), vec![tool.clone()]).await?;
-    let msg = first.pointer("/choices/0/message").cloned().ok_or_else(|| anyhow!("first response missing message"))?;
-    let calls = msg.get("tool_calls").and_then(Value::as_array).cloned().unwrap_or_default();
+    let first = client
+        .complete_with_tools(messages.clone(), vec![tool.clone()])
+        .await?;
+    let msg = first
+        .pointer("/choices/0/message")
+        .cloned()
+        .ok_or_else(|| anyhow!("first response missing message"))?;
+    let calls = msg
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     if calls.is_empty() {
-        return Err(anyhow!("complete_with_tools did not return tool_calls in first turn"));
+        return Err(anyhow!(
+            "complete_with_tools did not return tool_calls in first turn"
+        ));
     }
     messages.push(msg);
     for call in calls {
-        let id = call.get("id").and_then(Value::as_str).ok_or_else(|| anyhow!("tool call missing id"))?;
+        let id = call
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("tool call missing id"))?;
         messages.push(json!({
             "role": "tool",
             "tool_call_id": id,
@@ -46,11 +60,17 @@ async fn smoke_complete_with_tools_multi_turn(client: &OpenAiCompatibleClient) -
         }));
     }
     let second = client.complete_with_tools(messages, vec![tool]).await?;
-    let content = second.pointer("/choices/0/message/content").and_then(Value::as_str).unwrap_or("");
+    let content = second
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     if content.trim().is_empty() {
         return Err(anyhow!("second tool-history turn produced no content"));
     }
-    println!("PASS complete_with_tools multi-turn: {}", content.trim().chars().take(120).collect::<String>());
+    println!(
+        "PASS complete_with_tools multi-turn: {}",
+        content.trim().chars().take(120).collect::<String>()
+    );
     Ok(())
 }
 
@@ -91,12 +111,20 @@ async fn collect_raw_sse(config: &LlmConfig, body: Value) -> Result<(bool, bool,
             if value.pointer("/choices/0/delta/tool_calls").is_some() {
                 saw_tool_delta = true;
             }
-            if value.pointer("/choices/0/delta/content").and_then(Value::as_str).map(|s| !s.is_empty()).unwrap_or(false) {
+            if value
+                .pointer("/choices/0/delta/content")
+                .and_then(Value::as_str)
+                .map(|s| !s.is_empty())
+                .unwrap_or(false)
+            {
                 saw_content_delta = true;
             }
             if value.get("usage").map(|u| !u.is_null()).unwrap_or(false) {
                 saw_usage = true;
-                println!("USAGE cached_tokens={:?}", value.pointer("/usage/prompt_tokens_details/cached_tokens"));
+                println!(
+                    "USAGE cached_tokens={:?}",
+                    value.pointer("/usage/prompt_tokens_details/cached_tokens")
+                );
             }
         }
     }
@@ -149,7 +177,10 @@ async fn smoke_raw_stream_tool_delta(config: &LlmConfig) -> Result<()> {
 async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
     let config = LlmConfig::from_env()?;
-    eprintln!("relay smoke target: base_url={} model={}", config.base_url, config.model);
+    eprintln!(
+        "relay smoke target: base_url={} model={}",
+        config.base_url, config.model
+    );
     let client = OpenAiCompatibleClient::new(config.clone())?;
     smoke_complete_with_tools_multi_turn(&client).await?;
     smoke_raw_stream_tool_delta(&config).await?;

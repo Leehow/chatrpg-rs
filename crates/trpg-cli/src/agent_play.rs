@@ -17,7 +17,7 @@ use trpg_gm::{
 use trpg_llm::LlmClient;
 use trpg_model::{ChatMessage, ContextRequest, RuntimeState, TokenBudget, VisibilityProfile};
 use trpg_runtime::scene_navigation::extract_module_scenes;
-use trpg_runtime::RuntimeEngine;
+use trpg_runtime::{EntryGate, RuntimeEngine};
 
 pub async fn smoke_agent_play_symbol_exists() -> Result<()> {
     Ok(())
@@ -25,16 +25,27 @@ pub async fn smoke_agent_play_symbol_exists() -> Result<()> {
 
 /// CLI play 会话主循环（永走 execute_turn，无 `--agent` flag）。
 /// 内部自建 db/llm/search/engine，每回合重建 GmLoop 后 move 进 execute_turn。
-pub async fn play_cli_agent(ruleset: &str, module: Option<&str>) -> Result<()> {
+pub async fn play_cli_agent(
+    ruleset: &str,
+    module: Option<&str>,
+    session_id: Option<&str>,
+) -> Result<()> {
     let db = crate::connect_db().await?;
     db.migrate().await?;
-    // make_llm() 已返回 Arc<dyn LlmClient>：直接持有 Arc，绝不从 &dyn 造 Arc。
-    let llm = crate::make_llm()?;
     let data_dir = crate::default_data_dir();
+    // 角色卡入口锁：LLM 延后到 gate 通过的第一回合才构造（make_llm() 返回
+    // Arc<dyn LlmClient>，直接持有 Arc，绝不从 &dyn 造 Arc）。没有角色卡的输入
+    // 只打印 [blocked] 建卡提示，永不触碰 make_llm()——锁在门口而非房间里。
+    let mut llm_cache: Option<Arc<dyn LlmClient>> = None;
     // 真 session bootstrap（绝不自造 session_id 字符串）：sessions 行落库 +
-    // 模组入口场景激活（entry_node_id → current_scene_id）。
-    let engine = RuntimeEngine::new(db.clone()).with_search(crate::make_search(&db, data_dir.clone())?);
-    let session_id = engine.start_session(ruleset, module).await?;
+    // 模组入口场景激活（entry_node_id → current_scene_id）。start_session 与
+    // entry-gate 都只读 db，故 bootstrap/gate 用 search-free runtime——search 留到
+    // gate 通过后的 per-turn engine 才构造，blocked 输入不碰 make_search()。
+    let engine = RuntimeEngine::new(db.clone());
+    let session_id = match session_id {
+        Some(id) => id.to_string(),
+        None => engine.start_session(ruleset, module).await?,
+    };
     println!("session: {session_id}");
     println!("Type /quit to exit.");
 
@@ -49,15 +60,43 @@ pub async fn play_cli_agent(ruleset: &str, module: Option<&str>) -> Result<()> {
             break;
         }
         let input = line.trim().to_string();
-        if input.is_empty() { continue; }
-        if input == "/quit" { break; }
+        if input.is_empty() {
+            continue;
+        }
+        if input == "/quit" {
+            break;
+        }
+
+        // 角色卡入口锁：没有可机解角色卡，不进入 GM 回合，给建卡提示后继续等输入（可 /quit）。
+        // gate 评估只需 db（engine 为 search-free runtime），不触碰 make_llm()/make_search()。
+        if let EntryGate::Blocked(block) = engine.evaluate_session_entry_gate(&session_id).await? {
+            println!("[blocked] {}", block.hint());
+            continue;
+        }
+
+        // gate 通过（Playable）后才懒构造并缓存 LLM——首个可玩回合付一次 make_llm() 成本。
+        let llm = match llm_cache {
+            Some(ref l) => l.clone(),
+            None => {
+                let l = crate::make_llm()?;
+                llm_cache = Some(l.clone());
+                l
+            }
+        };
 
         // execute_turn 消费 GmLoop（owned，spawn 进 tokio 任务需 'static）。GmLoop 含
         // ToolRegistry(Box<dyn GmTool>)/ErrataMemory/ObligationLedger 等不可 Clone 字段，
         // 故每回合重建（RuntimeEngine 持 Arc<Db> 克隆，成本极低）。errata/obligations 是
         // per-turn 状态，TurnPipeline 内全程持有、TurnComplete 后随任务丢弃，不跨回合。
-        let engine = RuntimeEngine::new(db.clone()).with_search(crate::make_search(&db, data_dir.clone())?);
-        let mut gm = GmLoop::new(engine, llm.clone(), ToolRegistry::standard(), LoopConfig::default(), data_dir.clone());
+        let engine =
+            RuntimeEngine::new(db.clone()).with_search(crate::make_search(&db, data_dir.clone())?);
+        let mut gm = GmLoop::new(
+            engine,
+            llm.clone(),
+            ToolRegistry::standard(),
+            LoopConfig::default(),
+            data_dir.clone(),
+        );
         // 装配到场深抽闭包（scene_navigate phase 切场景到达时深抽目标场景）。
         wire_scene_extractor(&mut gm, &db, &llm, ruleset, module, &data_dir);
 
@@ -102,7 +141,10 @@ pub async fn play_cli_agent(ruleset: &str, module: Option<&str>) -> Result<()> {
                     io::stdout().flush().ok();
                     streamed.push_str(&delta);
                 }
-                TurnEvent::AwaitingPlayerRoll { check_id, prompt_public } => {
+                TurnEvent::AwaitingPlayerRoll {
+                    check_id,
+                    prompt_public,
+                } => {
                     // standalone 事件 = live 信号（terminal 记录由 TurnComplete 承载，避免双 emit）。
                     println!("\n[awaiting_player_roll] check_id={check_id}");
                     println!("{prompt_public}");
@@ -133,8 +175,14 @@ pub async fn play_cli_agent(ruleset: &str, module: Option<&str>) -> Result<()> {
                     println!();
                     match outcome {
                         TurnOutcome::Narration(text) => {
-                            history.push(ChatMessage { role: "user".to_string(), content: input.clone() });
-                            history.push(ChatMessage { role: "assistant".to_string(), content: text.clone() });
+                            history.push(ChatMessage {
+                                role: "user".to_string(),
+                                content: input.clone(),
+                            });
+                            history.push(ChatMessage {
+                                role: "assistant".to_string(),
+                                content: text.clone(),
+                            });
                             let tail = format!("\nPlayer: {input}\nGM: {text}\n");
                             let r = recent.get_or_insert_with(String::new);
                             r.push_str(&tail);
@@ -142,10 +190,17 @@ pub async fn play_cli_agent(ruleset: &str, module: Option<&str>) -> Result<()> {
                             *r = take_tail_chars(r, 12_000);
                         }
                         TurnOutcome::AwaitingPlayerRoll { prompt_public, .. } => {
-                            history.push(ChatMessage { role: "user".to_string(), content: input.clone() });
+                            history.push(ChatMessage {
+                                role: "user".to_string(),
+                                content: input.clone(),
+                            });
                             history.push(ChatMessage {
                                 role: "assistant".to_string(),
-                                content: if streamed.trim().is_empty() { prompt_public } else { streamed.clone() },
+                                content: if streamed.trim().is_empty() {
+                                    prompt_public
+                                } else {
+                                    streamed.clone()
+                                },
                             });
                         }
                     }
@@ -179,7 +234,17 @@ fn wire_scene_extractor(
             let rs3 = rs2.clone();
             let dir3 = dir2.clone();
             Box::pin(async move {
-                extract_module_scenes(&db3, llm3.as_ref(), &mid3, None, Some(&rs3), &dir3, 12, Some(&node_id)).await
+                extract_module_scenes(
+                    &db3,
+                    llm3.as_ref(),
+                    &mid3,
+                    None,
+                    Some(&rs3),
+                    &dir3,
+                    12,
+                    Some(&node_id),
+                )
+                .await
             }) as Pin<Box<dyn Future<Output = Result<usize>> + Send>>
         }) as SceneDeepExtractFn);
     }

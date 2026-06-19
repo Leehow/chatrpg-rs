@@ -20,7 +20,10 @@ pub const MODE_CATALOG_HEADER: &str = "[mode 目录子集]";
 ///   description 文本的（不区分大小写）子串命中集——tag 词汇表在 manifest
 ///   数据侧，目录条目模型暂无结构化 tags 字段，按声明词命中是唯一不发明
 ///   数据的匹配方式（fail-closed：未命中不注入）。
-fn entry_dimensions(entry: &MechanicEntry, filter: &CatalogFilter) -> (String, Vec<String>, Vec<String>) {
+fn entry_dimensions(
+    entry: &MechanicEntry,
+    filter: &CatalogFilter,
+) -> (String, Vec<String>, Vec<String>) {
     let kind = serde_json::to_value(&entry.kind)
         .ok()
         .and_then(|v| v.as_str().map(str::to_string))
@@ -33,7 +36,11 @@ fn entry_dimensions(entry: &MechanicEntry, filter: &CatalogFilter) -> (String, V
             v.get("event").and_then(|e| e.as_str()).map(str::to_string)
         })
         .collect();
-    let text = format!("{} {} {} {}", entry.id, entry.name, entry.when_to_use, entry.description).to_lowercase();
+    let text = format!(
+        "{} {} {} {}",
+        entry.id, entry.name, entry.when_to_use, entry.description
+    )
+    .to_lowercase();
     let tags = filter
         .semantic_tags
         .iter()
@@ -48,14 +55,25 @@ fn entry_dimensions(entry: &MechanicEntry, filter: &CatalogFilter) -> (String, V
 /// `id | name | when_to_use` 一行（空白归一保持单行不变量）。目录为空 /
 /// 无条目命中 → None（不写空节，fail-closed）；三维全空过滤器 = 不过滤
 /// （CatalogFilter::matches 既定语义，全量注入）。确定性：同输入同字节。
-pub fn mode_catalog_section(mode_id: &str, filter: &CatalogFilter, catalog: &[MechanicEntry]) -> Option<String> {
+pub fn mode_catalog_section(
+    mode_id: &str,
+    filter: &CatalogFilter,
+    catalog: &[MechanicEntry],
+) -> Option<String> {
     let lines: Vec<String> = catalog
         .iter()
         .filter(|e| {
             let (kind, hooks, tags) = entry_dimensions(e, filter);
             filter.matches(&kind, &hooks, &tags)
         })
-        .map(|e| format!("{} | {} | {}", one_line(&e.id), one_line(&e.name), one_line(&e.when_to_use)))
+        .map(|e| {
+            format!(
+                "{} | {} | {}",
+                one_line(&e.id),
+                one_line(&e.name),
+                one_line(&e.when_to_use)
+            )
+        })
         .collect();
     if lines.is_empty() {
         return None;
@@ -76,7 +94,12 @@ mod tests {
     use super::*;
     use trpg_model::{EngineHook, MechanicKind};
 
-    fn entry(id: &str, kind: MechanicKind, hooks: Vec<EngineHook>, when_to_use: &str) -> MechanicEntry {
+    fn entry(
+        id: &str,
+        kind: MechanicKind,
+        hooks: Vec<EngineHook>,
+        when_to_use: &str,
+    ) -> MechanicEntry {
         MechanicEntry {
             id: id.to_string(),
             name: format!("{id} 名称"),
@@ -100,30 +123,85 @@ mod tests {
     #[test]
     fn filter_hits_render_one_line_per_entry_with_header() {
         let catalog = vec![
-            entry("shield_parry", MechanicKind::Reaction, vec![], "when attacked in melee"),
-            entry("battle_alarm", MechanicKind::Other("alarm".into()), vec![EngineHook::CombatStart], "when combat begins"),
-            entry("turn_order", MechanicKind::Other("order".into()), vec![], "roll Initiative order at the start"),
+            entry(
+                "shield_parry",
+                MechanicKind::Reaction,
+                vec![],
+                "when attacked in melee",
+            ),
+            entry(
+                "battle_alarm",
+                MechanicKind::Other("alarm".into()),
+                vec![EngineHook::CombatStart],
+                "when combat begins",
+            ),
+            entry(
+                "turn_order",
+                MechanicKind::Other("order".into()),
+                vec![],
+                "roll Initiative order at the start",
+            ),
         ];
-        let text = mode_catalog_section("combat", &combat_filter(), &catalog).expect("hits must render a section");
-        assert!(text.starts_with(MODE_CATALOG_HEADER), "header line must lead the section: {text}");
-        assert!(text.contains("combat"), "header must state the current posture: {text}");
-        assert!(text.contains("shield_parry | shield_parry 名称 | when attacked in melee"), "kind hit line missing: {text}");
-        assert!(text.contains("battle_alarm | battle_alarm 名称 | when combat begins"), "hook hit line missing: {text}");
-        assert!(text.contains("turn_order | turn_order 名称 | roll Initiative order at the start"), "semantic-tag substring hit (initiative) missing: {text}");
+        let text = mode_catalog_section("combat", &combat_filter(), &catalog)
+            .expect("hits must render a section");
+        assert!(
+            text.starts_with(MODE_CATALOG_HEADER),
+            "header line must lead the section: {text}"
+        );
+        assert!(
+            text.contains("combat"),
+            "header must state the current posture: {text}"
+        );
+        assert!(
+            text.contains("shield_parry | shield_parry 名称 | when attacked in melee"),
+            "kind hit line missing: {text}"
+        );
+        assert!(
+            text.contains("battle_alarm | battle_alarm 名称 | when combat begins"),
+            "hook hit line missing: {text}"
+        );
+        assert!(
+            text.contains("turn_order | turn_order 名称 | roll Initiative order at the start"),
+            "semantic-tag substring hit (initiative) missing: {text}"
+        );
     }
 
     /// 不命中：三维全不沾边的条目绝不出现；目录全不命中 / 空目录 → None。
     #[test]
     fn filter_misses_are_dropped_and_all_miss_renders_nothing() {
         let catalog = vec![
-            entry("library_use", MechanicKind::SkillCheck, vec![], "research in a library"),
-            entry("shield_parry", MechanicKind::Reaction, vec![], "when attacked"),
+            entry(
+                "library_use",
+                MechanicKind::SkillCheck,
+                vec![],
+                "research in a library",
+            ),
+            entry(
+                "shield_parry",
+                MechanicKind::Reaction,
+                vec![],
+                "when attacked",
+            ),
         ];
         let text = mode_catalog_section("combat", &combat_filter(), &catalog).unwrap();
-        assert!(!text.contains("library_use"), "miss entry must be filtered out: {text}");
-        let all_miss = vec![entry("library_use", MechanicKind::SkillCheck, vec![], "research in a library")];
-        assert!(mode_catalog_section("combat", &combat_filter(), &all_miss).is_none(), "all-miss must render no section");
-        assert!(mode_catalog_section("combat", &combat_filter(), &[]).is_none(), "empty catalog must render no section");
+        assert!(
+            !text.contains("library_use"),
+            "miss entry must be filtered out: {text}"
+        );
+        let all_miss = vec![entry(
+            "library_use",
+            MechanicKind::SkillCheck,
+            vec![],
+            "research in a library",
+        )];
+        assert!(
+            mode_catalog_section("combat", &combat_filter(), &all_miss).is_none(),
+            "all-miss must render no section"
+        );
+        assert!(
+            mode_catalog_section("combat", &combat_filter(), &[]).is_none(),
+            "empty catalog must render no section"
+        );
     }
 
     /// 三维全空过滤器 = 不过滤（manifest 没声明维度 ⇒ 全量注入，
@@ -132,9 +210,18 @@ mod tests {
     fn empty_filter_means_no_filtering() {
         let catalog = vec![
             entry("library_use", MechanicKind::SkillCheck, vec![], "research"),
-            entry("shield_parry", MechanicKind::Reaction, vec![], "when attacked"),
+            entry(
+                "shield_parry",
+                MechanicKind::Reaction,
+                vec![],
+                "when attacked",
+            ),
         ];
-        let text = mode_catalog_section("downtime", &CatalogFilter::default(), &catalog).expect("empty filter injects all");
-        assert!(text.contains("library_use") && text.contains("shield_parry"), "all entries must be injected: {text}");
+        let text = mode_catalog_section("downtime", &CatalogFilter::default(), &catalog)
+            .expect("empty filter injects all");
+        assert!(
+            text.contains("library_use") && text.contains("shield_parry"),
+            "all entries must be injected: {text}"
+        );
     }
 }

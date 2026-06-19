@@ -1,0 +1,70 @@
+{
+  "name": "jrny_home_01_athena_knowledge_reveal",
+  "scenario_id": "JRNY-HOME-01-athena-knowledge-reveal",
+  "scenario_version": "1",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "session_id": null,
+  "_derived_from": "docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/scenarios/JRNY-HOME-01-athena-knowledge-reveal.yaml (success branch). Bounded JSON playtest spec for the deterministic/live/replay harness, preserving the stable scenario identity. The hidden fact is the rogue drone's concealed Athena identity; secret_terms follow the established Homecoming no-spoiler vocabulary (harness/cases/homecoming_no_spoiler_golden.json: Athena / 内鬼 / double-cross).",
+  "setup": {
+    "character": {
+      "preferences": "技术型 Cyberpunk RED 角色，擅长观察、电子、维修；与本地修理圈有联系。优先 REF/TECH、Electronics/Security Tech、Evasion，带武器与护甲，可立即开始第一幕。",
+      "auto_complete": true,
+      "require_persisted": true,
+      "require_session_binding": true
+    }
+  },
+  "stream_format": "jsonl",
+  "turns": [
+    {
+      "user_input": "我先站在巷口的安全距离观察现场，看看无人机、警察和仓库门口分别是什么情况。",
+      "notes": "first_observation: natural observation. Before reveal the hidden Athena identity must be absent from player-visible output (no leak) and the player must not know it. ContextSurfaced/PlayerExposed may surface the drone's presence but must not grant the hidden fact.",
+      "forbid_player_text": ["Athena", "内鬼", "double-cross", "反水", "回收指令"],
+      "knowledge": {
+        "hidden_fact_id": "homecoming.athena_drone.hidden_identity",
+        "secret_terms": ["Athena", "内鬼", "double-cross", "反水", "回收指令"],
+        "require_player_unknown": true,
+        "forbid_player_text_leak": true
+      }
+    },
+    {
+      "user_input": "我拆开无人机背后的护盖，动手切断它外露的供电电缆。",
+      "notes": "technical_action: source-backed cut/power/cable -> DV 14 (Homecoming technical_option_table). Reaches an actual check/dice path that resolves with non-null target/success/degree and a player-visible effect.",
+      "if_not_triggered": "我直接剪断那根连到无人机的供电电缆。",
+      "check": {
+        "label": "cut_drone_power_cable",
+        "require_dice": true,
+        "require_check_resolution": true,
+        "require_player_visible_effect": true,
+        "player_visible_effect_any": ["切断", "供电", "电力", "断电", "熄灭", "成功", "失败"]
+      }
+    },
+    {
+      "user_input": "切断电缆后，我仔细查看无人机内部的接线和模块，判断它到底是什么来路。",
+      "notes": "outcome (success branch): the successful technical action drives a first-class reveal that commits player_party knowledge (PlayerLearnedFact -> KnowledgeEdge player_party knows_true). The discovery is narrated; revealed terms are now eligible to appear (DA-SPOIL-04).",
+      "knowledge": {
+        "hidden_fact_id": "homecoming.athena_drone.hidden_identity",
+        "secret_terms": ["Athena", "内鬼", "double-cross", "反水", "回收指令"],
+        "require_player_learned": true,
+        "forbid_player_text_leak": true,
+        "require_semantic_any": ["你发现", "Athena"]
+      }
+    },
+    {
+      "user_input": "根据我刚才实际查到的东西，我现在能确定这台无人机的什么情况？",
+      "notes": "continuity: after process restart/reload, the player_party knowledge must survive and be consumed in narration (knowledge_survives_reload). Evidence reload=true means player_known came from a fresh post-restart projection.",
+      "knowledge": {
+        "hidden_fact_id": "homecoming.athena_drone.hidden_identity",
+        "secret_terms": ["Athena", "内鬼", "double-cross", "反水", "回收指令"],
+        "require_player_learned": true,
+        "require_reload": true,
+        "forbid_player_text_leak": true,
+        "require_semantic_any": ["Athena", "回收指令"]
+      }
+    }
+  ],
+  "forbidden_player_text": [],
+  "allow_debug_directives": false,
+  "allow_nonhuman_player_input": false,
+  "allow_manual_roll_input": false
+}

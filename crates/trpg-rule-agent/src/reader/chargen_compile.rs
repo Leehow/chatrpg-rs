@@ -21,7 +21,10 @@ use trpg_model::{CharacterField, CharacterTemplate, DerivedValue};
 fn parse_pages(s: &str) -> (u32, u32) {
     let s = s.trim();
     if let Some((a, b)) = s.split_once('-') {
-        (a.trim().parse().unwrap_or(0), b.trim().parse().unwrap_or(u32::MAX))
+        (
+            a.trim().parse().unwrap_or(0),
+            b.trim().parse().unwrap_or(u32::MAX),
+        )
     } else {
         let p = s.parse().unwrap_or(0);
         (p, p)
@@ -91,7 +94,8 @@ fn table_is_categorical(tbl: &Value) -> bool {
 
 /// The machine exprs a raw §4 record evaluates (expr + attr_derived).
 fn record_exprs_raw(r: &Value) -> Vec<String> {
-    ["expr", "attr_derived"].iter()
+    ["expr", "attr_derived"]
+        .iter()
         .filter_map(|k| r.get(*k).and_then(|v| v.as_str()))
         .filter(|s| !s.trim().is_empty())
         .map(str::to_string)
@@ -104,15 +108,30 @@ fn record_exprs_raw(r: &Value) -> Vec<String> {
 /// Refs that are themselves records (resolve via topo) and numeric stats (already
 /// sampled at 50) are left alone. Generic — driven by table shape, not field names.
 fn add_categorical_samples(inputs: &mut Map<String, Value>, records: &[Value]) {
-    let is_record_id = |k: &str| records.iter().any(|x|
-        x.get("id").and_then(|v| v.as_str()).map(|s| s.trim().eq_ignore_ascii_case(k)).unwrap_or(false));
+    let is_record_id = |k: &str| {
+        records.iter().any(|x| {
+            x.get("id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().eq_ignore_ascii_case(k))
+                .unwrap_or(false)
+        })
+    };
     for r in records {
-        let Some(tables) = r.get("lookup_tables").and_then(|v| v.as_object()) else { continue };
-        let Some(key) = tables.values().find_map(first_categorical_key) else { continue };
+        let Some(tables) = r.get("lookup_tables").and_then(|v| v.as_object()) else {
+            continue;
+        };
+        let Some(key) = tables.values().find_map(first_categorical_key) else {
+            continue;
+        };
         for e in record_exprs_raw(r) {
             for refr in trpg_formula::extract_refs(&e) {
-                let k = refr.trim_start_matches("derived.").trim().to_ascii_lowercase();
-                if k.is_empty() || inputs.contains_key(&k) || is_record_id(&k) { continue; }
+                let k = refr
+                    .trim_start_matches("derived.")
+                    .trim()
+                    .to_ascii_lowercase();
+                if k.is_empty() || inputs.contains_key(&k) || is_record_id(&k) {
+                    continue;
+                }
                 inputs.insert(k, json!(key.clone()));
             }
         }
@@ -126,7 +145,12 @@ fn normalize_lookup_value(v: &mut Value) {
     if let Some(s) = v.as_str() {
         let t = s.trim().trim_start_matches('+').trim();
         let low = t.to_ascii_lowercase();
-        if low.is_empty() || matches!(low.as_str(), "none" | "-" | "—" | "–" | "no bonus" | "n/a" | "na") {
+        if low.is_empty()
+            || matches!(
+                low.as_str(),
+                "none" | "-" | "—" | "–" | "no bonus" | "n/a" | "na"
+            )
+        {
             *v = json!("0");
         } else if t != s {
             *v = json!(t);
@@ -138,7 +162,18 @@ fn normalize_lookup_value(v: &mut Value) {
 /// scalar string field that came back as a non-string (a stray number must not
 /// fail the whole record), and normalize inline lookup-table values.
 fn sanitize_record(obj: &mut Map<String, Value>) {
-    for k in ["role", "input_kind", "recompute", "result_type", "status", "notes", "expr", "attr_derived", "formula", "evaluator"] {
+    for k in [
+        "role",
+        "input_kind",
+        "recompute",
+        "result_type",
+        "status",
+        "notes",
+        "expr",
+        "attr_derived",
+        "formula",
+        "evaluator",
+    ] {
         if obj.get(k).map(|v| !v.is_string()).unwrap_or(false) {
             obj.remove(k);
         }
@@ -149,9 +184,20 @@ fn sanitize_record(obj: &mut Map<String, Value>) {
     // `attr_derived` and let the allocations array carry the points, so it resolves.
     if let Some(expr) = obj.get("expr").and_then(|v| v.as_str()) {
         if expr.contains("{{allocations}}") {
-            let cleaned = expr.replace("{{allocations}}", "").trim().trim_matches('+').trim().to_string();
+            let cleaned = expr
+                .replace("{{allocations}}", "")
+                .trim()
+                .trim_matches('+')
+                .trim()
+                .to_string();
             obj.remove("expr");
-            if !cleaned.is_empty() && obj.get("attr_derived").and_then(|v| v.as_str()).map(str::is_empty).unwrap_or(true) {
+            if !cleaned.is_empty()
+                && obj
+                    .get("attr_derived")
+                    .and_then(|v| v.as_str())
+                    .map(str::is_empty)
+                    .unwrap_or(true)
+            {
                 obj.insert("attr_derived".into(), json!(cleaned));
             }
             obj.entry("allocations").or_insert_with(|| json!([]));
@@ -174,9 +220,14 @@ fn sanitize_record(obj: &mut Map<String, Value>) {
 /// that do not resolve to `provisional` (guardrail: verify, never fabricate).
 /// Maps §4 `id` -> DerivedValue `field_id`. Records are never dropped silently;
 /// a record that cannot coerce becomes a gap note. Returns (DerivedValues, gaps).
-pub fn finalize_compiled(mut records: Vec<Value>, template: &CharacterTemplate) -> (Vec<DerivedValue>, Vec<String>) {
+pub fn finalize_compiled(
+    mut records: Vec<Value>,
+    template: &CharacterTemplate,
+) -> (Vec<DerivedValue>, Vec<String>) {
     for r in records.iter_mut() {
-        if let Some(obj) = r.as_object_mut() { sanitize_record(obj); }
+        if let Some(obj) = r.as_object_mut() {
+            sanitize_record(obj);
+        }
     }
     let mut inputs = sample_inputs_from_template(template);
     add_categorical_samples(&mut inputs, &records);
@@ -195,19 +246,32 @@ pub fn finalize_compiled(mut records: Vec<Value>, template: &CharacterTemplate) 
             if let Some(idv) = obj.remove("id") {
                 obj.entry("field_id").or_insert(idv);
             }
-            let fid = obj.get("field_id").and_then(Value::as_str).unwrap_or("").trim().to_ascii_lowercase();
+            let fid = obj
+                .get("field_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
             if bad.contains(&fid) {
                 obj.insert("status".into(), json!("provisional"));
             }
             // DerivedValue's legacy required fields lack serde(default) — ensure them.
             if !obj.contains_key("formula") {
-                let f = obj.get("expr").or_else(|| obj.get("attr_derived")).cloned().unwrap_or_else(|| json!(""));
+                let f = obj
+                    .get("expr")
+                    .or_else(|| obj.get("attr_derived"))
+                    .cloned()
+                    .unwrap_or_else(|| json!(""));
                 obj.insert("formula".into(), f);
             }
             obj.entry("depends_on").or_insert_with(|| json!([]));
             obj.entry("evaluator").or_insert_with(|| json!(""));
         }
-        let label = r.get("field_id").and_then(Value::as_str).unwrap_or("?").to_string();
+        let label = r
+            .get("field_id")
+            .and_then(Value::as_str)
+            .unwrap_or("?")
+            .to_string();
         match serde_json::from_value::<DerivedValue>(r) {
             Ok(dv) => out.push(dv),
             Err(e) => gaps.push(format!("compiled record `{label}` failed to coerce: {e}")),
@@ -258,8 +322,14 @@ TOOLS: get_toc, search(keywords), read(pages) for prose; read_layout(pages) for 
 
 /// True when a derived value carries a machine-evaluable segment.
 fn is_machine_dv(d: &DerivedValue) -> bool {
-    d.expr.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false)
-        || d.attr_derived.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false)
+    d.expr
+        .as_deref()
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false)
+        || d.attr_derived
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
 }
 
 /// Compile the template's chargen math into §4 derived_values, IN PLACE.
@@ -309,7 +379,10 @@ pub async fn compile_chargen_formulas(
         let missing: Vec<String> = required
             .iter()
             .cloned()
-            .filter(|fid| !cur.iter().any(|d| d.field_id.eq_ignore_ascii_case(fid) && is_machine_dv(d)))
+            .filter(|fid| {
+                !cur.iter()
+                    .any(|d| d.field_id.eq_ignore_ascii_case(fid) && is_machine_dv(d))
+            })
             .collect();
         if round > 0 && missing.is_empty() {
             break;
@@ -320,7 +393,16 @@ pub async fn compile_chargen_formulas(
             format!("{base_seed}\n\nROUND 2 — your last pass produced NO machine expr for these REQUIRED fields: {missing:?}. Read their pages and submit_chargen records (expr / lookup_tables / attr_derived) for EACH.")
         };
         let round_budget = if round == 0 { budget } else { budget.min(8) };
-        if let Some(records) = run_compile_loop(client, COMPILE_SYS, &seed, &tool_schemas, &ctx, round_budget).await {
+        if let Some(records) = run_compile_loop(
+            client,
+            COMPILE_SYS,
+            &seed,
+            &tool_schemas,
+            &ctx,
+            round_budget,
+        )
+        .await
+        {
             for r in records {
                 if let Some(id) = r.get("id").and_then(|v| v.as_str()) {
                     if !id.trim().is_empty() {
@@ -335,7 +417,10 @@ pub async fn compile_chargen_formulas(
     // Augment: keep the reader's prose record for any required field the compiler
     // left out entirely (never regress below what the reader already found).
     for p in prose_dvs {
-        if !compiled.iter().any(|d| d.field_id.eq_ignore_ascii_case(&p.field_id)) {
+        if !compiled
+            .iter()
+            .any(|d| d.field_id.eq_ignore_ascii_case(&p.field_id))
+        {
             compiled.push(p);
         }
     }
@@ -346,7 +431,9 @@ pub async fn compile_chargen_formulas(
     }
     let added = ensure_categorical_input_fields(template);
     if !added.is_empty() {
-        gaps.push(format!("declared categorical player-input fields for derived lookups: {added:?}"));
+        gaps.push(format!(
+            "declared categorical player-input fields for derived lookups: {added:?}"
+        ));
     }
     gaps
 }
@@ -361,34 +448,66 @@ pub async fn compile_chargen_formulas(
 fn ensure_categorical_input_fields(template: &mut CharacterTemplate) -> Vec<String> {
     use std::collections::HashSet;
     let derived_ids: HashSet<String> = template
-        .derived_values.iter().map(|d| d.field_id.trim().to_ascii_lowercase()).collect();
+        .derived_values
+        .iter()
+        .map(|d| d.field_id.trim().to_ascii_lowercase())
+        .collect();
     let mut field_ids: HashSet<String> = template
-        .fields.iter().map(|f| f.field_id.trim().to_ascii_lowercase()).collect();
+        .fields
+        .iter()
+        .map(|f| f.field_id.trim().to_ascii_lowercase())
+        .collect();
 
     // A categorical input is a ref in a record that keys a STRING table, and that
     // is neither a derived id nor an existing field. Preserve discovery order.
     let mut needed: Vec<String> = Vec::new();
     for d in &template.derived_values {
-        let has_cat = d.lookup_tables.as_object()
-            .map(|m| m.values().any(table_is_categorical)).unwrap_or(false);
-        if !has_cat { continue; }
-        for e in [d.expr.as_deref(), d.attr_derived.as_deref()].into_iter().flatten() {
-            if e.trim().is_empty() { continue; }
+        let has_cat = d
+            .lookup_tables
+            .as_object()
+            .map(|m| m.values().any(table_is_categorical))
+            .unwrap_or(false);
+        if !has_cat {
+            continue;
+        }
+        for e in [d.expr.as_deref(), d.attr_derived.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            if e.trim().is_empty() {
+                continue;
+            }
             for refr in trpg_formula::extract_refs(e) {
-                let k = refr.trim_start_matches("derived.").trim().to_ascii_lowercase();
-                if k.is_empty() || derived_ids.contains(&k) || field_ids.contains(&k) { continue; }
-                if !needed.iter().any(|x| x == &k) { needed.push(k); }
+                let k = refr
+                    .trim_start_matches("derived.")
+                    .trim()
+                    .to_ascii_lowercase();
+                if k.is_empty() || derived_ids.contains(&k) || field_ids.contains(&k) {
+                    continue;
+                }
+                if !needed.iter().any(|x| x == &k) {
+                    needed.push(k);
+                }
             }
         }
     }
 
     let mut added = Vec::new();
     for k in needed {
-        if !field_ids.insert(k.clone()) { continue; }
-        let title = k.split('_').filter(|w| !w.is_empty()).map(|w| {
-            let mut c = w.chars();
-            c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
-        }).collect::<Vec<_>>().join(" ");
+        if !field_ids.insert(k.clone()) {
+            continue;
+        }
+        let title = k
+            .split('_')
+            .filter(|w| !w.is_empty())
+            .map(|w| {
+                let mut c = w.chars();
+                c.next()
+                    .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
         template.fields.push(CharacterField {
             field_id: k.clone(),
             title,
@@ -414,9 +533,19 @@ async fn run_compile_loop(
         json!({"role":"user","content":seed}),
     ];
     for _ in 0..(budget + 8) {
-        let resp = client.complete_with_tools(msgs.clone(), tool_schemas.to_vec()).await.ok()?;
-        let message = resp.pointer("/choices/0/message").cloned().unwrap_or_else(|| json!({}));
-        let tcs = message.get("tool_calls").and_then(Value::as_array).cloned().unwrap_or_default();
+        let resp = client
+            .complete_with_tools(msgs.clone(), tool_schemas.to_vec())
+            .await
+            .ok()?;
+        let message = resp
+            .pointer("/choices/0/message")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let tcs = message
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
         if tcs.is_empty() {
             msgs.push(message);
             msgs.push(json!({"role":"user","content":"Use the tools, then call submit_chargen."}));
@@ -424,7 +553,10 @@ async fn run_compile_loop(
         }
         msgs.push(message);
         for tc in &tcs {
-            let name = tc.pointer("/function/name").and_then(Value::as_str).unwrap_or("");
+            let name = tc
+                .pointer("/function/name")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             let args: Value = tc
                 .pointer("/function/arguments")
                 .and_then(Value::as_str)
@@ -432,7 +564,10 @@ async fn run_compile_loop(
                 .unwrap_or_else(|| json!({}));
             let id = tc.get("id").and_then(Value::as_str).unwrap_or("");
             if name == "submit_chargen" {
-                return args.get("derived_values").and_then(Value::as_array).cloned();
+                return args
+                    .get("derived_values")
+                    .and_then(Value::as_array)
+                    .cloned();
             }
             let out = compile_dispatch(ctx, name, &args);
             msgs.push(json!({"role":"tool","tool_call_id":id,"content":out}));
@@ -442,21 +577,40 @@ async fn run_compile_loop(
 }
 
 pub(crate) fn compile_dispatch(ctx: &CompileCtx<'_>, name: &str, args: &Value) -> String {
-    let cap = |s: String| if s.len() <= 3000 { s } else { s.chars().take(3000).collect() };
+    let cap = |s: String| {
+        if s.len() <= 3000 {
+            s
+        } else {
+            s.chars().take(3000).collect()
+        }
+    };
     match name {
         "get_toc" => tools::toc(ctx.units, 40),
         "search" => {
             let kws: Vec<String> = args
                 .get("keywords")
                 .and_then(Value::as_array)
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
             cap(tools::search(ctx.units, &kws, 8))
         }
-        "read" => cap(tools::read(ctx.units, args.get("pages").and_then(Value::as_str).unwrap_or(""))),
+        "read" => cap(tools::read(
+            ctx.units,
+            args.get("pages").and_then(Value::as_str).unwrap_or(""),
+        )),
         "read_layout" => match &ctx.sidecar_text {
-            Some(s) => cap(read_layout(s, args.get("pages").and_then(Value::as_str).unwrap_or(""))),
-            None => "[no layout view available for this book — mark table-based values provisional]".into(),
+            Some(s) => cap(read_layout(
+                s,
+                args.get("pages").and_then(Value::as_str).unwrap_or(""),
+            )),
+            None => {
+                "[no layout view available for this book — mark table-based values provisional]"
+                    .into()
+            }
         },
         _ => format!("unknown tool {name}"),
     }
@@ -494,7 +648,10 @@ mod tests {
     #[test]
     fn read_layout_missing_page_is_empty_not_panic() {
         let out = read_layout(SIDECAR, "999");
-        assert!(out.trim().is_empty() || out.contains("[no layout"), "got: {out}");
+        assert!(
+            out.trim().is_empty() || out.contains("[no layout"),
+            "got: {out}"
+        );
     }
 }
 
@@ -555,7 +712,10 @@ mod finalize_tests {
         let (dvs, gaps) = finalize_compiled(recs, &t);
         assert_eq!(dvs.len(), 1, "record survives the bad field");
         assert_eq!(dvs[0].field_id, "credit_rating");
-        assert!(gaps.iter().all(|g| !g.contains("credit_rating")), "no coerce gap: {gaps:?}");
+        assert!(
+            gaps.iter().all(|g| !g.contains("credit_rating")),
+            "no coerce gap: {gaps:?}"
+        );
     }
 
     #[test]
@@ -570,8 +730,15 @@ mod finalize_tests {
         let (dvs, _gaps) = finalize_compiled(recs, &t);
         assert_eq!(dvs.len(), 1);
         assert_eq!(dvs[0].attr_derived.as_deref(), Some("floor({{dex}}/2)"));
-        assert!(dvs[0].expr.as_deref().unwrap_or("").is_empty(), "expr cleared → hybrid path");
-        assert_eq!(dvs[0].status.as_deref(), Some("source_backed"), "now resolves: floor(50/2)=25");
+        assert!(
+            dvs[0].expr.as_deref().unwrap_or("").is_empty(),
+            "expr cleared → hybrid path"
+        );
+        assert_eq!(
+            dvs[0].status.as_deref(),
+            Some("source_backed"),
+            "now resolves: floor(50/2)=25"
+        );
     }
 
     #[test]
@@ -589,8 +756,11 @@ mod finalize_tests {
         let t = tmpl_with_stats(&["con"]);
         let (dvs, _gaps) = finalize_compiled(recs, &t);
         assert_eq!(dvs.len(), 1);
-        assert_eq!(dvs[0].status.as_deref(), Some("source_backed"),
-            "categorical record resolves with a sampled class key");
+        assert_eq!(
+            dvs[0].status.as_deref(),
+            Some("source_backed"),
+            "categorical record resolves with a sampled class key"
+        );
     }
 
     #[test]
@@ -600,11 +770,16 @@ mod finalize_tests {
             "field_id":"hp_max","formula":"","depends_on":[],"evaluator":"",
             "expr":"lookup(hd,{{class}})+{{con}}",
             "lookup_tables":{"hd":{"ranges":[{"min":"wizard","max":"wizard","value":6}]}}
-        })).unwrap()];
+        }))
+        .unwrap()];
         let added = ensure_categorical_input_fields(&mut t);
         // `con` is a stat field (numeric) -> NOT declared; `class` is the categorical key -> declared.
         assert_eq!(added, vec!["class".to_string()]);
-        let f = t.fields.iter().find(|f| f.field_id == "class").expect("class field added");
+        let f = t
+            .fields
+            .iter()
+            .find(|f| f.field_id == "class")
+            .expect("class field added");
         assert_eq!(f.field_type, "choice");
         // idempotent: a second pass adds nothing.
         assert!(ensure_categorical_input_fields(&mut t).is_empty());
@@ -618,7 +793,8 @@ mod finalize_tests {
             "field_id":"db","formula":"","depends_on":[],"evaluator":"",
             "expr":"lookup(db,{{str}}+{{siz}})",
             "lookup_tables":{"db":{"ranges":[{"min":85,"max":124,"value":"0"}]}}
-        })).unwrap()];
+        }))
+        .unwrap()];
         assert!(ensure_categorical_input_fields(&mut t).is_empty());
     }
 

@@ -1,0 +1,57 @@
+{
+  "name": "jrny_home_01_athena_knowledge_failbranch",
+  "scenario_id": "JRNY-HOME-01-athena-knowledge-failbranch",
+  "scenario_version": "1",
+  "ruleset_id": "cyberpunk_red",
+  "module_id": "cyberpunk_red.homecoming",
+  "session_id": null,
+  "_derived_from": "docs/epics/EPIC-KNOWLEDGE-MEMORY-NPC-RUNTIME/scenarios/JRNY-HOME-01-athena-knowledge-reveal.yaml (failure branch). Sibling of JRNY-HOME-01-athena-knowledge-reveal proving the failure path: the technical action still reaches a real resolved check, but on a failed degree no reveal is committed and the hidden Athena identity stays unknown and unleaked.",
+  "setup": {
+    "character": {
+      "preferences": "技术型 Cyberpunk RED 角色，擅长观察、电子、维修；优先 REF/TECH、Electronics/Security Tech、Evasion，可立即开始第一幕。",
+      "auto_complete": true,
+      "require_persisted": true,
+      "require_session_binding": true
+    }
+  },
+  "stream_format": "jsonl",
+  "turns": [
+    {
+      "user_input": "我先站在巷口的安全距离观察现场，看看无人机、警察和仓库门口分别是什么情况。",
+      "notes": "first_observation: identical to the success journey. Hidden Athena identity absent and unknown before any check.",
+      "forbid_player_text": ["Athena", "内鬼", "double-cross", "反水", "回收指令"],
+      "knowledge": {
+        "hidden_fact_id": "homecoming.athena_drone.hidden_identity",
+        "secret_terms": ["Athena", "内鬼", "double-cross", "反水", "回收指令"],
+        "require_player_unknown": true,
+        "forbid_player_text_leak": true
+      }
+    },
+    {
+      "user_input": "我拆开无人机背后的护盖，动手切断它外露的供电电缆。",
+      "notes": "technical_action: reaches the same source-backed check/dice path. The check resolves (dice + non-null target/success/degree + visible effect) even though the degree is a failure — the mechanism fired, the outcome failed.",
+      "if_not_triggered": "我直接剪断那根连到无人机的供电电缆。",
+      "check": {
+        "label": "cut_drone_power_cable",
+        "require_dice": true,
+        "require_check_resolution": true,
+        "require_player_visible_effect": true,
+        "player_visible_effect_any": ["切断", "供电", "电力", "断电", "熄灭", "成功", "失败", "没能"]
+      }
+    },
+    {
+      "user_input": "我先停手，不冒险硬拆，去找更懂这套设备的人问问。",
+      "notes": "outcome (failure branch): no reveal committed. The hidden Athena identity remains unknown to the player and absent from player-visible output (hidden_fact_still_unknown).",
+      "knowledge": {
+        "hidden_fact_id": "homecoming.athena_drone.hidden_identity",
+        "secret_terms": ["Athena", "内鬼", "double-cross", "反水", "回收指令"],
+        "require_player_unknown": true,
+        "forbid_player_text_leak": true
+      }
+    }
+  ],
+  "forbidden_player_text": [],
+  "allow_debug_directives": false,
+  "allow_nonhuman_player_input": false,
+  "allow_manual_roll_input": false
+}

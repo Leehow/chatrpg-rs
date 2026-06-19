@@ -1,0 +1,31 @@
+{
+  "identity": {
+    "scenario_id": "JRNY-CYBER-PERCEPTION-FAILCLOSED",
+    "scenario_version": "1",
+    "evidence_schema_version": "tc-jrny-02.evidence.v1"
+  },
+  "recorded_mode": "deterministic",
+  "turns": [
+    {
+      "user_input": "我压低声音靠近公寓门口，先仔细观察有没有埋伏的迹象。",
+      "count_delta": {
+        "roll_plans": 1,
+        "dice_rolls": 1,
+        "contest_resolution_events": 1
+      },
+      "newest_contest_row": {
+        "target_value": null,
+        "success": null,
+        "degree": null,
+        "total": 10,
+        "outcome_json": {
+          "awaiting_binding": "no source-backed target number/opposition model was bound for ruleset `cyberpunk_red`",
+          "target": null,
+          "success": null,
+          "degree": null
+        }
+      },
+      "player_visible_body": "你屏息细听，门后毫无动静，你无法确定是否有埋伏。"
+    }
+  ]
+}

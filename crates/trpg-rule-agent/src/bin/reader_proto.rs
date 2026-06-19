@@ -13,13 +13,20 @@ use trpg_rule_agent::reader::{load_units, run_reader, run_reader_parallel};
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let units_path = PathBuf::from(args.get(1).expect("usage: reader_proto <units.jsonl> <ruleset> [max_tools] [single|parallel]"));
+    let units_path = PathBuf::from(
+        args.get(1)
+            .expect("usage: reader_proto <units.jsonl> <ruleset> [max_tools] [single|parallel]"),
+    );
     let ruleset = args.get(2).cloned().unwrap_or_else(|| "unknown".into());
     let max_tools: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(12);
     let mode = args.get(4).cloned().unwrap_or_else(|| "parallel".into());
 
     let units = load_units(&units_path)?;
-    eprintln!("loaded {} units from {} (mode={mode})", units.len(), units_path.display());
+    eprintln!(
+        "loaded {} units from {} (mode={mode})",
+        units.len(),
+        units_path.display()
+    );
 
     let client = OpenAiCompatibleClient::new(LlmConfig::from_env()?)?;
     let res = if mode == "single" {

@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+name = "trpg_harness"
+path = "src/lib.rs"
+
 [[bin]]
 name = "trpg-harness"
 path = "src/main.rs"
@@ -17,3 +21,7 @@ tokio.workspace = true
 chrono.workspace = true
 dotenvy.workspace = true
 sqlx.workspace = true
+# Reuse the production knowledge-leak verifier (`scan_player_visible_leak`,
+# `FactSurfaceMarker`) so the harness's deterministic post-output spoiler check is
+# the SAME mechanism the GM's NoSpoiler plugin uses, not a parallel reimplementation.
+trpg-model = { path = "../trpg-model" }

@@ -1,11 +1,14 @@
 //! B4/B5 watcher 纯函数测试（不碰 db）。track fixture 直接抄真 CoC kernel
 //! sanity 轨形状（测试清单指定，fixture 内的规则集词汇不属于逻辑硬编码）。
 use crate::watcher::{
-    calendar_crossed, crossing_fact, detect_crossings, due_from_crossing, hook_due_candidates,
-    hook_matches_event, HookEvent,
+    admit_candidates, calendar_crossed, crossing_fact, detect_crossings, due_from_crossing,
+    hook_due_candidates, hook_matches_event, HookEvent,
 };
 use serde_json::json;
-use trpg_model::{CalendarGranularity, DueSource, DueStatus, EngineHook, MechanicEntry, ParameterOperation};
+use std::collections::HashSet;
+use trpg_model::{
+    CalendarGranularity, DueSource, DueStatus, EngineHook, MechanicEntry, ParameterOperation,
+};
 
 fn sanity_track() -> serde_json::Value {
     json!({"id":"sanity","owner_kind":"actor","thresholds":[
@@ -15,38 +18,86 @@ fn sanity_track() -> serde_json::Value {
 
 #[test]
 fn san_loss_of_6_in_one_go_produces_crossing() {
-    let cs = detect_crossings(&sanity_track(), "actor", "pc.current", 38, 32, ParameterOperation::Subtract);
+    let cs = detect_crossings(
+        &sanity_track(),
+        "actor",
+        "pc.current",
+        38,
+        32,
+        ParameterOperation::Subtract,
+    );
     assert_eq!(cs.len(), 1, "exactly one crossing expected: {cs:?}");
     assert_eq!(cs[0].kind, "loss_in_one_go");
-    assert_eq!(cs[0].followup_procedure_id.as_deref(), Some("coc.temporary_insanity"));
+    assert_eq!(
+        cs[0].followup_procedure_id.as_deref(),
+        Some("coc.temporary_insanity")
+    );
     assert_eq!(cs[0].before, 38);
     assert_eq!(cs[0].after, 32);
 }
 
 #[test]
 fn san_loss_of_4_produces_no_crossing() {
-    let cs = detect_crossings(&sanity_track(), "actor", "pc.current", 38, 34, ParameterOperation::Subtract);
-    assert!(cs.is_empty(), "loss of 4 must not cross loss_in_one_go:5: {cs:?}");
+    let cs = detect_crossings(
+        &sanity_track(),
+        "actor",
+        "pc.current",
+        38,
+        34,
+        ParameterOperation::Subtract,
+    );
+    assert!(
+        cs.is_empty(),
+        "loss of 4 must not cross loss_in_one_go:5: {cs:?}"
+    );
 }
 
 #[test]
 fn hp_reaching_zero_crosses_at_or_below() {
     let track = json!({"id":"hit_points","owner_kind":"actor","thresholds":[
         {"at":0,"direction":"at_or_below","consequence":"unconscious or dying"}]});
-    let cs = detect_crossings(&track, "actor", "pc.current", 3, 0, ParameterOperation::Subtract);
+    let cs = detect_crossings(
+        &track,
+        "actor",
+        "pc.current",
+        3,
+        0,
+        ParameterOperation::Subtract,
+    );
     assert_eq!(cs.len(), 1);
     assert_eq!(cs[0].kind, "cumulative");
     // 边沿触发：before==after==0 没有"穿越"，不重复发。
-    let none = detect_crossings(&track, "actor", "pc.current", 0, 0, ParameterOperation::Subtract);
-    assert!(none.is_empty(), "edge-triggered: staying at 0 must not re-cross: {none:?}");
+    let none = detect_crossings(
+        &track,
+        "actor",
+        "pc.current",
+        0,
+        0,
+        ParameterOperation::Subtract,
+    );
+    assert!(
+        none.is_empty(),
+        "edge-triggered: staying at 0 must not re-cross: {none:?}"
+    );
 }
 
 #[test]
 fn threshold_without_followup_still_yields_due_with_prose() {
     // sanity 轨第二条阈值（at:0）没有 followup_procedure_id ——
     // fail-closed 但不静默：due 仍产出，threshold_desc 带 prose consequence 原文。
-    let cs = detect_crossings(&sanity_track(), "actor", "pc.current", 2, 0, ParameterOperation::Subtract);
-    assert_eq!(cs.len(), 1, "only the at:0 cumulative threshold crosses: {cs:?}");
+    let cs = detect_crossings(
+        &sanity_track(),
+        "actor",
+        "pc.current",
+        2,
+        0,
+        ParameterOperation::Subtract,
+    );
+    assert_eq!(
+        cs.len(),
+        1,
+        "only the at:0 cumulative threshold crosses: {cs:?}"
+    );
     assert_eq!(cs[0].followup_procedure_id, None);
     let due = due_from_crossing("s", "t", &cs[0]);
     assert_eq!(due.threshold_desc, "permanent insanity");
@@ -54,11 +105,25 @@ fn threshold_without_followup_still_yields_due_with_prose() {
 
 #[test]
 fn due_from_crossing_evidence_has_before_after_delta() {
-    let cs = detect_crossings(&sanity_track(), "actor", "pc.current", 38, 32, ParameterOperation::Subtract);
+    let cs = detect_crossings(
+        &sanity_track(),
+        "actor",
+        "pc.current",
+        38,
+        32,
+        ParameterOperation::Subtract,
+    );
     let due = due_from_crossing("sess_x", "turn_y", &cs[0]);
-    assert_eq!(due.evidence.get("before").and_then(|v| v.as_i64()), Some(38));
+    assert_eq!(
+        due.evidence.get("before").and_then(|v| v.as_i64()),
+        Some(38)
+    );
     assert_eq!(due.evidence.get("after").and_then(|v| v.as_i64()), Some(32));
-    assert_eq!(due.evidence.get("delta").and_then(|v| v.as_i64()), Some(-6), "delta == after - before");
+    assert_eq!(
+        due.evidence.get("delta").and_then(|v| v.as_i64()),
+        Some(-6),
+        "delta == after - before"
+    );
     assert_eq!(due.status, DueStatus::Open);
     assert_eq!(due.source, DueSource::Threshold);
     assert_eq!(due.source_track.as_deref(), Some("sanity"));
@@ -66,7 +131,11 @@ fn due_from_crossing_evidence_has_before_after_delta() {
     assert_eq!(due.turn_id, "turn_y");
     assert_eq!(due.owner_kind, "actor");
     assert_eq!(due.owner_id, "pc.current");
-    assert!(due.due_id.starts_with("due_"), "due_id must be 'due_{{uuid simple}}': {}", due.due_id);
+    assert!(
+        due.due_id.starts_with("due_"),
+        "due_id must be 'due_{{uuid simple}}': {}",
+        due.due_id
+    );
 }
 
 // ===== B5：EngineHook 事件点纯函数 =====
@@ -74,35 +143,89 @@ fn due_from_crossing_evidence_has_before_after_delta() {
 #[test]
 fn calendar_crossing_fires_only_across_segment_boundary() {
     // Fate 一天 8 段实证：段长 86400/8 = 10800s。
-    let seg = CalendarGranularity { unit: "segment".to_string(), seconds_per_unit: None, segments_per_day: Some(8), label: None };
-    assert!(calendar_crossed(&seg, 5000, 12000), "5000→12000 crosses the 10800s segment boundary");
-    assert!(!calendar_crossed(&seg, 1000, 9000), "1000→9000 stays inside the first segment");
-    let day = CalendarGranularity { unit: "day".to_string(), seconds_per_unit: None, segments_per_day: None, label: None };
-    assert!(calendar_crossed(&day, 86000, 87000), "86000→87000 crosses the day boundary at 86400");
+    let seg = CalendarGranularity {
+        unit: "segment".to_string(),
+        seconds_per_unit: None,
+        segments_per_day: Some(8),
+        label: None,
+    };
+    assert!(
+        calendar_crossed(&seg, 5000, 12000),
+        "5000→12000 crosses the 10800s segment boundary"
+    );
+    assert!(
+        !calendar_crossed(&seg, 1000, 9000),
+        "1000→9000 stays inside the first segment"
+    );
+    let day = CalendarGranularity {
+        unit: "day".to_string(),
+        seconds_per_unit: None,
+        segments_per_day: None,
+        label: None,
+    };
+    assert!(
+        calendar_crossed(&day, 86000, 87000),
+        "86000→87000 crosses the day boundary at 86400"
+    );
 }
 
 #[test]
 fn unknown_granularity_is_fail_closed() {
-    let g = CalendarGranularity { unit: "???".to_string(), seconds_per_unit: None, segments_per_day: None, label: None };
-    assert!(!calendar_crossed(&g, 0, 1_000_000), "unrecognized granularity must never fire (no guessing)");
+    let g = CalendarGranularity {
+        unit: "???".to_string(),
+        seconds_per_unit: None,
+        segments_per_day: None,
+        label: None,
+    };
+    assert!(
+        !calendar_crossed(&g, 0, 1_000_000),
+        "unrecognized granularity must never fire (no guessing)"
+    );
 }
 
 #[test]
 fn zero_second_granularity_never_panics() {
     // LLM 编译遍可产出 segments_per_day > 86400（如 100000）→ 86400/n 整除得 0。
     // calendar_crossed 必须把 0 当认不出（fail-closed），绝不除零 panic。
-    let g = CalendarGranularity { unit: "segment".to_string(), seconds_per_unit: None, segments_per_day: Some(100_000), label: None };
-    assert!(!calendar_crossed(&g, 0, 1_000_000), "segments_per_day=100000 yields 0s granularity: must be false, not panic");
+    let g = CalendarGranularity {
+        unit: "segment".to_string(),
+        seconds_per_unit: None,
+        segments_per_day: Some(100_000),
+        label: None,
+    };
+    assert!(
+        !calendar_crossed(&g, 0, 1_000_000),
+        "segments_per_day=100000 yields 0s granularity: must be false, not panic"
+    );
 }
 
 #[test]
 fn hook_matches_event_maps_variants_one_to_one() {
-    assert!(hook_matches_event(&EngineHook::TurnStart, &HookEvent::TurnStart));
-    assert!(!hook_matches_event(&EngineHook::SceneEnter, &HookEvent::TurnStart));
+    assert!(hook_matches_event(
+        &EngineHook::TurnStart,
+        &HookEvent::TurnStart
+    ));
+    assert!(!hook_matches_event(
+        &EngineHook::SceneEnter,
+        &HookEvent::TurnStart
+    ));
     assert!(hook_matches_event(&EngineHook::Rest, &HookEvent::Rest));
     // Calendar 不经此函数直配（强制走 calendar_crossed 分支）。
-    let cal = EngineHook::Calendar { granularity: CalendarGranularity { unit: "day".to_string(), seconds_per_unit: None, segments_per_day: None, label: None } };
-    assert!(!hook_matches_event(&cal, &HookEvent::TimeAdvance { from_tick: 0, to_tick: 1_000_000 }));
+    let cal = EngineHook::Calendar {
+        granularity: CalendarGranularity {
+            unit: "day".to_string(),
+            seconds_per_unit: None,
+            segments_per_day: None,
+            label: None,
+        },
+    };
+    assert!(!hook_matches_event(
+        &cal,
+        &HookEvent::TimeAdvance {
+            from_tick: 0,
+            to_tick: 1_000_000
+        }
+    ));
 }
 
 #[test]
@@ -129,9 +252,100 @@ fn coc_hp_track() -> serde_json::Value {
 #[test]
 fn hp_drop_to_zero_crosses_dying_threshold() {
     // before=4 -> after=0, Subtract：触发 cumulative(at:0) 濒死阈值。
-    let cs = detect_crossings(&coc_hp_track(), "actor", "pc.current", 4, 0, ParameterOperation::Subtract);
-    assert!(cs.iter().any(|c| c.kind == "cumulative" && c.threshold_at == Some(0)),
-        "0 线濒死阈值应穿越: {cs:?}");
+    let cs = detect_crossings(
+        &coc_hp_track(),
+        "actor",
+        "pc.current",
+        4,
+        0,
+        ParameterOperation::Subtract,
+    );
+    assert!(
+        cs.iter()
+            .any(|c| c.kind == "cumulative" && c.threshold_at == Some(0)),
+        "0 线濒死阈值应穿越: {cs:?}"
+    );
+}
+
+// ===== admit_dues 抑制判定（纯函数侧，不碰 db）=====
+// 抑制集语义：open / scene-waived / resolved 同 (mechanic_id, hook_event) 键的
+// 候选都跳过。resolved 这条堵住 post-combat status query 把已结算的战斗
+// 余波（major_wound / zero_hp_state）经 stimulus pass 重新 admit 的复发口子。
+
+fn upkeep_entry() -> MechanicEntry {
+    MechanicEntry {
+        id: "test.upkeep".to_string(),
+        name: "Upkeep".to_string(),
+        when_to_use: "at the start of every turn".to_string(),
+        hooks: vec![EngineHook::TurnStart],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn resolved_due_with_same_key_suppresses_new_candidate() {
+    // 候选键 = ("test.upkeep", "turn_start")。
+    let candidates =
+        hook_due_candidates(&[upkeep_entry()], &HookEvent::TurnStart, "sess_x", "turn_y");
+    assert_eq!(candidates.len(), 1, "fixture must produce one candidate");
+    let empty: HashSet<(String, String)> = HashSet::new();
+    // resolved 集携带同键 → 候选必须被抑制（已结算不再重发）。
+    let resolved: HashSet<(String, String)> =
+        HashSet::from([("test.upkeep".to_string(), "turn_start".to_string())]);
+    let admitted = admit_candidates(candidates.clone(), &empty, &empty, &resolved);
+    assert!(
+        admitted.is_empty(),
+        "resolved due with same key must suppress refire: {admitted:?}"
+    );
+    // 对照：无 resolved 键 → 候选放行（证明抑制确由 resolved 集导致，非别处）。
+    let admitted = admit_candidates(candidates, &empty, &empty, &empty);
+    assert_eq!(
+        admitted.len(),
+        1,
+        "without any suppression key the candidate is admitted"
+    );
+}
+
+#[test]
+fn open_and_scene_waived_suppression_preserved() {
+    // 既有两条抑制语义（open / scene-waived）在纯函数侧仍成立。
+    let key: HashSet<(String, String)> =
+        HashSet::from([("test.upkeep".to_string(), "turn_start".to_string())]);
+    let empty: HashSet<(String, String)> = HashSet::new();
+    let candidates =
+        hook_due_candidates(&[upkeep_entry()], &HookEvent::TurnStart, "sess_x", "turn_y");
+    assert!(
+        admit_candidates(candidates.clone(), &key, &empty, &empty).is_empty(),
+        "open key must suppress"
+    );
+    assert!(
+        admit_candidates(candidates, &empty, &key, &empty).is_empty(),
+        "scene-waived key must suppress"
+    );
+}
+
+#[test]
+fn candidate_missing_key_is_always_admitted() {
+    // 阈值型 due 没有 mechanic_id/hook_event → due_key 为 None → 不参与抑制，
+    // 一律放行（fail-closed 方向："宁可再催，绝不静默"）。即便 resolved 集非空。
+    let cs = detect_crossings(
+        &coc_hp_track(),
+        "actor",
+        "pc.current",
+        4,
+        0,
+        ParameterOperation::Subtract,
+    );
+    let due = due_from_crossing("sess_x", "turn_y", &cs[0]);
+    assert!(due.mechanic_id.is_none() && due.hook_event.is_none());
+    let nonempty: HashSet<(String, String)> =
+        HashSet::from([("anything".to_string(), "turn_start".to_string())]);
+    let admitted = admit_candidates(vec![due], &nonempty, &nonempty, &nonempty);
+    assert_eq!(
+        admitted.len(),
+        1,
+        "key-less candidate must pass through suppression"
+    );
 }
 
 // ===== #5 Triangle Agency chaos pool threshold regression =====
@@ -160,26 +374,55 @@ fn chaos_track_fixed() -> serde_json::Value {
 #[test]
 fn chaos_pool_accumulating_past_4_produces_crossing() {
     // 3 → 4: crosses the first threshold (Manifest unlocks).
-    let cs = detect_crossings(&chaos_track_fixed(), "scene", "scene.current", 3, 4, ParameterOperation::Add);
+    let cs = detect_crossings(
+        &chaos_track_fixed(),
+        "scene",
+        "scene.current",
+        3,
+        4,
+        ParameterOperation::Add,
+    );
     assert_eq!(cs.len(), 1, "exactly one crossing at at:4: {cs:?}");
     assert_eq!(cs[0].kind, "cumulative");
     assert_eq!(cs[0].track_id, "chaos");
     assert_eq!(cs[0].threshold_at, Some(4));
-    assert!(cs[0].consequence.contains("Manifest"), "consequence must name the effect: {}", cs[0].consequence);
+    assert!(
+        cs[0].consequence.contains("Manifest"),
+        "consequence must name the effect: {}",
+        cs[0].consequence
+    );
 }
 
 #[test]
 fn chaos_pool_no_crossing_before_threshold() {
     // 0 → 3: below every `at` threshold — should fire nothing.
-    let cs = detect_crossings(&chaos_track_fixed(), "scene", "scene.current", 0, 3, ParameterOperation::Add);
+    let cs = detect_crossings(
+        &chaos_track_fixed(),
+        "scene",
+        "scene.current",
+        0,
+        3,
+        ParameterOperation::Add,
+    );
     assert!(cs.is_empty(), "no threshold crossed at 3: {cs:?}");
 }
 
 #[test]
 fn chaos_pool_multiple_thresholds_crossed_in_one_roll() {
     // A large single roll can jump from 0 to 11, crossing at:4, 5, 6, 10.
-    let cs = detect_crossings(&chaos_track_fixed(), "scene", "scene.current", 0, 11, ParameterOperation::Add);
-    assert_eq!(cs.len(), 4, "should cross four thresholds (4, 5, 6, 10): {cs:?}");
+    let cs = detect_crossings(
+        &chaos_track_fixed(),
+        "scene",
+        "scene.current",
+        0,
+        11,
+        ParameterOperation::Add,
+    );
+    assert_eq!(
+        cs.len(),
+        4,
+        "should cross four thresholds (4, 5, 6, 10): {cs:?}"
+    );
     let ats: Vec<i32> = cs.iter().filter_map(|c| c.threshold_at).collect();
     assert_eq!(ats, vec![4, 5, 6, 10], "thresholds fired in order: {ats:?}");
 }
@@ -187,8 +430,18 @@ fn chaos_pool_multiple_thresholds_crossed_in_one_roll() {
 #[test]
 fn chaos_pool_edge_exact_hit_does_not_re_cross() {
     // Already at 4 → stays at 4: before==after, no crossing (edge-triggered).
-    let cs = detect_crossings(&chaos_track_fixed(), "scene", "scene.current", 4, 4, ParameterOperation::Add);
-    assert!(cs.is_empty(), "staying exactly at threshold must not re-cross: {cs:?}");
+    let cs = detect_crossings(
+        &chaos_track_fixed(),
+        "scene",
+        "scene.current",
+        4,
+        4,
+        ParameterOperation::Add,
+    );
+    assert!(
+        cs.is_empty(),
+        "staying exactly at threshold must not re-cross: {cs:?}"
+    );
 }
 
 #[test]
@@ -201,8 +454,18 @@ fn chaos_stub_without_at_produces_no_crossing() {
         "owner_kind": "scene",
         "thresholds": [{"consequence": "GM spends Chaos when an Anomaly takes specific supernatural actions"}]
     });
-    let cs = detect_crossings(&stub_track, "scene", "scene.current", 0, 12, ParameterOperation::Add);
-    assert!(cs.is_empty(), "stub-only threshold (no `at`) must fire nothing (was the pre-fix behavior): {cs:?}");
+    let cs = detect_crossings(
+        &stub_track,
+        "scene",
+        "scene.current",
+        0,
+        12,
+        ParameterOperation::Add,
+    );
+    assert!(
+        cs.is_empty(),
+        "stub-only threshold (no `at`) must fire nothing (was the pre-fix behavior): {cs:?}"
+    );
 }
 
 /// 重构回归金样：既有 `resource_threshold_consequence` CreateFact 的 fact JSON
@@ -210,7 +473,14 @@ fn chaos_stub_without_at_produces_no_crossing() {
 #[test]
 fn apply_outcome_threshold_facts_unchanged() {
     // 金样 A：单独 loss_in_one_go（before=38→32, Subtract）。
-    let cs = detect_crossings(&sanity_track(), "actor", "pc.current", 38, 32, ParameterOperation::Subtract);
+    let cs = detect_crossings(
+        &sanity_track(),
+        "actor",
+        "pc.current",
+        38,
+        32,
+        ParameterOperation::Subtract,
+    );
     let golden_loss = json!({"resource_track": "sanity", "kind": "loss_in_one_go", "lost": 6, "value": 32, "consequence": "may trigger temporary insanity"});
     assert_eq!(
         serde_json::to_string(&crossing_fact(&cs[0])).unwrap(),
@@ -219,10 +489,23 @@ fn apply_outcome_threshold_facts_unchanged() {
     );
     // 金样 B：同次结算两条阈值齐发（before=6→0, Subtract）：
     // 旧循环按 thresholds 数组序产出 [loss_in_one_go(th1), cumulative(th2)]。
-    let cs = detect_crossings(&sanity_track(), "actor", "pc.current", 6, 0, ParameterOperation::Subtract);
+    let cs = detect_crossings(
+        &sanity_track(),
+        "actor",
+        "pc.current",
+        6,
+        0,
+        ParameterOperation::Subtract,
+    );
     assert_eq!(cs.len(), 2, "both thresholds fire: {cs:?}");
     let golden_loss2 = json!({"resource_track": "sanity", "kind": "loss_in_one_go", "lost": 6, "value": 0, "consequence": "may trigger temporary insanity"});
     let golden_cumulative = json!({"resource_track": "sanity", "kind": "cumulative", "threshold_at": 0, "value": 0, "consequence": "permanent insanity"});
-    assert_eq!(serde_json::to_string(&crossing_fact(&cs[0])).unwrap(), serde_json::to_string(&golden_loss2).unwrap());
-    assert_eq!(serde_json::to_string(&crossing_fact(&cs[1])).unwrap(), serde_json::to_string(&golden_cumulative).unwrap());
+    assert_eq!(
+        serde_json::to_string(&crossing_fact(&cs[0])).unwrap(),
+        serde_json::to_string(&golden_loss2).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_string(&crossing_fact(&cs[1])).unwrap(),
+        serde_json::to_string(&golden_cumulative).unwrap()
+    );
 }

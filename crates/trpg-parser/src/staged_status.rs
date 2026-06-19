@@ -126,10 +126,16 @@ mod tests {
         s.finish("identity", "premise ready");
         s.begin("character");
         assert_eq!(s.stage, "character");
-        assert!(s.stages.iter().any(|x| x.name == "identity" && x.status == "done"));
+        assert!(s
+            .stages
+            .iter()
+            .any(|x| x.name == "identity" && x.status == "done"));
         assert!(s.progress_pct > 0 && s.progress_pct < 100);
         s.fail("character", "boom");
         assert_eq!(s.error.as_deref(), Some("boom"));
-        assert!(s.stages.iter().any(|x| x.name == "character" && x.status == "failed"));
+        assert!(s
+            .stages
+            .iter()
+            .any(|x| x.name == "character" && x.status == "failed"));
     }
 }

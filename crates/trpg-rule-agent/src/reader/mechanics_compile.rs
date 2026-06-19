@@ -115,11 +115,19 @@ pub async fn compile_mechanics_catalog(
         let round_budget = if round == 0 { budget } else { budget.min(8) };
         if let Some(sub) = run_mech_loop(client, &seed, &tool_schemas, &ctx, round_budget).await {
             for r in sub.catalog {
-                match r.get("id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+                match r
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
                     Some(id) => {
                         merged.insert(id.to_ascii_lowercase(), r);
                     }
-                    None => gaps.push(format!("submitted mechanic without usable id dropped: {}", snippet(&r))),
+                    None => gaps.push(format!(
+                        "submitted mechanic without usable id dropped: {}",
+                        snippet(&r)
+                    )),
                 }
             }
             extend_dedup(&mut ups.thresholds, sub.upgrades.thresholds);
@@ -146,24 +154,42 @@ pub async fn compile_mechanics_catalog(
             super::mechanics_finalize::finalize_catalog(raw, kernel, &ctx.skill_names);
         messages.extend(more);
         if entries.is_empty() {
-            gaps.push("mechanics compiler produced nothing usable; kernel catalog left untouched".into());
+            gaps.push(
+                "mechanics compiler produced nothing usable; kernel catalog left untouched".into(),
+            );
         } else {
             kernel.mechanics_catalog = entries;
         }
         // A4 companion upgrades — applied AFTER the catalog is final (threshold
         // followup refs validate against it); all merges additive, never overwrite.
         let catalog = kernel.mechanics_catalog.clone();
-        messages.extend(super::mechanics_finalize::apply_thresholds_upgrades(kernel, &ups.thresholds, &catalog));
-        messages.extend(super::mechanics_finalize::apply_success_bands_upgrades(kernel, &ups.bands));
-        messages.extend(super::mechanics_finalize::apply_field_notes(kernel, &ups.field_notes));
+        messages.extend(super::mechanics_finalize::apply_thresholds_upgrades(
+            kernel,
+            &ups.thresholds,
+            &catalog,
+        ));
+        messages.extend(super::mechanics_finalize::apply_success_bands_upgrades(
+            kernel, &ups.bands,
+        ));
+        messages.extend(super::mechanics_finalize::apply_field_notes(
+            kernel,
+            &ups.field_notes,
+        ));
     }
     for m in &messages {
-        gaps.push(format!("{} [{}]: {}", m.code, m.target.as_deref().unwrap_or("-"), m.message));
+        gaps.push(format!(
+            "{} [{}]: {}",
+            m.code,
+            m.target.as_deref().unwrap_or("-"),
+            m.message
+        ));
     }
     kernel.validation_report.warnings.extend(messages);
     if let Err(e) = super::mechanics_finalize::kernel_round_trip_guard(kernel) {
         *kernel = backup;
-        gaps.push(format!("kernel round-trip guard failed; mechanics pass fully reverted: {e}"));
+        gaps.push(format!(
+            "kernel round-trip guard failed; mechanics pass fully reverted: {e}"
+        ));
     }
     gaps
 }
@@ -206,7 +232,12 @@ fn build_mech_seed(kernel: &RuleKernel, ctx: &MechCompileCtx<'_>) -> String {
     let mut keys: Vec<String> = Vec::new();
     keys.extend(field_ids(schema.get("fields")));
     keys.extend(field_ids(schema.get("derived_values")));
-    keys.extend(ctx.skill_names.iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
+    keys.extend(
+        ctx.skill_names
+            .iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+    );
     let track_ids: Vec<String> = kernel
         .resource_tracks
         .iter()
@@ -223,7 +254,10 @@ fn build_mech_seed(kernel: &RuleKernel, ctx: &MechCompileCtx<'_>) -> String {
         .map(|t| {
             let id = t.get("id").and_then(Value::as_str).unwrap_or("?");
             let ths = t.get("thresholds").cloned().unwrap_or_else(|| json!([]));
-            format!("- {id} thresholds={}", serde_json::to_string(&ths).unwrap_or_default())
+            format!(
+                "- {id} thresholds={}",
+                serde_json::to_string(&ths).unwrap_or_default()
+            )
         })
         .collect();
 
@@ -231,7 +265,12 @@ fn build_mech_seed(kernel: &RuleKernel, ctx: &MechCompileCtx<'_>) -> String {
         .dice_core
         .get("success_bands")
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|b| b.get("id").and_then(Value::as_str)).map(str::to_string).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|b| b.get("id").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
         .unwrap_or_default();
 
     // A4 — sheet fields whose usage notes are missing/empty: the prompt's
@@ -244,7 +283,9 @@ fn build_mech_seed(kernel: &RuleKernel, ctx: &MechCompileCtx<'_>) -> String {
             a.iter()
                 .filter(|f| match f.get("notes") {
                     None => true,
-                    Some(v) => v.is_null() || v.as_str().map(|s| s.trim().is_empty()).unwrap_or(false),
+                    Some(v) => {
+                        v.is_null() || v.as_str().map(|s| s.trim().is_empty()).unwrap_or(false)
+                    }
                 })
                 .filter_map(|f| f.get("field_id").and_then(Value::as_str))
                 .map(str::to_string)
@@ -309,17 +350,32 @@ async fn run_mech_loop(
         json!({"role":"user","content":seed}),
     ];
     for _ in 0..(budget + 8) {
-        let resp = client.complete_with_tools(msgs.clone(), tool_schemas.to_vec()).await.ok()?;
-        let message = resp.pointer("/choices/0/message").cloned().unwrap_or_else(|| json!({}));
-        let tcs = message.get("tool_calls").and_then(Value::as_array).cloned().unwrap_or_default();
+        let resp = client
+            .complete_with_tools(msgs.clone(), tool_schemas.to_vec())
+            .await
+            .ok()?;
+        let message = resp
+            .pointer("/choices/0/message")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let tcs = message
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
         if tcs.is_empty() {
             msgs.push(message);
-            msgs.push(json!({"role":"user","content":"Use the tools, then call submit_mechanics."}));
+            msgs.push(
+                json!({"role":"user","content":"Use the tools, then call submit_mechanics."}),
+            );
             continue;
         }
         msgs.push(message);
         for tc in &tcs {
-            let name = tc.pointer("/function/name").and_then(Value::as_str).unwrap_or("");
+            let name = tc
+                .pointer("/function/name")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             let args: Value = tc
                 .pointer("/function/arguments")
                 .and_then(Value::as_str)
@@ -329,7 +385,12 @@ async fn run_mech_loop(
             if name == "submit_mechanics" {
                 match args.get("mechanics_catalog").and_then(Value::as_array) {
                     Some(arr) => {
-                        let opt = |k: &str| args.get(k).and_then(Value::as_array).cloned().unwrap_or_default();
+                        let opt = |k: &str| {
+                            args.get(k)
+                                .and_then(Value::as_array)
+                                .cloned()
+                                .unwrap_or_default()
+                        };
                         return Some(MechSubmission {
                             catalog: arr.clone(),
                             upgrades: MechUpgrades {
@@ -353,7 +414,13 @@ async fn run_mech_loop(
 }
 
 fn mech_dispatch(ctx: &MechCompileCtx<'_>, name: &str, args: &Value) -> String {
-    let cap = |s: String| if s.len() <= 3000 { s } else { s.chars().take(3000).collect() };
+    let cap = |s: String| {
+        if s.len() <= 3000 {
+            s
+        } else {
+            s.chars().take(3000).collect()
+        }
+    };
     match name {
         "get_toc" => tools::toc(ctx.units, 40),
         "search" => {

@@ -49,7 +49,11 @@ TOOLS: get_toc, search(keywords), read(pages), read_layout(pages) for tables. Th
 /// JSON OBJECT, fail-closed: every recipe is grounded + references only legal ids,
 /// or it is dropped; an empty extraction returns `{}`. The LLM loop is
 /// live-validated — only `finalize_starter_pack` is unit-tested.
-pub async fn compile_starter_pack(client: &dyn LlmClient, ctx: &OnboardingCtx<'_>, budget: usize) -> Value {
+pub async fn compile_starter_pack(
+    client: &dyn LlmClient,
+    ctx: &OnboardingCtx<'_>,
+    budget: usize,
+) -> Value {
     let toc = tools::toc(ctx.units, 40);
     let submit = tools::submit_tool(
         "submit_starter_pack",
@@ -67,14 +71,29 @@ pub async fn compile_starter_pack(client: &dyn LlmClient, ctx: &OnboardingCtx<'_
         "Role/class field: {:?}\nSkill fields (legal signature-skill refs): {:?}\nOption-catalog ids (legal required_option_refs): {:?}\n\nTOC (already fetched):\n{toc}\n\nRead this game's character-creation chapter and submit_starter_pack with 2-4 grounded archetypes + 1-3 quick-build shortcuts (pregens only if the book prints sample characters).",
         ctx.role_field, ctx.skill_fields, option_ids
     );
-    let raw = run_onboarding_loop(client, STARTER_SYS, &seed, &schemas, ctx, budget, "submit_starter_pack")
-        .await
-        .unwrap_or_else(|| json!({}));
+    let raw = run_onboarding_loop(
+        client,
+        STARTER_SYS,
+        &seed,
+        &schemas,
+        ctx,
+        budget,
+        "submit_starter_pack",
+    )
+    .await
+    .unwrap_or_else(|| json!({}));
     let pack = finalize_starter_pack(raw.clone(), ctx);
-    let n = |v: &Value, k: &str| v.get(k).and_then(Value::as_array).map(|a| a.len()).unwrap_or(0);
+    let n = |v: &Value, k: &str| {
+        v.get(k)
+            .and_then(Value::as_array)
+            .map(|a| a.len())
+            .unwrap_or(0)
+    };
     tracing::info!(
-        raw_archetypes = n(&raw, "archetypes"), raw_shortcuts = n(&raw, "creation_shortcuts"),
-        kept_archetypes = n(&pack, "archetypes"), kept_shortcuts = n(&pack, "creation_shortcuts"),
+        raw_archetypes = n(&raw, "archetypes"),
+        raw_shortcuts = n(&raw, "creation_shortcuts"),
+        kept_archetypes = n(&pack, "archetypes"),
+        kept_shortcuts = n(&pack, "creation_shortcuts"),
         "starter pack compiled"
     );
     pack
@@ -108,9 +127,19 @@ async fn run_onboarding_loop(
         json!({"role": "user", "content": seed}),
     ];
     for _ in 0..(budget + 8) {
-        let resp = client.complete_with_tools(msgs.clone(), tool_schemas.to_vec()).await.ok()?;
-        let message = resp.pointer("/choices/0/message").cloned().unwrap_or_else(|| json!({}));
-        let tcs = message.get("tool_calls").and_then(Value::as_array).cloned().unwrap_or_default();
+        let resp = client
+            .complete_with_tools(msgs.clone(), tool_schemas.to_vec())
+            .await
+            .ok()?;
+        let message = resp
+            .pointer("/choices/0/message")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let tcs = message
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
         if tcs.is_empty() {
             msgs.push(message);
             msgs.push(json!({"role": "user", "content": format!("Use the tools, then call {submit_name}.")}));
@@ -118,7 +147,10 @@ async fn run_onboarding_loop(
         }
         msgs.push(message);
         for tc in &tcs {
-            let name = tc.pointer("/function/name").and_then(Value::as_str).unwrap_or("");
+            let name = tc
+                .pointer("/function/name")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             let args: Value = tc
                 .pointer("/function/arguments")
                 .and_then(Value::as_str)
@@ -136,20 +168,36 @@ async fn run_onboarding_loop(
 }
 
 fn onboarding_dispatch(ctx: &OnboardingCtx<'_>, name: &str, args: &Value) -> String {
-    let cap = |s: String| if s.len() <= 3000 { s } else { s.chars().take(3000).collect() };
+    let cap = |s: String| {
+        if s.len() <= 3000 {
+            s
+        } else {
+            s.chars().take(3000).collect()
+        }
+    };
     match name {
         "get_toc" => tools::toc(ctx.units, 40),
         "search" => {
             let kws: Vec<String> = args
                 .get("keywords")
                 .and_then(Value::as_array)
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
             cap(tools::search(ctx.units, &kws, 8))
         }
-        "read" => cap(tools::read(ctx.units, args.get("pages").and_then(Value::as_str).unwrap_or(""))),
+        "read" => cap(tools::read(
+            ctx.units,
+            args.get("pages").and_then(Value::as_str).unwrap_or(""),
+        )),
         "read_layout" => match &ctx.sidecar_text {
-            Some(s) => cap(read_layout(s, args.get("pages").and_then(Value::as_str).unwrap_or(""))),
+            Some(s) => cap(read_layout(
+                s,
+                args.get("pages").and_then(Value::as_str).unwrap_or(""),
+            )),
             None => "[no layout view available — read() the page instead]".into(),
         },
         _ => format!("unknown tool {name}"),
@@ -284,9 +332,19 @@ mod tests {
     // just pins the context + empty-extraction contract so the module compiles.
     #[test]
     fn empty_records_yield_empty_pack() {
-        let ctx = OnboardingCtx { units: &[], sidecar_text: None, role_field: None, skill_fields: vec![], option_catalogs: serde_json::json!([]) };
+        let ctx = OnboardingCtx {
+            units: &[],
+            sidecar_text: None,
+            role_field: None,
+            skill_fields: vec![],
+            option_catalogs: serde_json::json!([]),
+        };
         let pack = finalize_starter_pack(serde_json::json!({}), &ctx);
-        assert_eq!(pack, serde_json::json!({}), "no archetypes/shortcuts -> empty pack, never fabricated");
+        assert_eq!(
+            pack,
+            serde_json::json!({}),
+            "no archetypes/shortcuts -> empty pack, never fabricated"
+        );
     }
 
     fn ctx_with(role: Option<&str>, skills: &[&str], catalogs: Value) -> OnboardingCtx<'static> {
@@ -303,7 +361,11 @@ mod tests {
     fn archetype_referencing_bogus_field_is_dropped() {
         // One archetype references a real skill ("library_use"); the other references
         // a non-existent field ("warp_drive") -> dropped. The good one survives.
-        let ctx = ctx_with(Some("occupation"), &["library_use", "spot_hidden"], json!([]));
+        let ctx = ctx_with(
+            Some("occupation"),
+            &["library_use", "spot_hidden"],
+            json!([]),
+        );
         let raw = json!({
             "archetypes": [
                 {"archetype_id": "scholar", "title": "Scholar", "summary": "reads things",
@@ -334,9 +396,17 @@ mod tests {
             ]
         });
         let pack = finalize_starter_pack(raw, &ctx);
-        assert_eq!(pack["archetypes"].as_array().unwrap().len(), 1, "ungrounded archetype dropped");
+        assert_eq!(
+            pack["archetypes"].as_array().unwrap().len(),
+            1,
+            "ungrounded archetype dropped"
+        );
         assert_eq!(pack["archetypes"][0]["archetype_id"], json!("fighter"));
-        assert_eq!(pack["creation_shortcuts"].as_array().unwrap().len(), 1, "ungrounded shortcut dropped");
+        assert_eq!(
+            pack["creation_shortcuts"].as_array().unwrap().len(),
+            1,
+            "ungrounded shortcut dropped"
+        );
         assert_eq!(pack["creation_shortcuts"][0]["shortcut_id"], json!("quick"));
     }
 
@@ -348,7 +418,11 @@ mod tests {
             "archetypes": [{"archetype_id": "x", "title": "X", "required_option_refs": ["class"]}],
             "creation_shortcuts": [{"shortcut_id": "y", "title": "Y", "mode": "guided", "description": "no page"}]
         });
-        assert_eq!(finalize_starter_pack(raw, &ctx), json!({}), "all dropped -> {{}}");
+        assert_eq!(
+            finalize_starter_pack(raw, &ctx),
+            json!({}),
+            "all dropped -> {{}}"
+        );
     }
 
     #[test]
@@ -369,6 +443,10 @@ mod tests {
             "creation_shortcuts": []
         });
         let pack = finalize_starter_pack(raw, &ctx);
-        assert_eq!(pack["archetypes"].as_array().unwrap().len(), 1, "catalog option id is legal");
+        assert_eq!(
+            pack["archetypes"].as_array().unwrap().len(),
+            1,
+            "catalog option id is legal"
+        );
     }
 }

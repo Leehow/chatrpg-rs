@@ -6,8 +6,8 @@ use sqlx::Row;
 use trpg_db::Db;
 use trpg_interaction::InteractionLifecycleKernel;
 use trpg_model::*;
-use trpg_time::WorldTimeService;
 use trpg_semantics::SemanticIntentService;
+use trpg_time::WorldTimeService;
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -40,15 +40,51 @@ pub struct ObjectTurnResult {
 }
 
 impl ObjectTurnResult {
-    pub fn handled() -> Self { Self { handled: true, ..Default::default() } }
-    pub fn not_handled() -> Self { Self::default() }
+    pub fn handled() -> Self {
+        Self {
+            handled: true,
+            ..Default::default()
+        }
+    }
+    pub fn not_handled() -> Self {
+        Self::default()
+    }
 }
 
 impl ObjectService {
-    pub fn new(db: Db) -> Self { Self { db } }
+    pub fn new(db: Db) -> Self {
+        Self { db }
+    }
+
+    /// Seed player-declared inventory from a freshly created character sheet.
+    ///
+    /// This only structures equipment the sheet already declares. It does not
+    /// invent weapon damage or rules stats; ammo tracking is allowed when the
+    /// sheet explicitly says a loaded magazine / round count exists.
+    pub async fn seed_actor_inventory_from_sheet(
+        &self,
+        session_id: &str,
+        ruleset_id: &str,
+        actor_id: &str,
+        sheet: &Value,
+        world_tick: i64,
+    ) -> Result<Vec<ObjectInstance>> {
+        let objects = inventory_weapon_instances_from_sheet(
+            session_id, ruleset_id, actor_id, sheet, world_tick,
+        );
+        for obj in &objects {
+            if let Some(def) = definition_for_source_backed_declared_weapon(ruleset_id, obj) {
+                self.upsert_definition(&def).await?;
+            }
+            self.upsert_instance(obj).await?;
+        }
+        Ok(objects)
+    }
 
     pub async fn handle_turn(&self, input: ObjectTurnInput<'_>) -> Result<ObjectTurnResult> {
-        if !object_kernel_enabled() { return Ok(ObjectTurnResult::not_handled()); }
+        if !object_kernel_enabled() {
+            return Ok(ObjectTurnResult::not_handled());
+        }
         let semantic = SemanticIntentService::from_env(self.db.clone()).classify_turn(SemanticIntentRequest {
             session_id: input.session_id.into(),
             turn_id: input.turn_id.into(),
@@ -62,22 +98,53 @@ impl ObjectService {
         }).await.ok();
         // ObjectService is only called when TurnOrchestrator has already chosen an object route.
         // Therefore this local deterministic resolver is a route invariant, not a global keyword-first router.
-        let kind = semantic.as_ref().and_then(kind_from_semantic_object_intent)
+        let kind = semantic
+            .as_ref()
+            .and_then(kind_from_semantic_object_intent)
             .or_else(|| classify_object_interaction(input.user_input));
-        let Some(kind) = kind else { return Ok(ObjectTurnResult::not_handled()); };
+        let Some(kind) = kind else {
+            return Ok(ObjectTurnResult::not_handled());
+        };
         let actor_id = input.actor_id.unwrap_or("pc.current");
-        let time = WorldTimeService::new(self.db.clone()).ensure_session_time(input.session_id, Some(input.session_id)).await?;
+        let time = WorldTimeService::new(self.db.clone())
+            .ensure_session_time(input.session_id, Some(input.session_id))
+            .await?;
         let target_actor_id = infer_target_actor(input.user_input);
-        let target_object = self.resolve_or_seed_target_object(input, kind, actor_id, target_actor_id.as_deref(), time.world_tick).await?;
-        let affordances = self.affordances_for_object(input.session_id, actor_id, &target_object, kind).await?;
-        let contract = self.build_contract(input, actor_id, target_actor_id, &target_object, kind, time.world_tick).await?;
+        let target_object = self
+            .resolve_or_seed_target_object(
+                input,
+                kind,
+                actor_id,
+                target_actor_id.as_deref(),
+                time.world_tick,
+            )
+            .await?;
+        let affordances = self
+            .affordances_for_object(input.session_id, actor_id, &target_object, kind)
+            .await?;
+        let contract = self
+            .build_contract(
+                input,
+                actor_id,
+                target_actor_id,
+                &target_object,
+                kind,
+                time.world_tick,
+            )
+            .await?;
         self.upsert_interaction_contract(&contract).await?;
         if let Some(check) = &contract.check_contract {
             self.db.insert_check_contract(check, "created").await.ok();
         }
         if let Some(frame_id) = input.frame_id {
             let kernel = InteractionLifecycleKernel::new(self.db.clone());
-            let _ = kernel.attach_object_interaction_to_active_frame(input.session_id, &contract.interaction_id, frame_id).await;
+            let _ = kernel
+                .attach_object_interaction_to_active_frame(
+                    input.session_id,
+                    &contract.interaction_id,
+                    frame_id,
+                )
+                .await;
         }
         let event = self.insert_object_event(ObjectEvent {
             object_event_id: format!("object_event_{}", Uuid::new_v4().simple()),
@@ -91,11 +158,18 @@ impl ObjectService {
             world_tick: time.world_tick,
             created_at: Utc::now(),
         }).await?;
-        let block = self.object_context_block(input.session_id, input.frame_id, actor_id, time.world_tick).await.ok();
+        let block = self
+            .object_context_block(input.session_id, input.frame_id, actor_id, time.world_tick)
+            .await
+            .ok();
         let mut result = ObjectTurnResult::handled();
         result.phases.push("object_kernel".into());
-        result.phases.push("object_interaction_contract_created".into());
-        if contract.check_contract.is_some() { result.phases.push("check_contract_created".into()); }
+        result
+            .phases
+            .push("object_interaction_contract_created".into());
+        if contract.check_contract.is_some() {
+            result.phases.push("check_contract_created".into());
+        }
         result.interaction = Some(contract.clone());
         result.check = contract.check_contract.clone();
         result.object_events.push(event);
@@ -105,11 +179,23 @@ impl ObjectService {
         Ok(result)
     }
 
-    pub async fn object_context_block(&self, session_id: &str, frame_id: Option<&str>, actor_id: &str, world_tick: i64) -> Result<ContextBlock> {
+    pub async fn object_context_block(
+        &self,
+        session_id: &str,
+        frame_id: Option<&str>,
+        actor_id: &str,
+        world_tick: i64,
+    ) -> Result<ContextBlock> {
         let objects = self.list_active_objects(session_id, 30).await?;
-        let affordances = self.affordances_for_visible_objects(session_id, actor_id, &objects).await?;
+        let affordances = self
+            .affordances_for_visible_objects(session_id, actor_id, &objects)
+            .await?;
         let mut block = ContextBlock::new(
-            format!("runtime.object_graph.{}.{}", session_id, frame_id.unwrap_or("session")),
+            format!(
+                "runtime.object_graph.{}.{}",
+                session_id,
+                frame_id.unwrap_or("session")
+            ),
             BlockKind::ObjectGraph,
             "Runtime Object / Possession Graph",
             BlockContent::Json(json!({
@@ -121,7 +207,10 @@ impl ObjectService {
             Visibility::GmOnly,
             Stability::TurnDynamic,
             CacheZone::DynamicTail,
-            Scope { scope_type: ScopeType::Session, scope_id: session_id.to_string() },
+            Scope {
+                scope_type: ScopeType::Session,
+                scope_id: session_id.to_string(),
+            },
             146,
         );
         block.tags = vec!["object_graph".into(), "possession".into(), "bp3".into()];
@@ -130,16 +219,37 @@ impl ObjectService {
         Ok(block)
     }
 
-    pub async fn apply_for_check_result(&self, result: &CheckResultRecord) -> Result<Option<ObjectInteractionResult>> {
-        let Some(mut contract) = self.find_interaction_by_check(&result.check_id).await? else { return Ok(None); };
-        let success = result.outcome.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
-        let patches = if success { contract.success_patches.clone() } else { contract.failure_patches.clone() };
+    pub async fn apply_for_check_result(
+        &self,
+        result: &CheckResultRecord,
+    ) -> Result<Option<ObjectInteractionResult>> {
+        let Some(mut contract) = self.find_interaction_by_check(&result.check_id).await? else {
+            return Ok(None);
+        };
+        let success = result
+            .outcome
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let patches = if success {
+            contract.success_patches.clone()
+        } else {
+            contract.failure_patches.clone()
+        };
         let mut applied = Vec::new();
         let mut events = Vec::new();
-        let time = WorldTimeService::new(self.db.clone()).ensure_session_time(&contract.session_id, Some(&contract.session_id)).await?;
+        let time = WorldTimeService::new(self.db.clone())
+            .ensure_session_time(&contract.session_id, Some(&contract.session_id))
+            .await?;
         for patch in patches {
             if self.validate_patch(&contract, &patch).await? {
-                self.apply_patch(&contract.session_id, &contract.interaction_id, &patch, time.world_tick).await?;
+                self.apply_patch(
+                    &contract.session_id,
+                    &contract.interaction_id,
+                    &patch,
+                    time.world_tick,
+                )
+                .await?;
                 let object_id = patch_object_id(&patch);
                 let event = self.insert_object_event(ObjectEvent {
                     object_event_id: format!("object_event_{}", Uuid::new_v4().simple()),
@@ -157,64 +267,190 @@ impl ObjectService {
                 applied.push(patch);
             }
         }
-        contract.status = if success { ObjectInteractionStatus::Applied } else { ObjectInteractionStatus::Failed };
+        contract.status = if success {
+            ObjectInteractionStatus::Applied
+        } else {
+            ObjectInteractionStatus::Failed
+        };
         self.upsert_interaction_contract(&contract).await?;
-        Ok(Some(ObjectInteractionResult { interaction_id: contract.interaction_id, check_id: Some(result.check_id.clone()), applied_patches: applied, object_events: events, status: contract.status }))
+        Ok(Some(ObjectInteractionResult {
+            interaction_id: contract.interaction_id,
+            check_id: Some(result.check_id.clone()),
+            applied_patches: applied,
+            object_events: events,
+            status: contract.status,
+        }))
     }
 
-    async fn resolve_or_seed_target_object(&self, input: ObjectTurnInput<'_>, kind: ObjectInteractionKind, _actor_id: &str, target_actor_id: Option<&str>, world_tick: i64) -> Result<ObjectInstance> {
-        if matches!(kind, ObjectInteractionKind::CutConnection | ObjectInteractionKind::TraceConnection | ObjectInteractionKind::Inspect | ObjectInteractionKind::Hack | ObjectInteractionKind::Break) && mentions_cable(input.user_input) {
-            return self.ensure_scene_cable(input.session_id, input.frame_id, world_tick).await;
+    async fn resolve_or_seed_target_object(
+        &self,
+        input: ObjectTurnInput<'_>,
+        kind: ObjectInteractionKind,
+        _actor_id: &str,
+        target_actor_id: Option<&str>,
+        world_tick: i64,
+    ) -> Result<ObjectInstance> {
+        if matches!(
+            kind,
+            ObjectInteractionKind::CutConnection
+                | ObjectInteractionKind::TraceConnection
+                | ObjectInteractionKind::Inspect
+                | ObjectInteractionKind::Hack
+                | ObjectInteractionKind::Break
+        ) && mentions_cable(input.user_input)
+        {
+            return self
+                .ensure_scene_cable(input.session_id, input.frame_id, world_tick)
+                .await;
         }
-        if matches!(kind, ObjectInteractionKind::Unlock | ObjectInteractionKind::Lock) {
-            return self.ensure_scene_lock(input.session_id, input.frame_id, world_tick).await;
+        if matches!(
+            kind,
+            ObjectInteractionKind::Unlock | ObjectInteractionKind::Lock
+        ) {
+            return self
+                .ensure_scene_lock(input.session_id, input.frame_id, world_tick)
+                .await;
         }
         if matches!(kind, ObjectInteractionKind::PickUp) {
-            return self.ensure_ground_weapon(input.session_id, input.frame_id, world_tick).await;
+            return self
+                .ensure_ground_weapon(input.session_id, input.frame_id, world_tick)
+                .await;
         }
-        if matches!(kind, ObjectInteractionKind::Equip | ObjectInteractionKind::Unequip) && mentions_armor(input.user_input) {
-            return self.ensure_actor_armor(input.session_id, _actor_id, world_tick).await;
+        if matches!(
+            kind,
+            ObjectInteractionKind::Equip | ObjectInteractionKind::Unequip
+        ) && mentions_armor(input.user_input)
+        {
+            return self
+                .ensure_actor_armor(input.session_id, _actor_id, world_tick)
+                .await;
         }
         // Self-directed interactions act on the ACTING actor's OWN object,
         // resolved by the noun the player typed (e.g. "用魔杖" -> the held wand),
         // NOT the opponent's hand. Only if nothing owned matches do we seed a
         // held weapon for the acting actor (never default to npc.opposition).
-        if matches!(kind, ObjectInteractionKind::Use | ObjectInteractionKind::Drop | ObjectInteractionKind::Reload | ObjectInteractionKind::Throw) {
-            if let Some(obj) = self.find_owned_object_by_reference(input.session_id, _actor_id, input.user_input).await? {
+        if matches!(
+            kind,
+            ObjectInteractionKind::Use
+                | ObjectInteractionKind::Drop
+                | ObjectInteractionKind::Reload
+                | ObjectInteractionKind::Throw
+        ) {
+            if let Some(obj) = self
+                .find_owned_object_by_reference(input.session_id, _actor_id, input.user_input)
+                .await?
+            {
                 return Ok(obj);
             }
-            return self.ensure_actor_weapon(input.session_id, input.ruleset_id, input.user_input, _actor_id, world_tick).await;
+            return self
+                .ensure_actor_weapon(
+                    input.session_id,
+                    input.ruleset_id,
+                    input.user_input,
+                    _actor_id,
+                    world_tick,
+                )
+                .await;
         }
         // Contested takings target the OPPONENT's held object.
-        if matches!(kind, ObjectInteractionKind::Disarm | ObjectInteractionKind::GrabHeldObject | ObjectInteractionKind::Steal | ObjectInteractionKind::Draw) {
-            return self.ensure_actor_weapon(input.session_id, input.ruleset_id, input.user_input, target_actor_id.unwrap_or("npc.opposition"), world_tick).await;
+        if matches!(
+            kind,
+            ObjectInteractionKind::Disarm
+                | ObjectInteractionKind::GrabHeldObject
+                | ObjectInteractionKind::Steal
+                | ObjectInteractionKind::Draw
+        ) {
+            return self
+                .ensure_actor_weapon(
+                    input.session_id,
+                    input.ruleset_id,
+                    input.user_input,
+                    target_actor_id.unwrap_or("npc.opposition"),
+                    world_tick,
+                )
+                .await;
         }
         // 搜身/搜尸: the searched body/container is the target. A stable per-actor
         // body container gives the contract a deterministic target_object_id; the
         // actual loot (the target's owned items) is enumerated in build_contract.
-        if matches!(kind, ObjectInteractionKind::Loot | ObjectInteractionKind::Search) {
+        if matches!(
+            kind,
+            ObjectInteractionKind::Loot | ObjectInteractionKind::Search
+        ) {
             let tgt = target_actor_id.unwrap_or("npc.opposition");
-            return self.ensure_actor_body(input.session_id, tgt, world_tick).await;
+            return self
+                .ensure_actor_body(input.session_id, tgt, world_tick)
+                .await;
         }
-        self.ensure_scene_object(input.session_id, input.frame_id, world_tick).await
+        self.ensure_scene_object(input.session_id, input.frame_id, world_tick)
+            .await
     }
 
-    async fn build_contract(&self, input: ObjectTurnInput<'_>, actor_id: &str, target_actor_id: Option<String>, object: &ObjectInstance, kind: ObjectInteractionKind, world_tick: i64) -> Result<ObjectInteractionContract> {
+    async fn build_contract(
+        &self,
+        input: ObjectTurnInput<'_>,
+        actor_id: &str,
+        target_actor_id: Option<String>,
+        object: &ObjectInstance,
+        kind: ObjectInteractionKind,
+        world_tick: i64,
+    ) -> Result<ObjectInteractionContract> {
         let requires_check = requires_check(kind);
         // Data-driven: read the parsed kernel's core die, success model, and
         // source refs instead of hardcoded per-ruleset dice + a provisional DV.
-        let kernel = self.db.load_rule_kernel(input.ruleset_id).await.ok().flatten();
-        let kernel_dice = kernel.as_ref().and_then(|k| k.dice_core.get("dice").and_then(|v| v.as_str()).map(|s| s.trim().to_string())).filter(|s| !s.is_empty());
-        let kernel_target = kernel.as_ref().and_then(|k| target_model_from_dice_core(&k.dice_core));
-        let kernel_refs = kernel.as_ref().map(|k| k.source_refs.clone()).unwrap_or_default();
-        let check = if requires_check { Some(make_object_check(input, actor_id, target_actor_id.as_deref(), object, kind, kernel_dice.as_deref(), kernel_target, kernel_refs, kernel.as_ref())) } else { None };
-        let mut success_patches = success_patches_for(actor_id, target_actor_id.as_deref(), object, kind);
+        let kernel = self
+            .db
+            .load_rule_kernel(input.ruleset_id)
+            .await
+            .ok()
+            .flatten();
+        let kernel_dice = kernel
+            .as_ref()
+            .and_then(|k| {
+                k.dice_core
+                    .get("dice")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim().to_string())
+            })
+            .filter(|s| !s.is_empty());
+        let kernel_target = kernel
+            .as_ref()
+            .and_then(|k| target_model_from_dice_core(&k.dice_core));
+        let kernel_refs = kernel
+            .as_ref()
+            .map(|k| k.source_refs.clone())
+            .unwrap_or_default();
+        let check = if requires_check {
+            Some(make_object_check(
+                input,
+                actor_id,
+                target_actor_id.as_deref(),
+                object,
+                kind,
+                kernel_dice.as_deref(),
+                kernel_target,
+                kernel_refs,
+                kernel.as_ref(),
+            ))
+        } else {
+            None
+        };
+        let mut success_patches =
+            success_patches_for(actor_id, target_actor_id.as_deref(), object, kind);
         // Source A loot (no-LLM): on a successful 搜身/search, transfer the
         // searched actor's OWN structured items (weapon+ammo, armor, ...) to the
         // looter. Source-backed (existing instances), object_id/ammo preserved.
-        if matches!(kind, ObjectInteractionKind::Loot | ObjectInteractionKind::Search) {
+        if matches!(
+            kind,
+            ObjectInteractionKind::Loot | ObjectInteractionKind::Search
+        ) {
             if let Some(tgt) = target_actor_id.as_deref() {
-                if let Ok(p) = self.loot_owned_patches(input.session_id, tgt, actor_id).await { success_patches.extend(p); }
+                if let Ok(p) = self
+                    .loot_owned_patches(input.session_id, tgt, actor_id)
+                    .await
+                {
+                    success_patches.extend(p);
+                }
             }
         }
         let failure_patches = failure_patches_for(object, kind);
@@ -237,7 +473,11 @@ impl ObjectService {
             source_refs: vec![],
             learned_packet_ids: vec![],
             advice_refs: vec!["object.possession.kernel.v1_6".into()],
-            status: if requires_check { ObjectInteractionStatus::AwaitingCheck } else { ObjectInteractionStatus::Created },
+            status: if requires_check {
+                ObjectInteractionStatus::AwaitingCheck
+            } else {
+                ObjectInteractionStatus::Created
+            },
             created_at_tick: world_tick,
         })
     }
@@ -248,19 +488,31 @@ impl ObjectService {
     /// mechanical_profile). None => no source def; caller falls back. Prefers the
     /// most specific (longest-name) match. This is how item params come from the
     /// SOURCE instead of a hardcoded engine table.
-    pub async fn find_materialized_object_def(&self, ruleset_id: &str, name_query: &str) -> Result<Option<(String, String, serde_json::Value)>> {
-        let row = sqlx::query(r#"
+    pub async fn find_materialized_object_def(
+        &self,
+        ruleset_id: &str,
+        name_query: &str,
+    ) -> Result<Option<(String, String, serde_json::Value)>> {
+        let row = sqlx::query(
+            r#"
             select object_def_id, name, mechanical_profile from object_definitions
             where ruleset_id = $1
               and jsonb_array_length(coalesce(source_refs::jsonb, '[]'::jsonb)) > 0
               and length(name) > 0 and position(lower(name) in lower($2)) > 0
             order by length(name) desc limit 1
-        "#).bind(ruleset_id).bind(name_query).fetch_optional(&self.db.pool).await?;
-        Ok(row.map(|r| (
-            r.get::<String, _>("object_def_id"),
-            r.get::<String, _>("name"),
-            r.get::<serde_json::Value, _>("mechanical_profile"),
-        )))
+        "#,
+        )
+        .bind(ruleset_id)
+        .bind(name_query)
+        .fetch_optional(&self.db.pool)
+        .await?;
+        Ok(row.map(|r| {
+            (
+                r.get::<String, _>("object_def_id"),
+                r.get::<String, _>("name"),
+                r.get::<serde_json::Value, _>("mechanical_profile"),
+            )
+        }))
     }
 
     async fn upsert_definition(&self, def: &ObjectDefinition) -> Result<()> {
@@ -314,7 +566,10 @@ impl ObjectService {
         Ok(())
     }
 
-    async fn upsert_interaction_contract(&self, contract: &ObjectInteractionContract) -> Result<()> {
+    async fn upsert_interaction_contract(
+        &self,
+        contract: &ObjectInteractionContract,
+    ) -> Result<()> {
         sqlx::query(r#"
             insert into object_interaction_contracts
               (id, interaction_id, session_id, turn_id, frame_id, interaction_context_id, actor_id, target_actor_id, target_object_id, interaction_kind, contract_json, status, world_tick)
@@ -360,58 +615,113 @@ impl ObjectService {
         Ok(event)
     }
 
-    async fn list_active_objects(&self, session_id: &str, limit: i64) -> Result<Vec<ObjectInstance>> {
+    async fn list_active_objects(
+        &self,
+        session_id: &str,
+        limit: i64,
+    ) -> Result<Vec<ObjectInstance>> {
         let rows = sqlx::query(r#"
             select object_id, object_def_id, session_id, scope_type, scope_id, display_name, object_kind, location_json, visibility_state, mechanical_state, quantity, durability_json, tags, active, created_at_tick, updated_at_tick
             from object_instances where session_id = $1 and active = true order by updated_at desc limit $2
         "#).bind(session_id).bind(limit).fetch_all(&self.db.pool).await?;
-        Ok(rows.into_iter().filter_map(|r| row_to_object(r).ok()).collect())
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| row_to_object(r).ok())
+            .collect())
     }
 
-    async fn find_interaction_by_check(&self, check_id: &str) -> Result<Option<ObjectInteractionContract>> {
+    async fn find_interaction_by_check(
+        &self,
+        check_id: &str,
+    ) -> Result<Option<ObjectInteractionContract>> {
         let row = sqlx::query("select contract_json from object_interaction_contracts where contract_json #>> '{check_contract,check_id}' = $1 and status in ('created','awaiting_check') order by created_at desc limit 1")
             .bind(check_id).fetch_optional(&self.db.pool).await?;
-        Ok(row.and_then(|r| serde_json::from_value::<ObjectInteractionContract>(r.get("contract_json")).ok()))
+        Ok(row.and_then(|r| {
+            serde_json::from_value::<ObjectInteractionContract>(r.get("contract_json")).ok()
+        }))
     }
 
-    async fn validate_patch(&self, contract: &ObjectInteractionContract, patch: &ObjectPatch) -> Result<bool> {
+    async fn validate_patch(
+        &self,
+        contract: &ObjectInteractionContract,
+        patch: &ObjectPatch,
+    ) -> Result<bool> {
         let ok = match patch {
-            ObjectPatch::TransferObject { object_id, .. } | ObjectPatch::SetObjectLocation { object_id, .. } | ObjectPatch::SetObjectVisibility { object_id, .. } | ObjectPatch::ModifyQuantity { object_id, .. } | ObjectPatch::DamageObject { object_id, .. } | ObjectPatch::DestroyObject { object_id, .. } | ObjectPatch::SetMechanicalState { object_id, .. } | ObjectPatch::TransformObject { object_id, .. } => {
-                if contract.target_object_id.as_deref().map(|id| id == object_id).unwrap_or(false) {
+            ObjectPatch::TransferObject { object_id, .. }
+            | ObjectPatch::SetObjectLocation { object_id, .. }
+            | ObjectPatch::SetObjectVisibility { object_id, .. }
+            | ObjectPatch::ModifyQuantity { object_id, .. }
+            | ObjectPatch::DamageObject { object_id, .. }
+            | ObjectPatch::DestroyObject { object_id, .. }
+            | ObjectPatch::SetMechanicalState { object_id, .. }
+            | ObjectPatch::TransformObject { object_id, .. } => {
+                if contract
+                    .target_object_id
+                    .as_deref()
+                    .map(|id| id == object_id)
+                    .unwrap_or(false)
+                {
                     true
-                } else if matches!(patch, ObjectPatch::TransferObject { .. } | ObjectPatch::SetObjectVisibility { .. }) {
+                } else if matches!(
+                    patch,
+                    ObjectPatch::TransferObject { .. } | ObjectPatch::SetObjectVisibility { .. }
+                ) {
                     // Loot allowance: a reveal/transfer of an object PROVABLY owned
                     // by the searched target actor is admitted even though it is
                     // not the contract's target_object_id (the body). Strictly
                     // gated on ownership-by-target_actor_id — never a blanket allow.
                     match contract.target_actor_id.as_deref() {
-                        Some(owner) => self.object_owned_by(&contract.session_id, object_id, owner).await?,
+                        Some(owner) => {
+                            self.object_owned_by(&contract.session_id, object_id, owner)
+                                .await?
+                        }
                         None => false,
                     }
                 } else {
                     false
                 }
             }
-            ObjectPatch::CreateObjectInstance { .. } | ObjectPatch::AddObjectEdge { .. } | ObjectPatch::RemoveObjectEdge { .. } => true,
+            ObjectPatch::CreateObjectInstance { .. }
+            | ObjectPatch::AddObjectEdge { .. }
+            | ObjectPatch::RemoveObjectEdge { .. } => true,
         };
         Ok(ok)
     }
 
-    async fn apply_patch(&self, session_id: &str, interaction_id: &str, patch: &ObjectPatch, world_tick: i64) -> Result<()> {
+    async fn apply_patch(
+        &self,
+        session_id: &str,
+        interaction_id: &str,
+        patch: &ObjectPatch,
+        world_tick: i64,
+    ) -> Result<()> {
         match patch {
-            ObjectPatch::TransferObject { object_id, to, .. } | ObjectPatch::SetObjectLocation { object_id, location: to, .. } => {
+            ObjectPatch::TransferObject { object_id, to, .. }
+            | ObjectPatch::SetObjectLocation {
+                object_id,
+                location: to,
+                ..
+            } => {
                 sqlx::query("update object_instances set location_json = $2, updated_at_tick = $3, updated_at = now() where session_id = $1 and object_id = $4")
                     .bind(session_id).bind(serde_json::to_value(to)?).bind(world_tick).bind(object_id).execute(&self.db.pool).await?;
             }
-            ObjectPatch::SetObjectVisibility { object_id, visibility_state, .. } => {
+            ObjectPatch::SetObjectVisibility {
+                object_id,
+                visibility_state,
+                ..
+            } => {
                 sqlx::query("update object_instances set visibility_state = $2, updated_at_tick = $3, updated_at = now() where session_id = $1 and object_id = $4")
                     .bind(session_id).bind(serde_json::to_value(visibility_state)?).bind(world_tick).bind(object_id).execute(&self.db.pool).await?;
             }
-            ObjectPatch::ModifyQuantity { object_id, delta, .. } => {
+            ObjectPatch::ModifyQuantity {
+                object_id, delta, ..
+            } => {
                 sqlx::query("update object_instances set quantity = coalesce(quantity,0) + $2, updated_at_tick = $3, updated_at = now() where session_id = $1 and object_id = $4")
                     .bind(session_id).bind(delta).bind(world_tick).bind(object_id).execute(&self.db.pool).await?;
             }
-            ObjectPatch::DamageObject { object_id, amount, .. } => {
+            ObjectPatch::DamageObject {
+                object_id, amount, ..
+            } => {
                 sqlx::query("update object_instances set durability_json = coalesce(durability_json,'{}'::jsonb) || jsonb_build_object('last_damage', $2::int, 'damaged_at_tick', $3::bigint), updated_at_tick = $3, updated_at = now() where session_id = $1 and object_id = $4")
                     .bind(session_id).bind(amount).bind(world_tick).bind(object_id).execute(&self.db.pool).await?;
             }
@@ -419,11 +729,33 @@ impl ObjectService {
                 sqlx::query("update object_instances set active = false, location_json = jsonb_build_object('kind','destroyed'), updated_at_tick = $3, updated_at = now() where session_id = $1 and object_id = $2")
                     .bind(session_id).bind(object_id).bind(world_tick).execute(&self.db.pool).await?;
             }
-            ObjectPatch::CreateObjectInstance { object, .. } => { self.upsert_instance(object).await?; }
-            ObjectPatch::AddObjectEdge { edge, .. } => { self.upsert_edge(edge).await?; }
-            ObjectPatch::RemoveObjectEdge { edge_id, .. } => { sqlx::query("update object_edges set valid_until_tick = $2 where edge_id = $1").bind(edge_id).bind(world_tick).execute(&self.db.pool).await?; }
-            ObjectPatch::SetMechanicalState { object_id, patch_json, .. } => { sqlx::query("update object_instances set mechanical_state = coalesce(mechanical_state,'{}'::jsonb) || $2, updated_at_tick=$3, updated_at=now() where session_id=$1 and object_id=$4").bind(session_id).bind(patch_json).bind(world_tick).bind(object_id).execute(&self.db.pool).await?; }
-            ObjectPatch::TransformObject { object_id, new_kind, new_name, set_mechanical_state, .. } => {
+            ObjectPatch::CreateObjectInstance { object, .. } => {
+                self.upsert_instance(object).await?;
+            }
+            ObjectPatch::AddObjectEdge { edge, .. } => {
+                self.upsert_edge(edge).await?;
+            }
+            ObjectPatch::RemoveObjectEdge { edge_id, .. } => {
+                sqlx::query("update object_edges set valid_until_tick = $2 where edge_id = $1")
+                    .bind(edge_id)
+                    .bind(world_tick)
+                    .execute(&self.db.pool)
+                    .await?;
+            }
+            ObjectPatch::SetMechanicalState {
+                object_id,
+                patch_json,
+                ..
+            } => {
+                sqlx::query("update object_instances set mechanical_state = coalesce(mechanical_state,'{}'::jsonb) || $2, updated_at_tick=$3, updated_at=now() where session_id=$1 and object_id=$4").bind(session_id).bind(patch_json).bind(world_tick).bind(object_id).execute(&self.db.pool).await?;
+            }
+            ObjectPatch::TransformObject {
+                object_id,
+                new_kind,
+                new_name,
+                set_mechanical_state,
+                ..
+            } => {
                 if let Some(k) = new_kind {
                     sqlx::query("update object_instances set object_kind=$2, updated_at_tick=$3, updated_at=now() where session_id=$1 and object_id=$4").bind(session_id).bind(k.as_str()).bind(world_tick).bind(object_id).execute(&self.db.pool).await?;
                 }
@@ -452,30 +784,61 @@ impl ObjectService {
         Ok(())
     }
 
-    async fn ensure_actor_weapon(&self, session_id: &str, ruleset_id: &str, user_input: &str, actor_id: &str, world_tick: i64) -> Result<ObjectInstance> {
-        if let Some(obj) = self.find_object_by_tag(session_id, &format!("held_by:{}", actor_id)).await? { return Ok(obj); }
+    async fn ensure_actor_weapon(
+        &self,
+        session_id: &str,
+        ruleset_id: &str,
+        user_input: &str,
+        actor_id: &str,
+        world_tick: i64,
+    ) -> Result<ObjectInstance> {
+        if let Some(obj) = self
+            .find_object_by_tag(session_id, &format!("held_by:{}", actor_id))
+            .await?
+        {
+            return Ok(obj);
+        }
         // Source-backed FIRST: if the rules/module already materialized a matching
         // item definition (params verified against the SOURCE), seed from ITS
         // mechanical_profile. If NOT found, FAIL CLOSED — a provisional, unresolved
         // object with NO fabricated stats (clarification_needed) so the smart GM
         // asks the player + verifies against the rules. Never invent params, and
         // never a hardcoded per-ruleset table.
-        let (def_id, def_name, def_profile) = match self.find_materialized_object_def(ruleset_id, user_input).await? {
+        let (def_id, def_name, def_profile) = match self
+            .find_materialized_object_def(ruleset_id, user_input)
+            .await?
+        {
             Some(t) => t,
             None => provisional_item_seed(ruleset_id, user_input),
         };
-        let object_id = format!("obj.{}.{}.{}", safe_id(session_id), safe_id(actor_id), safe_id(&def_id));
+        let object_id = format!(
+            "obj.{}.{}.{}",
+            safe_id(session_id),
+            safe_id(actor_id),
+            safe_id(&def_id)
+        );
         let obj = ObjectInstance {
             object_id,
             object_def_id: Some(def_id.clone()),
             session_id: session_id.into(),
-            scope: Scope { scope_type: ScopeType::Character, scope_id: actor_id.into() },
+            scope: Scope {
+                scope_type: ScopeType::Character,
+                scope_id: actor_id.into(),
+            },
             display_name: def_name.clone(),
             object_kind: ObjectKind::Weapon,
-            location: ObjectLocation::Held { actor_id: actor_id.into(), hand: Some(HandSlot::Right) },
+            location: ObjectLocation::Held {
+                actor_id: actor_id.into(),
+                hand: Some(HandSlot::Right),
+            },
             visibility_state: visible_state(&def_name, true),
             mechanical_state: def_profile.clone(),
-            tags: vec!["weapon".into(), "held".into(), format!("held_by:{}", actor_id), format!("def:{}", def_id)],
+            tags: vec![
+                "weapon".into(),
+                "held".into(),
+                format!("held_by:{}", actor_id),
+                format!("def:{}", def_id),
+            ],
             created_at_tick: world_tick,
             updated_at_tick: world_tick,
             active: true,
@@ -485,51 +848,225 @@ impl ObjectService {
         Ok(obj)
     }
 
-    async fn ensure_ground_weapon(&self, session_id: &str, frame_id: Option<&str>, world_tick: i64) -> Result<ObjectInstance> {
+    async fn ensure_ground_weapon(
+        &self,
+        session_id: &str,
+        frame_id: Option<&str>,
+        world_tick: i64,
+    ) -> Result<ObjectInstance> {
         let scene = frame_id.unwrap_or("scene.current");
-        let object_id = format!("obj.{}.{}.ground_weapon", safe_id(session_id), scene.replace('.', "_"));
-        if let Some(obj) = self.find_object(session_id, &object_id).await? { return Ok(obj); }
-        let obj = ObjectInstance { object_id, object_def_id: Some("generic.weapon.dropped".into()), session_id: session_id.into(), scope: Scope { scope_type: ScopeType::Scene, scope_id: scene.into() }, display_name: "dropped weapon".into(), object_kind: ObjectKind::Weapon, location: ObjectLocation::OnGround { scene_id: scene.into(), zone_id: None }, visibility_state: visible_state("dropped weapon", true), mechanical_state: json!({}), tags: vec!["weapon".into(), "ground".into()], created_at_tick: world_tick, updated_at_tick: world_tick, active: true, ..Default::default() };
-        self.upsert_instance(&obj).await?; Ok(obj)
+        let object_id = format!(
+            "obj.{}.{}.ground_weapon",
+            safe_id(session_id),
+            scene.replace('.', "_")
+        );
+        if let Some(obj) = self.find_object(session_id, &object_id).await? {
+            return Ok(obj);
+        }
+        let obj = ObjectInstance {
+            object_id,
+            object_def_id: Some("generic.weapon.dropped".into()),
+            session_id: session_id.into(),
+            scope: Scope {
+                scope_type: ScopeType::Scene,
+                scope_id: scene.into(),
+            },
+            display_name: "dropped weapon".into(),
+            object_kind: ObjectKind::Weapon,
+            location: ObjectLocation::OnGround {
+                scene_id: scene.into(),
+                zone_id: None,
+            },
+            visibility_state: visible_state("dropped weapon", true),
+            mechanical_state: json!({}),
+            tags: vec!["weapon".into(), "ground".into()],
+            created_at_tick: world_tick,
+            updated_at_tick: world_tick,
+            active: true,
+            ..Default::default()
+        };
+        self.upsert_instance(&obj).await?;
+        Ok(obj)
     }
 
-    async fn ensure_actor_armor(&self, session_id: &str, actor_id: &str, world_tick: i64) -> Result<ObjectInstance> {
-        let object_id = format!("obj.{}.{}.armor", safe_id(session_id), actor_id.replace('.', "_"));
-        if let Some(obj) = self.find_object(session_id, &object_id).await? { return Ok(obj); }
-        let obj = ObjectInstance { object_id, object_def_id: Some("generic.armor.body".into()), session_id: session_id.into(), scope: Scope { scope_type: ScopeType::Character, scope_id: actor_id.into() }, display_name: "body armor".into(), object_kind: ObjectKind::Armor, location: ObjectLocation::Carried { actor_id: actor_id.into(), container_id: None }, visibility_state: visible_state("body armor", true), mechanical_state: json!({"load_policy":"exact_rule_on_first_use"}), tags: vec!["armor".into(), format!("carried_by:{}", actor_id)], created_at_tick: world_tick, updated_at_tick: world_tick, active: true, ..Default::default() };
-        self.upsert_instance(&obj).await?; Ok(obj)
+    async fn ensure_actor_armor(
+        &self,
+        session_id: &str,
+        actor_id: &str,
+        world_tick: i64,
+    ) -> Result<ObjectInstance> {
+        let object_id = format!(
+            "obj.{}.{}.armor",
+            safe_id(session_id),
+            actor_id.replace('.', "_")
+        );
+        if let Some(obj) = self.find_object(session_id, &object_id).await? {
+            return Ok(obj);
+        }
+        let obj = ObjectInstance {
+            object_id,
+            object_def_id: Some("generic.armor.body".into()),
+            session_id: session_id.into(),
+            scope: Scope {
+                scope_type: ScopeType::Character,
+                scope_id: actor_id.into(),
+            },
+            display_name: "body armor".into(),
+            object_kind: ObjectKind::Armor,
+            location: ObjectLocation::Carried {
+                actor_id: actor_id.into(),
+                container_id: None,
+            },
+            visibility_state: visible_state("body armor", true),
+            mechanical_state: json!({"load_policy":"exact_rule_on_first_use"}),
+            tags: vec!["armor".into(), format!("carried_by:{}", actor_id)],
+            created_at_tick: world_tick,
+            updated_at_tick: world_tick,
+            active: true,
+            ..Default::default()
+        };
+        self.upsert_instance(&obj).await?;
+        Ok(obj)
     }
 
-    async fn ensure_scene_cable(&self, session_id: &str, frame_id: Option<&str>, world_tick: i64) -> Result<ObjectInstance> {
+    async fn ensure_scene_cable(
+        &self,
+        session_id: &str,
+        frame_id: Option<&str>,
+        world_tick: i64,
+    ) -> Result<ObjectInstance> {
         let scope = frame_id.unwrap_or("scene.current");
-        let object_id = format!("obj.{}.{}.drone_cable", safe_id(session_id), scope.replace('.', "_"));
-        if let Some(obj) = self.find_object(session_id, &object_id).await? { return Ok(obj); }
-        let obj = ObjectInstance { object_id, object_def_id: Some("scene.object.exposed_cable".into()), session_id: session_id.into(), scope: Scope { scope_type: ScopeType::Scene, scope_id: scope.into() }, display_name: "exposed drone cable".into(), object_kind: ObjectKind::EnvironmentalFeature, location: ObjectLocation::Connected { endpoint_a: "object.drone".into(), endpoint_b: "object.server_or_power_source".into(), connection_kind: "power_and_data".into() }, visibility_state: visible_state("exposed cable", true), mechanical_state: json!({"affordances":["inspect","trace_connection","cut_connection","hack"],"risk":"close approach may expose actor to fire"}), tags: vec!["cable".into(), "connected".into()], created_at_tick: world_tick, updated_at_tick: world_tick, active: true, ..Default::default() };
-        self.upsert_instance(&obj).await?; Ok(obj)
+        let object_id = format!(
+            "obj.{}.{}.drone_cable",
+            safe_id(session_id),
+            scope.replace('.', "_")
+        );
+        if let Some(obj) = self.find_object(session_id, &object_id).await? {
+            return Ok(obj);
+        }
+        let obj = ObjectInstance {
+            object_id,
+            object_def_id: Some("scene.object.exposed_cable".into()),
+            session_id: session_id.into(),
+            scope: Scope {
+                scope_type: ScopeType::Scene,
+                scope_id: scope.into(),
+            },
+            display_name: "exposed drone cable".into(),
+            object_kind: ObjectKind::EnvironmentalFeature,
+            location: ObjectLocation::Connected {
+                endpoint_a: "object.drone".into(),
+                endpoint_b: "object.server_or_power_source".into(),
+                connection_kind: "power_and_data".into(),
+            },
+            visibility_state: visible_state("exposed cable", true),
+            mechanical_state: json!({"affordances":["inspect","trace_connection","cut_connection","hack"],"risk":"close approach may expose actor to fire"}),
+            tags: vec!["cable".into(), "connected".into()],
+            created_at_tick: world_tick,
+            updated_at_tick: world_tick,
+            active: true,
+            ..Default::default()
+        };
+        self.upsert_instance(&obj).await?;
+        Ok(obj)
     }
 
-    async fn ensure_scene_lock(&self, session_id: &str, frame_id: Option<&str>, world_tick: i64) -> Result<ObjectInstance> {
+    async fn ensure_scene_lock(
+        &self,
+        session_id: &str,
+        frame_id: Option<&str>,
+        world_tick: i64,
+    ) -> Result<ObjectInstance> {
         let scope = frame_id.unwrap_or("scene.current");
-        let object_id = format!("obj.{}.{}.lock", safe_id(session_id), scope.replace('.', "_"));
-        if let Some(obj) = self.find_object(session_id, &object_id).await? { return Ok(obj); }
-        let obj = ObjectInstance { object_id, object_def_id: Some("generic.object.lock".into()), session_id: session_id.into(), scope: Scope { scope_type: ScopeType::Scene, scope_id: scope.into() }, display_name: "lock".into(), object_kind: ObjectKind::Lock, location: ObjectLocation::Installed { parent_object_id: "object.door".into(), port_or_mount: "lock".into() }, visibility_state: visible_state("lock", true), mechanical_state: json!({"locked":true}), tags: vec!["lock".into(), "door".into()], created_at_tick: world_tick, updated_at_tick: world_tick, active: true, ..Default::default() };
-        self.upsert_instance(&obj).await?; Ok(obj)
+        let object_id = format!(
+            "obj.{}.{}.lock",
+            safe_id(session_id),
+            scope.replace('.', "_")
+        );
+        if let Some(obj) = self.find_object(session_id, &object_id).await? {
+            return Ok(obj);
+        }
+        let obj = ObjectInstance {
+            object_id,
+            object_def_id: Some("generic.object.lock".into()),
+            session_id: session_id.into(),
+            scope: Scope {
+                scope_type: ScopeType::Scene,
+                scope_id: scope.into(),
+            },
+            display_name: "lock".into(),
+            object_kind: ObjectKind::Lock,
+            location: ObjectLocation::Installed {
+                parent_object_id: "object.door".into(),
+                port_or_mount: "lock".into(),
+            },
+            visibility_state: visible_state("lock", true),
+            mechanical_state: json!({"locked":true}),
+            tags: vec!["lock".into(), "door".into()],
+            created_at_tick: world_tick,
+            updated_at_tick: world_tick,
+            active: true,
+            ..Default::default()
+        };
+        self.upsert_instance(&obj).await?;
+        Ok(obj)
     }
 
-    async fn ensure_scene_object(&self, session_id: &str, frame_id: Option<&str>, world_tick: i64) -> Result<ObjectInstance> {
+    async fn ensure_scene_object(
+        &self,
+        session_id: &str,
+        frame_id: Option<&str>,
+        world_tick: i64,
+    ) -> Result<ObjectInstance> {
         let scope = frame_id.unwrap_or("scene.current");
-        let object_id = format!("obj.{}.{}.interactive_object", safe_id(session_id), scope.replace('.', "_"));
-        if let Some(obj) = self.find_object(session_id, &object_id).await? { return Ok(obj); }
-        let obj = ObjectInstance { object_id, object_def_id: None, session_id: session_id.into(), scope: Scope { scope_type: ScopeType::Scene, scope_id: scope.into() }, display_name: "interactive object".into(), object_kind: ObjectKind::Unknown, location: ObjectLocation::OnGround { scene_id: scope.into(), zone_id: None }, visibility_state: visible_state("interactive object", true), mechanical_state: json!({}), tags: vec!["object".into()], created_at_tick: world_tick, updated_at_tick: world_tick, active: true, ..Default::default() };
-        self.upsert_instance(&obj).await?; Ok(obj)
+        let object_id = format!(
+            "obj.{}.{}.interactive_object",
+            safe_id(session_id),
+            scope.replace('.', "_")
+        );
+        if let Some(obj) = self.find_object(session_id, &object_id).await? {
+            return Ok(obj);
+        }
+        let obj = ObjectInstance {
+            object_id,
+            object_def_id: None,
+            session_id: session_id.into(),
+            scope: Scope {
+                scope_type: ScopeType::Scene,
+                scope_id: scope.into(),
+            },
+            display_name: "interactive object".into(),
+            object_kind: ObjectKind::Unknown,
+            location: ObjectLocation::OnGround {
+                scene_id: scope.into(),
+                zone_id: None,
+            },
+            visibility_state: visible_state("interactive object", true),
+            mechanical_state: json!({}),
+            tags: vec!["object".into()],
+            created_at_tick: world_tick,
+            updated_at_tick: world_tick,
+            active: true,
+            ..Default::default()
+        };
+        self.upsert_instance(&obj).await?;
+        Ok(obj)
     }
 
-    async fn find_object(&self, session_id: &str, object_id: &str) -> Result<Option<ObjectInstance>> {
+    async fn find_object(
+        &self,
+        session_id: &str,
+        object_id: &str,
+    ) -> Result<Option<ObjectInstance>> {
         let row = sqlx::query(r#"select object_id, object_def_id, session_id, scope_type, scope_id, display_name, object_kind, location_json, visibility_state, mechanical_state, quantity, durability_json, tags, active, created_at_tick, updated_at_tick from object_instances where session_id=$1 and object_id=$2"#).bind(session_id).bind(object_id).fetch_optional(&self.db.pool).await?;
         Ok(row.and_then(|r| row_to_object(r).ok()))
     }
 
-    async fn find_object_by_tag(&self, session_id: &str, tag: &str) -> Result<Option<ObjectInstance>> {
+    async fn find_object_by_tag(
+        &self,
+        session_id: &str,
+        tag: &str,
+    ) -> Result<Option<ObjectInstance>> {
         let row = sqlx::query(r#"select object_id, object_def_id, session_id, scope_type, scope_id, display_name, object_kind, location_json, visibility_state, mechanical_state, quantity, durability_json, tags, active, created_at_tick, updated_at_tick from object_instances where session_id=$1 and $2 = any(tags) and active=true order by updated_at desc limit 1"#).bind(session_id).bind(tag).fetch_optional(&self.db.pool).await?;
         Ok(row.and_then(|r| row_to_object(r).ok()))
     }
@@ -539,7 +1076,12 @@ impl ObjectService {
     /// objects and scores each by token overlap of the input against the
     /// object's display_name + tags (DATA on the instance, not a keyword table).
     /// Returns the best scorer, or None to let the caller seed/fall back.
-    pub async fn find_owned_object_by_reference(&self, session_id: &str, actor_id: &str, user_input: &str) -> Result<Option<ObjectInstance>> {
+    pub async fn find_owned_object_by_reference(
+        &self,
+        session_id: &str,
+        actor_id: &str,
+        user_input: &str,
+    ) -> Result<Option<ObjectInstance>> {
         let rows = sqlx::query(r#"select object_id, object_def_id, session_id, scope_type, scope_id, display_name, object_kind, location_json, visibility_state, mechanical_state, quantity, durability_json, tags, active, created_at_tick, updated_at_tick from object_instances where session_id=$1 and active=true and (scope_id=$2 or $3 = any(tags) or $4 = any(tags))"#)
             .bind(session_id).bind(actor_id)
             .bind(format!("held_by:{}", actor_id)).bind(format!("carried_by:{}", actor_id))
@@ -547,7 +1089,10 @@ impl ObjectService {
         let input = user_input.to_lowercase();
         let mut best: Option<(i32, ObjectInstance)> = None;
         for r in rows {
-            let obj = match row_to_object(r) { Ok(o) => o, Err(_) => continue };
+            let obj = match row_to_object(r) {
+                Ok(o) => o,
+                Err(_) => continue,
+            };
             let score = reference_score(&input, &obj);
             if score > 0 && best.as_ref().map(|(s, _)| score > *s).unwrap_or(true) {
                 best = Some((score, obj));
@@ -559,18 +1104,41 @@ impl ObjectService {
     /// Stable per-actor "body" container used as the loot target's object id.
     /// Generic, empty, keyed only by the passed actor id (no NPC/item content):
     /// the actual loot is the actor's own owned items (enumerated separately).
-    async fn ensure_actor_body(&self, session_id: &str, target_actor_id: &str, world_tick: i64) -> Result<ObjectInstance> {
-        let object_id = format!("obj.{}.{}.body", safe_id(session_id), safe_id(target_actor_id));
-        if let Some(obj) = self.find_object(session_id, &object_id).await? { return Ok(obj); }
+    async fn ensure_actor_body(
+        &self,
+        session_id: &str,
+        target_actor_id: &str,
+        world_tick: i64,
+    ) -> Result<ObjectInstance> {
+        let object_id = format!(
+            "obj.{}.{}.body",
+            safe_id(session_id),
+            safe_id(target_actor_id)
+        );
+        if let Some(obj) = self.find_object(session_id, &object_id).await? {
+            return Ok(obj);
+        }
         let obj = ObjectInstance {
-            object_id, object_def_id: None, session_id: session_id.into(),
-            scope: Scope { scope_type: ScopeType::Scene, scope_id: "scene.current".into() },
-            display_name: "searchable body / container".into(), object_kind: ObjectKind::Container,
-            location: ObjectLocation::OnGround { scene_id: "scene.current".into(), zone_id: None },
+            object_id,
+            object_def_id: None,
+            session_id: session_id.into(),
+            scope: Scope {
+                scope_type: ScopeType::Scene,
+                scope_id: "scene.current".into(),
+            },
+            display_name: "searchable body / container".into(),
+            object_kind: ObjectKind::Container,
+            location: ObjectLocation::OnGround {
+                scene_id: "scene.current".into(),
+                zone_id: None,
+            },
             visibility_state: visible_state("searchable body / container", true),
             mechanical_state: json!({}),
             tags: vec!["loot_target".into(), format!("body_of:{}", target_actor_id)],
-            created_at_tick: world_tick, updated_at_tick: world_tick, active: true, ..Default::default()
+            created_at_tick: world_tick,
+            updated_at_tick: world_tick,
+            active: true,
+            ..Default::default()
         };
         self.upsert_instance(&obj).await?;
         Ok(obj)
@@ -580,24 +1148,49 @@ impl ObjectService {
     /// carried_by: tags) — the SAME ownership predicate as find_owned_object_by_reference,
     /// returning every row (no scoring). Excludes the body container itself.
     /// Pure DB read: empty kit => empty vec (fail closed). Source A loot enumerator.
-    pub async fn list_owned_objects(&self, session_id: &str, target_actor_id: &str) -> Result<Vec<ObjectInstance>> {
+    pub async fn list_owned_objects(
+        &self,
+        session_id: &str,
+        target_actor_id: &str,
+    ) -> Result<Vec<ObjectInstance>> {
         let rows = sqlx::query(r#"select object_id, object_def_id, session_id, scope_type, scope_id, display_name, object_kind, location_json, visibility_state, mechanical_state, quantity, durability_json, tags, active, created_at_tick, updated_at_tick from object_instances where session_id=$1 and active=true and (scope_id=$2 or $3 = any(tags) or $4 = any(tags))"#)
             .bind(session_id).bind(target_actor_id)
             .bind(format!("held_by:{}", target_actor_id)).bind(format!("carried_by:{}", target_actor_id))
             .fetch_all(&self.db.pool).await?;
-        Ok(rows.into_iter().filter_map(|r| row_to_object(r).ok())
-            .filter(|o| !o.object_id.ends_with(".body") && !o.tags.iter().any(|t| t == "loot_target"))
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| row_to_object(r).ok())
+            .filter(|o| {
+                !o.object_id.ends_with(".body") && !o.tags.iter().any(|t| t == "loot_target")
+            })
             .collect())
     }
 
     /// Build the Source-A loot patches: reveal + transfer each item the target
     /// actor owns to the looter. Preserves object_id / ammo / durability
     /// (TransferObject only rewrites location). No LLM, no item table.
-    pub async fn loot_owned_patches(&self, session_id: &str, target_actor_id: &str, looter_actor_id: &str) -> Result<Vec<ObjectPatch>> {
+    pub async fn loot_owned_patches(
+        &self,
+        session_id: &str,
+        target_actor_id: &str,
+        looter_actor_id: &str,
+    ) -> Result<Vec<ObjectPatch>> {
         let mut out = Vec::new();
         for item in self.list_owned_objects(session_id, target_actor_id).await? {
-            out.push(ObjectPatch::SetObjectVisibility { object_id: item.object_id.clone(), visibility_state: visible_state(&item.display_name, true), reason: "revealed on search".into() });
-            out.push(ObjectPatch::TransferObject { object_id: item.object_id.clone(), from: item.location.clone(), to: ObjectLocation::Carried { actor_id: looter_actor_id.into(), container_id: None }, reason: format!("looted from {}", target_actor_id) });
+            out.push(ObjectPatch::SetObjectVisibility {
+                object_id: item.object_id.clone(),
+                visibility_state: visible_state(&item.display_name, true),
+                reason: "revealed on search".into(),
+            });
+            out.push(ObjectPatch::TransferObject {
+                object_id: item.object_id.clone(),
+                from: item.location.clone(),
+                to: ObjectLocation::Carried {
+                    actor_id: looter_actor_id.into(),
+                    container_id: None,
+                },
+                reason: format!("looted from {}", target_actor_id),
+            });
         }
         Ok(out)
     }
@@ -620,7 +1213,10 @@ impl ObjectService {
             let obj = ObjectInstance {
                 object_id: object_id.to_string(),
                 session_id: session_id.to_string(),
-                scope: Scope { scope_type: ScopeType::Session, scope_id: session_id.to_string() },
+                scope: Scope {
+                    scope_type: ScopeType::Session,
+                    scope_id: session_id.to_string(),
+                },
                 display_name: object_id.to_string(),
                 visibility_state: visible_state(object_id, true),
                 mechanical_state: json!({}),
@@ -639,21 +1235,34 @@ impl ObjectService {
             patch_json,
             reason: reason.to_string(),
         };
-        self.apply_patch(session_id, "scene.policy", &patch, world_tick).await?;
+        self.apply_patch(session_id, "scene.policy", &patch, world_tick)
+            .await?;
         Ok(created)
     }
 
     /// True when `object_id` is provably owned by `owner_actor_id` (scope_id or
     /// held_by:/carried_by: tags). Gates the loot patch-validation allowance.
-    async fn object_owned_by(&self, session_id: &str, object_id: &str, owner_actor_id: &str) -> Result<bool> {
-        let row = sqlx::query("select scope_id, tags from object_instances where session_id=$1 and object_id=$2")
-            .bind(session_id).bind(object_id).fetch_optional(&self.db.pool).await?;
+    async fn object_owned_by(
+        &self,
+        session_id: &str,
+        object_id: &str,
+        owner_actor_id: &str,
+    ) -> Result<bool> {
+        let row = sqlx::query(
+            "select scope_id, tags from object_instances where session_id=$1 and object_id=$2",
+        )
+        .bind(session_id)
+        .bind(object_id)
+        .fetch_optional(&self.db.pool)
+        .await?;
         if let Some(r) = row {
             let scope_id: String = r.try_get("scope_id").unwrap_or_default();
             let tags: Vec<String> = r.try_get("tags").unwrap_or_default();
             let held = format!("held_by:{}", owner_actor_id);
             let carried = format!("carried_by:{}", owner_actor_id);
-            return Ok(scope_id == owner_actor_id || tags.iter().any(|t| t == &held || t == &carried));
+            return Ok(
+                scope_id == owner_actor_id || tags.iter().any(|t| t == &held || t == &carried)
+            );
         }
         Ok(false)
     }
@@ -663,9 +1272,16 @@ impl ObjectService {
     /// so the auto-roll combat route can't miss them). Maps the resolved
     /// contract's intent to an object trigger and applies the OBJECT'S OWN data.
     /// No per-ruleset code, no hardcoded numbers.
-    pub async fn apply_object_rule_effects(&self, session_id: &str, contract: &CheckContract) -> Result<()> {
+    pub async fn apply_object_rule_effects(
+        &self,
+        session_id: &str,
+        contract: &CheckContract,
+    ) -> Result<()> {
         match trigger_for_contract(contract) {
-            Some(ObjectRuleTrigger::OnAttack) => self.consume_ammo_on_attack(session_id, &contract.initiator.actor_id).await,
+            Some(ObjectRuleTrigger::OnAttack) => {
+                self.consume_ammo_on_attack(session_id, &contract.initiator.actor_id)
+                    .await
+            }
             _ => Ok(()),
         }
     }
@@ -676,43 +1292,132 @@ impl ObjectService {
     /// amount comes from the weapon's own `ammo_per_shot` (default 1). The
     /// numbers live in the weapon's mechanical_state, never in engine Rust.
     async fn consume_ammo_on_attack(&self, session_id: &str, actor_id: &str) -> Result<()> {
-        let w = match self.find_object_by_tag(session_id, &format!("held_by:{}", actor_id)).await? { Some(w) => w, None => return Ok(()) };
-        let cur = match w.mechanical_state.get("ammo_current").and_then(|v| v.as_i64()) { Some(c) => c, None => return Ok(()) };
-        let per = w.mechanical_state.get("ammo_per_shot").and_then(|v| v.as_i64()).unwrap_or(1).max(1);
+        let w = match self
+            .find_object_by_tag(session_id, &format!("held_by:{}", actor_id))
+            .await?
+        {
+            Some(w) => w,
+            None => return Ok(()),
+        };
+        let cur = match w
+            .mechanical_state
+            .get("ammo_current")
+            .and_then(|v| v.as_i64())
+        {
+            Some(c) => c,
+            None => return Ok(()),
+        };
+        let per = w
+            .mechanical_state
+            .get("ammo_per_shot")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(1)
+            .max(1);
         let next = (cur - per).max(0);
-        if next == cur { return Ok(()); }
-        let time = WorldTimeService::new(self.db.clone()).ensure_session_time(session_id, Some(session_id)).await?;
-        self.apply_patch(session_id, "ammo_on_attack", &ObjectPatch::SetMechanicalState { object_id: w.object_id.clone(), patch_json: json!({"ammo_current": next, "out_of_ammo": next == 0}), reason: "ranged attack spent a round".into() }, time.world_tick).await?;
+        if next == cur {
+            return Ok(());
+        }
+        let time = WorldTimeService::new(self.db.clone())
+            .ensure_session_time(session_id, Some(session_id))
+            .await?;
+        self.apply_patch(
+            session_id,
+            "ammo_on_attack",
+            &ObjectPatch::SetMechanicalState {
+                object_id: w.object_id.clone(),
+                patch_json: json!({"ammo_current": next, "out_of_ammo": next == 0}),
+                reason: "ranged attack spent a round".into(),
+            },
+            time.world_tick,
+        )
+        .await?;
         Ok(())
     }
 
-    async fn affordances_for_object(&self, _session_id: &str, actor_id: &str, object: &ObjectInstance, focus: ObjectInteractionKind) -> Result<Vec<ObjectAffordance>> {
-        Ok(vec![ObjectAffordance { affordance_id: format!("affordance_{}", Uuid::new_v4().simple()), object_id: object.object_id.clone(), actor_id: actor_id.into(), action_kind: focus, label: format!("{}: {}", focus.as_str(), object.display_name), description: format!("Interact with {} through {}", object.display_name, focus.as_str()), requires_check: requires_check(focus), check_recipe: if requires_check(focus) { Some("ruleset object interaction check; exact rule packet on demand".into()) } else { None }, risk_level: if requires_check(focus) { "medium".into() } else { "low".into() }, visible_to_player: object.visibility_state.known_by_player, source_refs: vec![] }])
+    async fn affordances_for_object(
+        &self,
+        _session_id: &str,
+        actor_id: &str,
+        object: &ObjectInstance,
+        focus: ObjectInteractionKind,
+    ) -> Result<Vec<ObjectAffordance>> {
+        Ok(vec![ObjectAffordance {
+            affordance_id: format!("affordance_{}", Uuid::new_v4().simple()),
+            object_id: object.object_id.clone(),
+            actor_id: actor_id.into(),
+            action_kind: focus,
+            label: format!("{}: {}", focus.as_str(), object.display_name),
+            description: format!(
+                "Interact with {} through {}",
+                object.display_name,
+                focus.as_str()
+            ),
+            requires_check: requires_check(focus),
+            check_recipe: if requires_check(focus) {
+                Some("ruleset object interaction check; exact rule packet on demand".into())
+            } else {
+                None
+            },
+            risk_level: if requires_check(focus) {
+                "medium".into()
+            } else {
+                "low".into()
+            },
+            visible_to_player: object.visibility_state.known_by_player,
+            source_refs: vec![],
+        }])
     }
 
-    async fn affordances_for_visible_objects(&self, session_id: &str, actor_id: &str, objects: &[ObjectInstance]) -> Result<Vec<ObjectAffordance>> {
+    async fn affordances_for_visible_objects(
+        &self,
+        session_id: &str,
+        actor_id: &str,
+        objects: &[ObjectInstance],
+    ) -> Result<Vec<ObjectAffordance>> {
         let mut out = Vec::new();
-        for obj in objects.iter().filter(|o| o.visibility_state.known_by_player || o.visibility_state.known_by_actor_ids.iter().any(|id| id == actor_id)) {
+        for obj in objects.iter().filter(|o| {
+            o.visibility_state.known_by_player
+                || o.visibility_state
+                    .known_by_actor_ids
+                    .iter()
+                    .any(|id| id == actor_id)
+        }) {
             for kind in default_affordance_kinds(obj) {
-                out.extend(self.affordances_for_object(session_id, actor_id, obj, kind).await?);
+                out.extend(
+                    self.affordances_for_object(session_id, actor_id, obj, kind)
+                        .await?,
+                );
             }
         }
         Ok(out)
     }
 }
 
-
-fn kind_from_semantic_object_intent(semantic: &SemanticIntentResult) -> Option<ObjectInteractionKind> {
+fn kind_from_semantic_object_intent(
+    semantic: &SemanticIntentResult,
+) -> Option<ObjectInteractionKind> {
     // Semantic-first: honor an explicit loot/search classification regardless of
     // materialization requests, so 搜身/搜尸/"go through their pockets"/any phrasing
     // in any language routes to Loot/Search via MEANING, not a keyword table.
-    match semantic.raw_json.get("object_interaction_kind").and_then(|v| v.as_str()) {
+    match semantic
+        .raw_json
+        .get("object_interaction_kind")
+        .and_then(|v| v.as_str())
+    {
         Some("loot") => return Some(ObjectInteractionKind::Loot),
         Some("search") => return Some(ObjectInteractionKind::Search),
         _ => {}
     }
-    if semantic.materialization_requests.iter().any(|r| r.target_kind == RuleBindingTargetKind::ObjectDefinition) {
-        let raw_kind = semantic.raw_json.get("object_interaction_kind").and_then(|v| v.as_str()).unwrap_or_default();
+    if semantic
+        .materialization_requests
+        .iter()
+        .any(|r| r.target_kind == RuleBindingTargetKind::ObjectDefinition)
+    {
+        let raw_kind = semantic
+            .raw_json
+            .get("object_interaction_kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
         return match raw_kind {
             "disarm" => Some(ObjectInteractionKind::Disarm),
             "grab_held_object" => Some(ObjectInteractionKind::GrabHeldObject),
@@ -734,22 +1439,105 @@ fn kind_from_semantic_object_intent(semantic: &SemanticIntentResult) -> Option<O
     match semantic.primary_action_kind {
         SituationActionKind::Hack => Some(ObjectInteractionKind::Hack),
         SituationActionKind::DisableDevice => Some(ObjectInteractionKind::Break),
-        SituationActionKind::UseItem => semantic.raw_json.get("object_interaction_kind").and_then(|v| v.as_str()).and_then(parse_object_interaction_kind).or(Some(ObjectInteractionKind::Use)),
+        SituationActionKind::UseItem => semantic
+            .raw_json
+            .get("object_interaction_kind")
+            .and_then(|v| v.as_str())
+            .and_then(parse_object_interaction_kind)
+            .or(Some(ObjectInteractionKind::Use)),
         _ => None,
     }
 }
-fn parse_object_interaction_kind(s: &str) -> Option<ObjectInteractionKind> { match s { "disarm" => Some(ObjectInteractionKind::Disarm), "grab_held_object" => Some(ObjectInteractionKind::GrabHeldObject), "pick_up" => Some(ObjectInteractionKind::PickUp), "drop" => Some(ObjectInteractionKind::Drop), "equip" => Some(ObjectInteractionKind::Equip), "reload" => Some(ObjectInteractionKind::Reload), "cut_connection" => Some(ObjectInteractionKind::CutConnection), "trace_connection" => Some(ObjectInteractionKind::TraceConnection), "unlock" => Some(ObjectInteractionKind::Unlock), "inspect" => Some(ObjectInteractionKind::Inspect), "break" => Some(ObjectInteractionKind::Break), "hack" => Some(ObjectInteractionKind::Hack), "loot" => Some(ObjectInteractionKind::Loot), "search" => Some(ObjectInteractionKind::Search), _ => None } }
-fn lexical_object_fallback_enabled() -> bool { std::env::var("TRPG_LEXICAL_FALLBACK_ENABLE").map(|v| matches!(v.to_ascii_lowercase().as_str(), "1"|"true"|"yes"|"on")).unwrap_or(false) }
+fn parse_object_interaction_kind(s: &str) -> Option<ObjectInteractionKind> {
+    match s {
+        "disarm" => Some(ObjectInteractionKind::Disarm),
+        "grab_held_object" => Some(ObjectInteractionKind::GrabHeldObject),
+        "pick_up" => Some(ObjectInteractionKind::PickUp),
+        "drop" => Some(ObjectInteractionKind::Drop),
+        "equip" => Some(ObjectInteractionKind::Equip),
+        "reload" => Some(ObjectInteractionKind::Reload),
+        "cut_connection" => Some(ObjectInteractionKind::CutConnection),
+        "trace_connection" => Some(ObjectInteractionKind::TraceConnection),
+        "unlock" => Some(ObjectInteractionKind::Unlock),
+        "inspect" => Some(ObjectInteractionKind::Inspect),
+        "break" => Some(ObjectInteractionKind::Break),
+        "hack" => Some(ObjectInteractionKind::Hack),
+        "loot" => Some(ObjectInteractionKind::Loot),
+        "search" => Some(ObjectInteractionKind::Search),
+        _ => None,
+    }
+}
+fn lexical_object_fallback_enabled() -> bool {
+    std::env::var("TRPG_LEXICAL_FALLBACK_ENABLE")
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
 
-fn object_kernel_enabled() -> bool { std::env::var("TRPG_OBJECT_KERNEL_ENABLE_V16").map(|v| v != "0" && v.to_ascii_lowercase() != "false").unwrap_or(true) }
-fn mentions_cable(s: &str) -> bool { contains_any(s, &["线", "线缆", "电缆", "cable", "wire", "cord"]) }
-fn mentions_armor(s: &str) -> bool { contains_any(s, &["护甲", "盔甲", "armor", "armour", "穿甲"]) }
-fn contains_any(s: &str, terms: &[&str]) -> bool { let lower=s.to_lowercase(); terms.iter().any(|t| lower.contains(&t.to_lowercase())) }
+fn object_kernel_enabled() -> bool {
+    std::env::var("TRPG_OBJECT_KERNEL_ENABLE_V16")
+        .map(|v| v != "0" && v.to_ascii_lowercase() != "false")
+        .unwrap_or(true)
+}
+fn mentions_cable(s: &str) -> bool {
+    contains_any(s, &["线", "线缆", "电缆", "cable", "wire", "cord"])
+}
+fn mentions_armor(s: &str) -> bool {
+    contains_any(s, &["护甲", "盔甲", "armor", "armour", "穿甲"])
+}
+fn contains_any(s: &str, terms: &[&str]) -> bool {
+    let lower = s.to_lowercase();
+    terms.iter().any(|t| lower.contains(&t.to_lowercase()))
+}
 
-
-fn safe_id(s: &str) -> String { s.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect() }
-fn is_hypothetical_or_secret(input: &str) -> bool { contains_any(input, &["能不能", "可不可以", "是否", "判断", "分析", "评估", "安全切断", "安全吗", "gm 暗中", "gm暗中", "暗中处理", "暗投", "秘密处理", "can i", "could i", "is it safe", "assess", "analyze", "secret roll", "gm secretly"]) }
-fn is_attack_with_possessed_weapon(input: &str) -> bool { contains_any(input, &["夺来的", "抢来的", "刚夺", "刚抢", "picked up", "grabbed", "taken"]) && contains_any(input, &["开火", "射击", "攻击", "打", "shoot", "fire", "attack"]) }
+fn safe_id(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
+}
+fn is_hypothetical_or_secret(input: &str) -> bool {
+    contains_any(
+        input,
+        &[
+            "能不能",
+            "可不可以",
+            "是否",
+            "判断",
+            "分析",
+            "评估",
+            "安全切断",
+            "安全吗",
+            "gm 暗中",
+            "gm暗中",
+            "暗中处理",
+            "暗投",
+            "秘密处理",
+            "can i",
+            "could i",
+            "is it safe",
+            "assess",
+            "analyze",
+            "secret roll",
+            "gm secretly",
+        ],
+    )
+}
+fn is_attack_with_possessed_weapon(input: &str) -> bool {
+    contains_any(
+        input,
+        &[
+            "夺来的",
+            "抢来的",
+            "刚夺",
+            "刚抢",
+            "picked up",
+            "grabbed",
+            "taken",
+        ],
+    ) && contains_any(
+        input,
+        &["开火", "射击", "攻击", "打", "shoot", "fire", "attack"],
+    )
+}
 
 /// Fail-closed seed for an item with NO source-backed definition. Returns
 /// (object_def_id, display_name, mechanical_profile) with NO fabricated stats
@@ -758,7 +1546,10 @@ fn is_attack_with_possessed_weapon(input: &str) -> bool { contains_any(input, &[
 /// item is and verifies it against the rules (smart-GM branch 1), rather than
 /// inventing parameters. Downstream mechanical resolution sees no source-backed
 /// params and stays provisional instead of rolling with invented numbers.
-fn provisional_item_seed(ruleset_id: &str, user_input: &str) -> (String, String, serde_json::Value) {
+fn provisional_item_seed(
+    ruleset_id: &str,
+    user_input: &str,
+) -> (String, String, serde_json::Value) {
     let object_def_id = format!("{}.object.unresolved", safe_id(ruleset_id));
     let profile = json!({
         "source_policy": "unresolved_needs_source_binding",
@@ -771,23 +1562,74 @@ fn provisional_item_seed(ruleset_id: &str, user_input: &str) -> (String, String,
 }
 
 fn classify_object_interaction(input: &str) -> Option<ObjectInteractionKind> {
-    if is_hypothetical_or_secret(input) { return None; }
-    if is_attack_with_possessed_weapon(input) { return None; }
-    if contains_any(input, &["缴械", "打掉武器", "夺下武器", "disarm"]) { return Some(ObjectInteractionKind::Disarm); }
-    if contains_any(input, &["抢", "夺", "抓", "grab", "snatch", "take his", "take her"]) && contains_any(input, &["枪", "武器", "刀", "weapon", "gun", "pistol", "knife"]) { return Some(ObjectInteractionKind::GrabHeldObject); }
-    if contains_any(input, &["偷", "偷走", "扒", "steal", "pickpocket"]) { return Some(ObjectInteractionKind::Steal); }
-    if contains_any(input, &["捡", "拾起", "拿起", "pick up", "pickup"]) { return Some(ObjectInteractionKind::PickUp); }
-    if contains_any(input, &["丢", "扔下", "放下", "drop"]) { return Some(ObjectInteractionKind::Drop); }
-    if contains_any(input, &["装备", "穿上", "戴上", "equip", "wear", "put on"]) { return Some(ObjectInteractionKind::Equip); }
-    if contains_any(input, &["换弹", "装弹", "reload"]) { return Some(ObjectInteractionKind::Reload); }
-    if contains_any(input, &["剪线", "切断", "剪断", "cut cable", "cut wire"]) { return Some(ObjectInteractionKind::CutConnection); }
-    if contains_any(input, &["追踪线", "顺着线", "trace cable", "trace wire"]) { return Some(ObjectInteractionKind::TraceConnection); }
-    if contains_any(input, &["开锁", "撬锁", "unlock", "lockpick"]) { return Some(ObjectInteractionKind::Unlock); }
-    if contains_any(input, &["搜身", "搜尸", "翻找", "loot", "frisk", "search body"]) { return Some(ObjectInteractionKind::Loot); }
-    if contains_any(input, &["检查", "观察", "分析", "inspect", "examine", "analyze"]) && contains_any(input, &["物", "东西", "设备", "线", "门", "锁", "weapon", "object", "device", "cable", "lock"]) { return Some(ObjectInteractionKind::Inspect); }
+    if is_hypothetical_or_secret(input) {
+        return None;
+    }
+    if is_attack_with_possessed_weapon(input) {
+        return None;
+    }
+    if contains_any(input, &["缴械", "打掉武器", "夺下武器", "disarm"]) {
+        return Some(ObjectInteractionKind::Disarm);
+    }
+    if contains_any(
+        input,
+        &["抢", "夺", "抓", "grab", "snatch", "take his", "take her"],
+    ) && contains_any(
+        input,
+        &["枪", "武器", "刀", "weapon", "gun", "pistol", "knife"],
+    ) {
+        return Some(ObjectInteractionKind::GrabHeldObject);
+    }
+    if contains_any(input, &["偷", "偷走", "扒", "steal", "pickpocket"]) {
+        return Some(ObjectInteractionKind::Steal);
+    }
+    if contains_any(input, &["捡", "拾起", "拿起", "pick up", "pickup"]) {
+        return Some(ObjectInteractionKind::PickUp);
+    }
+    if contains_any(input, &["丢", "扔下", "放下", "drop"]) {
+        return Some(ObjectInteractionKind::Drop);
+    }
+    if contains_any(input, &["装备", "穿上", "戴上", "equip", "wear", "put on"]) {
+        return Some(ObjectInteractionKind::Equip);
+    }
+    if contains_any(input, &["换弹", "装弹", "reload"]) {
+        return Some(ObjectInteractionKind::Reload);
+    }
+    if contains_any(input, &["剪线", "切断", "剪断", "cut cable", "cut wire"]) {
+        return Some(ObjectInteractionKind::CutConnection);
+    }
+    if contains_any(input, &["追踪线", "顺着线", "trace cable", "trace wire"]) {
+        return Some(ObjectInteractionKind::TraceConnection);
+    }
+    if contains_any(input, &["开锁", "撬锁", "unlock", "lockpick"]) {
+        return Some(ObjectInteractionKind::Unlock);
+    }
+    if contains_any(
+        input,
+        &["搜身", "搜尸", "翻找", "loot", "frisk", "search body"],
+    ) {
+        return Some(ObjectInteractionKind::Loot);
+    }
+    if contains_any(
+        input,
+        &["检查", "观察", "分析", "inspect", "examine", "analyze"],
+    ) && contains_any(
+        input,
+        &[
+            "物", "东西", "设备", "线", "门", "锁", "weapon", "object", "device", "cable", "lock",
+        ],
+    ) {
+        return Some(ObjectInteractionKind::Inspect);
+    }
     None
 }
-fn infer_target_actor(input: &str) -> Option<String> { if contains_any(input, &["他", "她", "敌", "npc", "scav", "guard", "守卫"]) { Some("npc.opposition".into()) } else { None } }
+fn infer_target_actor(input: &str) -> Option<String> {
+    if contains_any(input, &["他", "她", "敌", "npc", "scav", "guard", "守卫"]) {
+        Some("npc.opposition".into())
+    } else {
+        None
+    }
+}
 
 /// Map a resolved check's intent to the object trigger it fires. An attack /
 /// counterattack to-hit check fires OnAttack (e.g. a firearm spends a round);
@@ -796,7 +1638,77 @@ fn infer_target_actor(input: &str) -> Option<String> { if contains_any(input, &[
 /// per-ruleset or per-weapon logic.
 fn trigger_for_contract(contract: &CheckContract) -> Option<ObjectRuleTrigger> {
     let intent = contract.intent_kind.to_ascii_lowercase();
-    if intent.contains("attack") { return Some(ObjectRuleTrigger::OnAttack); }
+    if contains_any(
+        &intent,
+        &[
+            "effect", "damage", "reload", "dodge", "stealth", "潜行", "闪避", "装弹", "伤害",
+        ],
+    ) {
+        return None;
+    }
+    let label = contract.check_label.to_lowercase();
+    let summary = contract.action_summary.to_lowercase();
+    if contains_any(
+        &format!("{intent} {label}"),
+        &[
+            "initiative",
+            "order",
+            "turn_order",
+            "行动顺序",
+            "战斗顺序",
+            "先攻",
+        ],
+    ) {
+        return None;
+    }
+    let mut param_text = String::new();
+    if let Some(param) = &contract.tested_parameter {
+        param_text.push_str(&param.key.to_lowercase());
+        param_text.push(' ');
+        param_text.push_str(&param.label.to_lowercase());
+    }
+    let direct_action_text = format!("{intent} {label}");
+    let firearm_param = contains_any(
+        &param_text,
+        &["firearms", "handgun", "pistol", "m1911", "gun", "手枪"],
+    );
+    let summary_attack_cue = contains_any(
+        &summary,
+        &[
+            "attack",
+            "counterattack",
+            "shoot",
+            "shot",
+            "shooting",
+            "开枪",
+            "射击",
+            "枪击",
+            "瞄准射击",
+        ],
+    );
+    if contains_any(
+        &direct_action_text,
+        &[
+            "attack",
+            "counterattack",
+            "shoot",
+            "shot",
+            "shooting",
+            "firearms",
+            "handgun",
+            "pistol",
+            "m1911",
+            "gun",
+            "开枪",
+            "射击",
+            "枪击",
+            "瞄准射击",
+            "手枪",
+        ],
+    ) || (firearm_param && summary_attack_cue)
+    {
+        return Some(ObjectRuleTrigger::OnAttack);
+    }
     None
 }
 
@@ -807,24 +1719,59 @@ fn trigger_for_contract(contract: &CheckContract) -> Option<ObjectRuleTrigger> {
 /// per-ruleset literals. Empty/absent contents => no items (fail closed, no
 /// fabrication). The contents themselves are source-backed (NPC card / module
 /// via materialization), not invented here.
-fn loot_patches_from_contents(mech: &serde_json::Value, session_id: &str, finder: &str) -> Vec<ObjectPatch> {
-    let items = match mech.get("loot_contents").and_then(|v| v.as_array()) { Some(a) => a, None => return vec![] };
+fn loot_patches_from_contents(
+    mech: &serde_json::Value,
+    session_id: &str,
+    finder: &str,
+) -> Vec<ObjectPatch> {
+    let items = match mech.get("loot_contents").and_then(|v| v.as_array()) {
+        Some(a) => a,
+        None => return vec![],
+    };
     let mut out = Vec::new();
     for it in items {
-        let name = it.get("name").and_then(|v| v.as_str()).map(str::trim).unwrap_or("");
-        if name.is_empty() { continue; }
-        let kind = it.get("kind").and_then(|v| v.as_str()).map(object_kind_from_str).unwrap_or(ObjectKind::Unknown);
-        let qty = it.get("quantity").and_then(|v| v.as_i64()).map(|q| q as i32).filter(|q| *q > 0);
+        let name = it
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .unwrap_or("");
+        if name.is_empty() {
+            continue;
+        }
+        let kind = it
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .map(object_kind_from_str)
+            .unwrap_or(ObjectKind::Unknown);
+        let qty = it
+            .get("quantity")
+            .and_then(|v| v.as_i64())
+            .map(|q| q as i32)
+            .filter(|q| *q > 0);
         out.push(ObjectPatch::CreateObjectInstance {
             object: ObjectInstance {
-                object_id: format!("obj.{}.loot.{}.{}", safe_id(session_id), safe_id(name), Uuid::new_v4().simple()),
+                object_id: format!(
+                    "obj.{}.loot.{}.{}",
+                    safe_id(session_id),
+                    safe_id(name),
+                    Uuid::new_v4().simple()
+                ),
                 session_id: session_id.into(),
-                scope: Scope { scope_type: ScopeType::Scene, scope_id: "scene.current".into() },
+                scope: Scope {
+                    scope_type: ScopeType::Scene,
+                    scope_id: "scene.current".into(),
+                },
                 display_name: name.into(),
                 object_kind: kind,
-                location: ObjectLocation::OnGround { scene_id: "scene.current".into(), zone_id: None },
+                location: ObjectLocation::OnGround {
+                    scene_id: "scene.current".into(),
+                    zone_id: None,
+                },
                 visibility_state: visible_state(name, true),
-                mechanical_state: it.get("mechanical_profile").cloned().unwrap_or_else(|| json!({})),
+                mechanical_state: it
+                    .get("mechanical_profile")
+                    .cloned()
+                    .unwrap_or_else(|| json!({})),
                 quantity: qty,
                 tags: vec!["loot".into(), format!("looted_by:{}", finder)],
                 active: true,
@@ -843,22 +1790,61 @@ fn loot_patches_from_contents(mech: &serde_json::Value, session_id: &str, finder
 fn reference_score(input_lower: &str, obj: &ObjectInstance) -> i32 {
     let name = obj.display_name.to_lowercase();
     let mut score = 0;
-    for w in name.split(|c: char| !c.is_alphanumeric()).filter(|w| w.len() >= 3) {
-        if input_lower.contains(w) { score += 3; }
+    for w in name
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() >= 3)
+    {
+        if input_lower.contains(w) {
+            score += 3;
+        }
     }
     for ch in name.chars().filter(|c| !c.is_ascii() && !c.is_whitespace()) {
-        if input_lower.contains(ch) { score += 1; }
+        if input_lower.contains(ch) {
+            score += 1;
+        }
     }
     for t in &obj.tags {
         let t = t.to_lowercase();
-        if t.starts_with("held_by:") || t.starts_with("carried_by:") || t == "weapon" || t == "held" { continue; }
-        if t.len() >= 3 && input_lower.contains(&t) { score += 2; }
+        if t.starts_with("held_by:") || t.starts_with("carried_by:") || t == "weapon" || t == "held"
+        {
+            continue;
+        }
+        if t.len() >= 3 && input_lower.contains(&t) {
+            score += 2;
+        }
     }
     score
 }
-fn requires_check(kind: ObjectInteractionKind) -> bool { matches!(kind, ObjectInteractionKind::GrabHeldObject | ObjectInteractionKind::Disarm | ObjectInteractionKind::Steal | ObjectInteractionKind::Hack | ObjectInteractionKind::Break | ObjectInteractionKind::Repair | ObjectInteractionKind::Unlock | ObjectInteractionKind::CutConnection | ObjectInteractionKind::TraceConnection | ObjectInteractionKind::Loot | ObjectInteractionKind::Search | ObjectInteractionKind::Use | ObjectInteractionKind::Reload) }
+fn requires_check(kind: ObjectInteractionKind) -> bool {
+    matches!(
+        kind,
+        ObjectInteractionKind::GrabHeldObject
+            | ObjectInteractionKind::Disarm
+            | ObjectInteractionKind::Steal
+            | ObjectInteractionKind::Hack
+            | ObjectInteractionKind::Break
+            | ObjectInteractionKind::Repair
+            | ObjectInteractionKind::Unlock
+            | ObjectInteractionKind::CutConnection
+            | ObjectInteractionKind::TraceConnection
+            | ObjectInteractionKind::Loot
+            | ObjectInteractionKind::Search
+            | ObjectInteractionKind::Use
+            | ObjectInteractionKind::Reload
+    )
+}
 
-fn make_object_check(input: ObjectTurnInput<'_>, actor_id: &str, target_actor_id: Option<&str>, object: &ObjectInstance, kind: ObjectInteractionKind, kernel_dice: Option<&str>, kernel_target: Option<CheckTargetModel>, kernel_source_refs: Vec<SourceRef>, kernel: Option<&RuleKernel>) -> CheckContract {
+fn make_object_check(
+    input: ObjectTurnInput<'_>,
+    actor_id: &str,
+    target_actor_id: Option<&str>,
+    object: &ObjectInstance,
+    kind: ObjectInteractionKind,
+    kernel_dice: Option<&str>,
+    kernel_target: Option<CheckTargetModel>,
+    kernel_source_refs: Vec<SourceRef>,
+    kernel: Option<&RuleKernel>,
+) -> CheckContract {
     let dice = kernel_dice.unwrap_or("1d20").to_string();
     // Restore EXACT legacy make_object_check check_label match: ONLY
     // GrabHeldObject|Disarm is ruleset-data-driven (read from a dedicated
@@ -872,45 +1858,156 @@ fn make_object_check(input: ObjectTurnInput<'_>, actor_id: &str, target_actor_id
             .map(|s| s.as_str())
             .unwrap_or("appropriate opposed disarm / athletics check"),
         ObjectInteractionKind::Unlock => "appropriate lockpicking / technical unlock check",
-        ObjectInteractionKind::CutConnection | ObjectInteractionKind::TraceConnection => "appropriate technical analysis / cable handling check",
-        ObjectInteractionKind::Steal | ObjectInteractionKind::Loot => "appropriate stealth / sleight / search check",
+        ObjectInteractionKind::CutConnection | ObjectInteractionKind::TraceConnection => {
+            "appropriate technical analysis / cable handling check"
+        }
+        ObjectInteractionKind::Steal | ObjectInteractionKind::Loot => {
+            "appropriate stealth / sleight / search check"
+        }
         _ => "appropriate object interaction check",
-    }.to_string();
-    let defender = target_actor_id.map(|id| ActorRef { actor_id: id.into(), actor_kind: ActorKind::Npc, display_name: Some("target".into()) });
+    }
+    .to_string();
+    let defender = target_actor_id.map(|id| ActorRef {
+        actor_id: id.into(),
+        actor_kind: ActorKind::Npc,
+        display_name: Some("target".into()),
+    });
     // Data-driven target: prefer the kernel's core mechanic; otherwise leave it
     // UnknownUntilLookup so the contest kernel resolves it (PercentileRollUnder /
     // DicePoolCount / etc.) — never a fabricated roll-high static DV.
     let target = kernel_target.unwrap_or(CheckTargetModel::UnknownUntilLookup);
     let opposition = match defender.clone() {
-        Some(d) => OppositionModel::OpposedActive { defender: d, defender_check_label: "opposing object control / defense".into(), defender_dice_expression: dice.clone() },
+        Some(d) => OppositionModel::OpposedActive {
+            defender: d,
+            defender_check_label: "opposing object control / defense".into(),
+            defender_dice_expression: dice.clone(),
+        },
         None => OppositionModel::NoMechanicalOpposition,
     };
-    let ruling_status = if kernel_source_refs.is_empty() { RulingStatus::Provisional } else { RulingStatus::SourceBacked };
+    let ruling_status = if kernel_source_refs.is_empty() {
+        RulingStatus::Provisional
+    } else {
+        RulingStatus::SourceBacked
+    };
     CheckContract {
         check_id: format!("check_{}", Uuid::new_v4().simple()), session_id: input.session_id.into(), turn_id: input.turn_id.into(), ruleset_id: input.ruleset_id.into(), module_id: input.module_id.map(str::to_string), initiator: ActorRef { actor_id: actor_id.into(), actor_kind: ActorKind::PlayerCharacter, display_name: Some("current actor".into()) }, target_actor: defender.clone(), opposition, action_summary: input.user_input.chars().take(500).collect(), intent_kind: format!("object:{}", kind.as_str()), check_label, dice_expression: dice.clone(), modifiers: vec![], target, tested_parameter: None, opponent_tested_parameter: None, actor_snapshot_ids: input.frame_id.map(|id| vec![id.to_string()]).unwrap_or_default(), source_refs: kernel_source_refs, learned_packet_ids: vec![], roll_visibility: RollVisibility::PlayerRollRequired, roll_authority: RollAuthority::Player, disclosure: RollDisclosurePolicy::for_visibility(RollVisibility::PlayerRollRequired), stakes: CheckStakes { before_roll_public: format!("You can try to {} {}. Success changes object possession/state; failure leaves it controlled, secured, or escalates risk.", kind.as_str(), object.display_name), success_public: "Object state changes through validated ObjectPatch.".into(), failure_public: "The object is not transferred/changed; the scene may react.".into(), critical_public: None, fumble_public: None, success_patches_allowed: vec!["object_patch".into()], failure_patches_allowed: vec!["object_patch".into()], irreversible: false }, confidence: RulingConfidence::Low, ruling_status, advice_refs: vec!["object.possession.kernel.v1_6".into()], expires_at_turn: Some(input.turn_id.into()) }
 }
 
-fn preconditions_for(actor_id: &str, object: &ObjectInstance, kind: ObjectInteractionKind) -> Vec<ObjectPrecondition> {
-    let mut pre = vec![ObjectPrecondition::ObjectExists { object_id: object.object_id.clone() }, ObjectPrecondition::ObjectVisibleOrKnown { object_id: object.object_id.clone(), actor_id: actor_id.into() }];
-    if matches!(kind, ObjectInteractionKind::GrabHeldObject | ObjectInteractionKind::Disarm | ObjectInteractionKind::Steal) {
-        if let ObjectLocation::Held { actor_id: holder, .. } = &object.location { pre.push(ObjectPrecondition::ObjectHeldBy { object_id: object.object_id.clone(), actor_id: holder.clone() }); }
-        pre.push(ObjectPrecondition::ObjectWithinReach { object_id: object.object_id.clone(), actor_id: actor_id.into() });
-        pre.push(ObjectPrecondition::ActorHasFreeHand { actor_id: actor_id.into() });
+fn preconditions_for(
+    actor_id: &str,
+    object: &ObjectInstance,
+    kind: ObjectInteractionKind,
+) -> Vec<ObjectPrecondition> {
+    let mut pre = vec![
+        ObjectPrecondition::ObjectExists {
+            object_id: object.object_id.clone(),
+        },
+        ObjectPrecondition::ObjectVisibleOrKnown {
+            object_id: object.object_id.clone(),
+            actor_id: actor_id.into(),
+        },
+    ];
+    if matches!(
+        kind,
+        ObjectInteractionKind::GrabHeldObject
+            | ObjectInteractionKind::Disarm
+            | ObjectInteractionKind::Steal
+    ) {
+        if let ObjectLocation::Held {
+            actor_id: holder, ..
+        } = &object.location
+        {
+            pre.push(ObjectPrecondition::ObjectHeldBy {
+                object_id: object.object_id.clone(),
+                actor_id: holder.clone(),
+            });
+        }
+        pre.push(ObjectPrecondition::ObjectWithinReach {
+            object_id: object.object_id.clone(),
+            actor_id: actor_id.into(),
+        });
+        pre.push(ObjectPrecondition::ActorHasFreeHand {
+            actor_id: actor_id.into(),
+        });
     }
-    if matches!(kind, ObjectInteractionKind::Equip) { pre.push(ObjectPrecondition::ActorHasSlotFree { actor_id: actor_id.into(), slot: EquipSlotKind::MainHand }); }
+    if matches!(kind, ObjectInteractionKind::Equip) {
+        pre.push(ObjectPrecondition::ActorHasSlotFree {
+            actor_id: actor_id.into(),
+            slot: EquipSlotKind::MainHand,
+        });
+    }
     pre
 }
 
-fn success_patches_for(actor_id: &str, target_actor_id: Option<&str>, object: &ObjectInstance, kind: ObjectInteractionKind) -> Vec<ObjectPatch> {
+fn success_patches_for(
+    actor_id: &str,
+    target_actor_id: Option<&str>,
+    object: &ObjectInstance,
+    kind: ObjectInteractionKind,
+) -> Vec<ObjectPatch> {
     match kind {
-        ObjectInteractionKind::GrabHeldObject | ObjectInteractionKind::Disarm | ObjectInteractionKind::Steal => vec![ObjectPatch::TransferObject { object_id: object.object_id.clone(), from: object.location.clone(), to: ObjectLocation::Held { actor_id: actor_id.into(), hand: Some(HandSlot::Left) }, reason: format!("successful {}", kind.as_str()) }],
-        ObjectInteractionKind::PickUp => vec![ObjectPatch::SetObjectLocation { object_id: object.object_id.clone(), location: ObjectLocation::Held { actor_id: actor_id.into(), hand: Some(HandSlot::Right) }, reason: "picked up object".into() }],
-        ObjectInteractionKind::Drop => vec![ObjectPatch::SetObjectLocation { object_id: object.object_id.clone(), location: ObjectLocation::OnGround { scene_id: "scene.current".into(), zone_id: None }, reason: "dropped object".into() }],
-        ObjectInteractionKind::Equip => vec![ObjectPatch::SetObjectLocation { object_id: object.object_id.clone(), location: ObjectLocation::Equipped { actor_id: actor_id.into(), slot: if object.object_kind == ObjectKind::Armor { EquipSlotKind::BodyArmor } else { EquipSlotKind::MainHand } }, reason: "equipped object".into() }],
-        ObjectInteractionKind::CutConnection => vec![ObjectPatch::SetMechanicalState { object_id: object.object_id.clone(), patch_json: json!({"connection_cut": true, "cut_by": actor_id}), reason: "connection cut".into() }],
-        ObjectInteractionKind::Unlock => vec![ObjectPatch::SetMechanicalState { object_id: object.object_id.clone(), patch_json: json!({"locked": false, "unlocked_by": actor_id}), reason: "unlocked".into() }],
-        ObjectInteractionKind::Break => vec![ObjectPatch::DamageObject { object_id: object.object_id.clone(), amount: 1, damage_kind: "break".into(), reason: "object damaged/broken".into() }],
-        ObjectInteractionKind::Reveal | ObjectInteractionKind::Inspect | ObjectInteractionKind::TraceConnection => vec![ObjectPatch::SetObjectVisibility { object_id: object.object_id.clone(), visibility_state: visible_state(&object.display_name, true), reason: "object information revealed".into() }],
+        ObjectInteractionKind::GrabHeldObject
+        | ObjectInteractionKind::Disarm
+        | ObjectInteractionKind::Steal => vec![ObjectPatch::TransferObject {
+            object_id: object.object_id.clone(),
+            from: object.location.clone(),
+            to: ObjectLocation::Held {
+                actor_id: actor_id.into(),
+                hand: Some(HandSlot::Left),
+            },
+            reason: format!("successful {}", kind.as_str()),
+        }],
+        ObjectInteractionKind::PickUp => vec![ObjectPatch::SetObjectLocation {
+            object_id: object.object_id.clone(),
+            location: ObjectLocation::Held {
+                actor_id: actor_id.into(),
+                hand: Some(HandSlot::Right),
+            },
+            reason: "picked up object".into(),
+        }],
+        ObjectInteractionKind::Drop => vec![ObjectPatch::SetObjectLocation {
+            object_id: object.object_id.clone(),
+            location: ObjectLocation::OnGround {
+                scene_id: "scene.current".into(),
+                zone_id: None,
+            },
+            reason: "dropped object".into(),
+        }],
+        ObjectInteractionKind::Equip => vec![ObjectPatch::SetObjectLocation {
+            object_id: object.object_id.clone(),
+            location: ObjectLocation::Equipped {
+                actor_id: actor_id.into(),
+                slot: if object.object_kind == ObjectKind::Armor {
+                    EquipSlotKind::BodyArmor
+                } else {
+                    EquipSlotKind::MainHand
+                },
+            },
+            reason: "equipped object".into(),
+        }],
+        ObjectInteractionKind::CutConnection => vec![ObjectPatch::SetMechanicalState {
+            object_id: object.object_id.clone(),
+            patch_json: json!({"connection_cut": true, "cut_by": actor_id}),
+            reason: "connection cut".into(),
+        }],
+        ObjectInteractionKind::Unlock => vec![ObjectPatch::SetMechanicalState {
+            object_id: object.object_id.clone(),
+            patch_json: json!({"locked": false, "unlocked_by": actor_id}),
+            reason: "unlocked".into(),
+        }],
+        ObjectInteractionKind::Break => vec![ObjectPatch::DamageObject {
+            object_id: object.object_id.clone(),
+            amount: 1,
+            damage_kind: "break".into(),
+            reason: "object damaged/broken".into(),
+        }],
+        ObjectInteractionKind::Reveal
+        | ObjectInteractionKind::Inspect
+        | ObjectInteractionKind::TraceConnection => vec![ObjectPatch::SetObjectVisibility {
+            object_id: object.object_id.clone(),
+            visibility_state: visible_state(&object.display_name, true),
+            reason: "object information revealed".into(),
+        }],
         // Loot/Search: the looted target/container declares its contents as DATA
         // (mechanical_state.loot_contents = [{name, kind, quantity, ...}], filled
         // from the NPC card / module via materialization — NOT an engine item
@@ -918,27 +2015,54 @@ fn success_patches_for(actor_id: &str, target_actor_id: Option<&str>, object: &O
         // declared item (with quantity). No fabrication: if nothing is declared,
         // it's reveal-only (fail closed).
         ObjectInteractionKind::Loot | ObjectInteractionKind::Search => {
-            let mut patches = vec![ObjectPatch::SetObjectVisibility { object_id: object.object_id.clone(), visibility_state: visible_state(&object.display_name, true), reason: "container searched".into() }];
-            patches.extend(loot_patches_from_contents(&object.mechanical_state, &object.session_id, actor_id));
+            let mut patches = vec![ObjectPatch::SetObjectVisibility {
+                object_id: object.object_id.clone(),
+                visibility_state: visible_state(&object.display_name, true),
+                reason: "container searched".into(),
+            }];
+            patches.extend(loot_patches_from_contents(
+                &object.mechanical_state,
+                &object.session_id,
+                actor_id,
+            ));
             patches
         }
         // Reload: refill loaded rounds to the magazine capacity (data-driven from
         // the weapon's mechanical_state.ammo_max).
-        ObjectInteractionKind::Reload => vec![ObjectPatch::SetMechanicalState { object_id: object.object_id.clone(), patch_json: json!({"ammo_current": object.mechanical_state.get("ammo_max").and_then(|v| v.as_i64()).unwrap_or(0)}), reason: "reloaded to full magazine".into() }],
+        ObjectInteractionKind::Reload => vec![ObjectPatch::SetMechanicalState {
+            object_id: object.object_id.clone(),
+            patch_json: json!({"ammo_current": object.mechanical_state.get("ammo_max").and_then(|v| v.as_i64()).unwrap_or(0)}),
+            reason: "reloaded to full magazine".into(),
+        }],
         // Use: ONLY a charged object (one that declares `charges`) changes state;
         // its per-use cost AND its depletion behavior are the object's OWN data,
         // not an engine policy. When charges run out, the object transforms ONLY
         // if it declares a depleted form (depleted_kind/depleted_name) — otherwise
         // it's just marked spent. A non-charged object is narration-only here (no
         // fabricated depletion). The engine encodes no per-item/ruleset policy.
-        ObjectInteractionKind::Use => match object.mechanical_state.get("charges").and_then(|v| v.as_i64()) {
+        ObjectInteractionKind::Use => match object
+            .mechanical_state
+            .get("charges")
+            .and_then(|v| v.as_i64())
+        {
             None => vec![],
             Some(charges) => {
-                let cost = object.mechanical_state.get("charge_cost").and_then(|v| v.as_i64()).unwrap_or(1).max(1);
+                let cost = object
+                    .mechanical_state
+                    .get("charge_cost")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(1)
+                    .max(1);
                 let next = charges - cost;
                 if next > 0 {
-                    vec![ObjectPatch::SetMechanicalState { object_id: object.object_id.clone(), patch_json: json!({"charges": next}), reason: "used one charge".into() }]
-                } else if object.mechanical_state.get("depleted_kind").is_some() || object.mechanical_state.get("depleted_name").is_some() {
+                    vec![ObjectPatch::SetMechanicalState {
+                        object_id: object.object_id.clone(),
+                        patch_json: json!({"charges": next}),
+                        reason: "used one charge".into(),
+                    }]
+                } else if object.mechanical_state.get("depleted_kind").is_some()
+                    || object.mechanical_state.get("depleted_name").is_some()
+                {
                     vec![ObjectPatch::TransformObject {
                         object_id: object.object_id.clone(),
                         new_kind: object.mechanical_state.get("depleted_kind").and_then(|v| v.as_str()).map(object_kind_from_str),
@@ -947,26 +2071,542 @@ fn success_patches_for(actor_id: &str, target_actor_id: Option<&str>, object: &O
                         reason: "item spent its last charge and transformed into its declared depleted form".into(),
                     }]
                 } else {
-                    vec![ObjectPatch::SetMechanicalState { object_id: object.object_id.clone(), patch_json: json!({"charges": 0, "depleted": true}), reason: "item spent its last charge".into() }]
+                    vec![ObjectPatch::SetMechanicalState {
+                        object_id: object.object_id.clone(),
+                        patch_json: json!({"charges": 0, "depleted": true}),
+                        reason: "item spent its last charge".into(),
+                    }]
                 }
             }
         },
         _ => target_actor_id.map(|_| vec![]).unwrap_or_default(),
     }
 }
-fn failure_patches_for(object: &ObjectInstance, kind: ObjectInteractionKind) -> Vec<ObjectPatch> { if matches!(kind, ObjectInteractionKind::CutConnection | ObjectInteractionKind::Unlock | ObjectInteractionKind::Break) { vec![ObjectPatch::SetMechanicalState { object_id: object.object_id.clone(), patch_json: json!({"last_failed_interaction": kind.as_str()}), reason: "failed object interaction records pressure".into() }] } else { vec![] } }
+fn failure_patches_for(object: &ObjectInstance, kind: ObjectInteractionKind) -> Vec<ObjectPatch> {
+    if matches!(
+        kind,
+        ObjectInteractionKind::CutConnection
+            | ObjectInteractionKind::Unlock
+            | ObjectInteractionKind::Break
+    ) {
+        vec![ObjectPatch::SetMechanicalState {
+            object_id: object.object_id.clone(),
+            patch_json: json!({"last_failed_interaction": kind.as_str()}),
+            reason: "failed object interaction records pressure".into(),
+        }]
+    } else {
+        vec![]
+    }
+}
 
-fn patch_kind(p: &ObjectPatch) -> &'static str { match p { ObjectPatch::CreateObjectInstance { .. } => "create_object_instance", ObjectPatch::TransferObject { .. } => "transfer_object", ObjectPatch::SetObjectLocation { .. } => "set_object_location", ObjectPatch::SetObjectVisibility { .. } => "set_object_visibility", ObjectPatch::ModifyQuantity { .. } => "modify_quantity", ObjectPatch::DamageObject { .. } => "damage_object", ObjectPatch::DestroyObject { .. } => "destroy_object", ObjectPatch::AddObjectEdge { .. } => "add_object_edge", ObjectPatch::RemoveObjectEdge { .. } => "remove_object_edge", ObjectPatch::SetMechanicalState { .. } => "set_mechanical_state", ObjectPatch::TransformObject { .. } => "transform_object" } }
-fn patch_object_id(p: &ObjectPatch) -> Option<String> { match p { ObjectPatch::CreateObjectInstance { object, .. } => Some(object.object_id.clone()), ObjectPatch::TransferObject { object_id, .. } | ObjectPatch::SetObjectLocation { object_id, .. } | ObjectPatch::SetObjectVisibility { object_id, .. } | ObjectPatch::ModifyQuantity { object_id, .. } | ObjectPatch::DamageObject { object_id, .. } | ObjectPatch::DestroyObject { object_id, .. } | ObjectPatch::SetMechanicalState { object_id, .. } | ObjectPatch::TransformObject { object_id, .. } => Some(object_id.clone()), ObjectPatch::AddObjectEdge { edge, .. } => Some(edge.from_object_id.clone()), ObjectPatch::RemoveObjectEdge { edge_id, .. } => Some(edge_id.clone()) } }
-fn visible_state(label: &str, known: bool) -> ObjectVisibilityState { ObjectVisibilityState { public_label: Some(label.into()), identified_label: if known { Some(label.into()) } else { None }, gm_label: label.into(), discovery_state: if known { DiscoveryState::Known } else { DiscoveryState::Unknown }, known_by_actor_ids: vec!["pc.current".into()], known_by_player: known, reveal_conditions: vec![] } }
-fn default_affordance_kinds(obj: &ObjectInstance) -> Vec<ObjectInteractionKind> { match obj.object_kind { ObjectKind::Weapon => vec![ObjectInteractionKind::PickUp, ObjectInteractionKind::Drop, ObjectInteractionKind::Equip, ObjectInteractionKind::Use, ObjectInteractionKind::Disarm], ObjectKind::Armor => vec![ObjectInteractionKind::Equip, ObjectInteractionKind::Unequip, ObjectInteractionKind::Inspect], ObjectKind::Lock => vec![ObjectInteractionKind::Unlock, ObjectInteractionKind::Break, ObjectInteractionKind::Inspect], ObjectKind::EnvironmentalFeature | ObjectKind::Device => vec![ObjectInteractionKind::Inspect, ObjectInteractionKind::TraceConnection, ObjectInteractionKind::CutConnection, ObjectInteractionKind::Hack], _ => vec![ObjectInteractionKind::Inspect, ObjectInteractionKind::Use] } }
+fn patch_kind(p: &ObjectPatch) -> &'static str {
+    match p {
+        ObjectPatch::CreateObjectInstance { .. } => "create_object_instance",
+        ObjectPatch::TransferObject { .. } => "transfer_object",
+        ObjectPatch::SetObjectLocation { .. } => "set_object_location",
+        ObjectPatch::SetObjectVisibility { .. } => "set_object_visibility",
+        ObjectPatch::ModifyQuantity { .. } => "modify_quantity",
+        ObjectPatch::DamageObject { .. } => "damage_object",
+        ObjectPatch::DestroyObject { .. } => "destroy_object",
+        ObjectPatch::AddObjectEdge { .. } => "add_object_edge",
+        ObjectPatch::RemoveObjectEdge { .. } => "remove_object_edge",
+        ObjectPatch::SetMechanicalState { .. } => "set_mechanical_state",
+        ObjectPatch::TransformObject { .. } => "transform_object",
+    }
+}
+fn patch_object_id(p: &ObjectPatch) -> Option<String> {
+    match p {
+        ObjectPatch::CreateObjectInstance { object, .. } => Some(object.object_id.clone()),
+        ObjectPatch::TransferObject { object_id, .. }
+        | ObjectPatch::SetObjectLocation { object_id, .. }
+        | ObjectPatch::SetObjectVisibility { object_id, .. }
+        | ObjectPatch::ModifyQuantity { object_id, .. }
+        | ObjectPatch::DamageObject { object_id, .. }
+        | ObjectPatch::DestroyObject { object_id, .. }
+        | ObjectPatch::SetMechanicalState { object_id, .. }
+        | ObjectPatch::TransformObject { object_id, .. } => Some(object_id.clone()),
+        ObjectPatch::AddObjectEdge { edge, .. } => Some(edge.from_object_id.clone()),
+        ObjectPatch::RemoveObjectEdge { edge_id, .. } => Some(edge_id.clone()),
+    }
+}
+fn visible_state(label: &str, known: bool) -> ObjectVisibilityState {
+    ObjectVisibilityState {
+        public_label: Some(label.into()),
+        identified_label: if known { Some(label.into()) } else { None },
+        gm_label: label.into(),
+        discovery_state: if known {
+            DiscoveryState::Known
+        } else {
+            DiscoveryState::Unknown
+        },
+        known_by_actor_ids: vec!["pc.current".into()],
+        known_by_player: known,
+        reveal_conditions: vec![],
+    }
+}
+fn default_affordance_kinds(obj: &ObjectInstance) -> Vec<ObjectInteractionKind> {
+    match obj.object_kind {
+        ObjectKind::Weapon => vec![
+            ObjectInteractionKind::PickUp,
+            ObjectInteractionKind::Drop,
+            ObjectInteractionKind::Equip,
+            ObjectInteractionKind::Use,
+            ObjectInteractionKind::Disarm,
+        ],
+        ObjectKind::Armor => vec![
+            ObjectInteractionKind::Equip,
+            ObjectInteractionKind::Unequip,
+            ObjectInteractionKind::Inspect,
+        ],
+        ObjectKind::Lock => vec![
+            ObjectInteractionKind::Unlock,
+            ObjectInteractionKind::Break,
+            ObjectInteractionKind::Inspect,
+        ],
+        ObjectKind::EnvironmentalFeature | ObjectKind::Device => vec![
+            ObjectInteractionKind::Inspect,
+            ObjectInteractionKind::TraceConnection,
+            ObjectInteractionKind::CutConnection,
+            ObjectInteractionKind::Hack,
+        ],
+        _ => vec![ObjectInteractionKind::Inspect, ObjectInteractionKind::Use],
+    }
+}
+
+fn inventory_weapon_instances_from_sheet(
+    session_id: &str,
+    ruleset_id: &str,
+    actor_id: &str,
+    sheet: &Value,
+    world_tick: i64,
+) -> Vec<ObjectInstance> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for (source_field, text) in inventory_texts_from_sheet(sheet) {
+        let Some(name) = infer_declared_firearm_name(&text) else {
+            continue;
+        };
+        let key = safe_id(&name.to_ascii_lowercase());
+        if !seen.insert(key.clone()) {
+            continue;
+        }
+        let ammo = declared_loaded_rounds(&text);
+        let mut mechanical_state = json!({
+            "source": "created_character_inventory",
+            "hydration": "sheet_declared",
+            "source_field": source_field,
+            "source_text": text.chars().take(240).collect::<String>(),
+        });
+        if let Some(ammo) = ammo {
+            mechanical_state["ammo_current"] = json!(ammo);
+            mechanical_state["ammo_max"] = json!(ammo);
+            mechanical_state["ammo_per_shot"] = json!(1);
+            mechanical_state["out_of_ammo"] = json!(ammo <= 0);
+            mechanical_state["ammo_source"] = json!("declared_loaded_magazine");
+        }
+        let mut object_def_id = None;
+        if let Some((def_id, profile, source_refs)) =
+            source_backed_declared_firearm_profile(ruleset_id, &name, &text)
+        {
+            if let (Some(dst), Some(src)) = (mechanical_state.as_object_mut(), profile.as_object())
+            {
+                for (key, value) in src {
+                    dst.insert(key.clone(), value.clone());
+                }
+                dst.insert("source_refs".into(), json!(source_refs));
+            }
+            object_def_id = Some(def_id);
+        }
+        let mut tags = vec![
+            "weapon".to_string(),
+            "held".to_string(),
+            "firearm".to_string(),
+            "created_character_inventory".to_string(),
+            format!("held_by:{}", actor_id),
+            format!("source_field:{}", safe_id(&source_field)),
+        ];
+        let name_lower = name.to_lowercase();
+        for token in name_lower
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|t| t.len() >= 3)
+        {
+            tags.push(token.to_string());
+        }
+        if let Some(def_id) = object_def_id.as_ref() {
+            tags.push("source_backed_weapon_profile".into());
+            tags.push(format!("def:{}", def_id));
+        }
+        out.push(ObjectInstance {
+            object_id: format!(
+                "obj.{}.{}.created_weapon.{}",
+                safe_id(session_id),
+                safe_id(actor_id),
+                key
+            ),
+            object_def_id,
+            session_id: session_id.into(),
+            scope: Scope {
+                scope_type: ScopeType::Character,
+                scope_id: actor_id.into(),
+            },
+            display_name: name,
+            object_kind: ObjectKind::Weapon,
+            location: ObjectLocation::Held {
+                actor_id: actor_id.into(),
+                hand: Some(HandSlot::Right),
+            },
+            visibility_state: visible_state("declared weapon", true),
+            mechanical_state,
+            tags,
+            created_at_tick: world_tick,
+            updated_at_tick: world_tick,
+            active: true,
+            ..Default::default()
+        });
+    }
+    out
+}
+
+fn source_backed_declared_firearm_profile(
+    ruleset_id: &str,
+    name: &str,
+    text: &str,
+) -> Option<(String, Value, Vec<SourceRef>)> {
+    if ruleset_id != "call_of_cthulhu_7e" {
+        return None;
+    }
+    let hay = format!("{name} {text}").to_ascii_lowercase();
+    let is_45_auto = hay.contains("m1911")
+        || hay.contains("colt .45")
+        || hay.contains(".45 automatic")
+        || (hay.contains(".45") && hay.contains("automatic"));
+    if !is_45_auto {
+        return None;
+    }
+    let source_ref = SourceRef {
+        source_id: "call_of_cthulhu_keeper_rulebook_40th_anniversary_sandy_petersen".into(),
+        page: Some(414),
+        anchor_id: Some(
+            "call_of_cthulhu_keeper_rulebook_40th_anniversary_sandy_petersen:page:414".into(),
+        ),
+        section_path: vec![],
+        char_start: None,
+        char_end: None,
+        text_hash: None,
+        note: Some("weapon table row: .45 Automatic / Firearms (handgun) / 1D10+2 / 15 yards / 1 (3) / 7 / malfunction 100".into()),
+    };
+    let profile = json!({
+        "weapon_profile_source": "source_backed_table_row",
+        "rules_table_name": ".45 Automatic",
+        "skill": "Firearms (Handgun)",
+        "damage_expression": "1d10+2",
+        "base_range": "15 yards",
+        "attacks_per_round": "1 (3)",
+        "ammo_capacity": 7,
+        "malfunction": 100,
+        "cost_1920s": "$40",
+        "cost_modern": "$375",
+        "era": "1920s, Modern",
+        "source_row": ".45 Automatic      Firearms (handgun)      1D10+2      15 yards      1 (3)      7      $40/$375      100      1920s, Modern"
+    });
+    Some((
+        format!("{}.weapon.45_automatic", safe_id(ruleset_id)),
+        profile,
+        vec![source_ref],
+    ))
+}
+
+fn definition_for_source_backed_declared_weapon(
+    ruleset_id: &str,
+    obj: &ObjectInstance,
+) -> Option<ObjectDefinition> {
+    let object_def_id = obj.object_def_id.clone()?;
+    if obj
+        .mechanical_state
+        .get("weapon_profile_source")
+        .and_then(|v| v.as_str())
+        != Some("source_backed_table_row")
+    {
+        return None;
+    }
+    let source_refs: Vec<SourceRef> = obj
+        .mechanical_state
+        .get("source_refs")
+        .cloned()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    Some(ObjectDefinition {
+        object_def_id,
+        ruleset_id: ruleset_id.into(),
+        name: obj
+            .mechanical_state
+            .get("rules_table_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&obj.display_name)
+            .into(),
+        object_kind: ObjectKind::Weapon,
+        tags: obj.tags.clone(),
+        mechanical_profile: obj.mechanical_state.clone(),
+        rule_bindings: vec![],
+        default_affordances: vec![ObjectInteractionKind::Use, ObjectInteractionKind::Reload],
+        equip_slots: vec![EquipSlotKind::MainHand],
+        visibility_default: Visibility::GmOnly,
+        source_refs,
+    })
+}
+
+fn inventory_texts_from_sheet(sheet: &Value) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    collect_inventory_texts(sheet, "", false, &mut out);
+    out
+}
+
+fn collect_inventory_texts(
+    value: &Value,
+    key_path: &str,
+    in_inventory: bool,
+    out: &mut Vec<(String, String)>,
+) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                let path = if key_path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{key_path}.{key}")
+                };
+                let relevant = in_inventory || is_inventory_key(key);
+                collect_inventory_texts(child, &path, relevant, out);
+            }
+        }
+        Value::Array(items) => {
+            if in_inventory {
+                let text = items
+                    .iter()
+                    .filter_map(compact_inventory_value)
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                if !text.trim().is_empty() {
+                    out.push((key_path.to_string(), text));
+                }
+            }
+            for child in items {
+                collect_inventory_texts(child, key_path, in_inventory, out);
+            }
+        }
+        _ if in_inventory => {
+            if let Some(text) = compact_inventory_value(value) {
+                if !text.trim().is_empty() {
+                    out.push((key_path.to_string(), text));
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_inventory_key(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    [
+        "possessions",
+        "equipment",
+        "inventory",
+        "gear",
+        "weapons",
+        "weapon",
+        "items",
+        "belongings",
+        "kit",
+        "loadout",
+        "物品",
+        "装备",
+        "武器",
+        "随身物品",
+    ]
+    .iter()
+    .any(|term| lower.contains(term))
+}
+
+fn compact_inventory_value(value: &Value) -> Option<String> {
+    match value {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Bool(b) => Some(b.to_string()),
+        Value::Array(items) => {
+            let text = items
+                .iter()
+                .filter_map(compact_inventory_value)
+                .collect::<Vec<_>>()
+                .join(", ");
+            (!text.trim().is_empty()).then_some(text)
+        }
+        Value::Object(map) => {
+            let mut parts = Vec::new();
+            for (key, child) in map {
+                if let Some(v) = compact_inventory_value(child) {
+                    parts.push(format!("{key}: {v}"));
+                }
+            }
+            let text = parts.join(", ");
+            (!text.trim().is_empty()).then_some(text)
+        }
+        Value::Null => None,
+    }
+}
+
+fn infer_declared_firearm_name(text: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+    if !contains_any(
+        &lower,
+        &[
+            "m1911",
+            "handgun",
+            "pistol",
+            "revolver",
+            "rifle",
+            "shotgun",
+            "firearm",
+            "gun",
+            "手枪",
+            "左轮",
+            "步枪",
+            "霰弹枪",
+            "猎枪",
+            "枪",
+        ],
+    ) {
+        return None;
+    }
+    if lower.contains("colt m1911") {
+        return Some("Colt M1911".into());
+    }
+    if lower.contains("m1911") {
+        return Some("M1911".into());
+    }
+    let known = [
+        ("heavy handgun", "Heavy handgun"),
+        ("handgun", "Handgun"),
+        ("pistol", "Pistol"),
+        ("revolver", "Revolver"),
+        ("shotgun", "Shotgun"),
+        ("rifle", "Rifle"),
+        ("firearm", "Firearm"),
+        ("gun", "Gun"),
+        ("重型手枪", "重型手枪"),
+        ("手枪", "手枪"),
+        ("左轮", "左轮手枪"),
+        ("霰弹枪", "霰弹枪"),
+        ("猎枪", "猎枪"),
+        ("步枪", "步枪"),
+    ];
+    known
+        .iter()
+        .find_map(|(needle, name)| lower.contains(needle).then(|| (*name).to_string()))
+}
+
+fn declared_loaded_rounds(text: &str) -> Option<i64> {
+    let lower = text.to_lowercase();
+    let bytes = lower.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            let start = i;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            let prev = start.checked_sub(1).map(|idx| bytes[idx]);
+            let next = bytes.get(i).copied();
+            if prev == Some(b'.')
+                || prev.map(|b| b.is_ascii_alphabetic()).unwrap_or(false)
+                || next.map(|b| b.is_ascii_alphabetic()).unwrap_or(false)
+            {
+                continue;
+            }
+            let n = lower[start..i].parse::<i64>().ok()?;
+            if ammo_window_mentions_rounds(&lower, start, i) {
+                return Some(n);
+            }
+            continue;
+        }
+        i += 1;
+    }
+    for (word, n) in [
+        ("one", 1),
+        ("two", 2),
+        ("three", 3),
+        ("four", 4),
+        ("five", 5),
+        ("six", 6),
+        ("seven", 7),
+        ("eight", 8),
+        ("nine", 9),
+        ("ten", 10),
+        ("eleven", 11),
+        ("twelve", 12),
+        ("一", 1),
+        ("二", 2),
+        ("两", 2),
+        ("三", 3),
+        ("四", 4),
+        ("五", 5),
+        ("六", 6),
+        ("七", 7),
+        ("八", 8),
+        ("九", 9),
+        ("十", 10),
+    ] {
+        if let Some(start) = lower.find(word) {
+            if ammo_window_mentions_rounds(&lower, start, start + word.len()) {
+                return Some(n);
+            }
+        }
+    }
+    None
+}
+
+fn ammo_window_mentions_rounds(lower: &str, start: usize, end: usize) -> bool {
+    let before = lower[..start]
+        .chars()
+        .rev()
+        .take(20)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    let after = lower[end..].chars().take(36).collect::<String>();
+    let window = format!("{before}{}{after}", &lower[start..end]);
+    (contains_any(
+        &after,
+        &[
+            "round",
+            "rounds",
+            "magazine",
+            "clip",
+            "ammo",
+            "cartridge",
+            "bullet",
+            "发",
+            "弹匣",
+            "子弹",
+        ],
+    ) || (contains_any(&before, &["loaded", "装填"])
+        && contains_any(
+            &window,
+            &["round", "rounds", "magazine", "clip", "发", "弹匣", "子弹"],
+        )))
+        && !window.contains("dodge")
+}
 
 fn row_to_object(row: sqlx::postgres::PgRow) -> Result<ObjectInstance> {
     let scope_type: String = row.get("scope_type");
-    let scope = Scope { scope_type: scope_type_from_str(&scope_type), scope_id: row.get("scope_id") };
-    let object_kind = object_kind_from_str(&row.get::<String,_>("object_kind"));
+    let scope = Scope {
+        scope_type: scope_type_from_str(&scope_type),
+        scope_id: row.get("scope_id"),
+    };
+    let object_kind = object_kind_from_str(&row.get::<String, _>("object_kind"));
     let durability_json: Option<serde_json::Value> = row.get("durability_json");
-    let durability = durability_json.and_then(|v| serde_json::from_value::<DurabilityState>(v).ok());
+    let durability =
+        durability_json.and_then(|v| serde_json::from_value::<DurabilityState>(v).ok());
     Ok(ObjectInstance {
         object_id: row.get("object_id"),
         object_def_id: row.get("object_def_id"),
@@ -981,12 +2621,60 @@ fn row_to_object(row: sqlx::postgres::PgRow) -> Result<ObjectInstance> {
         mechanical_state: row.get("mechanical_state"),
         tags: row.get("tags"),
         active: row.get("active"),
-        created_at_tick: row.get::<Option<i64>,_>("created_at_tick").unwrap_or_default(),
-        updated_at_tick: row.get::<Option<i64>,_>("updated_at_tick").unwrap_or_default(),
+        created_at_tick: row
+            .get::<Option<i64>, _>("created_at_tick")
+            .unwrap_or_default(),
+        updated_at_tick: row
+            .get::<Option<i64>, _>("updated_at_tick")
+            .unwrap_or_default(),
     })
 }
-fn object_kind_from_str(s: &str) -> ObjectKind { match s { "weapon" => ObjectKind::Weapon, "armor" => ObjectKind::Armor, "shield" => ObjectKind::Shield, "tool" => ObjectKind::Tool, "consumable" => ObjectKind::Consumable, "ammo" => ObjectKind::Ammo, "container" => ObjectKind::Container, "door" => ObjectKind::Door, "lock" => ObjectKind::Lock, "vehicle" => ObjectKind::Vehicle, "vehicle_part" => ObjectKind::VehiclePart, "cyberware" => ObjectKind::Cyberware, "program" => ObjectKind::Program, "device" => ObjectKind::Device, "document" => ObjectKind::Document, "key" => ObjectKind::Key, "clue" => ObjectKind::Clue, "currency" => ObjectKind::Currency, "quest_item" => ObjectKind::QuestItem, "environmental_feature" => ObjectKind::EnvironmentalFeature, "structure" => ObjectKind::Structure, "hazard_object" => ObjectKind::HazardObject, "anomaly_object" => ObjectKind::AnomalyObject, _ => ObjectKind::Unknown } }
-fn scope_type_from_str(s: &str) -> ScopeType { match s { "ruleset" => ScopeType::Ruleset, "module" => ScopeType::Module, "campaign" => ScopeType::Campaign, "chapter" => ScopeType::Chapter, "mission" => ScopeType::Mission, "location" => ScopeType::Location, "npc" => ScopeType::Npc, "session" => ScopeType::Session, "scene" => ScopeType::Scene, "turn" => ScopeType::Turn, "material" => ScopeType::Material, "character" => ScopeType::Character, "object" => ScopeType::Object, _ => ScopeType::Global } }
+fn object_kind_from_str(s: &str) -> ObjectKind {
+    match s {
+        "weapon" => ObjectKind::Weapon,
+        "armor" => ObjectKind::Armor,
+        "shield" => ObjectKind::Shield,
+        "tool" => ObjectKind::Tool,
+        "consumable" => ObjectKind::Consumable,
+        "ammo" => ObjectKind::Ammo,
+        "container" => ObjectKind::Container,
+        "door" => ObjectKind::Door,
+        "lock" => ObjectKind::Lock,
+        "vehicle" => ObjectKind::Vehicle,
+        "vehicle_part" => ObjectKind::VehiclePart,
+        "cyberware" => ObjectKind::Cyberware,
+        "program" => ObjectKind::Program,
+        "device" => ObjectKind::Device,
+        "document" => ObjectKind::Document,
+        "key" => ObjectKind::Key,
+        "clue" => ObjectKind::Clue,
+        "currency" => ObjectKind::Currency,
+        "quest_item" => ObjectKind::QuestItem,
+        "environmental_feature" => ObjectKind::EnvironmentalFeature,
+        "structure" => ObjectKind::Structure,
+        "hazard_object" => ObjectKind::HazardObject,
+        "anomaly_object" => ObjectKind::AnomalyObject,
+        _ => ObjectKind::Unknown,
+    }
+}
+fn scope_type_from_str(s: &str) -> ScopeType {
+    match s {
+        "ruleset" => ScopeType::Ruleset,
+        "module" => ScopeType::Module,
+        "campaign" => ScopeType::Campaign,
+        "chapter" => ScopeType::Chapter,
+        "mission" => ScopeType::Mission,
+        "location" => ScopeType::Location,
+        "npc" => ScopeType::Npc,
+        "session" => ScopeType::Session,
+        "scene" => ScopeType::Scene,
+        "turn" => ScopeType::Turn,
+        "material" => ScopeType::Material,
+        "character" => ScopeType::Character,
+        "object" => ScopeType::Object,
+        _ => ScopeType::Global,
+    }
+}
 
 #[cfg(test)]
 mod object_use_tests {
@@ -994,30 +2682,180 @@ mod object_use_tests {
     use serde_json::json;
 
     fn obj(name: &str, mech: serde_json::Value, tags: Vec<&str>) -> ObjectInstance {
-        ObjectInstance { object_id: "o1".into(), display_name: name.into(), mechanical_state: mech, tags: tags.into_iter().map(String::from).collect(), ..Default::default() }
+        ObjectInstance {
+            object_id: "o1".into(),
+            display_name: name.into(),
+            mechanical_state: mech,
+            tags: tags.into_iter().map(String::from).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn created_character_inventory_seeds_loaded_firearm() {
+        let sheet = json!({
+            "name": "test investigator",
+            "skills": {"Firearms (Handgun)": 60},
+            "possessions": "Colt M1911 .45 automatic heavy handgun, one loaded 7-round magazine, notebook, flashlight"
+        });
+        let objects = inventory_weapon_instances_from_sheet(
+            "session.test",
+            "call_of_cthulhu_7e",
+            "pc.current",
+            &sheet,
+            12,
+        );
+        assert_eq!(objects.len(), 1);
+        let pistol = &objects[0];
+        assert_eq!(pistol.display_name, "Colt M1911");
+        assert_eq!(
+            pistol
+                .mechanical_state
+                .get("ammo_current")
+                .and_then(|v| v.as_i64()),
+            Some(7)
+        );
+        assert_eq!(
+            pistol
+                .mechanical_state
+                .get("ammo_max")
+                .and_then(|v| v.as_i64()),
+            Some(7)
+        );
+        assert_eq!(
+            pistol
+                .mechanical_state
+                .get("damage_expression")
+                .and_then(|v| v.as_str()),
+            Some("1d10+2")
+        );
+        assert_eq!(
+            pistol.object_def_id.as_deref(),
+            Some("call_of_cthulhu_7e.weapon.45_automatic")
+        );
+        assert!(pistol.tags.iter().any(|t| t == "held_by:pc.current"));
+        assert!(pistol
+            .tags
+            .iter()
+            .any(|t| t == "created_character_inventory"));
+    }
+
+    fn contract_for_trigger(intent: &str, label: &str, summary: &str) -> CheckContract {
+        CheckContract {
+            check_id: "check.trigger".into(),
+            session_id: "s".into(),
+            turn_id: "t".into(),
+            ruleset_id: "call_of_cthulhu_7e".into(),
+            module_id: None,
+            initiator: ActorRef {
+                actor_id: "pc.current".into(),
+                actor_kind: ActorKind::PlayerCharacter,
+                display_name: None,
+            },
+            target_actor: None,
+            opposition: OppositionModel::NoMechanicalOpposition,
+            action_summary: summary.into(),
+            intent_kind: intent.into(),
+            check_label: label.into(),
+            dice_expression: "1d100".into(),
+            modifiers: vec![],
+            target: CheckTargetModel::UnknownUntilLookup,
+            tested_parameter: Some(TestedParameter {
+                domain: None,
+                key: "Firearms (Handgun)".into(),
+                label: "Firearms (Handgun)".into(),
+            }),
+            opponent_tested_parameter: None,
+            actor_snapshot_ids: vec![],
+            source_refs: vec![],
+            learned_packet_ids: vec![],
+            roll_visibility: RollVisibility::PublicGmRoll,
+            roll_authority: RollAuthority::System,
+            disclosure: RollDisclosurePolicy::for_visibility(RollVisibility::PublicGmRoll),
+            stakes: CheckStakes::default(),
+            confidence: RulingConfidence::Medium,
+            ruling_status: RulingStatus::SourceBacked,
+            advice_refs: vec![],
+            expires_at_turn: None,
+        }
+    }
+
+    #[test]
+    fn firearm_shot_intents_trigger_ammo_without_attack_word() {
+        let c = contract_for_trigger("aimed_shot", "M1911 瞄准射击", "开枪打持枪手");
+        assert!(matches!(
+            trigger_for_contract(&c),
+            Some(ObjectRuleTrigger::OnAttack)
+        ));
+
+        let damage = contract_for_trigger("effect_roll", "M1911 damage", "damage after hit");
+        assert!(
+            trigger_for_contract(&damage).is_none(),
+            "effect/damage follow-up must not spend another round"
+        );
+    }
+
+    #[test]
+    fn initiative_with_shooting_summary_does_not_trigger_ammo() {
+        let mut c = contract_for_trigger("combat_order", "战斗顺序", "玩家拔出 M1911 开枪打持枪手");
+        c.tested_parameter = Some(TestedParameter {
+            domain: None,
+            key: "DEX".into(),
+            label: "DEX".into(),
+        });
+        assert!(
+            trigger_for_contract(&c).is_none(),
+            "initiative/order checks must not spend ammo just because the original action summary mentions shooting"
+        );
     }
 
     #[test]
     fn reference_prefers_named_owned_object() {
         // "用魔杖" must pick the 法杖 (shares 杖), not the held pistol.
-        let wand = obj("奥术法杖", json!({"charges":1}), vec!["held_by:pc.current","device"]);
-        let pistol = obj("Heavy Pistol", json!({"ammo_current":8}), vec!["held_by:pc.current","weapon"]);
+        let wand = obj(
+            "奥术法杖",
+            json!({"charges":1}),
+            vec!["held_by:pc.current", "device"],
+        );
+        let pistol = obj(
+            "Heavy Pistol",
+            json!({"ammo_current":8}),
+            vec!["held_by:pc.current", "weapon"],
+        );
         let input = "用魔杖".to_lowercase();
-        assert!(reference_score(&input, &wand) > 0, "wand shares 杖 with 魔杖");
+        assert!(
+            reference_score(&input, &wand) > 0,
+            "wand shares 杖 with 魔杖"
+        );
         assert_eq!(reference_score(&input, &pistol), 0, "pistol has no overlap");
         assert!(reference_score(&input, &wand) > reference_score(&input, &pistol));
     }
 
     #[test]
     fn use_charged_decrements_then_transforms_to_declared_form() {
-        let w3 = obj("奥术法杖", json!({"charges":3,"depleted_kind":"tool","depleted_name":"朽木棍"}), vec![]);
+        let w3 = obj(
+            "奥术法杖",
+            json!({"charges":3,"depleted_kind":"tool","depleted_name":"朽木棍"}),
+            vec![],
+        );
         match &success_patches_for("pc.current", None, &w3, ObjectInteractionKind::Use)[..] {
-            [ObjectPatch::SetMechanicalState { patch_json, .. }] => assert_eq!(patch_json.get("charges").and_then(|v| v.as_i64()), Some(2)),
+            [ObjectPatch::SetMechanicalState { patch_json, .. }] => {
+                assert_eq!(patch_json.get("charges").and_then(|v| v.as_i64()), Some(2))
+            }
             _ => panic!("3 charges -> set charges=2"),
         }
-        let w1 = obj("奥术法杖", json!({"charges":1,"depleted_kind":"tool","depleted_name":"朽木棍"}), vec![]);
+        let w1 = obj(
+            "奥术法杖",
+            json!({"charges":1,"depleted_kind":"tool","depleted_name":"朽木棍"}),
+            vec![],
+        );
         match &success_patches_for("pc.current", None, &w1, ObjectInteractionKind::Use)[..] {
-            [ObjectPatch::TransformObject { new_name, new_kind, .. }] => { assert_eq!(new_name.as_deref(), Some("朽木棍")); assert_eq!(*new_kind, Some(ObjectKind::Tool)); }
+            [ObjectPatch::TransformObject {
+                new_name, new_kind, ..
+            }] => {
+                assert_eq!(new_name.as_deref(), Some("朽木棍"));
+                assert_eq!(*new_kind, Some(ObjectKind::Tool));
+            }
             _ => panic!("last charge + declared form -> transform"),
         }
     }
@@ -1026,7 +2864,13 @@ mod object_use_tests {
     fn use_last_charge_without_declared_form_just_marks_spent() {
         let w = obj("通用药剂", json!({"charges":1}), vec![]);
         match &success_patches_for("pc.current", None, &w, ObjectInteractionKind::Use)[..] {
-            [ObjectPatch::SetMechanicalState { patch_json, .. }] => { assert_eq!(patch_json.get("charges").and_then(|v| v.as_i64()), Some(0)); assert_eq!(patch_json.get("depleted").and_then(|v| v.as_bool()), Some(true)); }
+            [ObjectPatch::SetMechanicalState { patch_json, .. }] => {
+                assert_eq!(patch_json.get("charges").and_then(|v| v.as_i64()), Some(0));
+                assert_eq!(
+                    patch_json.get("depleted").and_then(|v| v.as_bool()),
+                    Some(true)
+                );
+            }
             _ => panic!("no declared form -> mark spent (no transform)"),
         }
     }
@@ -1034,13 +2878,26 @@ mod object_use_tests {
     #[test]
     fn use_noncharged_object_is_narration_only() {
         let w = obj("一块石头", json!({}), vec![]);
-        assert!(success_patches_for("pc.current", None, &w, ObjectInteractionKind::Use).is_empty(), "non-charged Use is narration-only");
+        assert!(
+            success_patches_for("pc.current", None, &w, ObjectInteractionKind::Use).is_empty(),
+            "non-charged Use is narration-only"
+        );
     }
 
     #[test]
     fn use_respects_charge_cost() {
-        let w = obj("法杖", json!({"charges":2,"charge_cost":2,"depleted_name":"灰烬"}), vec![]);
-        assert!(matches!(&success_patches_for("pc.current", None, &w, ObjectInteractionKind::Use)[..], [ObjectPatch::TransformObject { .. }]), "cost 2 from 2 -> deplete -> transform");
+        let w = obj(
+            "法杖",
+            json!({"charges":2,"charge_cost":2,"depleted_name":"灰烬"}),
+            vec![],
+        );
+        assert!(
+            matches!(
+                &success_patches_for("pc.current", None, &w, ObjectInteractionKind::Use)[..],
+                [ObjectPatch::TransformObject { .. }]
+            ),
+            "cost 2 from 2 -> deplete -> transform"
+        );
     }
 }
 
@@ -1062,10 +2919,21 @@ mod loot_tests {
         let mut seen = std::collections::HashMap::new();
         for p in &patches {
             if let ObjectPatch::CreateObjectInstance { object, .. } = p {
-                seen.insert(object.display_name.clone(), (object.object_kind, object.quantity));
-            } else { panic!("loot must construct CreateObjectInstance, got {}", patch_kind(p)); }
+                seen.insert(
+                    object.display_name.clone(),
+                    (object.object_kind, object.quantity),
+                );
+            } else {
+                panic!(
+                    "loot must construct CreateObjectInstance, got {}",
+                    patch_kind(p)
+                );
+            }
         }
-        assert_eq!(seen.get(".38左轮手枪"), Some(&(ObjectKind::Weapon, Some(1))));
+        assert_eq!(
+            seen.get(".38左轮手枪"),
+            Some(&(ObjectKind::Weapon, Some(1)))
+        );
         assert_eq!(seen.get(".38子弹"), Some(&(ObjectKind::Ammo, Some(12))));
     }
 
@@ -1073,27 +2941,41 @@ mod loot_tests {
     fn loot_without_declared_contents_yields_nothing() {
         // Fail closed: no source-backed contents => no fabricated items.
         assert!(loot_patches_from_contents(&json!({}), "s", "pc.current").is_empty());
-        assert!(loot_patches_from_contents(&json!({"loot_contents": []}), "s", "pc.current").is_empty());
+        assert!(
+            loot_patches_from_contents(&json!({"loot_contents": []}), "s", "pc.current").is_empty()
+        );
     }
 
     #[test]
     fn loot_success_arm_reveals_and_spawns() {
         let body = ObjectInstance {
-            object_id: "body1".into(), session_id: "s".into(), display_name: "倒下的盗匪".into(),
+            object_id: "body1".into(),
+            session_id: "s".into(),
+            display_name: "倒下的盗匪".into(),
             mechanical_state: json!({"loot_contents":[{"name":"钥匙","kind":"key","quantity":1}]}),
             ..Default::default()
         };
         let patches = success_patches_for("pc.current", None, &body, ObjectInteractionKind::Loot);
         // reveal + 1 created item
-        assert!(patches.iter().any(|p| matches!(p, ObjectPatch::SetObjectVisibility { .. })));
-        assert!(patches.iter().any(|p| matches!(p, ObjectPatch::CreateObjectInstance { .. })));
+        assert!(patches
+            .iter()
+            .any(|p| matches!(p, ObjectPatch::SetObjectVisibility { .. })));
+        assert!(patches
+            .iter()
+            .any(|p| matches!(p, ObjectPatch::CreateObjectInstance { .. })));
     }
 
     #[test]
     fn semantic_loot_search_kinds_parse() {
         // The semantic classifier's loot/search are recognized (not downgraded to Inspect).
-        assert!(matches!(parse_object_interaction_kind("loot"), Some(ObjectInteractionKind::Loot)));
-        assert!(matches!(parse_object_interaction_kind("search"), Some(ObjectInteractionKind::Search)));
+        assert!(matches!(
+            parse_object_interaction_kind("loot"),
+            Some(ObjectInteractionKind::Loot)
+        ));
+        assert!(matches!(
+            parse_object_interaction_kind("search"),
+            Some(ObjectInteractionKind::Search)
+        ));
         assert!(parse_object_interaction_kind("nonsense").is_none());
     }
 
@@ -1102,13 +2984,26 @@ mod loot_tests {
         // Retired weapon_definition_for: an item with no source def gets a
         // provisional seed — NO damage/ammo/rof fabricated, and clarification_needed
         // so the smart GM asks + verifies against the rules (branch 1).
-        let (_id, name, profile) = provisional_item_seed("cyberpunk_red", "我从裤裆掏出一个阿斯塔特");
+        let (_id, name, profile) =
+            provisional_item_seed("cyberpunk_red", "我从裤裆掏出一个阿斯塔特");
         assert_eq!(name, "unresolved item");
-        assert_eq!(profile.get("clarification_needed").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            profile
+                .get("clarification_needed")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
         for fabricated in ["damage", "ammo_max", "ammo_current", "rof", "armor"] {
-            assert!(profile.get(fabricated).is_none(), "must NOT fabricate {fabricated} for an unsourced item");
+            assert!(
+                profile.get(fabricated).is_none(),
+                "must NOT fabricate {fabricated} for an unsourced item"
+            );
         }
-        assert!(profile.get("referenced_as").and_then(|v| v.as_str()).unwrap_or("").contains("阿斯塔特"));
+        assert!(profile
+            .get("referenced_as")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .contains("阿斯塔特"));
     }
 }
 
@@ -1121,9 +3016,8 @@ mod check_label_policy_tests {
     use std::collections::BTreeMap;
 
     fn kernel_with_disarm_label(label: &str) -> RuleKernel {
-        let mut k: RuleKernel = serde_json::from_str(
-            r#"{"kernel_id":"t","ruleset_id":"t","version":"1"}"#
-        ).unwrap();
+        let mut k: RuleKernel =
+            serde_json::from_str(r#"{"kernel_id":"t","ruleset_id":"t","version":"1"}"#).unwrap();
         let mut labels = BTreeMap::new();
         labels.insert("disarm".to_string(), label.to_string());
         labels.insert("grab_held_object".to_string(), label.to_string());
@@ -1147,28 +3041,40 @@ mod check_label_policy_tests {
     #[test]
     fn no_policy_gives_generic_disarm_label() {
         let k: RuleKernel = serde_json::from_str(
-            r#"{"kernel_id":"t","ruleset_id":"call_of_cthulhu_7e","version":"1"}"#
-        ).unwrap();
-        assert!(k.check_label_policy.is_none(), "non-cyberpunk must have no check_label_policy");
+            r#"{"kernel_id":"t","ruleset_id":"call_of_cthulhu_7e","version":"1"}"#,
+        )
+        .unwrap();
+        assert!(
+            k.check_label_policy.is_none(),
+            "non-cyberpunk must have no check_label_policy"
+        );
         // Generic fallback (from make_object_check):
         let generic = match ObjectInteractionKind::GrabHeldObject {
-            ObjectInteractionKind::GrabHeldObject | ObjectInteractionKind::Disarm =>
-                "appropriate opposed disarm / athletics check",
+            ObjectInteractionKind::GrabHeldObject | ObjectInteractionKind::Disarm => {
+                "appropriate opposed disarm / athletics check"
+            }
             _ => "appropriate object interaction check",
         };
-        assert!(!generic.to_lowercase().contains("cyberpunk"),
-            "generic label must not mention cyberpunk; got {:?}", generic);
-        assert!(!generic.to_lowercase().contains("brawling"),
-            "generic label must not mention brawling; got {:?}", generic);
+        assert!(
+            !generic.to_lowercase().contains("cyberpunk"),
+            "generic label must not mention cyberpunk; got {:?}",
+            generic
+        );
+        assert!(
+            !generic.to_lowercase().contains("brawling"),
+            "generic label must not mention brawling; got {:?}",
+            generic
+        );
     }
 
     /// Policy present but key missing → generic fallback.
     #[test]
     fn policy_missing_key_falls_back_to_generic() {
-        let mut k: RuleKernel = serde_json::from_str(
-            r#"{"kernel_id":"t","ruleset_id":"t","version":"1"}"#
-        ).unwrap();
-        k.check_label_policy = Some(CheckLabelPolicy { labels: BTreeMap::new() });
+        let mut k: RuleKernel =
+            serde_json::from_str(r#"{"kernel_id":"t","ruleset_id":"t","version":"1"}"#).unwrap();
+        k.check_label_policy = Some(CheckLabelPolicy {
+            labels: BTreeMap::new(),
+        });
         let policy = k.check_label_policy.as_ref().unwrap();
         // "unlock" is not in the empty policy → engine would use generic
         assert!(policy.labels.get("unlock").is_none());
@@ -1180,22 +3086,43 @@ mod check_label_policy_tests {
     /// Legacy: only GrabHeldObject|Disarm is ruleset-driven (object-namespaced
     /// key); every other kind uses a FIXED string — Hack → generic.
     fn cyberpunk_kernel() -> RuleKernel {
-        let mut k: RuleKernel = serde_json::from_str(
-            r#"{"kernel_id":"t","ruleset_id":"cyberpunk_red","version":"1"}"#
-        ).unwrap();
+        let mut k: RuleKernel =
+            serde_json::from_str(r#"{"kernel_id":"t","ruleset_id":"cyberpunk_red","version":"1"}"#)
+                .unwrap();
         let mut labels = BTreeMap::new();
         // combat TECH labels shared on the map (these must NOT leak into Hack):
-        labels.insert("hack".to_string(), "appropriate TECH / Interface / Basic Tech check".to_string());
-        labels.insert("disable_device".to_string(), "appropriate TECH / Interface / Basic Tech check".to_string());
+        labels.insert(
+            "hack".to_string(),
+            "appropriate TECH / Interface / Basic Tech check".to_string(),
+        );
+        labels.insert(
+            "disable_device".to_string(),
+            "appropriate TECH / Interface / Basic Tech check".to_string(),
+        );
         // object-namespaced grab/disarm label:
-        labels.insert("object.grab_disarm".to_string(), "DEX + Brawling contested grab/disarm check".to_string());
+        labels.insert(
+            "object.grab_disarm".to_string(),
+            "DEX + Brawling contested grab/disarm check".to_string(),
+        );
         k.check_label_policy = Some(CheckLabelPolicy { labels });
         k
     }
 
     fn check_label_for_kind(kind: ObjectInteractionKind, kernel: Option<&RuleKernel>) -> String {
-        let input = ObjectTurnInput { session_id: "s", turn_id: "t", ruleset_id: "cyberpunk_red", module_id: None, actor_id: Some("pc"), frame_id: None, user_input: "x" };
-        let object = ObjectInstance { object_id: "o1".into(), display_name: "thing".into(), ..Default::default() };
+        let input = ObjectTurnInput {
+            session_id: "s",
+            turn_id: "t",
+            ruleset_id: "cyberpunk_red",
+            module_id: None,
+            actor_id: Some("pc"),
+            frame_id: None,
+            user_input: "x",
+        };
+        let object = ObjectInstance {
+            object_id: "o1".into(),
+            display_name: "thing".into(),
+            ..Default::default()
+        };
         make_object_check(input, "pc", None, &object, kind, None, None, vec![], kernel).check_label
     }
 
@@ -1218,10 +3145,22 @@ mod check_label_policy_tests {
             "DEX + Brawling contested grab/disarm check"
         );
         // Other fixed legacy strings unaffected by the shared map.
-        assert_eq!(check_label_for_kind(ObjectInteractionKind::Unlock, Some(&k)), "appropriate lockpicking / technical unlock check");
-        assert_eq!(check_label_for_kind(ObjectInteractionKind::CutConnection, Some(&k)), "appropriate technical analysis / cable handling check");
-        assert_eq!(check_label_for_kind(ObjectInteractionKind::Steal, Some(&k)), "appropriate stealth / sleight / search check");
+        assert_eq!(
+            check_label_for_kind(ObjectInteractionKind::Unlock, Some(&k)),
+            "appropriate lockpicking / technical unlock check"
+        );
+        assert_eq!(
+            check_label_for_kind(ObjectInteractionKind::CutConnection, Some(&k)),
+            "appropriate technical analysis / cable handling check"
+        );
+        assert_eq!(
+            check_label_for_kind(ObjectInteractionKind::Steal, Some(&k)),
+            "appropriate stealth / sleight / search check"
+        );
         // No kernel → grab/disarm uses the fixed default, not a panic.
-        assert_eq!(check_label_for_kind(ObjectInteractionKind::Disarm, None), "appropriate opposed disarm / athletics check");
+        assert_eq!(
+            check_label_for_kind(ObjectInteractionKind::Disarm, None),
+            "appropriate opposed disarm / athletics check"
+        );
     }
 }

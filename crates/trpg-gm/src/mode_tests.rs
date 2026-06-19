@@ -42,7 +42,10 @@ fn frame(kind: FrameKind, status: FrameStatus) -> StateFrame {
         ruleset_id: "rs".into(),
         module_id: None,
         parent_frame_id: None,
-        scope: Scope { scope_type: ScopeType::Session, scope_id: "s".into() },
+        scope: Scope {
+            scope_type: ScopeType::Session,
+            scope_id: "s".into(),
+        },
         status,
         title: "t".into(),
         objective: "o".into(),
@@ -68,8 +71,18 @@ fn engine_request_state() -> (RuntimeEngine, ContextRequest, RuntimeState) {
         .expect("lazy pool");
     let engine = RuntimeEngine::new(Db { pool });
     let session_id = format!("mode_test_{}", uuid::Uuid::new_v4().simple());
-    let request = ContextRequest { ruleset_id: "rs".into(), module_id: None, session_id, turn_id: "t".into(), viewer: VisibilityProfile::gm(), token_budget: TokenBudget::default() };
-    let state = RuntimeState { ruleset_id: "rs".into(), ..Default::default() };
+    let request = ContextRequest {
+        ruleset_id: "rs".into(),
+        module_id: None,
+        session_id,
+        turn_id: "t".into(),
+        viewer: VisibilityProfile::gm(),
+        token_budget: TokenBudget::default(),
+    };
+    let state = RuntimeState {
+        ruleset_id: "rs".into(),
+        ..Default::default()
+    };
     (engine, request, state)
 }
 
@@ -77,15 +90,32 @@ fn engine_request_state() -> (RuntimeEngine, ContextRequest, RuntimeState) {
 fn load_mode_manifest_is_fail_closed() {
     let dir = temp_data_dir();
     // 不存在 → Err。
-    assert!(load_mode_manifest(&dir, "combat").is_err(), "missing manifest must Err");
+    assert!(
+        load_mode_manifest(&dir, "combat").is_err(),
+        "missing manifest must Err"
+    );
     // 解析失败 → Err。
     write_manifest(&dir, "combat", "{not json");
-    assert!(load_mode_manifest(&dir, "combat").is_err(), "broken JSON must Err");
+    assert!(
+        load_mode_manifest(&dir, "combat").is_err(),
+        "broken JSON must Err"
+    );
     // mode_id 与文件夹名不一致 → Err（fail-closed 配置错误）。
-    write_manifest(&dir, "combat", r#"{"mode_id":"downtime","frame_kind":"combat"}"#);
-    assert!(load_mode_manifest(&dir, "combat").is_err(), "mode_id/folder mismatch must Err");
+    write_manifest(
+        &dir,
+        "combat",
+        r#"{"mode_id":"downtime","frame_kind":"combat"}"#,
+    );
+    assert!(
+        load_mode_manifest(&dir, "combat").is_err(),
+        "mode_id/folder mismatch must Err"
+    );
     // 最小合法 manifest：可选项全 serde default。
-    write_manifest(&dir, "combat", r#"{"mode_id":"combat","frame_kind":"combat"}"#);
+    write_manifest(
+        &dir,
+        "combat",
+        r#"{"mode_id":"combat","frame_kind":"combat"}"#,
+    );
     let manifest = load_mode_manifest(&dir, "combat").expect("minimal manifest loads");
     assert_eq!(manifest.mode_id, "combat");
     assert_eq!(manifest.frame_kind, "combat");
@@ -102,19 +132,36 @@ fn current_mode_three_states() {
     // 无 frame → None（默认叙事姿态）。
     assert_eq!(current_mode(&[]), None);
     // Combat frame → Some("combat")。
-    assert_eq!(current_mode(&[frame(FrameKind::Combat, FrameStatus::Active)]), Some("combat".to_string()));
+    assert_eq!(
+        current_mode(&[frame(FrameKind::Combat, FrameStatus::Active)]),
+        Some("combat".to_string())
+    );
     // Downtime frame → Some("downtime")。
-    assert_eq!(current_mode(&[frame(FrameKind::Downtime, FrameStatus::Active)]), Some("downtime".to_string()));
+    assert_eq!(
+        current_mode(&[frame(FrameKind::Downtime, FrameStatus::Active)]),
+        Some("downtime".to_string())
+    );
     // 已关闭 frame 不算（非 active 生命周期态被过滤）。
-    assert_eq!(current_mode(&[frame(FrameKind::Combat, FrameStatus::Completed)]), None);
+    assert_eq!(
+        current_mode(&[frame(FrameKind::Combat, FrameStatus::Completed)]),
+        None
+    );
 }
 
 #[test]
 fn active_mode_manifest_skips_frames_without_mode_package() {
     let dir = temp_data_dir();
-    write_manifest(&dir, "combat", r#"{"mode_id":"combat","frame_kind":"combat"}"#);
+    write_manifest(
+        &dir,
+        "combat",
+        r#"{"mode_id":"combat","frame_kind":"combat"}"#,
+    );
     // frame 种类无 mode 包（investigation_node）→ None（不是姿态，照常叙事）。
-    let no_pkg = active_mode_manifest(&dir, &[frame(FrameKind::InvestigationNode, FrameStatus::Active)]).unwrap();
+    let no_pkg = active_mode_manifest(
+        &dir,
+        &[frame(FrameKind::InvestigationNode, FrameStatus::Active)],
+    )
+    .unwrap();
     assert!(no_pkg.is_none());
     // 有包 → Some(manifest)。
     let hit = active_mode_manifest(&dir, &[frame(FrameKind::Combat, FrameStatus::Active)]).unwrap();
@@ -128,16 +175,35 @@ fn active_mode_manifest_skips_frames_without_mode_package() {
 #[test]
 fn for_mode_unknown_extra_tool_is_config_error() {
     let dir = temp_data_dir();
-    write_manifest(&dir, "combat", r#"{"mode_id":"combat","frame_kind":"combat","extra_tools":["no_such_tool"]}"#);
-    let err = ToolRegistry::for_mode(&dir, Some("combat")).err().expect("unknown extra tool must Err");
-    assert!(err.to_string().contains("no_such_tool"), "error must name the tool: {err}");
+    write_manifest(
+        &dir,
+        "combat",
+        r#"{"mode_id":"combat","frame_kind":"combat","extra_tools":["no_such_tool"]}"#,
+    );
+    let err = ToolRegistry::for_mode(&dir, Some("combat"))
+        .err()
+        .expect("unknown extra tool must Err");
+    assert!(
+        err.to_string().contains("no_such_tool"),
+        "error must name the tool: {err}"
+    );
     // extra_tools 为空 ⇒ 与 standard() schema 字节一致（基础 14 不因 mode 而变）。
-    write_manifest(&dir, "combat", r#"{"mode_id":"combat","frame_kind":"combat"}"#);
-    let mode_schemas = serde_json::to_vec(&ToolRegistry::for_mode(&dir, Some("combat")).unwrap().schemas()).unwrap();
+    write_manifest(
+        &dir,
+        "combat",
+        r#"{"mode_id":"combat","frame_kind":"combat"}"#,
+    );
+    let mode_schemas = serde_json::to_vec(
+        &ToolRegistry::for_mode(&dir, Some("combat"))
+            .unwrap()
+            .schemas(),
+    )
+    .unwrap();
     let std_schemas = serde_json::to_vec(&ToolRegistry::standard().schemas()).unwrap();
     assert_eq!(mode_schemas, std_schemas);
     // mode=None ⇒ 与 standard() 完全等同（mode=None 字节回归）。
-    let none_schemas = serde_json::to_vec(&ToolRegistry::for_mode(&dir, None).unwrap().schemas()).unwrap();
+    let none_schemas =
+        serde_json::to_vec(&ToolRegistry::for_mode(&dir, None).unwrap().schemas()).unwrap();
     assert_eq!(none_schemas, std_schemas);
     fs::remove_dir_all(dir).ok();
 }
@@ -145,8 +211,15 @@ fn for_mode_unknown_extra_tool_is_config_error() {
 #[test]
 fn base_registry_has_fourteen_tools_with_mode_tools_at_tail() {
     let schemas = ToolRegistry::standard().schemas();
-    assert_eq!(schemas.len(), 15, "基础 15 = 二期 12 + enter_mode/exit_mode + reveal_fact");
-    let names: Vec<&str> = schemas.iter().filter_map(|s| s.pointer("/function/name").and_then(|v| v.as_str())).collect();
+    assert_eq!(
+        schemas.len(),
+        15,
+        "基础 15 = 二期 12 + enter_mode/exit_mode + reveal_fact"
+    );
+    let names: Vec<&str> = schemas
+        .iter()
+        .filter_map(|s| s.pointer("/function/name").and_then(|v| v.as_str()))
+        .collect();
     assert_eq!(names[12], "enter_mode");
     assert_eq!(names[13], "exit_mode");
     assert_eq!(names[14], "reveal_fact");
@@ -155,29 +228,78 @@ fn base_registry_has_fourteen_tools_with_mode_tools_at_tail() {
 fn typed_err(result: anyhow::Result<crate::tools::ToolOutput>) -> ToolError {
     match result {
         Ok(_) => panic!("expected a typed ToolError"),
-        Err(e) => e.downcast_ref::<ToolError>().expect("typed ToolError").clone(),
+        Err(e) => e
+            .downcast_ref::<ToolError>()
+            .expect("typed ToolError")
+            .clone(),
     }
 }
 
 #[tokio::test]
 async fn enter_mode_rejects_nesting_and_unknown_mode() {
     let dir = temp_data_dir();
-    write_manifest(&dir, "combat", r#"{"mode_id":"combat","frame_kind":"combat"}"#);
+    write_manifest(
+        &dir,
+        "combat",
+        r#"{"mode_id":"combat","frame_kind":"combat"}"#,
+    );
     let (engine, request, state) = engine_request_state();
     let mut ledger = crate::ledger::TurnLedger::new();
     // 已在 combat 姿态内 enter downtime → mode_nesting_unsupported（栈深 1）。
-    let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: None, data_dir: Some(&dir), current_mode: Some("combat"), opposed_binding: None };
-    let err = typed_err(EnterModeTool.call(&ctx, &mut ledger, json!({"mode":"downtime","reason":"rest"})).await);
+    let ctx = ToolCtx {
+        engine: &engine,
+        request: &request,
+        state: &state,
+        scene_extractor: None,
+        obligations: None,
+        data_dir: Some(&dir),
+        current_mode: Some("combat"),
+        opposed_binding: None,
+    };
+    let err = typed_err(
+        EnterModeTool
+            .call(
+                &ctx,
+                &mut ledger,
+                json!({"mode":"downtime","reason":"rest"}),
+            )
+            .await,
+    );
     assert_eq!(err.code, "mode_nesting_unsupported");
     assert!(err.recoverable);
-    assert!(err.message.contains("combat"), "must name the active mode: {}", err.message);
+    assert!(
+        err.message.contains("combat"),
+        "must name the active mode: {}",
+        err.message
+    );
     // 默认姿态 enter 未安装 mode → mode_not_found。
-    let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: None, data_dir: Some(&dir), current_mode: None, opposed_binding: None };
-    let err = typed_err(EnterModeTool.call(&ctx, &mut ledger, json!({"mode":"no_such_mode","reason":"x"})).await);
+    let ctx = ToolCtx {
+        engine: &engine,
+        request: &request,
+        state: &state,
+        scene_extractor: None,
+        obligations: None,
+        data_dir: Some(&dir),
+        current_mode: None,
+        opposed_binding: None,
+    };
+    let err = typed_err(
+        EnterModeTool
+            .call(
+                &ctx,
+                &mut ledger,
+                json!({"mode":"no_such_mode","reason":"x"}),
+            )
+            .await,
+    );
     assert_eq!(err.code, "mode_not_found");
     assert!(err.recoverable);
     // 参数缺失 → invalid_arguments。
-    let err = typed_err(EnterModeTool.call(&ctx, &mut ledger, json!({"mode":"combat"})).await);
+    let err = typed_err(
+        EnterModeTool
+            .call(&ctx, &mut ledger, json!({"mode":"combat"}))
+            .await,
+    );
     assert_eq!(err.code, "invalid_arguments");
     fs::remove_dir_all(dir).ok();
 }
@@ -187,8 +309,21 @@ async fn exit_mode_without_active_mode_is_no_active_mode() {
     let dir = temp_data_dir();
     let (engine, request, state) = engine_request_state();
     let mut ledger = crate::ledger::TurnLedger::new();
-    let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: None, data_dir: Some(&dir), current_mode: None, opposed_binding: None };
-    let err = typed_err(ExitModeTool.call(&ctx, &mut ledger, json!({"reason":"done"})).await);
+    let ctx = ToolCtx {
+        engine: &engine,
+        request: &request,
+        state: &state,
+        scene_extractor: None,
+        obligations: None,
+        data_dir: Some(&dir),
+        current_mode: None,
+        opposed_binding: None,
+    };
+    let err = typed_err(
+        ExitModeTool
+            .call(&ctx, &mut ledger, json!({"reason":"done"}))
+            .await,
+    );
     assert_eq!(err.code, "no_active_mode");
     assert!(err.recoverable);
     fs::remove_dir_all(dir).ok();
@@ -211,9 +346,16 @@ async fn exit_mode_blocked_by_obligations_then_waive_releases() {
         obligations.ensure_mode_exit_obligations("combat", &["所有交锋簇效果落账".to_string()]);
         // 幂等 re-seed：重复挂账不翻倍。
         obligations.ensure_mode_exit_obligations("combat", &["所有交锋簇效果落账".to_string()]);
-        assert_eq!(obligations.exit_blocking().len(), 1, "deterministic id must dedupe");
+        assert_eq!(
+            obligations.exit_blocking().len(),
+            1,
+            "deterministic id must dedupe"
+        );
         // mode_exit 义务绝不门叙事轮（B6 blocking() 不含它）。
-        assert!(obligations.blocking().is_empty(), "mode_exit must not gate narration rounds");
+        assert!(
+            obligations.blocking().is_empty(),
+            "mode_exit must not gate narration rounds"
+        );
         let view = &obligations.exit_blocking()[0];
         assert_eq!(view.kind, "mode_exit");
         assert_eq!(view.target_id, "mode_exit.combat.0");
@@ -225,29 +367,75 @@ async fn exit_mode_blocked_by_obligations_then_waive_releases() {
     {
         let mut obligations = cell.lock().unwrap();
         obligations.absorb_dues(vec![trpg_model::MechanicDue {
-            due_id: "due_exit_gate".to_string(), session_id: "s".to_string(), turn_id: "t".to_string(),
-            source: trpg_model::DueSource::Threshold, source_track: Some("hp".to_string()), hook_event: None,
-            mechanic_id: None, threshold_desc: "未结算的交锋效果".to_string(), followup_procedure_id: None,
-            owner_kind: "actor".to_string(), owner_id: "pc.current".to_string(), evidence: json!({}),
-            status: trpg_model::DueStatus::Open, created_at: Utc::now(),
+            due_id: "due_exit_gate".to_string(),
+            session_id: "s".to_string(),
+            turn_id: "t".to_string(),
+            source: trpg_model::DueSource::Threshold,
+            source_track: Some("hp".to_string()),
+            hook_event: None,
+            mechanic_id: None,
+            threshold_desc: "未结算的交锋效果".to_string(),
+            followup_procedure_id: None,
+            owner_kind: "actor".to_string(),
+            owner_id: "pc.current".to_string(),
+            evidence: json!({}),
+            status: trpg_model::DueStatus::Open,
+            created_at: Utc::now(),
         }]);
     }
-    let ctx = ToolCtx { engine: &engine, request: &request, state: &state, scene_extractor: None, obligations: Some(&cell), data_dir: Some(&dir), current_mode: Some("combat"), opposed_binding: None };
+    let ctx = ToolCtx {
+        engine: &engine,
+        request: &request,
+        state: &state,
+        scene_extractor: None,
+        obligations: Some(&cell),
+        data_dir: Some(&dir),
+        current_mode: Some("combat"),
+        opposed_binding: None,
+    };
     // 外部债务未清 → exit 被拦（waive 通道照常可用——hint 指路）。
-    let err = typed_err(ExitModeTool.call(&ctx, &mut turn_ledger, json!({"reason":"flee"})).await);
+    let err = typed_err(
+        ExitModeTool
+            .call(&ctx, &mut turn_ledger, json!({"reason":"flee"}))
+            .await,
+    );
     assert_eq!(err.code, "exit_blocked_by_obligations");
     assert!(err.recoverable);
-    assert!(err.message.contains("due_exit_gate"), "must list outstanding items: {}", err.message);
-    assert!(err.hint.as_deref().unwrap_or("").contains("waive_obligation"));
+    assert!(
+        err.message.contains("due_exit_gate"),
+        "must list outstanding items: {}",
+        err.message
+    );
+    assert!(err
+        .hint
+        .as_deref()
+        .unwrap_or("")
+        .contains("waive_obligation"));
     // 外部债务 waive 带理由 → 只剩自身退出义务 → 确定性闭合放行
     // （frame 已不在 db = 幂等成功路径，姿态下回合回落叙事）。
     {
         let mut obligations = cell.lock().unwrap();
-        obligations.waive("due_exit_gate", "敌人逃散，效果并入下一幕", WaiveScope::Turn).expect("due target must be waivable");
-        assert_eq!(obligations.exit_blocking().len(), 1, "own mode_exit obligation still listed pre-exit");
+        obligations
+            .waive(
+                "due_exit_gate",
+                "敌人逃散，效果并入下一幕",
+                WaiveScope::Turn,
+            )
+            .expect("due target must be waivable");
+        assert_eq!(
+            obligations.exit_blocking().len(),
+            1,
+            "own mode_exit obligation still listed pre-exit"
+        );
     }
-    let output = ExitModeTool.call(&ctx, &mut turn_ledger, json!({"reason":"flee"})).await.expect("exit must pass once only own exit obligations remain");
-    assert_eq!(output.result.get("exited_mode").and_then(|v| v.as_str()), Some("combat"));
+    let output = ExitModeTool
+        .call(&ctx, &mut turn_ledger, json!({"reason":"flee"}))
+        .await
+        .expect("exit must pass once only own exit obligations remain");
+    assert_eq!(
+        output.result.get("exited_mode").and_then(|v| v.as_str()),
+        Some("combat")
+    );
     // 成功退出后该 mode 的退出义务整体清账。
     let obligations = cell.lock().unwrap();
     assert!(obligations.exit_blocking().is_empty());
@@ -295,12 +483,16 @@ fn catalog_filter_matches_any_dimension_and_empty_means_no_filter() {
 #[test]
 fn downtime_manifest_loads_with_correct_fields() {
     let data_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data");
-    let manifest = load_mode_manifest(&data_dir, "downtime")
-        .expect("downtime manifest must load from data/agent/gm_skill/modes/downtime/manifest.json");
+    let manifest = load_mode_manifest(&data_dir, "downtime").expect(
+        "downtime manifest must load from data/agent/gm_skill/modes/downtime/manifest.json",
+    );
     assert_eq!(manifest.mode_id, "downtime");
     assert_eq!(manifest.frame_kind, "downtime");
     // exit_obligations 非空：至少声明了结算表落账义务。
-    assert!(!manifest.exit_obligations.is_empty(), "downtime must declare at least one exit obligation (settlement ledger)");
+    assert!(
+        !manifest.exit_obligations.is_empty(),
+        "downtime must declare at least one exit obligation (settlement ledger)"
+    );
     // tempo 放宽：幕间不要求每簇效果闭合（None 或 false 均可）。
     assert!(
         manifest.tempo.effect_closure_per_cluster.is_none()
@@ -308,13 +500,14 @@ fn downtime_manifest_loads_with_correct_fields() {
         "downtime tempo must not require effect_closure_per_cluster (it is relaxed, not tight)"
     );
     // catalog_filter 至少在一个维度声明了 development_phase 或 calendar 相关钩子。
-    let has_downtime_hook = manifest.catalog_filter.hooks.iter().any(|h| {
-        h.eq_ignore_ascii_case("development_phase") || h.eq_ignore_ascii_case("calendar")
-    }) || manifest.catalog_filter.kinds.iter().any(|k| {
-        k.eq_ignore_ascii_case("downtime") || k.eq_ignore_ascii_case("development_phase")
-    }) || manifest.catalog_filter.semantic_tags.iter().any(|t| {
-        t.eq_ignore_ascii_case("downtime") || t.eq_ignore_ascii_case("development_phase")
-    });
+    let has_downtime_hook =
+        manifest.catalog_filter.hooks.iter().any(|h| {
+            h.eq_ignore_ascii_case("development_phase") || h.eq_ignore_ascii_case("calendar")
+        }) || manifest.catalog_filter.kinds.iter().any(|k| {
+            k.eq_ignore_ascii_case("downtime") || k.eq_ignore_ascii_case("development_phase")
+        }) || manifest.catalog_filter.semantic_tags.iter().any(|t| {
+            t.eq_ignore_ascii_case("downtime") || t.eq_ignore_ascii_case("development_phase")
+        });
     assert!(has_downtime_hook, "downtime catalog_filter must reference development_phase or calendar hooks/kinds; got: {:?}", manifest.catalog_filter);
 }
 
@@ -323,8 +516,7 @@ fn downtime_manifest_loads_with_correct_fields() {
 #[test]
 fn downtime_catalog_filter_selects_only_downtime_entries() {
     let data_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data");
-    let manifest = load_mode_manifest(&data_dir, "downtime")
-        .expect("downtime manifest must load");
+    let manifest = load_mode_manifest(&data_dir, "downtime").expect("downtime manifest must load");
     let filter = &manifest.catalog_filter;
     // 合成目录夹具：三条不同类型。
     // A5 幕间条目：kind=downtime，hooks=[development_phase]，tags=[rest]。
@@ -347,18 +539,32 @@ fn downtime_catalog_filter_selects_only_downtime_entries() {
     let selects_a5 = filter.matches(a5_kind, &a5_hooks, &a5_tags);
     let selects_combat = filter.matches(combat_kind, &combat_hooks, &combat_tags);
     let selects_other = filter.matches(other_kind, &other_hooks, &other_tags);
-    assert!(selects_a5, "downtime filter must select A5 downtime entry; filter={:?}", filter);
-    assert!(!selects_combat, "downtime filter must NOT select combat entry; filter={:?}", filter);
-    assert!(!selects_other, "downtime filter must NOT select unrelated lore entry; filter={:?}", filter);
+    assert!(
+        selects_a5,
+        "downtime filter must select A5 downtime entry; filter={:?}",
+        filter
+    );
+    assert!(
+        !selects_combat,
+        "downtime filter must NOT select combat entry; filter={:?}",
+        filter
+    );
+    assert!(
+        !selects_other,
+        "downtime filter must NOT select unrelated lore entry; filter={:?}",
+        filter
+    );
 }
 
 /// downtime exit_obligations 挂账后出现于债务清单（exit_blocking view）。
 #[test]
 fn downtime_exit_obligations_appear_in_exit_blocking_view() {
     let data_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data");
-    let manifest = load_mode_manifest(&data_dir, "downtime")
-        .expect("downtime manifest must load");
-    assert!(!manifest.exit_obligations.is_empty(), "precondition: downtime must have exit obligations");
+    let manifest = load_mode_manifest(&data_dir, "downtime").expect("downtime manifest must load");
+    assert!(
+        !manifest.exit_obligations.is_empty(),
+        "precondition: downtime must have exit obligations"
+    );
     let mut ledger = ObligationLedger::default();
     ledger.begin_turn("t");
     ledger.ensure_mode_exit_obligations("downtime", &manifest.exit_obligations);

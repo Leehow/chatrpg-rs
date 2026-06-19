@@ -51,7 +51,10 @@ async fn material_resolver_produces_blocks() {
         scene_id: None,
     };
     let resolver = MaterialNeedResolver::new(db.clone());
-    let need = Need::Material(MaterialNeed { scopes, user_input: None });
+    let need = Need::Material(MaterialNeed {
+        scopes,
+        user_input: None,
+    });
     let outcome = resolver.resolve(&need).await.expect("resolver ok");
 
     // materialization 投影恒产 1 个块（materialization_context_block）。
@@ -98,6 +101,13 @@ async fn material_resolver_fail_closed() {
         user_input: None,
     }));
     let outcomes = bus.resolve_all().await;
-    assert_eq!(outcomes.len(), 1, "fail-closed: must return 1 outcome entry");
-    eprintln!("[material_fail_closed] PASS: {} outcome(s) returned", outcomes.len());
+    assert_eq!(
+        outcomes.len(),
+        1,
+        "fail-closed: must return 1 outcome entry"
+    );
+    eprintln!(
+        "[material_fail_closed] PASS: {} outcome(s) returned",
+        outcomes.len()
+    );
 }

@@ -15,26 +15,29 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::sync::CancellationToken;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info};
 use trpg_db::Db;
+use trpg_gm::{
+    execute_turn, GmLoop, LoopConfig, OwnedTurnRequest, SceneDeepExtractFn, ToolRegistry,
+    CANONICAL_TURN_PLAN,
+};
 use trpg_ingest::PdfBackendKind;
 use trpg_llm::LlmClient;
 use trpg_model::*;
 use trpg_parser::{ParserConfig, ProjectParseService};
 use trpg_rule_agent::RuleStewardAgent;
-use trpg_runtime::{validate_character_template_sheet, RuntimeEngine};
-use trpg_gm::{
-    execute_turn, GmLoop, LoopConfig, OwnedTurnRequest, SceneDeepExtractFn, ToolRegistry,
-    CANONICAL_TURN_PLAN,
+use trpg_runtime::{validate_character_template_sheet, EntryGate, RuntimeEngine};
+use trpg_search::{
+    load_search_source_configs, upsert_search_source_config, SearchService, SearchSourceConfig,
 };
-use tokio_util::sync::CancellationToken;
-use trpg_search::{load_search_source_configs, upsert_search_source_config, SearchService, SearchSourceConfig};
 use uuid::Uuid;
 
 pub use trpg_runtime::scene_navigation::{
-    extract_module_scenes, build_nav_prompt, scene_navigator, validate_transition, prefetch_frontier,
+    build_nav_prompt, extract_module_scenes, prefetch_frontier, scene_navigator,
+    validate_transition,
 };
 
 pub mod turn_driver;
@@ -54,40 +57,82 @@ pub fn router(state: AppState) -> Router {
         .route("/api-doc/openapi.json", get(openapi_json))
         .route("/api/bundles", get(list_bundles))
         .route("/api/ingest/parse-all", post(parse_all))
-        .route("/api/modules/{module_id}/extract/continue", post(module_extract_continue))
-        .route("/api/modules/{module_id}/skeleton/complete", post(module_skeleton_complete))
+        .route(
+            "/api/modules/{module_id}/extract/continue",
+            post(module_extract_continue),
+        )
+        .route(
+            "/api/modules/{module_id}/skeleton/complete",
+            post(module_skeleton_complete),
+        )
         .route("/api/ingest/ruleset", post(ingest_ruleset))
         .route("/api/ingest/{job_id}/status", get(ingest_status))
         .route("/api/ingest/{job_id}/events", get(ingest_events))
         .route("/api/rulesets/{id}/identity", get(ruleset_identity))
-        .route("/api/rulesets/{id}/character-template", get(ruleset_character_template))
+        .route(
+            "/api/rulesets/{id}/character-template",
+            get(ruleset_character_template),
+        )
         .route("/api/context/compile", post(compile_context))
         .route("/api/checks/resolve", post(resolve_check_api))
         .route("/api/conflict/start", post(conflict_start_api))
-        .route("/api/conflict/{session_id}/frames", get(conflict_frames_api))
+        .route(
+            "/api/conflict/{session_id}/frames",
+            get(conflict_frames_api),
+        )
         .route("/api/search", post(search_api))
         .route("/api/search/reindex", post(search_reindex_api))
         .route("/api/search/load", post(search_load_api))
-        .route("/api/search/sources", get(search_sources_api).post(upsert_search_source_api))
+        .route(
+            "/api/search/sources",
+            get(search_sources_api).post(upsert_search_source_api),
+        )
         .route("/api/rules/lookup", post(rule_lookup))
         .route("/api/rules/steward/assist", post(rule_steward_assist_api))
         .route("/api/rules/playability", post(rule_playability_api))
-        .route("/api/rules/character-onboarding/{ruleset_id}", get(rule_character_onboarding_api))
+        .route(
+            "/api/rules/character-onboarding/{ruleset_id}",
+            get(rule_character_onboarding_api),
+        )
         .route("/api/rulings", post(record_ruling_api))
         .route("/api/learned-packets", post(upsert_learned_packet_api))
-        .route("/api/learned-packets/{ruleset_id}", get(list_learned_packets_api))
-        .route("/api/learning/candidates", get(list_learning_candidates_api))
-        .route("/api/learning/candidates/{candidate_id}/approve", post(approve_learning_candidate_api))
+        .route(
+            "/api/learned-packets/{ruleset_id}",
+            get(list_learned_packets_api),
+        )
+        .route(
+            "/api/learning/candidates",
+            get(list_learning_candidates_api),
+        )
+        .route(
+            "/api/learning/candidates/{candidate_id}/approve",
+            post(approve_learning_candidate_api),
+        )
         .route("/api/characters/create", post(create_character_sse))
         .route("/api/sessions/start", post(start_session))
         .route("/api/sessions/{session_id}/turn", post(play_turn_sse))
         .route("/api/sessions/{session_id}/time", get(get_session_time_api))
-        .route("/api/sessions/{session_id}/time/advance", post(advance_session_time_api))
-        .route("/api/sessions/{session_id}/events", get(list_session_events_api))
-        .route("/api/sessions/{session_id}/scheduled-events", post(schedule_session_event_api))
+        .route(
+            "/api/sessions/{session_id}/time/advance",
+            post(advance_session_time_api),
+        )
+        .route(
+            "/api/sessions/{session_id}/events",
+            get(list_session_events_api),
+        )
+        .route(
+            "/api/sessions/{session_id}/scheduled-events",
+            post(schedule_session_event_api),
+        )
         .route("/api/sessions/{session_id}/memory", get(get_session_memory))
-        .route("/api/sessions/{session_id}/memory/retrieve", post(retrieve_session_memory))
-        .route("/api/sessions/{session_id}/memory/compact", post(compact_session_memory))
+        .route(
+            "/api/sessions/{session_id}/memory/retrieve",
+            post(retrieve_session_memory),
+        )
+        .route(
+            "/api/sessions/{session_id}/memory/compact",
+            post(compact_session_memory),
+        )
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -100,7 +145,9 @@ pub async fn serve(addr: SocketAddr, state: AppState) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn health() -> Json<Value> { Json(json!({"status":"ok"})) }
+async fn health() -> Json<Value> {
+    Json(json!({"status":"ok"}))
+}
 
 async fn openapi_json() -> Json<Value> {
     Json(json!({
@@ -158,10 +205,15 @@ pub struct ParseAllQuery {
     pub pdf_backend: Option<String>,
 }
 
-async fn parse_all(Query(query): Query<ParseAllQuery>, State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+async fn parse_all(
+    Query(query): Query<ParseAllQuery>,
+    State(state): State<AppState>,
+) -> Result<Json<Value>, ApiError> {
     let job_id = format!("parse_all_{}", Uuid::new_v4().simple());
     let mut config = state.parser_config.clone();
-    if query.force.unwrap_or(false) { config.force = true; }
+    if query.force.unwrap_or(false) {
+        config.force = true;
+    }
     if let Some(pdf_backend) = query.pdf_backend.as_deref() {
         config.pdf_backend = match pdf_backend.to_ascii_lowercase().as_str() {
             "oxidize" | "oxidize-pdf" | "oxidize_pdf" => PdfBackendKind::Oxidize,
@@ -184,7 +236,10 @@ async fn parse_all(Query(query): Query<ParseAllQuery>, State(state): State<AppSt
     let job_id_spawn = job_id.clone();
     tokio::spawn(async move {
         let service = ProjectParseService::new(db.clone(), llm, config);
-        if let Err(err) = db.update_background_job(&job_id_spawn, "running", json!({}), None).await {
+        if let Err(err) = db
+            .update_background_job(&job_id_spawn, "running", json!({}), None)
+            .await
+        {
             error!(error = %err, "failed to mark parse job running");
         }
         match service.parse_all().await {
@@ -197,7 +252,14 @@ async fn parse_all(Query(query): Query<ParseAllQuery>, State(state): State<AppSt
             }
             Err(err) => {
                 error!(error = %err, "parse-all background job failed");
-                let _ = db.update_background_job(&job_id_spawn, "error", json!({}), Some(&err.to_string())).await;
+                let _ = db
+                    .update_background_job(
+                        &job_id_spawn,
+                        "error",
+                        json!({}),
+                        Some(&err.to_string()),
+                    )
+                    .await;
             }
         }
     });
@@ -236,26 +298,67 @@ async fn module_extract_continue(
     // insert+spawn a second deep-extract coroutine (they'd read the same bundle
     // and last-writer-wins overwrite each other). Narrow TOCTOU window, but fine
     // for a manual one-shot endpoint. Do not touch the shared insert helper.
-    if matches!(state.db.background_job_status(&job_id).await?.as_deref(), Some("running")) {
-        return Ok((StatusCode::OK, Json(json!({"job_id": job_id, "module_id": module_id, "status": "already_running"}))));
+    if matches!(
+        state.db.background_job_status(&job_id).await?.as_deref(),
+        Some("running")
+    ) {
+        return Ok((
+            StatusCode::OK,
+            Json(json!({"job_id": job_id, "module_id": module_id, "status": "already_running"})),
+        ));
     }
     state.db.insert_background_job(&job_id, "module_extract_continue", json!({"module_id": module_id, "source_id": req.source_id, "ruleset_id": req.ruleset_id})).await?;
     let db = state.db.clone();
     let llm = state.llm.clone();
     let data_dir = state.parser_config.data_dir.clone();
     let job_id_spawn = job_id.clone();
-    let (mid, sid, rid) = (module_id.clone(), req.source_id.clone(), req.ruleset_id.clone());
+    let (mid, sid, rid) = (
+        module_id.clone(),
+        req.source_id.clone(),
+        req.ruleset_id.clone(),
+    );
     tokio::spawn(async move {
-        let _ = db.update_background_job(&job_id_spawn, "running", json!({}), None).await;
-        match continue_module_extraction(&db, llm.as_ref(), &mid, &sid, rid.as_deref(), &data_dir, budget).await {
-            Ok(n) => { let _ = db.update_background_job(&job_id_spawn, "done", json!({"deep_extracted": n}), None).await; }
+        let _ = db
+            .update_background_job(&job_id_spawn, "running", json!({}), None)
+            .await;
+        match continue_module_extraction(
+            &db,
+            llm.as_ref(),
+            &mid,
+            &sid,
+            rid.as_deref(),
+            &data_dir,
+            budget,
+        )
+        .await
+        {
+            Ok(n) => {
+                let _ = db
+                    .update_background_job(
+                        &job_id_spawn,
+                        "done",
+                        json!({"deep_extracted": n}),
+                        None,
+                    )
+                    .await;
+            }
             Err(err) => {
                 error!(error = %err, module_id = %mid, "module_extract_continue job failed");
-                let _ = db.update_background_job(&job_id_spawn, "error", json!({}), Some(&err.to_string())).await;
+                let _ = db
+                    .update_background_job(
+                        &job_id_spawn,
+                        "error",
+                        json!({}),
+                        Some(&err.to_string()),
+                    )
+                    .await;
             }
         }
     });
-    Ok((StatusCode::ACCEPTED, Json(json!({"job_id": job_id, "module_id": module_id, "status": "queued"}))))
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({"job_id": job_id, "module_id": module_id, "status": "queued"})),
+    ))
 }
 
 /// Load the module bundle's ModuleGraph + units, deep-extract every scene still
@@ -281,7 +384,17 @@ pub async fn continue_module_extraction(
     // The single-scene path (scene_navigator on-arrival) reuses the same core
     // with only=Some(node_id). source_id is known here (from the request), so
     // pass it explicitly to skip the bundle-derived fallback.
-    extract_module_scenes(db, llm, module_id, Some(source_id), ruleset_id, data_dir, budget, None).await
+    extract_module_scenes(
+        db,
+        llm,
+        module_id,
+        Some(source_id),
+        ruleset_id,
+        data_dir,
+        budget,
+        None,
+    )
+    .await
 }
 
 // --- Background module skeleton gleaning (deployment wiring) ------------------
@@ -326,10 +439,23 @@ async fn module_skeleton_complete(
     // Read-after-check dedupe: a second running coroutine would read the same
     // bundle and last-writer-wins clobber the first. Narrow TOCTOU, fine for a
     // manual one-shot endpoint.
-    if matches!(state.db.background_job_status(&job_id).await?.as_deref(), Some("running")) {
-        return Ok((StatusCode::OK, Json(json!({"job_id": job_id, "module_id": module_id, "status": "already_running"}))));
+    if matches!(
+        state.db.background_job_status(&job_id).await?.as_deref(),
+        Some("running")
+    ) {
+        return Ok((
+            StatusCode::OK,
+            Json(json!({"job_id": job_id, "module_id": module_id, "status": "already_running"})),
+        ));
     }
-    state.db.insert_background_job(&job_id, "module_skeleton_complete", json!({"module_id": module_id, "ruleset_id": req.ruleset_id})).await?;
+    state
+        .db
+        .insert_background_job(
+            &job_id,
+            "module_skeleton_complete",
+            json!({"module_id": module_id, "ruleset_id": req.ruleset_id}),
+        )
+        .await?;
     let db = state.db.clone();
     // Gleaning is invisible background work → prefer the quality-first module
     // reader model (gpt-5.4); fall back to the GM/main client if it can't build.
@@ -338,16 +464,34 @@ async fn module_skeleton_complete(
     let job_id_spawn = job_id.clone();
     let (mid, rid) = (module_id.clone(), req.ruleset_id.clone());
     tokio::spawn(async move {
-        let _ = db.update_background_job(&job_id_spawn, "running", json!({}), None).await;
-        match complete_module_skeleton(&db, llm.as_ref(), &mid, rid.as_deref(), &data_dir, budget).await {
-            Ok(n) => { let _ = db.update_background_job(&job_id_spawn, "done", json!({"stubs_added": n}), None).await; }
+        let _ = db
+            .update_background_job(&job_id_spawn, "running", json!({}), None)
+            .await;
+        match complete_module_skeleton(&db, llm.as_ref(), &mid, rid.as_deref(), &data_dir, budget)
+            .await
+        {
+            Ok(n) => {
+                let _ = db
+                    .update_background_job(&job_id_spawn, "done", json!({"stubs_added": n}), None)
+                    .await;
+            }
             Err(err) => {
                 error!(error = %err, module_id = %mid, "module_skeleton_complete job failed");
-                let _ = db.update_background_job(&job_id_spawn, "error", json!({}), Some(&err.to_string())).await;
+                let _ = db
+                    .update_background_job(
+                        &job_id_spawn,
+                        "error",
+                        json!({}),
+                        Some(&err.to_string()),
+                    )
+                    .await;
             }
         }
     });
-    Ok((StatusCode::ACCEPTED, Json(json!({"job_id": job_id, "module_id": module_id, "status": "queued"}))))
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({"job_id": job_id, "module_id": module_id, "status": "queued"})),
+    ))
 }
 
 /// Load the module bundle's ModuleGraph + units, glean the skeleton against the
@@ -367,42 +511,79 @@ pub async fn complete_module_skeleton(
     data_dir: &std::path::Path,
     budget: usize,
 ) -> anyhow::Result<usize> {
-    let Some((mut bundle, source_hash, parse_config_hash)) = db.load_module_bundle_for_continue(module_id).await? else {
-        info!(module_id, "complete_module_skeleton: no module bundle found; nothing to do");
+    let Some((mut bundle, source_hash, parse_config_hash)) =
+        db.load_module_bundle_for_continue(module_id).await?
+    else {
+        info!(
+            module_id,
+            "complete_module_skeleton: no module bundle found; nothing to do"
+        );
         return Ok(0);
     };
     // source_id derived from the bundle's source_index — the same id parse_module
     // wrote the semantic-units file under (mirrors extract_module_scenes).
-    let Some(source_id) = bundle.source_index.sources.first().map(|s| s.source_id.clone()) else {
-        info!(module_id, "complete_module_skeleton: no source_id in bundle; nothing to do");
+    let Some(source_id) = bundle
+        .source_index
+        .sources
+        .first()
+        .map(|s| s.source_id.clone())
+    else {
+        info!(
+            module_id,
+            "complete_module_skeleton: no source_id in bundle; nothing to do"
+        );
         return Ok(0);
     };
     // Load the same semantic units parse_module read, from the same data dir path.
-    let units_path = data_dir.join("parsed/source_units").join(format!("{source_id}.semantic_units.jsonl"));
+    let units_path = data_dir
+        .join("parsed/source_units")
+        .join(format!("{source_id}.semantic_units.jsonl"));
     let units = match trpg_rule_agent::reader::load_units(&units_path) {
         Ok(u) if !u.is_empty() => u,
-        Ok(_) => { info!(module_id, path = %units_path.display(), "complete_module_skeleton: empty units; nothing to do"); return Ok(0); }
-        Err(err) => { error!(error = %err, path = %units_path.display(), "complete_module_skeleton: load_units failed; nothing to do"); return Ok(0); }
+        Ok(_) => {
+            info!(module_id, path = %units_path.display(), "complete_module_skeleton: empty units; nothing to do");
+            return Ok(0);
+        }
+        Err(err) => {
+            error!(error = %err, path = %units_path.display(), "complete_module_skeleton: load_units failed; nothing to do");
+            return Ok(0);
+        }
     };
     // Optional column-aligned sidecar (read_layout view); degrades to None.
-    let sidecar_text = std::fs::read_to_string(data_dir.join(format!("markdown/modules/{source_id}.md"))).ok();
-    let resolved_ruleset = ruleset_id.map(str::to_string).or_else(|| bundle.ruleset_id.clone());
-    let ctx = trpg_rule_agent::reader::ModuleReaderCtx { units: &units, sidecar_text, ruleset_id: resolved_ruleset };
+    let sidecar_text =
+        std::fs::read_to_string(data_dir.join(format!("markdown/modules/{source_id}.md"))).ok();
+    let resolved_ruleset = ruleset_id
+        .map(str::to_string)
+        .or_else(|| bundle.ruleset_id.clone());
+    let ctx = trpg_rule_agent::reader::ModuleReaderCtx {
+        units: &units,
+        sidecar_text,
+        ruleset_id: resolved_ruleset,
+    };
 
     // Glean the skeleton: append missing TOC stubs as new SkeletonOnly scenes.
     // complete_skeleton_stubs only appends (existing nodes untouched), so we
     // operate directly on the graph's scenes vec.
     let mut scenes = bundle.module_graph.scenes.clone();
-    let added = trpg_rule_agent::reader::complete_skeleton_stubs(llm, &ctx, &mut scenes, budget).await;
+    let added =
+        trpg_rule_agent::reader::complete_skeleton_stubs(llm, &ctx, &mut scenes, budget).await;
     if added == 0 {
-        info!(module_id, "complete_module_skeleton: no stub added; skipping re-persist");
+        info!(
+            module_id,
+            "complete_module_skeleton: no stub added; skipping re-persist"
+        );
         return Ok(0);
     }
     bundle.module_graph.scenes = scenes;
 
     // Re-persist into the same parsed_bundles row (on conflict (bundle_id)).
-    db.upsert_module_bundle(&bundle, None, &source_hash, &parse_config_hash).await?;
-    info!(module_id, stubs_added = added, "complete_module_skeleton: re-persisted upgraded ModuleGraph");
+    db.upsert_module_bundle(&bundle, None, &source_hash, &parse_config_hash)
+        .await?;
+    info!(
+        module_id,
+        stubs_added = added,
+        "complete_module_skeleton: re-persisted upgraded ModuleGraph"
+    );
     Ok(added)
 }
 
@@ -427,12 +608,19 @@ pub struct IngestRulesetRequest {
 /// `source_id` from the filename. Mirrors the CLI `largest_units_file`.
 fn largest_units_file(dir: &std::path::Path) -> anyhow::Result<(std::path::PathBuf, String)> {
     let mut best: Option<(std::path::PathBuf, String, u64)> = None;
-    let entries = std::fs::read_dir(dir).map_err(|e| anyhow::anyhow!("read {}: {e}", dir.display()))?;
+    let entries =
+        std::fs::read_dir(dir).map_err(|e| anyhow::anyhow!("read {}: {e}", dir.display()))?;
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
-        let name = match path.file_name().and_then(|n| n.to_str()) { Some(n) => n, None => continue };
-        let source_id = match name.strip_suffix(".semantic_units.jsonl") { Some(id) => id.to_string(), None => continue };
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        let source_id = match name.strip_suffix(".semantic_units.jsonl") {
+            Some(id) => id.to_string(),
+            None => continue,
+        };
         let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
         if best.as_ref().map(|(_, _, s)| size > *s).unwrap_or(true) {
             best = Some((path, source_id, size));
@@ -444,11 +632,16 @@ fn largest_units_file(dir: &std::path::Path) -> anyhow::Result<(std::path::PathB
 
 /// Build a `StagedParse` for one ruleset by loading its units + sidecar from the
 /// configured data dir. Shared by `ingest_ruleset` and any future caller.
-fn build_staged_parse(state: &AppState, req: &IngestRulesetRequest, job_id: String) -> anyhow::Result<trpg_parser::staged::StagedParse> {
+fn build_staged_parse(
+    state: &AppState,
+    req: &IngestRulesetRequest,
+    job_id: String,
+) -> anyhow::Result<trpg_parser::staged::StagedParse> {
     let dir = state.parser_config.data_dir.clone();
     let (units_path, source_id) = largest_units_file(&dir.join("parsed/source_units"))?;
     let units = trpg_rule_agent::reader::load_units(&units_path)?;
-    let sidecar = std::fs::read_to_string(dir.join(format!("markdown/rulebooks/{source_id}.md"))).ok();
+    let sidecar =
+        std::fs::read_to_string(dir.join(format!("markdown/rulebooks/{source_id}.md"))).ok();
     Ok(trpg_parser::staged::StagedParse {
         db: state.db.clone(),
         llm: state.llm.clone(),
@@ -464,11 +657,21 @@ fn build_staged_parse(state: &AppState, req: &IngestRulesetRequest, job_id: Stri
 
 /// POST /api/ingest/ruleset — start a staged parse in the background and return
 /// the job id immediately (202 Accepted).
-async fn ingest_ruleset(State(state): State<AppState>, Json(req): Json<IngestRulesetRequest>) -> Result<(StatusCode, Json<Value>), ApiError> {
+async fn ingest_ruleset(
+    State(state): State<AppState>,
+    Json(req): Json<IngestRulesetRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
     let job_id = format!("staged_{}", Uuid::new_v4().simple());
     let budget = req.budget.unwrap_or(9);
     let sp = build_staged_parse(&state, &req, job_id.clone())?;
-    state.db.insert_background_job(&job_id, "ruleset_parse_staged", json!({"ruleset": req.ruleset_id})).await?;
+    state
+        .db
+        .insert_background_job(
+            &job_id,
+            "ruleset_parse_staged",
+            json!({"ruleset": req.ruleset_id}),
+        )
+        .await?;
     let job_id_resp = job_id.clone();
     let ruleset_id = req.ruleset_id.clone();
     tokio::spawn(async move {
@@ -477,11 +680,17 @@ async fn ingest_ruleset(State(state): State<AppState>, Json(req): Json<IngestRul
             error!(error = %err, "staged ruleset parse reported error");
         }
     });
-    Ok((StatusCode::ACCEPTED, Json(json!({"job_id": job_id_resp, "ruleset_id": ruleset_id}))))
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({"job_id": job_id_resp, "ruleset_id": ruleset_id})),
+    ))
 }
 
 /// GET /api/ingest/{job_id}/status — one-shot JSON snapshot (poll fallback).
-async fn ingest_status(Path(job_id): Path<String>, State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+async fn ingest_status(
+    Path(job_id): Path<String>,
+    State(state): State<AppState>,
+) -> Result<Json<Value>, ApiError> {
     match state.db.load_background_job(&job_id).await? {
         Some(row) => Ok(Json(row)),
         None => Err(anyhow::anyhow!("job not found: {job_id}").into()),
@@ -490,26 +699,45 @@ async fn ingest_status(Path(job_id): Path<String>, State(state): State<AppState>
 
 /// GET /api/ingest/{job_id}/events — SSE stream of `result_json` snapshots, one
 /// every ~750ms, ending when the job status is `done` or `failed`.
-async fn ingest_events(Path(job_id): Path<String>, State(state): State<AppState>) -> impl IntoResponse {
+async fn ingest_events(
+    Path(job_id): Path<String>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(64);
     let db = state.db.clone();
     tokio::spawn(async move {
         loop {
             match db.load_background_job(&job_id).await {
                 Ok(Some(row)) => {
-                    let status = row.get("status").and_then(Value::as_str).unwrap_or("").to_string();
+                    let status = row
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
                     let result_json = row.get("result_json").cloned().unwrap_or(Value::Null);
-                    let _ = tx.send(Ok(Event::default().json_data(result_json).unwrap_or_default())).await;
+                    let _ = tx
+                        .send(Ok(Event::default()
+                            .json_data(result_json)
+                            .unwrap_or_default()))
+                        .await;
                     if matches!(status.as_str(), "done" | "failed" | "error") {
                         break;
                     }
                 }
                 Ok(None) => {
-                    let _ = tx.send(Ok(Event::default().json_data(json!({"error": "job not found"})).unwrap_or_default())).await;
+                    let _ = tx
+                        .send(Ok(Event::default()
+                            .json_data(json!({"error": "job not found"}))
+                            .unwrap_or_default()))
+                        .await;
                     break;
                 }
                 Err(err) => {
-                    let _ = tx.send(Ok(Event::default().json_data(json!({"error": err.to_string()})).unwrap_or_default())).await;
+                    let _ = tx
+                        .send(Ok(Event::default()
+                            .json_data(json!({"error": err.to_string()}))
+                            .unwrap_or_default()))
+                        .await;
                     break;
                 }
             }
@@ -523,8 +751,15 @@ async fn ingest_events(Path(job_id): Path<String>, State(state): State<AppState>
 /// snapshot for this ruleset, falling back to the pending stub if none exists.
 async fn latest_staged_progress(db: &Db, ruleset_id: &str) -> Value {
     if let Ok(Some(result)) = db.latest_staged_job_for_ruleset(ruleset_id).await {
-        let stage = result.get("stage").and_then(Value::as_str).unwrap_or("identity").to_string();
-        let progress = result.get("progress_pct").and_then(Value::as_u64).unwrap_or(0);
+        let stage = result
+            .get("stage")
+            .and_then(Value::as_str)
+            .unwrap_or("identity")
+            .to_string();
+        let progress = result
+            .get("progress_pct")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
         return json!({"stage": stage, "progress_pct": progress});
     }
     json!({"stage": "identity", "progress_pct": 0})
@@ -532,14 +767,27 @@ async fn latest_staged_progress(db: &Db, ruleset_id: &str) -> Value {
 
 /// GET /api/rulesets/{id}/identity — `{title, game_identity}` once Stage 0 is
 /// done; else 202 with `{stage, progress_pct}`.
-async fn ruleset_identity(Path(id): Path<String>, State(state): State<AppState>) -> Result<(StatusCode, Json<Value>), ApiError> {
+async fn ruleset_identity(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
     if let Some(kernel) = state.db.load_rule_kernel(&id).await? {
-        let summary = kernel.game_identity.get("summary").and_then(Value::as_str).unwrap_or("");
+        let summary = kernel
+            .game_identity
+            .get("summary")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         if !summary.is_empty() {
-            return Ok((StatusCode::OK, Json(json!({"ruleset_id": id, "game_identity": kernel.game_identity}))));
+            return Ok((
+                StatusCode::OK,
+                Json(json!({"ruleset_id": id, "game_identity": kernel.game_identity})),
+            ));
         }
     }
-    Ok((StatusCode::ACCEPTED, Json(latest_staged_progress(&state.db, &id).await)))
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(latest_staged_progress(&state.db, &id).await),
+    ))
 }
 
 /// A kernel jsonb value counts as "ready" when it is a non-empty object (or any
@@ -554,13 +802,24 @@ fn kernel_value_ready(value: &Value) -> bool {
 
 /// GET /api/rulesets/{id}/character-template — the sheet schema once Stage 1 is
 /// done; else 202 with `{stage, progress_pct}`.
-async fn ruleset_character_template(Path(id): Path<String>, State(state): State<AppState>) -> Result<(StatusCode, Json<Value>), ApiError> {
+async fn ruleset_character_template(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
     if let Some(kernel) = state.db.load_rule_kernel(&id).await? {
         if kernel_value_ready(&kernel.character_sheet_schema) {
-            return Ok((StatusCode::OK, Json(json!({"ruleset_id": id, "character_sheet_schema": kernel.character_sheet_schema}))));
+            return Ok((
+                StatusCode::OK,
+                Json(
+                    json!({"ruleset_id": id, "character_sheet_schema": kernel.character_sheet_schema}),
+                ),
+            ));
         }
     }
-    Ok((StatusCode::ACCEPTED, Json(latest_staged_progress(&state.db, &id).await)))
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(latest_staged_progress(&state.db, &id).await),
+    ))
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -568,7 +827,10 @@ pub struct SearchReindexRequest {
     pub incremental: Option<bool>,
 }
 
-async fn search_api(State(state): State<AppState>, Json(req): Json<SearchRequest>) -> Result<Json<SearchResponse>, ApiError> {
+async fn search_api(
+    State(state): State<AppState>,
+    Json(req): Json<SearchRequest>,
+) -> Result<Json<SearchResponse>, ApiError> {
     let response = state.search.search_async(&req).await?;
     if let Some(session_id) = req.scopes.get("session_id").cloned() {
         let event = LookupEvent {
@@ -580,7 +842,11 @@ async fn search_api(State(state): State<AppState>, Json(req): Json<SearchRequest
             query_text: req.query.clone(),
             search_terms: vec![req.query.clone()],
             source_hits: serde_json::to_value(&response.hits)?,
-            result_status: if response.hits.is_empty() { "no_hits".into() } else { "searched".into() },
+            result_status: if response.hits.is_empty() {
+                "no_hits".into()
+            } else {
+                "searched".into()
+            },
             created_at: Utc::now(),
         };
         let _ = state.db.insert_lookup_event(&event).await;
@@ -588,7 +854,10 @@ async fn search_api(State(state): State<AppState>, Json(req): Json<SearchRequest
     Ok(Json(response))
 }
 
-async fn search_reindex_api(State(state): State<AppState>, Json(req): Json<SearchReindexRequest>) -> Result<Json<SearchIndexStats>, ApiError> {
+async fn search_reindex_api(
+    State(state): State<AppState>,
+    Json(req): Json<SearchReindexRequest>,
+) -> Result<Json<SearchIndexStats>, ApiError> {
     let stats = if req.incremental.unwrap_or(false) {
         state.search.reindex_incremental().await?
     } else {
@@ -597,12 +866,18 @@ async fn search_reindex_api(State(state): State<AppState>, Json(req): Json<Searc
     Ok(Json(stats))
 }
 
-async fn search_load_api(State(state): State<AppState>, Json(req): Json<SearchLoadRequest>) -> Result<Json<SearchLoadResponse>, ApiError> {
+async fn search_load_api(
+    State(state): State<AppState>,
+    Json(req): Json<SearchLoadRequest>,
+) -> Result<Json<SearchLoadResponse>, ApiError> {
     let block = state.search.load_hit_to_context_block(&req)?;
     let mut persisted = false;
     if req.persist {
         if let Some(session_id) = req.session_id.as_deref() {
-            state.db.upsert_runtime_context_block(session_id, &block).await?;
+            state
+                .db
+                .upsert_runtime_context_block(session_id, &block)
+                .await?;
             persisted = true;
         }
     }
@@ -610,35 +885,65 @@ async fn search_load_api(State(state): State<AppState>, Json(req): Json<SearchLo
         let event = LookupEvent {
             event_id: format!("lookup_{}", Uuid::new_v4().simple()),
             session_id: Some(session_id),
-            ruleset_id: req.ruleset_id.clone().or_else(|| req.hit.scopes.get("ruleset_id").cloned()),
-            module_id: req.module_id.clone().or_else(|| req.hit.scopes.get("module_id").cloned()),
-            demand_id: req.demand_id.clone().or_else(|| Some("search_load".to_string())),
-            query_text: req.query_text.clone().unwrap_or_else(|| req.load_reason.clone()),
+            ruleset_id: req
+                .ruleset_id
+                .clone()
+                .or_else(|| req.hit.scopes.get("ruleset_id").cloned()),
+            module_id: req
+                .module_id
+                .clone()
+                .or_else(|| req.hit.scopes.get("module_id").cloned()),
+            demand_id: req
+                .demand_id
+                .clone()
+                .or_else(|| Some("search_load".to_string())),
+            query_text: req
+                .query_text
+                .clone()
+                .unwrap_or_else(|| req.load_reason.clone()),
             search_terms: vec![req.hit.title.clone()],
             source_hits: serde_json::to_value(&req.hit)?,
-            result_status: if persisted { "loaded_persisted".into() } else { "loaded_ephemeral".into() },
+            result_status: if persisted {
+                "loaded_persisted".into()
+            } else {
+                "loaded_ephemeral".into()
+            },
             created_at: Utc::now(),
         };
         state.db.insert_lookup_event(&event).await?;
         Some(event.event_id)
-    } else { None };
-    Ok(Json(SearchLoadResponse { block, persisted, lookup_event_id }))
+    } else {
+        None
+    };
+    Ok(Json(SearchLoadResponse {
+        block,
+        persisted,
+        lookup_event_id,
+    }))
 }
 
 async fn search_sources_api(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let sources = load_search_source_configs(&state.db.pool).await?;
-    let out = sources.into_iter().map(|source| json!({
-        "source_config_id": source.source_config_id,
-        "source_kind": source.source_kind,
-        "label": source.label,
-        "enabled": source.enabled,
-        "priority": source.priority,
-        "config_json": source.config_json,
-    })).collect::<Vec<_>>();
+    let out = sources
+        .into_iter()
+        .map(|source| {
+            json!({
+                "source_config_id": source.source_config_id,
+                "source_kind": source.source_kind,
+                "label": source.label,
+                "enabled": source.enabled,
+                "priority": source.priority,
+                "config_json": source.config_json,
+            })
+        })
+        .collect::<Vec<_>>();
     Ok(Json(json!({"sources": out})))
 }
 
-async fn upsert_search_source_api(State(state): State<AppState>, Json(req): Json<SearchSourceConfig>) -> Result<Json<SearchSourceConfig>, ApiError> {
+async fn upsert_search_source_api(
+    State(state): State<AppState>,
+    Json(req): Json<SearchSourceConfig>,
+) -> Result<Json<SearchSourceConfig>, ApiError> {
     upsert_search_source_config(&state.db.pool, &req).await?;
     Ok(Json(req))
 }
@@ -654,25 +959,48 @@ pub struct RuleLookupRequest {
     pub limit: Option<u32>,
 }
 
-async fn rule_lookup(State(state): State<AppState>, Json(req): Json<RuleLookupRequest>) -> Result<Json<Value>, ApiError> {
+async fn rule_lookup(
+    State(state): State<AppState>,
+    Json(req): Json<RuleLookupRequest>,
+) -> Result<Json<Value>, ApiError> {
     let mut scopes = std::collections::BTreeMap::new();
-    if let Some(v) = req.ruleset_id.clone() { scopes.insert("ruleset_id".into(), v); }
-    if let Some(v) = req.module_id.clone() { scopes.insert("module_id".into(), v); }
-    if let Some(v) = req.session_id.clone() { scopes.insert("session_id".into(), v); }
-    if let Some(v) = req.scene_id.clone() { scopes.insert("scene_id".into(), v); }
-    let response = state.search.search_async(&SearchRequest {
-        query: req.query_text.clone(),
-        mode: SearchMode::Auto,
-        domains: vec!["rules".into(), "modules".into(), "learned".into(), "source".into()],
-        scopes,
-        limit: req.limit.unwrap_or(8),
-        explain: true,
-        viewer: VisibilityProfile::gm(),
-        rewrite_query: true,
-        intent: Some("rule_lookup".into()),
-        ..Default::default()
-    }).await?;
-    let status = if response.hits.is_empty() { "provisional" } else { "source_backed" };
+    if let Some(v) = req.ruleset_id.clone() {
+        scopes.insert("ruleset_id".into(), v);
+    }
+    if let Some(v) = req.module_id.clone() {
+        scopes.insert("module_id".into(), v);
+    }
+    if let Some(v) = req.session_id.clone() {
+        scopes.insert("session_id".into(), v);
+    }
+    if let Some(v) = req.scene_id.clone() {
+        scopes.insert("scene_id".into(), v);
+    }
+    let response = state
+        .search
+        .search_async(&SearchRequest {
+            query: req.query_text.clone(),
+            mode: SearchMode::Auto,
+            domains: vec![
+                "rules".into(),
+                "modules".into(),
+                "learned".into(),
+                "source".into(),
+            ],
+            scopes,
+            limit: req.limit.unwrap_or(8),
+            explain: true,
+            viewer: VisibilityProfile::gm(),
+            rewrite_query: true,
+            intent: Some("rule_lookup".into()),
+            ..Default::default()
+        })
+        .await?;
+    let status = if response.hits.is_empty() {
+        "provisional"
+    } else {
+        "source_backed"
+    };
     let event = LookupEvent {
         event_id: format!("lookup_{}", Uuid::new_v4().simple()),
         session_id: req.session_id.clone(),
@@ -686,12 +1014,20 @@ async fn rule_lookup(State(state): State<AppState>, Json(req): Json<RuleLookupRe
         created_at: Utc::now(),
     };
     state.db.insert_lookup_event(&event).await?;
-    Ok(Json(json!({"event_id": event.event_id, "status": status, "query_id": response.query_id, "hits": response.hits})))
+    Ok(Json(
+        json!({"event_id": event.event_id, "status": status, "query_id": response.query_id, "hits": response.hits}),
+    ))
 }
 
-
-async fn rule_steward_assist_api(State(state): State<AppState>, Json(req): Json<RuleNeed>) -> Result<Json<RuleAssist>, ApiError> {
-    let steward = RuleStewardAgent::new(state.db.clone(), state.search.clone(), state.parser_config.data_dir.clone());
+async fn rule_steward_assist_api(
+    State(state): State<AppState>,
+    Json(req): Json<RuleNeed>,
+) -> Result<Json<RuleAssist>, ApiError> {
+    let steward = RuleStewardAgent::new(
+        state.db.clone(),
+        state.search.clone(),
+        state.parser_config.data_dir.clone(),
+    );
     let assist = steward.assist(req).await?;
     Ok(Json(assist))
 }
@@ -703,14 +1039,29 @@ pub struct RulePlayabilityRequest {
     pub module_id: Option<String>,
 }
 
-async fn rule_playability_api(State(state): State<AppState>, Json(req): Json<RulePlayabilityRequest>) -> Result<Json<PlayabilityGateReport>, ApiError> {
-    let steward = RuleStewardAgent::new(state.db.clone(), state.search.clone(), state.parser_config.data_dir.clone());
-    let report = steward.playability_gate(&req.ruleset_id, req.module_id.as_deref()).await?;
+async fn rule_playability_api(
+    State(state): State<AppState>,
+    Json(req): Json<RulePlayabilityRequest>,
+) -> Result<Json<PlayabilityGateReport>, ApiError> {
+    let steward = RuleStewardAgent::new(
+        state.db.clone(),
+        state.search.clone(),
+        state.parser_config.data_dir.clone(),
+    );
+    let report = steward
+        .playability_gate(&req.ruleset_id, req.module_id.as_deref())
+        .await?;
     Ok(Json(report))
 }
 
-async fn rule_character_onboarding_api(State(state): State<AppState>, Path(ruleset_id): Path<String>) -> Result<Json<CharacterOnboardingPack>, ApiError> {
-    let pack = state.db.load_character_onboarding_pack(&ruleset_id).await?
+async fn rule_character_onboarding_api(
+    State(state): State<AppState>,
+    Path(ruleset_id): Path<String>,
+) -> Result<Json<CharacterOnboardingPack>, ApiError> {
+    let pack = state
+        .db
+        .load_character_onboarding_pack(&ruleset_id)
+        .await?
         .ok_or_else(|| anyhow::anyhow!("character onboarding pack not found for {ruleset_id}"))?;
     Ok(Json(pack))
 }
@@ -730,9 +1081,14 @@ pub struct RecordRulingRequest {
     pub superseded_by: Option<String>,
 }
 
-async fn record_ruling_api(State(state): State<AppState>, Json(req): Json<RecordRulingRequest>) -> Result<Json<RulingLogEntry>, ApiError> {
+async fn record_ruling_api(
+    State(state): State<AppState>,
+    Json(req): Json<RecordRulingRequest>,
+) -> Result<Json<RulingLogEntry>, ApiError> {
     let status = req.status.unwrap_or(RulingStatus::Provisional);
-    let provisional = req.provisional.unwrap_or(matches!(status, RulingStatus::Provisional));
+    let provisional = req
+        .provisional
+        .unwrap_or(matches!(status, RulingStatus::Provisional));
     let ruling = RulingLogEntry {
         ruling_id: format!("ruling_{}", Uuid::new_v4().simple()),
         session_id: req.session_id,
@@ -742,7 +1098,11 @@ async fn record_ruling_api(State(state): State<AppState>, Json(req): Json<Record
         ruling_text: req.ruling_text,
         source_refs: req.source_refs,
         status,
-        confidence: req.confidence.unwrap_or(if provisional { RulingConfidence::Low } else { RulingConfidence::Medium }),
+        confidence: req.confidence.unwrap_or(if provisional {
+            RulingConfidence::Low
+        } else {
+            RulingConfidence::Medium
+        }),
         provisional,
         superseded_by: req.superseded_by,
         created_at: Utc::now(),
@@ -771,10 +1131,15 @@ pub struct UpsertLearnedPacketRequest {
     pub visibility: Option<Visibility>,
 }
 
-async fn upsert_learned_packet_api(State(state): State<AppState>, Json(req): Json<UpsertLearnedPacketRequest>) -> Result<Json<LearnedPacket>, ApiError> {
+async fn upsert_learned_packet_api(
+    State(state): State<AppState>,
+    Json(req): Json<UpsertLearnedPacketRequest>,
+) -> Result<Json<LearnedPacket>, ApiError> {
     let now = Utc::now();
     let packet = LearnedPacket {
-        packet_id: req.packet_id.unwrap_or_else(|| format!("learned_{}", Uuid::new_v4().simple())),
+        packet_id: req
+            .packet_id
+            .unwrap_or_else(|| format!("learned_{}", Uuid::new_v4().simple())),
         ruleset_id: req.ruleset_id,
         module_id: req.module_id,
         packet_type: req.packet_type,
@@ -796,11 +1161,13 @@ async fn upsert_learned_packet_api(State(state): State<AppState>, Json(req): Jso
     Ok(Json(packet))
 }
 
-async fn list_learned_packets_api(Path(ruleset_id): Path<String>, State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+async fn list_learned_packets_api(
+    Path(ruleset_id): Path<String>,
+    State(state): State<AppState>,
+) -> Result<Json<Value>, ApiError> {
     let packets = state.db.list_learned_packets(&ruleset_id, None, 50).await?;
     Ok(Json(json!({"ruleset_id": ruleset_id, "packets": packets})))
 }
-
 
 #[derive(Debug, Deserialize, Default)]
 pub struct LearningCandidatesQuery {
@@ -809,8 +1176,18 @@ pub struct LearningCandidatesQuery {
     pub limit: Option<i64>,
 }
 
-async fn list_learning_candidates_api(Query(query): Query<LearningCandidatesQuery>, State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let candidates = state.db.list_learning_candidates(query.ruleset_id.as_deref(), query.status.as_deref(), query.limit.unwrap_or(50)).await?;
+async fn list_learning_candidates_api(
+    Query(query): Query<LearningCandidatesQuery>,
+    State(state): State<AppState>,
+) -> Result<Json<Value>, ApiError> {
+    let candidates = state
+        .db
+        .list_learning_candidates(
+            query.ruleset_id.as_deref(),
+            query.status.as_deref(),
+            query.limit.unwrap_or(50),
+        )
+        .await?;
     Ok(Json(json!({"candidates": candidates})))
 }
 
@@ -820,14 +1197,30 @@ pub struct ApproveLearningCandidateRequest {
     pub stage: Option<LearningStage>,
 }
 
-async fn approve_learning_candidate_api(Path(candidate_id): Path<String>, State(state): State<AppState>, Json(req): Json<ApproveLearningCandidateRequest>) -> Result<Json<Value>, ApiError> {
-    let candidate = state.db.get_learning_candidate(&candidate_id).await?.ok_or_else(|| anyhow::anyhow!("unknown candidate_id: {candidate_id}"))?;
+async fn approve_learning_candidate_api(
+    Path(candidate_id): Path<String>,
+    State(state): State<AppState>,
+    Json(req): Json<ApproveLearningCandidateRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let candidate = state
+        .db
+        .get_learning_candidate(&candidate_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("unknown candidate_id: {candidate_id}"))?;
     let packet = candidate.to_learned_packet(req.stage.unwrap_or(LearningStage::UsedOnce));
     state.db.upsert_learned_packet(&packet).await?;
-    state.db.update_learning_candidate_status(&candidate_id, LearningCandidateStatus::Approved, req.notes.as_deref()).await?;
-    Ok(Json(json!({"candidate_id": candidate_id, "learned_packet": packet})))
+    state
+        .db
+        .update_learning_candidate_status(
+            &candidate_id,
+            LearningCandidateStatus::Approved,
+            req.notes.as_deref(),
+        )
+        .await?;
+    Ok(Json(
+        json!({"candidate_id": candidate_id, "learned_packet": packet}),
+    ))
 }
-
 
 #[derive(Debug, Deserialize)]
 pub struct ResolveCheckRequest {
@@ -836,10 +1229,20 @@ pub struct ResolveCheckRequest {
     pub roll_input: String,
 }
 
-async fn resolve_check_api(State(state): State<AppState>, Json(req): Json<ResolveCheckRequest>) -> Result<Json<Value>, ApiError> {
-    let turn_id = req.turn_id.unwrap_or_else(|| format!("turn_{}", Uuid::new_v4().simple()));
-    let outcome = state.runtime.handle_open_interaction_gate(&req.session_id, &turn_id, &req.roll_input).await?;
-    Ok(Json(json!({"session_id": req.session_id, "turn_id": turn_id, "outcome": outcome})))
+async fn resolve_check_api(
+    State(state): State<AppState>,
+    Json(req): Json<ResolveCheckRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let turn_id = req
+        .turn_id
+        .unwrap_or_else(|| format!("turn_{}", Uuid::new_v4().simple()));
+    let outcome = state
+        .runtime
+        .handle_open_interaction_gate(&req.session_id, &turn_id, &req.roll_input)
+        .await?;
+    Ok(Json(
+        json!({"session_id": req.session_id, "turn_id": turn_id, "outcome": outcome}),
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -850,8 +1253,19 @@ pub struct CompileContextRequest {
     pub recent_transcript: Option<String>,
 }
 
-async fn compile_context(State(state): State<AppState>, Json(req): Json<CompileContextRequest>) -> Result<Json<CompiledContext>, ApiError> {
-    let compiled = state.runtime.prepare_turn_context(&req.context_request, &req.runtime_state, req.current_input.as_deref(), req.recent_transcript.as_deref()).await?;
+async fn compile_context(
+    State(state): State<AppState>,
+    Json(req): Json<CompileContextRequest>,
+) -> Result<Json<CompiledContext>, ApiError> {
+    let compiled = state
+        .runtime
+        .prepare_turn_context(
+            &req.context_request,
+            &req.runtime_state,
+            req.current_input.as_deref(),
+            req.recent_transcript.as_deref(),
+        )
+        .await?;
     Ok(Json(compiled))
 }
 
@@ -862,16 +1276,29 @@ pub struct CreateCharacterRequest {
     pub user_preferences: String,
 }
 
-async fn create_character_sse(State(state): State<AppState>, Json(req): Json<CreateCharacterRequest>) -> impl IntoResponse {
+async fn create_character_sse(
+    State(state): State<AppState>,
+    Json(req): Json<CreateCharacterRequest>,
+) -> impl IntoResponse {
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(128);
     let runtime = state.runtime.clone();
     let llm = state.llm.clone();
     let db = state.db.clone();
     tokio::spawn(async move {
         send_phase(&tx, "start", json!({"kind":"character_create"})).await;
-        let messages = match runtime.character_creation_messages(&req.ruleset_id, req.module_id.as_deref(), &req.user_preferences).await {
+        let messages = match runtime
+            .character_creation_messages(
+                &req.ruleset_id,
+                req.module_id.as_deref(),
+                &req.user_preferences,
+            )
+            .await
+        {
             Ok(m) => m,
-            Err(err) => { send_error(&tx, &err.to_string()).await; return; }
+            Err(err) => {
+                send_error(&tx, &err.to_string()).await;
+                return;
+            }
         };
         send_phase(&tx, "llm_stream_start", json!({})).await;
         let mut full = String::new();
@@ -879,22 +1306,46 @@ async fn create_character_sse(State(state): State<AppState>, Json(req): Json<Cre
             Ok(mut stream) => {
                 while let Some(item) = stream.next().await {
                     match item {
-                        Ok(delta) => { full.push_str(&delta); send_delta(&tx, &delta).await; }
-                        Err(err) => { send_error(&tx, &err.to_string()).await; return; }
+                        Ok(delta) => {
+                            full.push_str(&delta);
+                            send_delta(&tx, &delta).await;
+                        }
+                        Err(err) => {
+                            send_error(&tx, &err.to_string()).await;
+                            return;
+                        }
                     }
                 }
             }
-            Err(err) => { send_error(&tx, &err.to_string()).await; return; }
+            Err(err) => {
+                send_error(&tx, &err.to_string()).await;
+                return;
+            }
         }
         let job_id = format!("character_postprocess_{}", Uuid::new_v4().simple());
         let ruleset_id_for_postprocess = req.ruleset_id.clone();
-        let _ = db.insert_background_job(&job_id, "character_postprocess", json!({"ruleset_id": req.ruleset_id.clone(), "module_id": req.module_id.clone()})).await;
-        send_phase(&tx, "postprocess_scheduled", json!({"job_id": job_id.clone()})).await;
+        let _ = db
+            .insert_background_job(
+                &job_id,
+                "character_postprocess",
+                json!({"ruleset_id": req.ruleset_id.clone(), "module_id": req.module_id.clone()}),
+            )
+            .await;
+        send_phase(
+            &tx,
+            "postprocess_scheduled",
+            json!({"job_id": job_id.clone()}),
+        )
+        .await;
         let db2 = db.clone();
         tokio::spawn(async move {
-            if let Err(err) = postprocess_character(db2.clone(), &job_id, &ruleset_id_for_postprocess, full).await {
+            if let Err(err) =
+                postprocess_character(db2.clone(), &job_id, &ruleset_id_for_postprocess, full).await
+            {
                 error!(error = %err, "character postprocess failed");
-                let _ = db2.update_background_job(&job_id, "error", json!({}), Some(&err.to_string())).await;
+                let _ = db2
+                    .update_background_job(&job_id, "error", json!({}), Some(&err.to_string()))
+                    .await;
             }
         });
         send_phase(&tx, "done", json!({})).await;
@@ -902,23 +1353,45 @@ async fn create_character_sse(State(state): State<AppState>, Json(req): Json<Cre
     Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default())
 }
 
-async fn postprocess_character(db: Db, job_id: &str, ruleset_id: &str, response_text: String) -> anyhow::Result<()> {
-    db.update_background_job(job_id, "running", json!({}), None).await?;
+async fn postprocess_character(
+    db: Db,
+    job_id: &str,
+    ruleset_id: &str,
+    response_text: String,
+) -> anyhow::Result<()> {
+    db.update_background_job(job_id, "running", json!({}), None)
+        .await?;
     let pack = db.load_character_onboarding_pack(ruleset_id).await?;
     let template = match pack.as_ref() {
         Some(pack) => pack.sheet_template.clone(),
-        None => db.load_character_template(ruleset_id).await?.ok_or_else(|| anyhow::anyhow!("template not found"))?,
+        None => db
+            .load_character_template(ruleset_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("template not found"))?,
     };
-    let draft = extract_json(&response_text).unwrap_or_else(|| json!({"raw_response": response_text}));
-    let name = draft.get("name").or_else(|| draft.get("character_name")).and_then(Value::as_str).unwrap_or("Unnamed Character").to_string();
+    let draft =
+        extract_json(&response_text).unwrap_or_else(|| json!({"raw_response": response_text}));
+    let name = draft
+        .get("name")
+        .or_else(|| draft.get("character_name"))
+        .and_then(Value::as_str)
+        .unwrap_or("Unnamed Character")
+        .to_string();
     let validation = validate_character_template_sheet(&template, &draft);
-    let pack_mechanically_ready = pack.as_ref().map(|p| {
-        p.validation_report.status == "ok"
-            && !p.derived_formula_pack.formulas.is_empty()
-            && !p.runtime_bindings.is_empty()
-            && !p.creation_flows.is_empty()
-    }).unwrap_or(false);
-    let status = if validation.status == "ok" && pack_mechanically_ready { "ready" } else { "draft_needs_rules_source" };
+    let pack_mechanically_ready = pack
+        .as_ref()
+        .map(|p| {
+            p.validation_report.status == "ok"
+                && !p.derived_formula_pack.formulas.is_empty()
+                && !p.runtime_bindings.is_empty()
+                && !p.creation_flows.is_empty()
+        })
+        .unwrap_or(false);
+    let status = if validation.status == "ok" && pack_mechanically_ready {
+        "ready"
+    } else {
+        "draft_needs_rules_source"
+    };
     let sheet = CharacterSheet {
         character_id: format!("character_{}", Uuid::new_v4().simple()),
         ruleset_id: ruleset_id.to_string(),
@@ -933,10 +1406,19 @@ async fn postprocess_character(db: Db, job_id: &str, ruleset_id: &str, response_
 }
 
 #[derive(Debug, Deserialize)]
-pub struct StartSessionRequest { pub ruleset_id: String, pub module_id: Option<String> }
+pub struct StartSessionRequest {
+    pub ruleset_id: String,
+    pub module_id: Option<String>,
+}
 
-async fn start_session(State(state): State<AppState>, Json(req): Json<StartSessionRequest>) -> Result<Json<Value>, ApiError> {
-    let session_id = state.runtime.start_session(&req.ruleset_id, req.module_id.as_deref()).await?;
+async fn start_session(
+    State(state): State<AppState>,
+    Json(req): Json<StartSessionRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let session_id = state
+        .runtime
+        .start_session(&req.ruleset_id, req.module_id.as_deref())
+        .await?;
     Ok(Json(json!({"session_id": session_id})))
 }
 
@@ -990,9 +1472,39 @@ pub struct PlayTurnRequest {
     pub cancellation_policy: Option<turn_driver::CancellationPolicy>,
 }
 
-async fn play_turn_sse(Path(session_id): Path<String>, State(state): State<AppState>, Json(req): Json<PlayTurnRequest>) -> impl IntoResponse {
+async fn play_turn_sse(
+    Path(session_id): Path<String>,
+    State(state): State<AppState>,
+    Json(req): Json<PlayTurnRequest>,
+) -> impl IntoResponse {
     // SSE transport channel: TurnEvent (from execute_turn) → axum Event。
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(128);
+    // 角色卡入口锁：在建任何 GM turn work / 启动叙事之前先查。没有可机解角色卡 →
+    // 发 blocked phase + error 后立即返回 SSE 流，绝不进 execute_turn。
+    match state.runtime.evaluate_session_entry_gate(&session_id).await {
+        Ok(EntryGate::Playable { .. }) => {}
+        Ok(EntryGate::Blocked(block)) => {
+            let tx2 = tx.clone();
+            tokio::spawn(async move {
+                send_phase(
+                    &tx2,
+                    "blocked",
+                    json!({"gate":"character_card","code": block.code(),"hint": block.hint()}),
+                )
+                .await;
+                send_error(&tx2, &block.hint()).await;
+            });
+            return Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default());
+        }
+        Err(err) => {
+            let tx2 = tx.clone();
+            let msg = err.to_string();
+            tokio::spawn(async move {
+                send_error(&tx2, &msg).await;
+            });
+            return Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default());
+        }
+    }
     let data_dir = state.parser_config.data_dir.clone();
     let llm = state.llm.clone();
     let db = state.db.clone();
@@ -1021,21 +1533,45 @@ async fn play_turn_sse(Path(session_id): Path<String>, State(state): State<AppSt
             let rs3 = rs2.clone();
             let dir3 = dir2.clone();
             Box::pin(async move {
-                extract_module_scenes(&db3, llm3.as_ref(), &mid3, None, Some(&rs3), &dir3, 12, Some(&node_id)).await
-            }) as Pin<Box<dyn std::future::Future<Output = anyhow::Result<usize>> + Send>>
+                extract_module_scenes(
+                    &db3,
+                    llm3.as_ref(),
+                    &mid3,
+                    None,
+                    Some(&rs3),
+                    &dir3,
+                    12,
+                    Some(&node_id),
+                )
+                .await
+            })
+                as Pin<Box<dyn std::future::Future<Output = anyhow::Result<usize>> + Send>>
         }) as SceneDeepExtractFn);
     }
     let runtime = state.runtime.clone();
     tokio::spawn(async move {
         let turn_id = format!("turn_{}", Uuid::new_v4().simple());
-        send_phase(&tx, "start", json!({"kind":"play_turn", "turn_id": turn_id.clone()})).await;
+        send_phase(
+            &tx,
+            "start",
+            json!({"kind":"play_turn", "turn_id": turn_id.clone()}),
+        )
+        .await;
         // world_time 注入 RuntimeState（execute_turn 不替我们查时间）。PlayerAction
         // 世界事件由 execute_turn 的 phase_record_player_action 接管（不在此手写，避免双记）。
         let world_time = match runtime.current_world_time(&session_id).await {
             Ok(t) => t,
-            Err(err) => { send_error(&tx, &err.to_string()).await; return; }
+            Err(err) => {
+                send_error(&tx, &err.to_string()).await;
+                return;
+            }
         };
-        send_phase(&tx, "world_time", serde_json::to_value(&world_time).unwrap_or_else(|_| json!({}))).await;
+        send_phase(
+            &tx,
+            "world_time",
+            serde_json::to_value(&world_time).unwrap_or_else(|_| json!({})),
+        )
+        .await;
         let mut runtime_state = req.runtime_state.clone().unwrap_or_default();
         runtime_state.world_time = Some(world_time);
         runtime_state.ruleset_id = req.ruleset_id.clone();
@@ -1049,7 +1585,10 @@ async fn play_turn_sse(Path(session_id): Path<String>, State(state): State<AppSt
         // I/O（DB 载 + 失败 fail-soft 成 None）与纯合并决策（resolve_recent_transcript）分离；
         // CLI 路径不经此处，行为不变。
         let server_loaded = if matches!(req.history_policy, HistoryPolicy::ServerRecent) {
-            match db.load_recent_transcript(&session_id, SERVER_RECENT_HISTORY_TURNS).await {
+            match db
+                .load_recent_transcript(&session_id, SERVER_RECENT_HISTORY_TURNS)
+                .await
+            {
                 Ok(t) => t,
                 Err(err) => {
                     tracing::warn!(error = %err, session_id = %session_id, "load_recent_transcript failed; fall back to client transcript");
@@ -1059,7 +1598,11 @@ async fn play_turn_sse(Path(session_id): Path<String>, State(state): State<AppSt
         } else {
             None
         };
-        let recent_transcript = resolve_recent_transcript(req.history_policy, req.recent_transcript.clone(), server_loaded);
+        let recent_transcript = resolve_recent_transcript(
+            req.history_policy,
+            req.recent_transcript.clone(),
+            server_loaded,
+        );
         let context_request = ContextRequest {
             ruleset_id: req.ruleset_id.clone(),
             module_id: req.module_id.clone(),
@@ -1090,21 +1633,16 @@ async fn play_turn_sse(Path(session_id): Path<String>, State(state): State<AppSt
         // 的任务里继续跑——对客户端=后台。SSE 翻译与原逐分支逐字节等价（见 turn_driver）。
         let stream = execute_turn(gm, owned, CANONICAL_TURN_PLAN);
         let policy = req.cancellation_policy.unwrap_or_default();
-        let marker = turn_driver::DbDisconnectMarker { db: db.clone(), session_id: session_id.clone() };
+        let marker = turn_driver::DbDisconnectMarker {
+            db: db.clone(),
+            session_id: session_id.clone(),
+        };
         let sink = turn_driver::AxumSseSink::new(tx);
-        let _outcome = turn_driver::drive_turn_stream(
-            stream,
-            sink,
-            policy,
-            cancel,
-            &marker,
-            &turn_id,
-        )
-        .await;
+        let _outcome =
+            turn_driver::drive_turn_stream(stream, sink, policy, cancel, &marker, &turn_id).await;
     });
     Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default())
 }
-
 
 #[derive(Debug, Deserialize)]
 struct ConflictStartRequest {
@@ -1115,74 +1653,163 @@ struct ConflictStartRequest {
     user_input: String,
 }
 
-async fn conflict_start_api(State(state): State<AppState>, Json(req): Json<ConflictStartRequest>) -> Result<Json<Value>, ApiError> {
+async fn conflict_start_api(
+    State(state): State<AppState>,
+    Json(req): Json<ConflictStartRequest>,
+) -> Result<Json<Value>, ApiError> {
     let turn_id = format!("turn_{}", Uuid::new_v4().simple());
-    let context_request = ContextRequest { ruleset_id: req.ruleset_id.clone(), module_id: req.module_id.clone(), session_id: req.session_id.clone(), turn_id: turn_id.clone(), viewer: VisibilityProfile::gm(), token_budget: TokenBudget::default() };
-    let runtime_state = RuntimeState { ruleset_id: req.ruleset_id.clone(), module_id: req.module_id.clone(), ..Default::default() };
-    let result = state.runtime.try_handle_conflict_turn(&context_request, &runtime_state, &req.user_input, None).await?;
+    let context_request = ContextRequest {
+        ruleset_id: req.ruleset_id.clone(),
+        module_id: req.module_id.clone(),
+        session_id: req.session_id.clone(),
+        turn_id: turn_id.clone(),
+        viewer: VisibilityProfile::gm(),
+        token_budget: TokenBudget::default(),
+    };
+    let runtime_state = RuntimeState {
+        ruleset_id: req.ruleset_id.clone(),
+        module_id: req.module_id.clone(),
+        ..Default::default()
+    };
+    let result = state
+        .runtime
+        .try_handle_conflict_turn(&context_request, &runtime_state, &req.user_input, None)
+        .await?;
     Ok(Json(json!({"turn_id": turn_id, "result": result})))
 }
 
-async fn conflict_frames_api(Path(session_id): Path<String>, State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+async fn conflict_frames_api(
+    Path(session_id): Path<String>,
+    State(state): State<AppState>,
+) -> Result<Json<Value>, ApiError> {
     let frames = state.db.list_active_state_frames(&session_id, 20).await?;
     Ok(Json(json!({"session_id": session_id, "frames": frames})))
 }
 
-
 #[derive(Debug, Deserialize, Default)]
 struct AdvanceTimeRequest {
-    #[serde(default)] seconds: i64,
-    #[serde(default)] minutes: i64,
-    #[serde(default)] hours: i64,
-    #[serde(default)] days: i64,
-    #[serde(default)] combat_rounds: i64,
-    #[serde(default)] scene_beats: i64,
-    #[serde(default = "default_time_scale_string")] scale: String,
-    #[serde(default = "default_time_reason")] reason: String,
-    #[serde(default)] scene_epoch: Option<String>,
+    #[serde(default)]
+    seconds: i64,
+    #[serde(default)]
+    minutes: i64,
+    #[serde(default)]
+    hours: i64,
+    #[serde(default)]
+    days: i64,
+    #[serde(default)]
+    combat_rounds: i64,
+    #[serde(default)]
+    scene_beats: i64,
+    #[serde(default = "default_time_scale_string")]
+    scale: String,
+    #[serde(default = "default_time_reason")]
+    reason: String,
+    #[serde(default)]
+    scene_epoch: Option<String>,
 }
-fn default_time_scale_string() -> String { "scene_beat".into() }
-fn default_time_reason() -> String { "api time advance".into() }
+fn default_time_scale_string() -> String {
+    "scene_beat".into()
+}
+fn default_time_reason() -> String {
+    "api time advance".into()
+}
 
-async fn get_session_time_api(Path(session_id): Path<String>, State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+async fn get_session_time_api(
+    Path(session_id): Path<String>,
+    State(state): State<AppState>,
+) -> Result<Json<Value>, ApiError> {
     let t = state.runtime.current_world_time(&session_id).await?;
     Ok(Json(json!({"time": t})))
 }
 
-async fn advance_session_time_api(Path(session_id): Path<String>, State(state): State<AppState>, Json(req): Json<AdvanceTimeRequest>) -> Result<Json<Value>, ApiError> {
-    let result = state.runtime.advance_world_time(TimeAdvanceRequest {
-        session_id,
-        campaign_id: None,
-        reason: req.reason,
-        amount: TimeAmount { seconds: req.seconds, minutes: req.minutes, hours: req.hours, days: req.days, combat_rounds: req.combat_rounds, scene_beats: req.scene_beats, label: String::new() },
-        scale: parse_time_scale_api(&req.scale),
-        mutation_kind: TimeMutationKind::Advance,
-        visibility: Visibility::PlayerVisible,
-        caused_by_turn_id: None,
-        caused_by_event_id: None,
-        scene_epoch: req.scene_epoch,
-    }).await?;
+async fn advance_session_time_api(
+    Path(session_id): Path<String>,
+    State(state): State<AppState>,
+    Json(req): Json<AdvanceTimeRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let result = state
+        .runtime
+        .advance_world_time(TimeAdvanceRequest {
+            session_id,
+            campaign_id: None,
+            reason: req.reason,
+            amount: TimeAmount {
+                seconds: req.seconds,
+                minutes: req.minutes,
+                hours: req.hours,
+                days: req.days,
+                combat_rounds: req.combat_rounds,
+                scene_beats: req.scene_beats,
+                label: String::new(),
+            },
+            scale: parse_time_scale_api(&req.scale),
+            mutation_kind: TimeMutationKind::Advance,
+            visibility: Visibility::PlayerVisible,
+            caused_by_turn_id: None,
+            caused_by_event_id: None,
+            scene_epoch: req.scene_epoch,
+        })
+        .await?;
     Ok(Json(json!({"result": result})))
 }
 
 #[derive(Debug, Deserialize, Default)]
-struct EventsQuery { since_tick: Option<i64>, since_event_seq: Option<i64>, limit: Option<i64> }
-async fn list_session_events_api(Path(session_id): Path<String>, Query(q): Query<EventsQuery>, State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let events = state.db.list_world_events_since(&session_id, q.since_tick.unwrap_or(0), q.since_event_seq.unwrap_or(0), q.limit.unwrap_or(50)).await?;
+struct EventsQuery {
+    since_tick: Option<i64>,
+    since_event_seq: Option<i64>,
+    limit: Option<i64>,
+}
+async fn list_session_events_api(
+    Path(session_id): Path<String>,
+    Query(q): Query<EventsQuery>,
+    State(state): State<AppState>,
+) -> Result<Json<Value>, ApiError> {
+    let events = state
+        .db
+        .list_world_events_since(
+            &session_id,
+            q.since_tick.unwrap_or(0),
+            q.since_event_seq.unwrap_or(0),
+            q.limit.unwrap_or(50),
+        )
+        .await?;
     Ok(Json(json!({"events": events})))
 }
 
 #[derive(Debug, Deserialize, Default)]
 struct ScheduleEventRequest {
-    #[serde(default)] seconds: i64,
-    #[serde(default)] minutes: i64,
-    #[serde(default = "default_scheduled_kind")] kind: String,
-    #[serde(default)] payload_json: Value,
+    #[serde(default)]
+    seconds: i64,
+    #[serde(default)]
+    minutes: i64,
+    #[serde(default = "default_scheduled_kind")]
+    kind: String,
+    #[serde(default)]
+    payload_json: Value,
 }
-fn default_scheduled_kind() -> String { "system_event".into() }
-async fn schedule_session_event_api(Path(session_id): Path<String>, State(state): State<AppState>, Json(req): Json<ScheduleEventRequest>) -> Result<Json<Value>, ApiError> {
+fn default_scheduled_kind() -> String {
+    "system_event".into()
+}
+async fn schedule_session_event_api(
+    Path(session_id): Path<String>,
+    State(state): State<AppState>,
+    Json(req): Json<ScheduleEventRequest>,
+) -> Result<Json<Value>, ApiError> {
     let service = trpg_time::WorldTimeService::new(state.db.clone());
-    let scheduled = service.schedule_in(&session_id, TimeAmount { seconds: req.seconds, minutes: req.minutes, ..Default::default() }, parse_world_event_kind_api(&req.kind), req.payload_json, Visibility::GmOnly, None).await?;
+    let scheduled = service
+        .schedule_in(
+            &session_id,
+            TimeAmount {
+                seconds: req.seconds,
+                minutes: req.minutes,
+                ..Default::default()
+            },
+            parse_world_event_kind_api(&req.kind),
+            req.payload_json,
+            Visibility::GmOnly,
+            None,
+        )
+        .await?;
     Ok(Json(json!({"scheduled_event": scheduled})))
 }
 
@@ -1210,11 +1837,16 @@ fn parse_world_event_kind_api(kind: &str) -> WorldEventKind {
     }
 }
 
-async fn get_session_memory(Path(session_id): Path<String>, State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+async fn get_session_memory(
+    Path(session_id): Path<String>,
+    State(state): State<AppState>,
+) -> Result<Json<Value>, ApiError> {
     let events = state.db.list_memory_events(&session_id, 20).await?;
     let facts = state.db.list_memory_facts(&session_id, 50).await?;
     let snapshots = state.db.list_memory_snapshots(&session_id, 10).await?;
-    Ok(Json(json!({"session_id": session_id, "snapshots": snapshots, "facts": facts, "events": events})))
+    Ok(Json(
+        json!({"session_id": session_id, "snapshots": snapshots, "facts": facts, "events": events}),
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1224,12 +1856,18 @@ pub struct RetrieveMemoryRequest {
     pub module_id: Option<String>,
     pub scene_id: Option<String>,
     pub location_id: Option<String>,
-    #[serde(default)] pub actor_ids: Vec<String>,
-    #[serde(default)] pub tags: Vec<String>,
+    #[serde(default)]
+    pub actor_ids: Vec<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
     pub limit: Option<u32>,
 }
 
-async fn retrieve_session_memory(Path(session_id): Path<String>, State(state): State<AppState>, Json(req): Json<RetrieveMemoryRequest>) -> Result<Json<MemoryRetrievalResult>, ApiError> {
+async fn retrieve_session_memory(
+    Path(session_id): Path<String>,
+    State(state): State<AppState>,
+    Json(req): Json<RetrieveMemoryRequest>,
+) -> Result<Json<MemoryRetrievalResult>, ApiError> {
     let query = MemoryQuery {
         session_id,
         text: req.text,
@@ -1256,17 +1894,40 @@ pub struct CompactMemoryRequest {
     pub max_events: Option<i64>,
 }
 
-async fn compact_session_memory(Path(session_id): Path<String>, State(state): State<AppState>, Json(req): Json<CompactMemoryRequest>) -> Result<Json<MemorySnapshot>, ApiError> {
-    let events = state.db.list_memory_events(&session_id, req.max_events.unwrap_or(24).max(1).min(100)).await?;
+async fn compact_session_memory(
+    Path(session_id): Path<String>,
+    State(state): State<AppState>,
+    Json(req): Json<CompactMemoryRequest>,
+) -> Result<Json<MemorySnapshot>, ApiError> {
+    let events = state
+        .db
+        .list_memory_events(&session_id, req.max_events.unwrap_or(24).max(1).min(100))
+        .await?;
     let facts = state.db.list_memory_facts(&session_id, 40).await?;
     let mut summary = String::from("# GM Memory Snapshot\n\nThis is a cache-stable session memory summary. It should be refreshed on scene/chapter breaks or explicit compaction, not every turn.\n\n## Recent Events\n");
-    for event in events.iter().rev() { summary.push_str(&format!("- {}\n", event.summary)); }
+    for event in events.iter().rev() {
+        summary.push_str(&format!("- {}\n", event.summary));
+    }
     if !facts.is_empty() {
         summary.push_str("\n## Active Facts\n");
-        for fact in &facts { summary.push_str(&format!("- {}\n", fact.summary)); }
+        for fact in &facts {
+            summary.push_str(&format!("- {}\n", fact.summary));
+        }
     }
-    let scope = Scope { scope_type: req.scope_type.unwrap_or(ScopeType::Session), scope_id: req.scope_id.unwrap_or_else(|| session_id.clone()) };
-    let snapshot_id = format!("memory.snapshot.{}.{}", session_id, match scope.scope_type { ScopeType::Scene => "scene", ScopeType::Chapter => "chapter", ScopeType::Mission => "mission", _ => "session" });
+    let scope = Scope {
+        scope_type: req.scope_type.unwrap_or(ScopeType::Session),
+        scope_id: req.scope_id.unwrap_or_else(|| session_id.clone()),
+    };
+    let snapshot_id = format!(
+        "memory.snapshot.{}.{}",
+        session_id,
+        match scope.scope_type {
+            ScopeType::Scene => "scene",
+            ScopeType::Chapter => "chapter",
+            ScopeType::Mission => "mission",
+            _ => "session",
+        }
+    );
     let snapshot = MemorySnapshot::new(
         snapshot_id,
         session_id.clone(),
@@ -1274,7 +1935,8 @@ async fn compact_session_memory(Path(session_id): Path<String>, State(state): St
         req.module_id,
         scope,
         Visibility::GmOnly,
-        req.title.unwrap_or_else(|| "GM Memory Snapshot".to_string()),
+        req.title
+            .unwrap_or_else(|| "GM Memory Snapshot".to_string()),
         summary,
         events.iter().map(|e| e.event_id.clone()).collect(),
         facts.iter().map(|f| f.fact_id.clone()).collect(),
@@ -1285,26 +1947,43 @@ async fn compact_session_memory(Path(session_id): Path<String>, State(state): St
 }
 
 fn default_memory_limit() -> u32 {
-    std::env::var("TRPG_MEMORY_RETRIEVAL_LIMIT").ok().and_then(|v| v.parse().ok()).unwrap_or(8)
+    std::env::var("TRPG_MEMORY_RETRIEVAL_LIMIT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8)
 }
 
 async fn send_phase(tx: &mpsc::Sender<Result<Event, Infallible>>, phase: &str, data: Value) {
-    let _ = tx.send(Ok(Event::default().event("phase").data(json!({"phase": phase, "data": data}).to_string()))).await;
+    let _ = tx
+        .send(Ok(Event::default()
+            .event("phase")
+            .data(json!({"phase": phase, "data": data}).to_string())))
+        .await;
 }
 
 async fn send_delta(tx: &mpsc::Sender<Result<Event, Infallible>>, delta: &str) {
-    let _ = tx.send(Ok(Event::default().event("delta").data(delta.to_string()))).await;
+    let _ = tx
+        .send(Ok(Event::default().event("delta").data(delta.to_string())))
+        .await;
 }
 
 // 注：原 `send_event`（scene_transition/error/warning 三种命名事件）已随回合 SSE 翻译
 // 收编进 turn_driver::send_event_translated（P1-3），此处不再保留重复 helper。
 
 async fn send_error(tx: &mpsc::Sender<Result<Event, Infallible>>, error: &str) {
-    let _ = tx.send(Ok(Event::default().event("error").data(json!({"error": error}).to_string()))).await;
+    let _ = tx
+        .send(Ok(Event::default()
+            .event("error")
+            .data(json!({"error": error}).to_string())))
+        .await;
 }
 
 fn extract_json(text: &str) -> Option<Value> {
-    if let Some(v) = extract_fenced(text, "json").and_then(|s| serde_json::from_str::<Value>(&s).ok()) { return Some(v); }
+    if let Some(v) =
+        extract_fenced(text, "json").and_then(|s| serde_json::from_str::<Value>(&s).ok())
+    {
+        return Some(v);
+    }
     serde_json::from_str::<Value>(text).ok()
 }
 
@@ -1316,13 +1995,16 @@ fn extract_fenced(text: &str, lang: &str) -> Option<String> {
     Some(rest[..end].trim().to_string())
 }
 
-
-
 #[derive(Debug)]
 pub struct ApiError(anyhow::Error);
 
-impl<E> From<E> for ApiError where E: Into<anyhow::Error> {
-    fn from(value: E) -> Self { Self(value.into()) }
+impl<E> From<E> for ApiError
+where
+    E: Into<anyhow::Error>,
+{
+    fn from(value: E) -> Self {
+        Self(value.into())
+    }
 }
 
 impl axum::response::IntoResponse for ApiError {
@@ -1345,9 +2027,13 @@ mod tests {
         assert!(!kernel_value_ready(&Value::Null));
         assert!(!kernel_value_ready(&json!({})));
         assert!(kernel_value_ready(&json!({"fields": []})));
-        assert!(kernel_value_ready(&json!({"summary": "A cosmic-horror investigation game."})));
+        assert!(kernel_value_ready(
+            &json!({"summary": "A cosmic-horror investigation game."})
+        ));
         // Stage-1 character template (non-empty object) is "ready".
-        assert!(kernel_value_ready(&json!({"template_id": "coc.sheet", "fields": [{"id": "str"}]})));
+        assert!(kernel_value_ready(
+            &json!({"template_id": "coc.sheet", "fields": [{"id": "str"}]})
+        ));
     }
 
     // The 202 progress body extracts `stage`/`progress_pct` from the latest job
@@ -1355,8 +2041,14 @@ mod tests {
     #[test]
     fn progress_body_extracts_stage_and_pct() {
         let snapshot = json!({"stage": "character", "progress_pct": 35, "stages": []});
-        let stage = snapshot.get("stage").and_then(Value::as_str).unwrap_or("identity");
-        let pct = snapshot.get("progress_pct").and_then(Value::as_u64).unwrap_or(0);
+        let stage = snapshot
+            .get("stage")
+            .and_then(Value::as_str)
+            .unwrap_or("identity");
+        let pct = snapshot
+            .get("progress_pct")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
         assert_eq!(stage, "character");
         assert_eq!(pct, 35);
     }
@@ -1405,7 +2097,7 @@ mod tests {
     fn server_recent_uses_db_transcript_when_present() {
         let out = resolve_recent_transcript(
             HistoryPolicy::ServerRecent,
-            None,                                  // 前端没传 transcript
+            None,                                                     // 前端没传 transcript
             Some("\nPlayer: 我推开门\nGM: 门后是浓雾\n".to_string()), // DB 载到上一回合
         );
         assert_eq!(out.as_deref(), Some("\nPlayer: 我推开门\nGM: 门后是浓雾\n"));
@@ -1415,18 +2107,27 @@ mod tests {
     #[test]
     fn server_recent_falls_back_to_client_when_db_empty() {
         assert_eq!(
-            resolve_recent_transcript(HistoryPolicy::ServerRecent, Some("client".into()), None).as_deref(),
+            resolve_recent_transcript(HistoryPolicy::ServerRecent, Some("client".into()), None)
+                .as_deref(),
             Some("client"),
         );
         // 首回合：两者皆空 → None（不注入空块）。
-        assert_eq!(resolve_recent_transcript(HistoryPolicy::ServerRecent, None, None), None);
+        assert_eq!(
+            resolve_recent_transcript(HistoryPolicy::ServerRecent, None, None),
+            None
+        );
     }
 
     // P1-2: ClientSupplied 沿用客户端传值（旧行为，忽略服务端载入）；None 永远空。
     #[test]
     fn client_supplied_and_none_policies_preserve_semantics() {
         assert_eq!(
-            resolve_recent_transcript(HistoryPolicy::ClientSupplied, Some("c".into()), Some("s".into())).as_deref(),
+            resolve_recent_transcript(
+                HistoryPolicy::ClientSupplied,
+                Some("c".into()),
+                Some("s".into())
+            )
+            .as_deref(),
             Some("c"),
         );
         assert_eq!(
@@ -1449,4 +2150,3 @@ mod tests {
         // explicit so the gap is not silent.
     }
 }
-

@@ -112,8 +112,10 @@ pub fn finalize_catalog(
     // Guardrail #2 — followup closure over the SURVIVING id set (intra-batch
     // mutual references are legal; links to dropped/unknown ids are removed,
     // the entry stays).
-    let surviving: HashSet<String> =
-        entries.iter().map(|e| e.id.trim().to_ascii_lowercase()).collect();
+    let surviving: HashSet<String> = entries
+        .iter()
+        .map(|e| e.id.trim().to_ascii_lowercase())
+        .collect();
     for e in &mut entries {
         let id = e.id.clone();
         e.followup_links.retain(|l| {
@@ -122,7 +124,10 @@ pub fn finalize_catalog(
                 msgs.push(warn(
                     "followup_link_broken",
                     Some(&id),
-                    format!("followup link points at `{}` which is not in the final catalog", l.procedure_id),
+                    format!(
+                        "followup link points at `{}` which is not in the final catalog",
+                        l.procedure_id
+                    ),
                 ));
             }
             ok
@@ -142,11 +147,19 @@ pub fn sheet_parameter_keys(kernel: &RuleKernel, extra: &[String]) -> HashSet<St
     let schema = &kernel.character_sheet_schema;
     for bucket in ["fields", "derived_values"] {
         if let Some(arr) = schema.get(bucket).and_then(Value::as_array) {
-            keys.extend(arr.iter().filter_map(|f| f.get("field_id").and_then(Value::as_str)).filter_map(norm_key));
+            keys.extend(
+                arr.iter()
+                    .filter_map(|f| f.get("field_id").and_then(Value::as_str))
+                    .filter_map(norm_key),
+            );
         }
     }
     keys.extend(
-        kernel.resource_tracks.iter().filter_map(|t| t.get("id").and_then(Value::as_str)).filter_map(norm_key),
+        kernel
+            .resource_tracks
+            .iter()
+            .filter_map(|t| t.get("id").and_then(Value::as_str))
+            .filter_map(norm_key),
     );
     keys.extend(extra.iter().filter_map(|s| norm_key(s)));
     keys
@@ -156,18 +169,31 @@ pub fn sheet_parameter_keys(kernel: &RuleKernel, extra: &[String]) -> HashSet<St
 /// for a second try (skill keys live unprefixed in the legal set).
 fn parameter_known(p: &str, keys: &HashSet<String>) -> bool {
     let q = p.trim().to_ascii_lowercase();
-    keys.contains(&q) || q.strip_prefix("skills.").map(|s| keys.contains(s)).unwrap_or(false)
+    keys.contains(&q)
+        || q.strip_prefix("skills.")
+            .map(|s| keys.contains(s))
+            .unwrap_or(false)
 }
 
 /// Semantic five-key rebuild (id/name/description/when_to_use/source_refs);
 /// source_refs elements are kept individually when coercible — an entry whose
 /// refs are all garbage then falls to the no-source drop, still loudly.
 fn salvage_semantic(r: &Value) -> MechanicEntry {
-    let s = |k: &str| r.get(k).and_then(Value::as_str).unwrap_or("").trim().to_string();
+    let s = |k: &str| {
+        r.get(k)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
     let source_refs: Vec<SourceRef> = r
         .get("source_refs")
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|v| serde_json::from_value(v.clone()).ok()).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                .collect()
+        })
         .unwrap_or_default();
     MechanicEntry {
         id: s("id"),
@@ -181,12 +207,19 @@ fn salvage_semantic(r: &Value) -> MechanicEntry {
 
 /// Per-element EngineHook validation: Err -> hook stripped + one message
 /// (the entry itself is kept; its tier downgrades by data shape).
-fn validate_hooks(raw_hooks: &Value, entry_id: &str, msgs: &mut Vec<ValidationMessage>) -> Vec<EngineHook> {
+fn validate_hooks(
+    raw_hooks: &Value,
+    entry_id: &str,
+    msgs: &mut Vec<ValidationMessage>,
+) -> Vec<EngineHook> {
     let Some(arr) = raw_hooks.as_array() else {
         msgs.push(warn(
             "hook_downgraded_no_engine_event",
             Some(entry_id),
-            format!("hooks is not an array, all stripped: {}", snippet(raw_hooks)),
+            format!(
+                "hooks is not an array, all stripped: {}",
+                snippet(raw_hooks)
+            ),
         ));
         return Vec::new();
     };
@@ -238,7 +271,11 @@ fn norm_key(s: &str) -> Option<String> {
 }
 
 fn warn(code: &str, target: Option<&str>, message: String) -> ValidationMessage {
-    ValidationMessage { code: code.into(), message, target: target.map(str::to_string) }
+    ValidationMessage {
+        code: code.into(),
+        message,
+        target: target.map(str::to_string),
+    }
 }
 
 fn snippet(v: &Value) -> String {

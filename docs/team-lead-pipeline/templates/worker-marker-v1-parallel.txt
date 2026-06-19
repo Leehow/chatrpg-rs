@@ -1,0 +1,43 @@
+[TEAM_LEAD_WORKER_V1]
+task_id: <task-id>
+work_id: <work-id>
+epic_id: <epic-id>
+mode: implementation
+model_tier: opus
+backend: tty
+observability: final_only
+subagent_policy: research_only
+parallel_pipeline: enabled
+worktree: <absolute-worktree-path>
+branch: claude/<work-id>/<task-id>
+base_sha: <integration-head-sha>
+commit_policy: scoped_commit
+workgraph_path: docs/epics/<epic-id>/WorkGraph.yaml
+integration_report: docs/epics/<epic-id>/IntegrationReport.md
+scope_own:
+  - <owned paths>
+scope_off:
+  - all unrelated files
+  - shared ledgers unless assigned
+  - integration branch
+  - main
+read_set:
+  - <paths/contracts>
+write_set:
+  - <paths>
+hotspot_leases:
+  - <lease ids or none>
+generated_outputs:
+  - <generated paths or none>
+migration_slot: none | <assigned migration id>
+decision_policy: autonomous_within_contract
+continuation_policy: repair_until_acceptance_or_human_blocker
+acceptance_source: docs/epics/<epic-id>/TaskCards.md
+acceptance_ids:
+  - <DA-ID>
+validation_profile: <profile>
+risk_budget: edit-bounded
+escalation: .tmp/team-lead/questions-<task-id>.md
+handoff: .tmp/team-lead/worker-<task-id>-<timestamp>.md
+
+Immediately print ACK_TEAM_LEAD_WORKER <task-id>, confirm repo/worktree/branch/base SHA/write_set/hotspot leases, then implement, test, repair, create one scoped local commit, and write the handoff. Do not ask routine questions. Record reversible assumptions and continue. Only human-only blockers stop the task.

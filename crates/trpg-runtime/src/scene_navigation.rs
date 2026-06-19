@@ -35,19 +35,33 @@ pub async fn extract_module_scenes(
     budget: usize,
     only: Option<&str>,
 ) -> anyhow::Result<usize> {
-    let Some((mut bundle, source_hash, parse_config_hash)) = db.load_module_bundle_for_continue(module_id).await? else {
-        info!(module_id, "extract_module_scenes: no module bundle found; nothing to do");
+    let Some((mut bundle, source_hash, parse_config_hash)) =
+        db.load_module_bundle_for_continue(module_id).await?
+    else {
+        info!(
+            module_id,
+            "extract_module_scenes: no module bundle found; nothing to do"
+        );
         return Ok(0);
     };
     // source_id: explicit (continue request) or derived from the bundle's
     // source_index (same id parse_module wrote the units file under).
-    let derived_source_id = bundle.source_index.sources.first().map(|s| s.source_id.clone());
+    let derived_source_id = bundle
+        .source_index
+        .sources
+        .first()
+        .map(|s| s.source_id.clone());
     let Some(source_id) = source_id.map(str::to_string).or(derived_source_id) else {
-        info!(module_id, "extract_module_scenes: no source_id (request or bundle); nothing to do");
+        info!(
+            module_id,
+            "extract_module_scenes: no source_id (request or bundle); nothing to do"
+        );
         return Ok(0);
     };
     // Load the same semantic units parse_module read, from the same data dir path.
-    let units_path = data_dir.join("parsed/source_units").join(format!("{source_id}.semantic_units.jsonl"));
+    let units_path = data_dir
+        .join("parsed/source_units")
+        .join(format!("{source_id}.semantic_units.jsonl"));
     let units = match trpg_rule_agent::reader::load_units(&units_path) {
         Ok(u) if !u.is_empty() => u,
         Ok(_) => {
@@ -60,9 +74,16 @@ pub async fn extract_module_scenes(
         }
     };
     // Optional column-aligned sidecar (read_layout view); degrades to None.
-    let sidecar_text = std::fs::read_to_string(data_dir.join(format!("markdown/modules/{source_id}.md"))).ok();
-    let resolved_ruleset = ruleset_id.map(str::to_string).or_else(|| bundle.ruleset_id.clone());
-    let ctx = trpg_rule_agent::reader::ModuleReaderCtx { units: &units, sidecar_text, ruleset_id: resolved_ruleset };
+    let sidecar_text =
+        std::fs::read_to_string(data_dir.join(format!("markdown/modules/{source_id}.md"))).ok();
+    let resolved_ruleset = ruleset_id
+        .map(str::to_string)
+        .or_else(|| bundle.ruleset_id.clone());
+    let ctx = trpg_rule_agent::reader::ModuleReaderCtx {
+        units: &units,
+        sidecar_text,
+        ruleset_id: resolved_ruleset,
+    };
 
     // ModuleGraph -> ModuleReadout (the deep-extract fn operates on a readout).
     let graph = &bundle.module_graph;
@@ -82,32 +103,54 @@ pub async fn extract_module_scenes(
 
     // Pick the target scene indices: SkeletonOnly scenes, optionally narrowed to
     // the single `only` node. (only=Some + already DeepExtracted -> empty -> 0.)
-    let skeleton_idxs: Vec<usize> = readout.scenes.iter().enumerate()
+    let skeleton_idxs: Vec<usize> = readout
+        .scenes
+        .iter()
+        .enumerate()
         .filter(|(_, s)| s.extraction_status == SceneExtractionStatus::SkeletonOnly)
         .filter(|(_, s)| only.map_or(true, |id| s.node_id == id))
         .map(|(i, _)| i)
         .collect();
     if skeleton_idxs.is_empty() {
-        info!(module_id, ?only, "extract_module_scenes: no matching SkeletonOnly scenes");
+        info!(
+            module_id,
+            ?only,
+            "extract_module_scenes: no matching SkeletonOnly scenes"
+        );
         return Ok(0);
     }
     let mut deep_count = 0usize;
     for idx in skeleton_idxs {
-        if trpg_rule_agent::reader::deep_extract_scene_in_place(llm, &ctx, &mut readout, idx, budget).await {
+        if trpg_rule_agent::reader::deep_extract_scene_in_place(
+            llm,
+            &ctx,
+            &mut readout,
+            idx,
+            budget,
+        )
+        .await
+        {
             deep_count += 1;
         } else {
             info!(module_id, idx, "scene stayed SkeletonOnly during extract");
         }
     }
     if deep_count == 0 {
-        info!(module_id, "extract_module_scenes: no scene upgraded; skipping re-persist");
+        info!(
+            module_id,
+            "extract_module_scenes: no scene upgraded; skipping re-persist"
+        );
         return Ok(0);
     }
 
     // 增量补实体桥接边：在 source_anchor 过滤(deep_extract_scene_in_place 内部)之后、写回
     // 之前调用，连通所有已深抽且共享实体的场景（零 LLM、幂等、source_anchor=None）。
     let bridges = trpg_rule_agent::reader::apply_bridge_edges(&mut readout.scenes);
-    info!(module_id, bridge_edges = bridges, "extract_module_scenes: applied entity-bridge edges");
+    info!(
+        module_id,
+        bridge_edges = bridges,
+        "extract_module_scenes: applied entity-bridge edges"
+    );
 
     // Readout -> ModuleGraph (scenes + closure entities upgraded in place).
     let g = &mut bundle.module_graph;
@@ -122,8 +165,13 @@ pub async fn extract_module_scenes(
     g.module_specific_rules = readout.module_specific_rules;
 
     // Re-persist into the same parsed_bundles row (on conflict (bundle_id)).
-    db.upsert_module_bundle(&bundle, None, &source_hash, &parse_config_hash).await?;
-    info!(module_id, deep_extracted = deep_count, "extract_module_scenes: re-persisted upgraded ModuleGraph");
+    db.upsert_module_bundle(&bundle, None, &source_hash, &parse_config_hash)
+        .await?;
+    info!(
+        module_id,
+        deep_extracted = deep_count,
+        "extract_module_scenes: re-persisted upgraded ModuleGraph"
+    );
     Ok(deep_count)
 }
 
@@ -198,7 +246,9 @@ pub async fn prefetch_frontier(
         }
     };
     // 取 target 场景的出口（links.to_node_id）。找不到 target → 无前探。
-    let Some(node) = graph.scenes.iter().find(|s| s.node_id == target) else { return };
+    let Some(node) = graph.scenes.iter().find(|s| s.node_id == target) else {
+        return;
+    };
     // 仍 SkeletonOnly 的出口集合，去重 + bounded 上限。
     let mut seen = std::collections::HashSet::new();
     let mut exits: Vec<String> = Vec::new();
@@ -207,7 +257,9 @@ pub async fn prefetch_frontier(
         if to.is_empty() || to == target || !seen.insert(to.to_string()) {
             continue;
         }
-        let still_stub = graph.scenes.iter()
+        let still_stub = graph
+            .scenes
+            .iter()
             .any(|s| s.node_id == to && s.extraction_status == SceneExtractionStatus::SkeletonOnly);
         if still_stub {
             exits.push(to.to_string());
@@ -222,7 +274,9 @@ pub async fn prefetch_frontier(
     info!(module_id, %target, prefetch = exits.len(), "prefetch_frontier: deep-extracting one-hop exits");
     for exit in exits {
         // 复用单场景深抽核心（only=Some），bundle 续读续写。失败只 warn、不中断其余出口。
-        if let Err(err) = extract_module_scenes(db, llm, module_id, None, None, data_dir, 12, Some(&exit)).await {
+        if let Err(err) =
+            extract_module_scenes(db, llm, module_id, None, None, data_dir, 12, Some(&exit)).await
+        {
             tracing::warn!(error = %err, %exit, "prefetch_frontier: one-hop deep-extract failed; best-effort skip");
         }
     }
@@ -298,7 +352,10 @@ mod tests {
         );
         assert!(prompt.contains("玩家输入:"), "应包含玩家输入标签");
         assert!(prompt.contains("我开车去镇中心"), "应包含玩家输入内容");
-        assert!(prompt.contains("GM 叙事:") || prompt.contains("GM叙事"), "应包含叙事标签");
+        assert!(
+            prompt.contains("GM 叙事:") || prompt.contains("GM叙事"),
+            "应包含叙事标签"
+        );
         assert!(prompt.contains("GM描述了街道"), "应包含叙事内容");
         assert!(prompt.contains("sc01"), "应包含当前场景");
         assert!(prompt.contains("sc02"), "应包含场景列表");
@@ -308,20 +365,43 @@ mod tests {
     fn build_nav_prompt_truncates_long_inputs() {
         let long_player = "x".repeat(600);
         let long_narration = "y".repeat(3000);
-        let prompt = build_nav_prompt("sc01", "场景", "sc01 | l | 场景", &long_player, &long_narration);
+        let prompt = build_nav_prompt(
+            "sc01",
+            "场景",
+            "sc01 | l | 场景",
+            &long_player,
+            &long_narration,
+        );
         // player_input 截至 500 字符，narration 截至 2000 字符
-        let player_section = prompt.split("玩家输入:").nth(1).unwrap_or("").split("GM 叙事:").next().unwrap_or("").trim().to_string();
+        let player_section = prompt
+            .split("玩家输入:")
+            .nth(1)
+            .unwrap_or("")
+            .split("GM 叙事:")
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
         let x_count = player_section.chars().filter(|&c| c == 'x').count();
-        assert!(x_count <= 500, "player_input 应被截断至 ≤500 chars，实际 {x_count}");
+        assert!(
+            x_count <= 500,
+            "player_input 应被截断至 ≤500 chars，实际 {x_count}"
+        );
         let y_count = prompt.chars().filter(|&c| c == 'y').count();
-        assert!(y_count <= 2000, "narration 应被截断至 ≤2000 chars，实际 {y_count}");
+        assert!(
+            y_count <= 2000,
+            "narration 应被截断至 ≤2000 chars，实际 {y_count}"
+        );
     }
 
     #[test]
     fn build_nav_prompt_empty_player_input_still_valid() {
         // fail-closed：空 player_input 不崩溃，叙事仍在 prompt 中
         let prompt = build_nav_prompt("sc01", "入口", "sc01 | l | 入口", "", "GM 叙事正文");
-        assert!(prompt.contains("GM描述") || prompt.contains("GM 叙事正文"), "叙事应在 prompt 中");
+        assert!(
+            prompt.contains("GM描述") || prompt.contains("GM 叙事正文"),
+            "叙事应在 prompt 中"
+        );
         assert!(prompt.contains("当前场景: sc01"), "当前场景应在");
     }
 
@@ -333,14 +413,30 @@ mod tests {
     async fn navigate_critical_and_heavy_have_separate_entrypoints() {
         #[allow(clippy::type_complexity)]
         fn _assert_critical(
-            f: fn(&trpg_db::Db, &dyn trpg_llm::LlmClient, &str, &str, &std::path::Path, &str, &str)
-                -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<Option<SceneNavCommit>>> + Send>>,
+            f: fn(
+                &trpg_db::Db,
+                &dyn trpg_llm::LlmClient,
+                &str,
+                &str,
+                &std::path::Path,
+                &str,
+                &str,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = anyhow::Result<Option<SceneNavCommit>>> + Send,
+                >,
+            >,
         ) {
             let _ = f;
         }
         fn _assert_heavy(
-            f: fn(&trpg_db::Db, &dyn trpg_llm::LlmClient, &str, &str, &std::path::Path)
-                -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+            f: fn(
+                &trpg_db::Db,
+                &dyn trpg_llm::LlmClient,
+                &str,
+                &str,
+                &std::path::Path,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
         ) {
             let _ = f;
         }

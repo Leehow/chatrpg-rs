@@ -27,14 +27,20 @@ mod tests {
     #[test]
     fn lazy_flag_default_off_and_accepted_values() {
         // 未设置(None):默认关——eager 全量编译仍是默认,开局前 schema 就绪、无回合内卡顿。
-        assert!(!lazy_flag_from(None), "unset must default to OFF (eager stays default)");
+        assert!(
+            !lazy_flag_from(None),
+            "unset must default to OFF (eager stays default)"
+        );
         // 显式打开(法术海量规则集如 D&D)。
         for v in ["1", "true", "yes", "on", "ON", "True"] {
             assert!(lazy_flag_from(Some(v.to_string())), "{v} must enable lazy");
         }
         // 关闭族 + 任意杂值 -> 关。
         for v in ["0", "false", "off", "no", "", "garbage"] {
-            assert!(!lazy_flag_from(Some(v.to_string())), "{v} must keep lazy OFF");
+            assert!(
+                !lazy_flag_from(Some(v.to_string())),
+                "{v} must keep lazy OFF"
+            );
         }
     }
 }

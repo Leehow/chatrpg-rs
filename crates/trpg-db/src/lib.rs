@@ -12,6 +12,29 @@ pub struct Db {
     pub pool: PgPool,
 }
 
+/// 迁移串行化用的 Postgres 事务级顾问锁键。任意稳定常量即可：所有 `Db::migrate()`
+/// 取同一把锁，使跨连接/跨进程（含并行 cargo 测试）的迁移不会交错执行非幂等 DDL。
+const MIGRATION_ADVISORY_LOCK_KEY: i64 = 0x6b6e_6f77_6d69_67;
+
+/// 通用 durable KnowledgeEdge upsert 入参（v1）。borrow 短生命周期，避免拷贝。
+/// holder_kind 必须是 durable 可持久化 token（gm/player_party/system/npc）；
+/// 否则 [`Db::upsert_knowledge_edge`] 在写库前 fail-closed 拒绝。
+/// 当 holder_kind=`npc` 时，holder_id 还须经 actor-identity 契约校验为稳定 actor id，
+/// 否则同样 fail-closed（不写任何边）。
+pub struct KnowledgeEdgeInput<'a> {
+    pub session_id: &'a str,
+    pub holder_kind: &'a str,
+    /// 集合 holder（gm/player_party/system）用空串 `""`；带身份 holder（npc）用其稳定 actor id。
+    pub holder_id: &'a str,
+    pub fact_id: &'a str,
+    pub knowledge_state: &'a str,
+    pub confidence: Option<f64>,
+    pub learned_at_turn_id: Option<&'a str>,
+    pub disclosure_policy: Option<&'a str>,
+    pub source_event_id: Option<&'a str>,
+    pub reason: Option<&'a str>,
+}
+
 impl Db {
     pub async fn connect(database_url: &str) -> Result<Self> {
         let pool = PgPool::connect(database_url)
@@ -44,7 +67,9 @@ impl Db {
             include_str!("../../../migrations/0020_contest_opposition_kernel_v111.sql"),
             include_str!("../../../migrations/0021_mechanics_search_skills_v112.sql"),
             include_str!("../../../migrations/0022_unified_roll_effect_executor_v1121.sql"),
-            include_str!("../../../migrations/0023_roll_binding_mechanical_gate_priority_v1122.sql"),
+            include_str!(
+                "../../../migrations/0023_roll_binding_mechanical_gate_priority_v1122.sql"
+            ),
             include_str!("../../../migrations/0024_parameter_facet_executor_v113.sql"),
             include_str!("../../../migrations/0025_rule_steward_character_onboarding_v116.sql"),
             include_str!("../../../migrations/0026_session_current_scene_v120.sql"),
@@ -54,18 +79,46 @@ impl Db {
             include_str!("../../../migrations/0030_domain_events.sql"),
             include_str!("../../../migrations/0031_memory_fact_turn_id.sql"),
             include_str!("../../../migrations/0032_knowledge_edges.sql"),
+            include_str!("../../../migrations/0033_knowledge_edges_v1_fields.sql"),
+            include_str!("../../../migrations/0034_knowledge_edges_npc_holders.sql"),
+            include_str!("../../../migrations/0035_npc_relationships.sql"),
+            include_str!("../../../migrations/0036_npc_profiles.sql"),
         ];
+        // 在单一事务内先取事务级顾问锁，串行化所有并发/跨进程 migrate() 调用。
+        // 0033 等迁移用 drop-then-add 重建命名 CHECK 约束（非幂等的两段式 DDL），
+        // 并行测试若各自 migrate() 会让 drop 与 add 交错，触发重复约束错误。
+        // 事务级顾问锁在 commit/rollback 时自动释放，不会泄漏；已确认所有迁移
+        // 语句均可在事务中执行（无 CONCURRENTLY / VACUUM / CREATE DATABASE）。
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .context("failed to begin migration transaction")?;
+        sqlx::query("select pg_advisory_xact_lock($1)")
+            .bind(MIGRATION_ADVISORY_LOCK_KEY)
+            .execute(&mut *tx)
+            .await
+            .context("failed to acquire migration advisory lock")?;
         for sql in migrations {
             for statement in split_sql_statements(sql) {
                 let trimmed = statement.trim();
                 if trimmed.is_empty() {
                     continue;
                 }
-                sqlx::query(trimmed).execute(&self.pool).await.with_context(|| {
-                    format!("failed migration statement: {}", trimmed.chars().take(120).collect::<String>())
-                })?;
+                sqlx::query(trimmed)
+                    .execute(&mut *tx)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed migration statement: {}",
+                            trimmed.chars().take(120).collect::<String>()
+                        )
+                    })?;
             }
         }
+        tx.commit()
+            .await
+            .context("failed to commit migration transaction")?;
         Ok(())
     }
 
@@ -101,7 +154,12 @@ impl Db {
         Ok(())
     }
 
-    pub async fn has_bundle_for_source(&self, source_hash: &str, parse_config_hash: &str, bundle_kind: &str) -> Result<bool> {
+    pub async fn has_bundle_for_source(
+        &self,
+        source_hash: &str,
+        parse_config_hash: &str,
+        bundle_kind: &str,
+    ) -> Result<bool> {
         let count: i64 = sqlx::query_scalar(
             r#"select count(*) from parsed_bundles where source_hash = $1 and parse_config_hash = $2 and bundle_kind = $3"#,
         )
@@ -113,8 +171,25 @@ impl Db {
         Ok(count > 0)
     }
 
-    pub async fn upsert_rule_bundle(&self, bundle: &RuleBundle, artifact_path: Option<&str>, source_hash: &str, parse_config_hash: &str) -> Result<()> {
-        self.upsert_parsed_bundle(&bundle.bundle_id, "ruleset", &bundle.title, &bundle.schema_version, artifact_path, source_hash, parse_config_hash, bundle, &bundle.validation_report).await?;
+    pub async fn upsert_rule_bundle(
+        &self,
+        bundle: &RuleBundle,
+        artifact_path: Option<&str>,
+        source_hash: &str,
+        parse_config_hash: &str,
+    ) -> Result<()> {
+        self.upsert_parsed_bundle(
+            &bundle.bundle_id,
+            "ruleset",
+            &bundle.title,
+            &bundle.schema_version,
+            artifact_path,
+            source_hash,
+            parse_config_hash,
+            bundle,
+            &bundle.validation_report,
+        )
+        .await?;
         for block in &bundle.context_blocks {
             self.upsert_context_block(&bundle.bundle_id, block).await?;
         }
@@ -122,7 +197,8 @@ impl Db {
             self.upsert_material_entry(&bundle.bundle_id, entry).await?;
         }
         for template in &bundle.character_templates {
-            self.upsert_character_template(&bundle.bundle_id, template).await?;
+            self.upsert_character_template(&bundle.bundle_id, template)
+                .await?;
         }
         for pack in &bundle.character_onboarding_packs {
             self.upsert_character_onboarding_pack(pack).await?;
@@ -132,21 +208,45 @@ impl Db {
         }
         if let Some(onboarding) = &bundle.gm_onboarding {
             self.upsert_onboarding_bundle(onboarding).await?;
-            for locator in onboarding.book_locator.iter().chain(onboarding.cold_data_locator.iter()) {
+            for locator in onboarding
+                .book_locator
+                .iter()
+                .chain(onboarding.cold_data_locator.iter())
+            {
                 self.upsert_book_locator_entry(locator).await?;
             }
         }
         Ok(())
     }
 
-    pub async fn upsert_module_bundle(&self, bundle: &ModuleBundle, artifact_path: Option<&str>, source_hash: &str, parse_config_hash: &str) -> Result<()> {
-        self.upsert_parsed_bundle(&bundle.bundle_id, "module", &bundle.title, &bundle.schema_version, artifact_path, source_hash, parse_config_hash, bundle, &bundle.validation_report).await?;
+    pub async fn upsert_module_bundle(
+        &self,
+        bundle: &ModuleBundle,
+        artifact_path: Option<&str>,
+        source_hash: &str,
+        parse_config_hash: &str,
+    ) -> Result<()> {
+        self.upsert_parsed_bundle(
+            &bundle.bundle_id,
+            "module",
+            &bundle.title,
+            &bundle.schema_version,
+            artifact_path,
+            source_hash,
+            parse_config_hash,
+            bundle,
+            &bundle.validation_report,
+        )
+        .await?;
         for block in &bundle.context_blocks {
             self.upsert_context_block(&bundle.bundle_id, block).await?;
         }
         for entry in &bundle.material_index {
             self.upsert_material_entry(&bundle.bundle_id, entry).await?;
-            if matches!(entry.material_type, MaterialType::BookLocator | MaterialType::ColdDataLocator) {
+            if matches!(
+                entry.material_type,
+                MaterialType::BookLocator | MaterialType::ColdDataLocator
+            ) {
                 let locator = locator_entry_from_material(&bundle.module_id, "module", entry);
                 self.upsert_book_locator_entry(&locator).await?;
             }
@@ -160,8 +260,25 @@ impl Db {
         Ok(())
     }
 
-    pub async fn upsert_project_bundle(&self, bundle: &ProjectBundle, artifact_path: Option<&str>, source_hash: &str, parse_config_hash: &str) -> Result<()> {
-        self.upsert_parsed_bundle(&bundle.project_id, "project", "Local Project", &bundle.schema_version, artifact_path, source_hash, parse_config_hash, bundle, &bundle.validation_report).await
+    pub async fn upsert_project_bundle(
+        &self,
+        bundle: &ProjectBundle,
+        artifact_path: Option<&str>,
+        source_hash: &str,
+        parse_config_hash: &str,
+    ) -> Result<()> {
+        self.upsert_parsed_bundle(
+            &bundle.project_id,
+            "project",
+            "Local Project",
+            &bundle.schema_version,
+            artifact_path,
+            source_hash,
+            parse_config_hash,
+            bundle,
+            &bundle.validation_report,
+        )
+        .await
     }
 
     pub async fn upsert_parsed_bundle<T: serde::Serialize>(
@@ -272,12 +389,21 @@ impl Db {
         Ok(())
     }
 
-    pub async fn upsert_runtime_context_block(&self, session_id: &str, block: &ContextBlock) -> Result<()> {
+    pub async fn upsert_runtime_context_block(
+        &self,
+        session_id: &str,
+        block: &ContextBlock,
+    ) -> Result<()> {
         let bundle_id = runtime_bundle_id(session_id);
         self.upsert_context_block(&bundle_id, block).await
     }
 
-    pub async fn list_runtime_context_blocks(&self, session_id: &str, turn_id: &str, scene_id: Option<&str>) -> Result<Vec<ContextBlock>> {
+    pub async fn list_runtime_context_blocks(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        scene_id: Option<&str>,
+    ) -> Result<Vec<ContextBlock>> {
         let bundle_id = runtime_bundle_id(session_id);
         let rows = sqlx::query(
             r#"
@@ -298,7 +424,11 @@ impl Db {
         rows.into_iter().map(row_to_context_block).collect()
     }
 
-    pub async fn deactivate_runtime_turn_blocks(&self, session_id: &str, turn_id: &str) -> Result<()> {
+    pub async fn deactivate_runtime_turn_blocks(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+    ) -> Result<()> {
         let bundle_id = runtime_bundle_id(session_id);
         sqlx::query(
             r#"update context_blocks set active = false, updated_at = now() where bundle_id = $1 and expires_at_turn is not null and expires_at_turn <> $2"#,
@@ -310,7 +440,11 @@ impl Db {
         Ok(())
     }
 
-    pub async fn upsert_material_entry(&self, bundle_id: &str, entry: &MaterialIndexEntry) -> Result<()> {
+    pub async fn upsert_material_entry(
+        &self,
+        bundle_id: &str,
+        entry: &MaterialIndexEntry,
+    ) -> Result<()> {
         sqlx::query(
             r#"
             insert into material_index
@@ -354,7 +488,11 @@ impl Db {
         Ok(())
     }
 
-    pub async fn upsert_character_template(&self, bundle_id: &str, template: &CharacterTemplate) -> Result<()> {
+    pub async fn upsert_character_template(
+        &self,
+        bundle_id: &str,
+        template: &CharacterTemplate,
+    ) -> Result<()> {
         sqlx::query(
             r#"
             insert into character_templates
@@ -387,17 +525,25 @@ impl Db {
         )
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.into_iter().map(|r| json!({
-            "bundle_id": r.get::<String,_>("bundle_id"),
-            "bundle_kind": r.get::<String,_>("bundle_kind"),
-            "title": r.get::<String,_>("title"),
-            "schema_version": r.get::<String,_>("schema_version"),
-            "artifact_path": r.get::<Option<String>,_>("artifact_path"),
-        })).collect())
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                json!({
+                    "bundle_id": r.get::<String,_>("bundle_id"),
+                    "bundle_kind": r.get::<String,_>("bundle_kind"),
+                    "title": r.get::<String,_>("title"),
+                    "schema_version": r.get::<String,_>("schema_version"),
+                    "artifact_path": r.get::<Option<String>,_>("artifact_path"),
+                })
+            })
+            .collect())
     }
 
-
-    pub async fn load_rule_bundle_by_source(&self, source_hash: &str, parse_config_hash: &str) -> Result<Option<RuleBundle>> {
+    pub async fn load_rule_bundle_by_source(
+        &self,
+        source_hash: &str,
+        parse_config_hash: &str,
+    ) -> Result<Option<RuleBundle>> {
         let row = sqlx::query(
             r#"select content_json from parsed_bundles where source_hash = $1 and parse_config_hash = $2 and bundle_kind = 'ruleset' order by updated_at desc limit 1"#,
         )
@@ -411,7 +557,11 @@ impl Db {
         }
     }
 
-    pub async fn load_module_bundle_by_source(&self, source_hash: &str, parse_config_hash: &str) -> Result<Option<ModuleBundle>> {
+    pub async fn load_module_bundle_by_source(
+        &self,
+        source_hash: &str,
+        parse_config_hash: &str,
+    ) -> Result<Option<ModuleBundle>> {
         let row = sqlx::query(
             r#"select content_json from parsed_bundles where source_hash = $1 and parse_config_hash = $2 and bundle_kind = 'module' order by updated_at desc limit 1"#,
         )
@@ -505,7 +655,10 @@ impl Db {
     /// Load the most recent project bundle whose rulesets include `ruleset_id`.
     /// Needed when several rulesets share one DB: `load_latest_project_bundle`
     /// would return whichever ruleset was parsed last, not the one being played.
-    pub async fn load_project_bundle_for_ruleset(&self, ruleset_id: &str) -> Result<Option<ProjectBundle>> {
+    pub async fn load_project_bundle_for_ruleset(
+        &self,
+        ruleset_id: &str,
+    ) -> Result<Option<ProjectBundle>> {
         let row = sqlx::query(r#"select content_json from parsed_bundles where bundle_kind = 'project' and content_json->'rulesets' @> jsonb_build_array(jsonb_build_object('ruleset_id', $1::text)) order by updated_at desc limit 1"#)
             .bind(ruleset_id)
             .fetch_optional(&self.pool)
@@ -516,7 +669,10 @@ impl Db {
         }
     }
 
-    pub async fn load_character_template(&self, ruleset_id: &str) -> Result<Option<CharacterTemplate>> {
+    pub async fn load_character_template(
+        &self,
+        ruleset_id: &str,
+    ) -> Result<Option<CharacterTemplate>> {
         let row = sqlx::query(
             r#"select content_json from character_templates where ruleset_id = $1 order by updated_at desc limit 1"#,
         )
@@ -529,7 +685,10 @@ impl Db {
         }
     }
 
-    pub async fn upsert_character_onboarding_pack(&self, pack: &CharacterOnboardingPack) -> Result<()> {
+    pub async fn upsert_character_onboarding_pack(
+        &self,
+        pack: &CharacterOnboardingPack,
+    ) -> Result<()> {
         let content_json = serde_json::to_value(pack)?;
         let content_hash = stable_json_hash(pack);
         sqlx::query(
@@ -646,13 +805,18 @@ impl Db {
         .bind(&pack.starter_character_pack.module_id)
         .bind("Starter Character Pack")
         .bind(serde_json::to_value(&pack.starter_character_pack)?)
-        .bind(serde_json::to_value(&pack.starter_character_pack.source_refs)?)
+        .bind(serde_json::to_value(
+            &pack.starter_character_pack.source_refs,
+        )?)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    pub async fn load_character_onboarding_pack(&self, ruleset_id: &str) -> Result<Option<CharacterOnboardingPack>> {
+    pub async fn load_character_onboarding_pack(
+        &self,
+        ruleset_id: &str,
+    ) -> Result<Option<CharacterOnboardingPack>> {
         let row = sqlx::query(r#"select content_json from character_onboarding_packs where ruleset_id = $1 order by updated_at desc limit 1"#)
             .bind(ruleset_id)
             .fetch_optional(&self.pool)
@@ -699,7 +863,9 @@ impl Db {
             .bind(ruleset_id)
             .fetch_optional(&self.pool)
             .await?;
-        let Some(r) = row else { return Ok(None); };
+        let Some(r) = row else {
+            return Ok(None);
+        };
         let mut kernel: RuleKernel = serde_json::from_value(r.get("content_json"))?;
         // Read-time cleanup of dirty resource_tracks (e.g. a mis-submitted character
         // sheet field-def) so stale DB kernels are sanitized without a re-parse,
@@ -711,7 +877,8 @@ impl Db {
         // self-healing at read time, with no per-ruleset Rust.
         if let Some(doc) = read_kernel_override_file(ruleset_id) {
             if let Some(tracks) = doc.get("resource_tracks").and_then(|t| t.as_array()) {
-                kernel.resource_tracks = merge_resource_tracks(kernel.resource_tracks, tracks.to_vec());
+                kernel.resource_tracks =
+                    merge_resource_tracks(kernel.resource_tracks, tracks.to_vec());
             }
             if let Some(dc) = doc.get("dice_core").and_then(|d| d.as_object()) {
                 kernel.dice_core = merge_dice_core(kernel.dice_core, dc);
@@ -722,7 +889,8 @@ impl Db {
             // kernel field stays None → engine uses GENERIC_*).
             apply_kernel_strategy_overrides(&mut kernel, &doc);
             // 去重共享 derived_from 的 track（align 可能建 stub 而 override 又提供了正式 track）。
-            kernel.resource_tracks = trpg_model::dedup_tracks_by_derived_from(&kernel.resource_tracks);
+            kernel.resource_tracks =
+                trpg_model::dedup_tracks_by_derived_from(&kernel.resource_tracks);
         }
         Ok(Some(kernel))
     }
@@ -797,7 +965,12 @@ impl Db {
         Ok(())
     }
 
-    pub async fn list_rule_kernel_patches(&self, ruleset_id: &str, status: Option<&str>, limit: i64) -> Result<Vec<RuleKernelPatch>> {
+    pub async fn list_rule_kernel_patches(
+        &self,
+        ruleset_id: &str,
+        status: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<RuleKernelPatch>> {
         let rows = sqlx::query(
             r#"
             select patch_id, ruleset_id, target_kernel_version, patch_kind, old_hash, proposed_hash, diff_summary,
@@ -813,27 +986,29 @@ impl Db {
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter().map(|r| {
-            let source_refs_json: serde_json::Value = r.get("source_refs");
-            let regression_tests_json: serde_json::Value = r.get("regression_tests");
-            let contradiction_report: Option<serde_json::Value> = r.get("contradiction_report");
-            Ok(RuleKernelPatch {
-                patch_id: r.get("patch_id"),
-                ruleset_id: r.get("ruleset_id"),
-                target_kernel_version: r.get("target_kernel_version"),
-                patch_kind: r.get("patch_kind"),
-                old_hash: r.get("old_hash"),
-                proposed_hash: r.get("proposed_hash"),
-                diff_summary: r.get("diff_summary"),
-                json_patch: r.get("json_patch"),
-                source_refs: serde_json::from_value(source_refs_json)?,
-                confidence: r.get("confidence"),
-                contradiction_report,
-                regression_tests: serde_json::from_value(regression_tests_json)?,
-                status: r.get("status"),
-                created_at: r.get("created_at"),
+        rows.into_iter()
+            .map(|r| {
+                let source_refs_json: serde_json::Value = r.get("source_refs");
+                let regression_tests_json: serde_json::Value = r.get("regression_tests");
+                let contradiction_report: Option<serde_json::Value> = r.get("contradiction_report");
+                Ok(RuleKernelPatch {
+                    patch_id: r.get("patch_id"),
+                    ruleset_id: r.get("ruleset_id"),
+                    target_kernel_version: r.get("target_kernel_version"),
+                    patch_kind: r.get("patch_kind"),
+                    old_hash: r.get("old_hash"),
+                    proposed_hash: r.get("proposed_hash"),
+                    diff_summary: r.get("diff_summary"),
+                    json_patch: r.get("json_patch"),
+                    source_refs: serde_json::from_value(source_refs_json)?,
+                    confidence: r.get("confidence"),
+                    contradiction_report,
+                    regression_tests: serde_json::from_value(regression_tests_json)?,
+                    status: r.get("status"),
+                    created_at: r.get("created_at"),
+                })
             })
-        }).collect()
+            .collect()
     }
 
     pub async fn upsert_rule_agent_run(&self, run: &RuleAgentRun) -> Result<()> {
@@ -900,14 +1075,19 @@ impl Db {
     }
 
     pub async fn has_module_first_session_packet(&self, module_id: &str) -> Result<bool> {
-        let exists: bool = sqlx::query_scalar(r#"select exists(select 1 from module_prep_packets where module_id = $1)"#)
-            .bind(module_id)
-            .fetch_one(&self.pool)
-            .await?;
+        let exists: bool = sqlx::query_scalar(
+            r#"select exists(select 1 from module_prep_packets where module_id = $1)"#,
+        )
+        .bind(module_id)
+        .fetch_one(&self.pool)
+        .await?;
         Ok(exists)
     }
 
-    pub async fn list_context_blocks_for_bundles(&self, bundle_ids: &[String]) -> Result<Vec<ContextBlock>> {
+    pub async fn list_context_blocks_for_bundles(
+        &self,
+        bundle_ids: &[String],
+    ) -> Result<Vec<ContextBlock>> {
         if bundle_ids.is_empty() {
             return Ok(vec![]);
         }
@@ -925,7 +1105,11 @@ impl Db {
         rows.into_iter().map(row_to_context_block).collect()
     }
 
-    pub async fn find_material_blocks(&self, bundle_ids: &[String], material_refs: &[String]) -> Result<Vec<ContextBlock>> {
+    pub async fn find_material_blocks(
+        &self,
+        bundle_ids: &[String],
+        material_refs: &[String],
+    ) -> Result<Vec<ContextBlock>> {
         if bundle_ids.is_empty() || material_refs.is_empty() {
             return Ok(vec![]);
         }
@@ -946,7 +1130,11 @@ impl Db {
         rows.into_iter().map(row_to_context_block).collect()
     }
 
-    pub async fn save_character(&self, character: &CharacterSheet, postprocess_status: &str) -> Result<()> {
+    pub async fn save_character(
+        &self,
+        character: &CharacterSheet,
+        postprocess_status: &str,
+    ) -> Result<()> {
         sqlx::query(
             r#"
             insert into characters
@@ -975,7 +1163,12 @@ impl Db {
         Ok(())
     }
 
-    pub async fn create_session(&self, session_id: &str, ruleset_id: &str, module_id: Option<&str>) -> Result<()> {
+    pub async fn create_session(
+        &self,
+        session_id: &str,
+        ruleset_id: &str,
+        module_id: Option<&str>,
+    ) -> Result<()> {
         sqlx::query(
             r#"
             insert into sessions (id, session_id, ruleset_id, module_id)
@@ -997,24 +1190,35 @@ impl Db {
 
     /// 设置该会话当前所在的模组场景 node_id（场景导航）。
     pub async fn set_session_scene(&self, session_id: &str, scene_id: &str) -> Result<()> {
-        sqlx::query("update sessions set current_scene_id = $2, updated_at = now() where session_id = $1")
-            .bind(session_id)
-            .bind(scene_id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "update sessions set current_scene_id = $2, updated_at = now() where session_id = $1",
+        )
+        .bind(session_id)
+        .bind(scene_id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
     /// 读取该会话当前模组场景 node_id（无则 None）。
     pub async fn load_session_scene(&self, session_id: &str) -> Result<Option<String>> {
-        let row: Option<(Option<String>,)> = sqlx::query_as("select current_scene_id from sessions where session_id = $1")
-            .bind(session_id)
-            .fetch_optional(&self.pool)
-            .await?;
+        let row: Option<(Option<String>,)> =
+            sqlx::query_as("select current_scene_id from sessions where session_id = $1")
+                .bind(session_id)
+                .fetch_optional(&self.pool)
+                .await?;
         Ok(row.and_then(|r| r.0).filter(|s| !s.trim().is_empty()))
     }
 
-    pub async fn save_turn(&self, session_id: &str, turn_id: &str, user_input: &str, assistant_output: &str, context_hashes: serde_json::Value, postprocess_status: &str) -> Result<()> {
+    pub async fn save_turn(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        user_input: &str,
+        assistant_output: &str,
+        context_hashes: serde_json::Value,
+        postprocess_status: &str,
+    ) -> Result<()> {
         sqlx::query(
             r#"
             insert into turns (id, session_id, turn_id, user_input, assistant_output, context_hashes, postprocess_status)
@@ -1133,7 +1337,11 @@ impl Db {
     /// 取一个会话全部回合的 Flight-Recorder trace（created_at 升序）。
     /// 反序列化镜像 `load_turn_trace`（jsonb → TurnTrace）。`trpg coverage`
     /// 聚合用：只读，单一 trace_json 事实源。
-    pub async fn list_turn_traces(&self, session_id: &str, limit: i64) -> Result<Vec<trpg_model::TurnTrace>> {
+    pub async fn list_turn_traces(
+        &self,
+        session_id: &str,
+        limit: i64,
+    ) -> Result<Vec<trpg_model::TurnTrace>> {
         let rows: Vec<(serde_json::Value,)> = sqlx::query_as(
             "select trace_json from turn_traces where session_id = $1 order by created_at asc limit $2",
         )
@@ -1146,7 +1354,13 @@ impl Db {
             .collect()
     }
 
-    pub async fn record_load_event(&self, session_id: Option<&str>, turn_id: Option<&str>, block: &ContextBlock, reason: &str) -> Result<()> {
+    pub async fn record_load_event(
+        &self,
+        session_id: Option<&str>,
+        turn_id: Option<&str>,
+        block: &ContextBlock,
+        reason: &str,
+    ) -> Result<()> {
         sqlx::query(
             r#"insert into context_block_load_events
                (id, session_id, turn_id, block_id, block_version, cache_zone, load_reason, token_estimate)
@@ -1303,7 +1517,11 @@ impl Db {
         Ok(())
     }
 
-    pub async fn list_memory_events(&self, session_id: &str, limit: i64) -> Result<Vec<MemoryEvent>> {
+    pub async fn list_memory_events(
+        &self,
+        session_id: &str,
+        limit: i64,
+    ) -> Result<Vec<MemoryEvent>> {
         let rows = sqlx::query(
             r#"select event_id, session_id, turn_id, ruleset_id, module_id, scene_id, location_id, actor_ids,
                       visibility, event_kind, summary, transcript_excerpt, source_json, tags, importance, occurred_at
@@ -1335,7 +1553,11 @@ impl Db {
         rows.into_iter().map(row_to_memory_fact).collect()
     }
 
-    pub async fn list_memory_snapshots(&self, session_id: &str, limit: i64) -> Result<Vec<MemorySnapshot>> {
+    pub async fn list_memory_snapshots(
+        &self,
+        session_id: &str,
+        limit: i64,
+    ) -> Result<Vec<MemorySnapshot>> {
         let rows = sqlx::query(
             r#"select snapshot_id, session_id, ruleset_id, module_id, scope_type, scope_id, visibility, title,
                       summary_markdown, included_event_ids, included_fact_ids, version, token_estimate, content_hash, created_at, updated_at
@@ -1390,10 +1612,20 @@ impl Db {
         let snapshots = self.list_memory_snapshots(&query.session_id, 3).await?;
         let facts: Result<Vec<_>> = facts_rows.into_iter().map(row_to_memory_fact).collect();
         let events: Result<Vec<_>> = events_rows.into_iter().map(row_to_memory_event).collect();
-        Ok(MemoryRetrievalResult { snapshots, facts: facts?, events: events?, blocks: vec![] })
+        Ok(MemoryRetrievalResult {
+            snapshots,
+            facts: facts?,
+            events: events?,
+            blocks: vec![],
+        })
     }
 
-    pub async fn insert_background_job(&self, job_id: &str, job_kind: &str, input_json: serde_json::Value) -> Result<()> {
+    pub async fn insert_background_job(
+        &self,
+        job_id: &str,
+        job_kind: &str,
+        input_json: serde_json::Value,
+    ) -> Result<()> {
         sqlx::query(
             r#"insert into background_jobs (id, job_id, job_kind, status, input_json) values ($1,$2,$3,'queued',$4)
                on conflict (job_id) do update set status = 'queued', input_json = excluded.input_json, error = null, updated_at = now()"#,
@@ -1407,7 +1639,13 @@ impl Db {
         Ok(())
     }
 
-    pub async fn update_background_job(&self, job_id: &str, status: &str, result_json: serde_json::Value, error: Option<&str>) -> Result<()> {
+    pub async fn update_background_job(
+        &self,
+        job_id: &str,
+        status: &str,
+        result_json: serde_json::Value,
+        error: Option<&str>,
+    ) -> Result<()> {
         sqlx::query(
             r#"update background_jobs set status = $2, result_json = $3, error = $4, updated_at = now() where job_id = $1"#,
         )
@@ -1424,10 +1662,11 @@ impl Db {
     /// Used by the extract/continue handler to skip re-enqueueing a job that is
     /// already `running`, avoiding a concurrent read-modify-write race.
     pub async fn background_job_status(&self, job_id: &str) -> Result<Option<String>> {
-        let status: Option<String> = sqlx::query_scalar(r#"select status from background_jobs where job_id = $1"#)
-            .bind(job_id)
-            .fetch_optional(&self.pool)
-            .await?;
+        let status: Option<String> =
+            sqlx::query_scalar(r#"select status from background_jobs where job_id = $1"#)
+                .bind(job_id)
+                .fetch_optional(&self.pool)
+                .await?;
         Ok(status)
     }
 
@@ -1435,14 +1674,17 @@ impl Db {
     /// `result_json`, and `error`. Returns `None` if the job does not exist.
     /// Used by the staged-parse status/SSE endpoints to surface live progress.
     pub async fn load_background_job(&self, job_id: &str) -> Result<Option<serde_json::Value>> {
-        let row = sqlx::query(r#"select status, result_json, error from background_jobs where job_id = $1"#)
-            .bind(job_id)
-            .fetch_optional(&self.pool)
-            .await?;
+        let row = sqlx::query(
+            r#"select status, result_json, error from background_jobs where job_id = $1"#,
+        )
+        .bind(job_id)
+        .fetch_optional(&self.pool)
+        .await?;
         match row {
             Some(r) => {
                 let status: String = r.get("status");
-                let result_json: serde_json::Value = r.try_get("result_json").unwrap_or(serde_json::Value::Null);
+                let result_json: serde_json::Value =
+                    r.try_get("result_json").unwrap_or(serde_json::Value::Null);
                 let error: Option<String> = r.try_get("error").unwrap_or(None);
                 Ok(Some(serde_json::json!({
                     "status": status,
@@ -1457,7 +1699,10 @@ impl Db {
     /// Find the most recent staged-parse job (`job_kind = 'ruleset_parse_staged'`)
     /// for a ruleset and return its `result_json` (the `JobStatus` snapshot).
     /// Used to populate the `{stage, progress_pct}` body of a 202 gate response.
-    pub async fn latest_staged_job_for_ruleset(&self, ruleset_id: &str) -> Result<Option<serde_json::Value>> {
+    pub async fn latest_staged_job_for_ruleset(
+        &self,
+        ruleset_id: &str,
+    ) -> Result<Option<serde_json::Value>> {
         let row = sqlx::query(
             r#"select result_json from background_jobs
                where job_kind = 'ruleset_parse_staged' and input_json->>'ruleset' = $1
@@ -1581,8 +1826,12 @@ impl Db {
         Ok(())
     }
 
-
-    pub async fn search_book_locator_entries(&self, owner_id: Option<&str>, query_text: &str, limit: i64) -> Result<Vec<serde_json::Value>> {
+    pub async fn search_book_locator_entries(
+        &self,
+        owner_id: Option<&str>,
+        query_text: &str,
+        limit: i64,
+    ) -> Result<Vec<serde_json::Value>> {
         let pattern = format!("%{}%", query_text.replace('%', "\\%").replace('_', "\\_"));
         let rows = sqlx::query(
             r#"
@@ -1728,7 +1977,12 @@ impl Db {
         Ok(())
     }
 
-    pub async fn list_learned_packets(&self, ruleset_id: &str, module_id: Option<&str>, limit: i64) -> Result<Vec<LearnedPacket>> {
+    pub async fn list_learned_packets(
+        &self,
+        ruleset_id: &str,
+        module_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<LearnedPacket>> {
         let rows = sqlx::query(
             r#"
             select packet_id, ruleset_id, module_id, packet_type, packet_key, title, summary, packet_json, source_refs,
@@ -1749,8 +2003,12 @@ impl Db {
         rows.into_iter().map(row_to_learned_packet).collect()
     }
 
-
-    pub async fn list_lookup_events_for_demand(&self, session_id: Option<&str>, demand_id: &str, limit: i64) -> Result<Vec<LookupEvent>> {
+    pub async fn list_lookup_events_for_demand(
+        &self,
+        session_id: Option<&str>,
+        demand_id: &str,
+        limit: i64,
+    ) -> Result<Vec<LookupEvent>> {
         let rows = sqlx::query(
             r#"
             select event_id, session_id, ruleset_id, module_id, demand_id, query_text, search_terms, source_hits, result_status, created_at
@@ -1768,7 +2026,18 @@ impl Db {
         rows.into_iter().map(row_to_lookup_event).collect()
     }
 
-    pub async fn insert_learning_audit_run(&self, audit_run_id: &str, session_id: Option<&str>, turn_id: Option<&str>, ruleset_id: Option<&str>, module_id: Option<&str>, status: &str, input_json: serde_json::Value, result_json: serde_json::Value, error: Option<&str>) -> Result<()> {
+    pub async fn insert_learning_audit_run(
+        &self,
+        audit_run_id: &str,
+        session_id: Option<&str>,
+        turn_id: Option<&str>,
+        ruleset_id: Option<&str>,
+        module_id: Option<&str>,
+        status: &str,
+        input_json: serde_json::Value,
+        result_json: serde_json::Value,
+        error: Option<&str>,
+    ) -> Result<()> {
         sqlx::query(
             r#"
             insert into learning_audit_runs
@@ -1796,7 +2065,10 @@ impl Db {
         Ok(())
     }
 
-    pub async fn insert_learning_candidate(&self, candidate: &LearningAuditCandidate) -> Result<()> {
+    pub async fn insert_learning_candidate(
+        &self,
+        candidate: &LearningAuditCandidate,
+    ) -> Result<()> {
         sqlx::query(
             r#"
             insert into learning_candidates
@@ -1838,7 +2110,10 @@ impl Db {
         Ok(())
     }
 
-    pub async fn get_learning_candidate(&self, candidate_id: &str) -> Result<Option<LearningAuditCandidate>> {
+    pub async fn get_learning_candidate(
+        &self,
+        candidate_id: &str,
+    ) -> Result<Option<LearningAuditCandidate>> {
         let row = sqlx::query(
             r#"
             select candidate_id, session_id, turn_id, ruleset_id, module_id, demand_id, packet_type, packet_key, title, summary, packet_json, source_refs, evidence_score, risk_flags, verifier_status, verifier_notes, created_at, updated_at
@@ -1852,7 +2127,12 @@ impl Db {
         row.map(row_to_learning_candidate).transpose()
     }
 
-    pub async fn list_learning_candidates(&self, ruleset_id: Option<&str>, status: Option<&str>, limit: i64) -> Result<Vec<LearningAuditCandidate>> {
+    pub async fn list_learning_candidates(
+        &self,
+        ruleset_id: Option<&str>,
+        status: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<LearningAuditCandidate>> {
         let rows = sqlx::query(
             r#"
             select candidate_id, session_id, turn_id, ruleset_id, module_id, demand_id, packet_type, packet_key, title, summary, packet_json, source_refs, evidence_score, risk_flags, verifier_status, verifier_notes, created_at, updated_at
@@ -1871,7 +2151,12 @@ impl Db {
         rows.into_iter().map(row_to_learning_candidate).collect()
     }
 
-    pub async fn update_learning_candidate_status(&self, candidate_id: &str, status: LearningCandidateStatus, notes: Option<&str>) -> Result<()> {
+    pub async fn update_learning_candidate_status(
+        &self,
+        candidate_id: &str,
+        status: LearningCandidateStatus,
+        notes: Option<&str>,
+    ) -> Result<()> {
         sqlx::query(
             r#"
             update learning_candidates
@@ -1915,7 +2200,11 @@ impl Db {
         Ok(())
     }
 
-    pub async fn insert_check_contract(&self, contract: &CheckContract, status: &str) -> Result<()> {
+    pub async fn insert_check_contract(
+        &self,
+        contract: &CheckContract,
+        status: &str,
+    ) -> Result<()> {
         sqlx::query(
             r#"
             insert into check_contracts
@@ -1941,7 +2230,6 @@ impl Db {
         .await?;
         Ok(())
     }
-
 
     // ------------------------------------------------------------------
     // v1.20 mechanic_dues persistence (B4 watcher; 对标 insert_check_contract)
@@ -1977,10 +2265,15 @@ impl Db {
     }
 
     pub async fn list_open_mechanic_dues(&self, session_id: &str) -> Result<Vec<MechanicDue>> {
-        self.list_mechanic_dues_with_status(session_id, "open").await
+        self.list_mechanic_dues_with_status(session_id, "open")
+            .await
     }
 
-    pub async fn list_mechanic_dues_with_status(&self, session_id: &str, status: &str) -> Result<Vec<MechanicDue>> {
+    pub async fn list_mechanic_dues_with_status(
+        &self,
+        session_id: &str,
+        status: &str,
+    ) -> Result<Vec<MechanicDue>> {
         let rows = sqlx::query(
             r#"
             select due_id, session_id, turn_id, source, source_track, hook_event, mechanic_id,
@@ -1998,8 +2291,13 @@ impl Db {
         Ok(rows.iter().filter_map(row_to_mechanic_due).collect())
     }
 
-    pub async fn update_mechanic_due_status(&self, due_id: &str, status: &str,
-        waive_reason: Option<&str>, waive_scope: Option<&str>) -> Result<()> {
+    pub async fn update_mechanic_due_status(
+        &self,
+        due_id: &str,
+        status: &str,
+        waive_reason: Option<&str>,
+        waive_scope: Option<&str>,
+    ) -> Result<()> {
         sqlx::query(
             r#"
             update mechanic_dues
@@ -2044,10 +2342,12 @@ impl Db {
             .execute(&self.pool)
             .await
             .ok();
-        let generation: Option<i64> = sqlx::query_scalar("select coalesce(interaction_generation, 0) from sessions where session_id = $1")
-            .bind(session_id)
-            .fetch_optional(&self.pool)
-            .await?;
+        let generation: Option<i64> = sqlx::query_scalar(
+            "select coalesce(interaction_generation, 0) from sessions where session_id = $1",
+        )
+        .bind(session_id)
+        .fetch_optional(&self.pool)
+        .await?;
         Ok(generation.unwrap_or(0))
     }
 
@@ -2109,7 +2409,12 @@ impl Db {
         .bind(ctx.updated_at)
         .execute(&self.pool)
         .await?;
-        if matches!(ctx.status, InteractionContextStatus::Active | InteractionContextStatus::Paused | InteractionContextStatus::Resolving) {
+        if matches!(
+            ctx.status,
+            InteractionContextStatus::Active
+                | InteractionContextStatus::Paused
+                | InteractionContextStatus::Resolving
+        ) {
             sqlx::query("update sessions set active_interaction_context_id = $2, updated_at = now() where session_id = $1")
                 .bind(&ctx.session_id)
                 .bind(&ctx.context_id)
@@ -2120,7 +2425,11 @@ impl Db {
         Ok(())
     }
 
-    pub async fn insert_invariant_repair(&self, session_id: &str, repair: &InvariantRepair) -> Result<()> {
+    pub async fn insert_invariant_repair(
+        &self,
+        session_id: &str,
+        repair: &InvariantRepair,
+    ) -> Result<()> {
         sqlx::query(
             r#"
             insert into invariant_repairs
@@ -2168,7 +2477,12 @@ impl Db {
         Ok(())
     }
 
-    pub async fn attach_gate_to_frame(&self, gate_id: &str, frame_id: &str, generation: i64) -> Result<()> {
+    pub async fn attach_gate_to_frame(
+        &self,
+        gate_id: &str,
+        frame_id: &str,
+        generation: i64,
+    ) -> Result<()> {
         sqlx::query(
             r#"
             update interaction_gates
@@ -2187,7 +2501,13 @@ impl Db {
         Ok(())
     }
 
-    pub async fn attach_pending_check_to_frame(&self, check_id: &str, frame_id: &str, gate_id: Option<&str>, generation: i64) -> Result<()> {
+    pub async fn attach_pending_check_to_frame(
+        &self,
+        check_id: &str,
+        frame_id: &str,
+        gate_id: Option<&str>,
+        generation: i64,
+    ) -> Result<()> {
         sqlx::query(
             r#"
             update pending_checks
@@ -2208,7 +2528,12 @@ impl Db {
         Ok(())
     }
 
-    pub async fn supersede_interaction_gate(&self, gate_id: &str, reason: &str, closed_at_tick: i64) -> Result<()> {
+    pub async fn supersede_interaction_gate(
+        &self,
+        gate_id: &str,
+        reason: &str,
+        closed_at_tick: i64,
+    ) -> Result<()> {
         sqlx::query(
             r#"
             update interaction_gates
@@ -2233,7 +2558,12 @@ impl Db {
         Ok(())
     }
 
-    pub async fn supersede_pending_check(&self, check_id: &str, reason: &str, closed_at_tick: Option<i64>) -> Result<()> {
+    pub async fn supersede_pending_check(
+        &self,
+        check_id: &str,
+        reason: &str,
+        closed_at_tick: Option<i64>,
+    ) -> Result<()> {
         sqlx::query(
             r#"
             update pending_checks
@@ -2252,7 +2582,14 @@ impl Db {
         Ok(())
     }
 
-    pub async fn cascade_close_frame_interactions(&self, session_id: &str, frame_id: &str, reason: &str, world_tick: i64, generation: i64) -> Result<Vec<InvariantRepair>> {
+    pub async fn cascade_close_frame_interactions(
+        &self,
+        session_id: &str,
+        frame_id: &str,
+        reason: &str,
+        world_tick: i64,
+        generation: i64,
+    ) -> Result<Vec<InvariantRepair>> {
         let mut repairs = Vec::new();
         let gate_count: i64 = sqlx::query_scalar(
             r#"
@@ -2276,7 +2613,16 @@ impl Db {
         .fetch_one(&self.pool)
         .await.unwrap_or(0);
         if gate_count > 0 {
-            repairs.push(InvariantRepair { repair_id: format!("repair_{}", Uuid::new_v4().simple()), kind: InvariantRepairKind::FrameClosedChildrenTerminal, target_table: "interaction_gates".into(), target_id: frame_id.into(), action: "superseded_open_child_gates".into(), reason: reason.into(), world_tick, generation });
+            repairs.push(InvariantRepair {
+                repair_id: format!("repair_{}", Uuid::new_v4().simple()),
+                kind: InvariantRepairKind::FrameClosedChildrenTerminal,
+                target_table: "interaction_gates".into(),
+                target_id: frame_id.into(),
+                action: "superseded_open_child_gates".into(),
+                reason: reason.into(),
+                world_tick,
+                generation,
+            });
         }
         let check_count: i64 = sqlx::query_scalar(
             r#"
@@ -2297,9 +2643,19 @@ impl Db {
         .bind(reason)
         .bind(world_tick)
         .fetch_one(&self.pool)
-        .await.unwrap_or(0);
+        .await
+        .unwrap_or(0);
         if check_count > 0 {
-            repairs.push(InvariantRepair { repair_id: format!("repair_{}", Uuid::new_v4().simple()), kind: InvariantRepairKind::FrameClosedChildrenTerminal, target_table: "pending_checks".into(), target_id: frame_id.into(), action: "superseded_open_child_pending_checks".into(), reason: reason.into(), world_tick, generation });
+            repairs.push(InvariantRepair {
+                repair_id: format!("repair_{}", Uuid::new_v4().simple()),
+                kind: InvariantRepairKind::FrameClosedChildrenTerminal,
+                target_table: "pending_checks".into(),
+                target_id: frame_id.into(),
+                action: "superseded_open_child_pending_checks".into(),
+                reason: reason.into(),
+                world_tick,
+                generation,
+            });
         }
         sqlx::query("update state_frames set status = case when status in ('active','paused','resolving') then 'completed' else status end, closed_at_tick = coalesce(closed_at_tick, $3), closed_reason = coalesce(closed_reason, $4), updated_at = now() where session_id = $1 and frame_id = $2")
             .bind(session_id)
@@ -2319,7 +2675,12 @@ impl Db {
         Ok(repairs)
     }
 
-    pub async fn reconcile_interaction_lifecycle(&self, session_id: &str, world_tick: i64, current_generation: i64) -> Result<Vec<InvariantRepair>> {
+    pub async fn reconcile_interaction_lifecycle(
+        &self,
+        session_id: &str,
+        world_tick: i64,
+        current_generation: i64,
+    ) -> Result<Vec<InvariantRepair>> {
         let mut repairs = Vec::new();
         // Backfill ownership for legacy gates by looking at frame.active_gate_ids.
         sqlx::query(
@@ -2332,7 +2693,12 @@ impl Db {
             where g.session_id = $1 and g.owner_frame_id is null
               and g.gate_id = any(f.active_gate_ids)
             "#,
-        ).bind(session_id).bind(current_generation).execute(&self.pool).await.ok();
+        )
+        .bind(session_id)
+        .bind(current_generation)
+        .execute(&self.pool)
+        .await
+        .ok();
         // Backfill pending checks from check actor_snapshot_ids when possible.
         sqlx::query(
             r#"
@@ -2365,7 +2731,16 @@ impl Db {
             "#,
         ).bind(session_id).bind(world_tick).bind(current_generation).fetch_one(&self.pool).await.unwrap_or(0);
         if stale_gate_count > 0 {
-            repairs.push(InvariantRepair { repair_id: format!("repair_{}", Uuid::new_v4().simple()), kind: InvariantRepairKind::OpenGateWithoutActiveOwner, target_table: "interaction_gates".into(), target_id: session_id.into(), action: "superseded_stale_or_orphan_open_gates".into(), reason: "superseded_by_reconcile".into(), world_tick, generation: current_generation });
+            repairs.push(InvariantRepair {
+                repair_id: format!("repair_{}", Uuid::new_v4().simple()),
+                kind: InvariantRepairKind::OpenGateWithoutActiveOwner,
+                target_table: "interaction_gates".into(),
+                target_id: session_id.into(),
+                action: "superseded_stale_or_orphan_open_gates".into(),
+                reason: "superseded_by_reconcile".into(),
+                world_tick,
+                generation: current_generation,
+            });
         }
         let stale_check_count: i64 = sqlx::query_scalar(
             r#"
@@ -2386,7 +2761,16 @@ impl Db {
             "#,
         ).bind(session_id).bind(world_tick).bind(current_generation).fetch_one(&self.pool).await.unwrap_or(0);
         if stale_check_count > 0 {
-            repairs.push(InvariantRepair { repair_id: format!("repair_{}", Uuid::new_v4().simple()), kind: InvariantRepairKind::OpenPendingCheckWithoutActiveOwner, target_table: "pending_checks".into(), target_id: session_id.into(), action: "superseded_stale_or_orphan_open_pending_checks".into(), reason: "superseded_by_reconcile".into(), world_tick, generation: current_generation });
+            repairs.push(InvariantRepair {
+                repair_id: format!("repair_{}", Uuid::new_v4().simple()),
+                kind: InvariantRepairKind::OpenPendingCheckWithoutActiveOwner,
+                target_table: "pending_checks".into(),
+                target_id: session_id.into(),
+                action: "superseded_stale_or_orphan_open_pending_checks".into(),
+                reason: "superseded_by_reconcile".into(),
+                world_tick,
+                generation: current_generation,
+            });
         }
         sqlx::query("update sessions set active_interaction_gate_id = null where session_id=$1 and active_interaction_gate_id is not null and not exists (select 1 from interaction_gates g where g.session_id=$1 and g.gate_id=active_interaction_gate_id and g.status='open')")
             .bind(session_id)
@@ -2397,10 +2781,22 @@ impl Db {
     }
 
     pub async fn insert_pending_check(&self, pending: &PendingCheck) -> Result<()> {
-        let generation = self.ensure_interaction_generation(&pending.session_id).await.unwrap_or(0);
-        let owner_frame_id = pending.owner_frame_id.clone().or_else(|| pending.contract.actor_snapshot_ids.first().cloned());
-        let gate_id = pending.gate_id.clone().or_else(|| Some(format!("gate_{}", pending.check_id)));
-        let interaction_context_id = pending.interaction_context_id.clone().or_else(|| owner_frame_id.as_ref().map(|f| format!("ctx_{}", f)));
+        let generation = self
+            .ensure_interaction_generation(&pending.session_id)
+            .await
+            .unwrap_or(0);
+        let owner_frame_id = pending
+            .owner_frame_id
+            .clone()
+            .or_else(|| pending.contract.actor_snapshot_ids.first().cloned());
+        let gate_id = pending
+            .gate_id
+            .clone()
+            .or_else(|| Some(format!("gate_{}", pending.check_id)));
+        let interaction_context_id = pending
+            .interaction_context_id
+            .clone()
+            .or_else(|| owner_frame_id.as_ref().map(|f| format!("ctx_{}", f)));
         sqlx::query(
             r#"
             insert into pending_checks
@@ -2441,7 +2837,11 @@ impl Db {
         Ok(())
     }
 
-    pub async fn cancel_open_pending_checks_for_session(&self, session_id: &str, status: PendingCheckStatus) -> Result<()> {
+    pub async fn cancel_open_pending_checks_for_session(
+        &self,
+        session_id: &str,
+        status: PendingCheckStatus,
+    ) -> Result<()> {
         sqlx::query(
             r#"
             update pending_checks
@@ -2468,7 +2868,10 @@ impl Db {
     }
 
     pub async fn insert_interaction_gate(&self, gate: &InteractionGate) -> Result<()> {
-        let generation = self.ensure_interaction_generation(&gate.session_id).await.unwrap_or(0);
+        let generation = self
+            .ensure_interaction_generation(&gate.session_id)
+            .await
+            .unwrap_or(0);
         sqlx::query(
             r#"
             insert into interaction_gates
@@ -2527,7 +2930,10 @@ impl Db {
         Ok(())
     }
 
-    pub async fn get_open_interaction_gate(&self, session_id: &str) -> Result<Option<InteractionGate>> {
+    pub async fn get_open_interaction_gate(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<InteractionGate>> {
         let row = sqlx::query(
             r#"
             select gate_id, session_id, turn_id, gate_kind, status, prompt_public, prompt_gm, required,
@@ -2548,7 +2954,12 @@ impl Db {
         row.map(row_to_interaction_gate).transpose()
     }
 
-    pub async fn update_interaction_gate_status(&self, gate_id: &str, status: GateStatus, resolution_json: serde_json::Value) -> Result<()> {
+    pub async fn update_interaction_gate_status(
+        &self,
+        gate_id: &str,
+        status: GateStatus,
+        resolution_json: serde_json::Value,
+    ) -> Result<()> {
         sqlx::query(
             r#"
             update interaction_gates
@@ -2587,7 +2998,11 @@ impl Db {
         row.map(row_to_pending_check).transpose()
     }
 
-    pub async fn update_pending_check_status(&self, check_id: &str, status: PendingCheckStatus) -> Result<()> {
+    pub async fn update_pending_check_status(
+        &self,
+        check_id: &str,
+        status: PendingCheckStatus,
+    ) -> Result<()> {
         sqlx::query(
             r#"update pending_checks set status = $2, updated_at = now() where check_id = $1"#,
         )
@@ -2598,7 +3013,11 @@ impl Db {
         Ok(())
     }
 
-    pub async fn list_check_contracts_for_turn(&self, session_id: &str, turn_id: &str) -> Result<Vec<CheckContract>> {
+    pub async fn list_check_contracts_for_turn(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+    ) -> Result<Vec<CheckContract>> {
         let rows = sqlx::query(
             r#"
             select contract_json
@@ -2624,7 +3043,10 @@ impl Db {
     /// Return the latest check contract that has not yet produced a check_result.
     /// Used by the turn/API `/roll` path to bind a naked `/roll` command to
     /// the most recent mechanical question instead of creating an orphan die.
-    pub async fn get_latest_unresolved_check_contract(&self, session_id: &str) -> Result<Option<CheckContract>> {
+    pub async fn get_latest_unresolved_check_contract(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<CheckContract>> {
         let row = sqlx::query(
             r#"
             select cc.contract_json
@@ -2696,7 +3118,11 @@ impl Db {
         Ok(())
     }
 
-    pub async fn list_active_state_frames(&self, session_id: &str, limit: i64) -> Result<Vec<StateFrame>> {
+    pub async fn list_active_state_frames(
+        &self,
+        session_id: &str,
+        limit: i64,
+    ) -> Result<Vec<StateFrame>> {
         let rows = sqlx::query(
             r#"
             select frame_id, frame_kind, session_id, ruleset_id, module_id, parent_frame_id,
@@ -2715,8 +3141,6 @@ impl Db {
         .await?;
         rows.into_iter().map(row_to_state_frame).collect()
     }
-
-
 
     pub async fn get_world_time_state(&self, session_id: &str) -> Result<Option<WorldTimeState>> {
         let row = sqlx::query(
@@ -2823,7 +3247,11 @@ impl Db {
     }
 
     /// 按会话取 domain events（seq 升序时间线，limit 截断）。
-    pub async fn list_domain_events(&self, session_id: &str, limit: i64) -> Result<Vec<trpg_model::DomainEvent>> {
+    pub async fn list_domain_events(
+        &self,
+        session_id: &str,
+        limit: i64,
+    ) -> Result<Vec<trpg_model::DomainEvent>> {
         let rows = sqlx::query(
             r#"
             select event_id, session_id, turn_id, kind, data, source_refs, created_at
@@ -2841,7 +3269,10 @@ impl Db {
     }
 
     /// 按回合取 domain events（seq 升序；explain / inspect 附该回合摘要用）。
-    pub async fn list_domain_events_for_turn(&self, turn_id: &str) -> Result<Vec<trpg_model::DomainEvent>> {
+    pub async fn list_domain_events_for_turn(
+        &self,
+        turn_id: &str,
+    ) -> Result<Vec<trpg_model::DomainEvent>> {
         let rows = sqlx::query(
             r#"
             select event_id, session_id, turn_id, kind, data, source_refs, created_at
@@ -2856,10 +3287,14 @@ impl Db {
         rows.into_iter().map(row_to_domain_event).collect()
     }
 
-    /// 反剧透 TruthGraph 投影（优化2 #5）：本会话已被 surfaced（玩家见过）的实体集。
-    /// 从 `EntitySurfaced` 事件的 `data` jsonb 抽 distinct `(entity_id, entity_kind)`。
-    /// event_id 已幂等 per-session，但保留 distinct 兜底 data 异常重复；按 entity_id 稳定排序。
-    pub async fn list_surfaced_entities(&self, session_id: &str) -> Result<Vec<(String, String)>> {
+    /// 反剧透 TruthGraph：本会话**进入 GM/runtime context** 的实体集（P0c `ContextSurfaced`）。
+    /// 这是隐藏的内部装载，**不**代表玩家见过——故与 [`Db::list_surfaced_entities`]（玩家暴露）
+    /// 严格区分。从 `ContextSurfaced` 事件的 `data` jsonb 抽 distinct `(entity_id, entity_kind)`，
+    /// 按 entity_id 稳定排序。
+    pub async fn list_context_surfaced_entities(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<(String, String)>> {
         let rows = sqlx::query(
             r#"
             select distinct
@@ -2867,7 +3302,7 @@ impl Db {
                    data->>'entity_kind' as entity_kind
             from domain_events
             where session_id = $1
-              and kind = 'EntitySurfaced'
+              and kind = 'ContextSurfaced'
               and data->>'entity_id' is not null
             order by entity_id
             "#,
@@ -2885,21 +3320,57 @@ impl Db {
             .collect())
     }
 
-    /// 反剧透 TruthGraph：本会话**本回合是否首次 surface 了新实体**。
+    /// 反剧透 TruthGraph 投影：本会话**已暴露给玩家**（玩家在可见虚构里真见过）的实体集。
+    /// P0c 语义：玩家暴露 = `PlayerExposed` + 遗留 `EntitySurfaced`（向后兼容），**绝不**含
+    /// `ContextSurfaced`（那是隐藏 context 装载，进 GM 不等于玩家知道）。从事件 `data` jsonb
+    /// 抽 distinct `(entity_id, entity_kind)`；按 entity_id 稳定排序。关系抽取据此只对玩家
+    /// 真见过的实体跑，不会把隐藏 context 当成玩家暴露。
+    pub async fn list_surfaced_entities(&self, session_id: &str) -> Result<Vec<(String, String)>> {
+        let rows = sqlx::query(
+            r#"
+            select distinct
+                   data->>'entity_id'   as entity_id,
+                   data->>'entity_kind' as entity_kind
+            from domain_events
+            where session_id = $1
+              and kind in ('PlayerExposed', 'EntitySurfaced')
+              and data->>'entity_id' is not null
+            order by entity_id
+            "#,
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let id: String = r.get("entity_id");
+                let kind: Option<String> = r.get("entity_kind");
+                (id, kind.unwrap_or_default())
+            })
+            .collect())
+    }
+
+    /// 反剧透 TruthGraph：本会话**本回合是否首次把新实体暴露给玩家**。
     ///
-    /// `EntitySurfaced` 写入是 per-session 幂等（`de_surfaced_{session}_{entity}` +
-    /// `on conflict do nothing`）：实体首次 surface 时该行的 `turn_id` **冻结为当时回合**，
-    /// 后续回合再 surface 同实体是 no-op、不改 turn_id。故「某行 turn_id == 本回合」
-    /// 当且仅当该实体**本回合才头一回出现**——这是 append 时落定的事实，而非事件存在性。
-    /// 关系抽取据此只在实体集真变化的回合才跑（省掉每回合重抽同样三元组的 LLM 调用）。
-    pub async fn has_entity_surfaced_in_turn(&self, session_id: &str, turn_id: &str) -> Result<bool> {
+    /// P0c 语义：只数玩家暴露事件（`PlayerExposed` + 遗留 `EntitySurfaced`），**不**含
+    /// `ContextSurfaced`——隐藏 context 装载不该触发关系抽取（否则把"GM 加载了它"误当
+    /// "玩家见过它"）。暴露写入 per-session 幂等（`on conflict do nothing`）：实体首次暴露时
+    /// 该行的 `turn_id` **冻结为当时回合**，后续重放 no-op、不改 turn_id。故「某行 turn_id ==
+    /// 本回合」当且仅当该实体**本回合才头一回暴露**。关系抽取据此只在玩家暴露集真变化的
+    /// 回合才跑（省掉每回合重抽同样三元组的 LLM 调用）。
+    pub async fn has_entity_surfaced_in_turn(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+    ) -> Result<bool> {
         let row = sqlx::query(
             r#"
             select exists(
                 select 1 from domain_events
                 where session_id = $1
                   and turn_id = $2
-                  and kind = 'EntitySurfaced'
+                  and kind in ('PlayerExposed', 'EntitySurfaced')
             ) as found
             "#,
         )
@@ -2911,9 +3382,11 @@ impl Db {
     }
 
     /// 反剧透 revealed-facts 账本落账（LEDGER 切片）：把一条事实（按 entity_id/node_id
-    /// 作 `fact_id`）记为已揭示。复用 domain_events 表，kind=FactRevealed，幂等键
-    /// `de_revealed_{session}_{fact}`（同 session+fact 重放 on-conflict no-op）。
-    /// 与 EntitySurfaced 立场区分：surfaced=玩家见过该实体，revealed=该实体的剧透已解锁。
+    /// 作 `fact_id`）记为 player_party 已习得/确认。复用 domain_events 表，P0c 起
+    /// kind=`PlayerLearnedFact`（取代旧 `FactRevealed` 写路径，旧 variant 保留仅向后兼容
+    /// 读取），幂等键 `de_revealed_{session}_{fact}`（同 session+fact 重放 on-conflict no-op）。
+    /// 与 ContextSurfaced/PlayerExposed 立场区分：那两者是"实体进 context / 玩家见过实体"，
+    /// 这里是"玩家确知某条事实"，并写穿 KnowledgeEdge(player_party, knows_true)。
     pub async fn record_revealed_fact(
         &self,
         session_id: &str,
@@ -2926,11 +3399,11 @@ impl Db {
             format!("de_revealed_{session_id}_{fact_id}"),
             session_id,
             turn_id,
-            trpg_model::DomainEventKind::FactRevealed,
+            trpg_model::DomainEventKind::PlayerLearnedFact,
             data,
         );
         self.append_domain_event(&ev).await?;
-        // P0b 写穿：FactRevealed 同步落 KnowledgeEdge (player_party, knows_true)。
+        // P0b 写穿：PlayerLearnedFact 同步落 KnowledgeEdge (player_party, knows_true)。
         // append 在同 (session,fact) 重放会 no-op，但 upsert 仍幂等保证边存在，
         // 使 revealed-facts 投影（现读 knowledge_edges）不漏旧事件。
         self.upsert_knowledge_edge_player_party(session_id, turn_id, fact_id, "knows_true", reason)
@@ -2977,24 +3450,128 @@ impl Db {
         Ok(())
     }
 
-    /// P0b 玩家已知事实投影：本会话 (player_party, knows_true) 的 distinct fact_id 集，
-    /// 按 fact_id 稳定排序。revealed-facts 兼容投影的统一真相源（list_revealed_facts 委托）。
-    pub async fn list_player_known_fact_ids(&self, session_id: &str) -> Result<Vec<String>> {
+    /// 通用 durable KnowledgeEdge upsert（v1）：把任意 durable holder 的一条知识边落账。
+    /// **fail-closed 门**：写库前校验 holder_kind 必须是 durable 可持久化态
+    /// （gm / player_party / system / npc，见 [`trpg_model::KnowledgeHolderKind::is_durable_persistable`]）。
+    /// 非 durable holder（pc/faction）或未知 token 直接返回 Err，绝不写 knowledge_edges
+    /// （pc/faction durable 边仍 gated）。
+    /// **NPC 身份门**（TC-KNOW-04 + TC-KNOW-00）：holder_kind=`npc` 时 holder_id 还须经
+    /// [`trpg_model::KnowledgeHolder::npc_from_actor_id`] 校验为稳定 actor id（空/占位/展示名形态
+    /// 全部 fail-closed），并以契约规范化（trim）后的 id 落库——kind 通过 ≠ id 合法。
+    /// edge_id 由 (session, holder_kind, holder_id, fact) md5 确定性生成；on-conflict 唯一键
+    /// 更新态/置信度/来源/理由/披露策略（coalesce 保留旧非空），重放幂等。
+    /// 注意：player_party 的兼容写穿路径仍走 [`Db::upsert_knowledge_edge_player_party`]
+    /// （edge_id 方案与 0032 回填对齐），本通用接口服务 gm / system / npc holder。
+    pub async fn upsert_knowledge_edge(&self, edge: KnowledgeEdgeInput<'_>) -> Result<()> {
+        // fail-closed：非 durable holder kind 在写库前拒绝（不发明 holder、不漏写半条）。
+        let kind = trpg_model::KnowledgeHolderKind::from_token(edge.holder_kind)
+            .filter(|k| k.is_durable_persistable())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "upsert_knowledge_edge: holder_kind {:?} 非 durable 可持久化（gated）",
+                    edge.holder_kind
+                )
+            })?;
+        let holder_kind = kind.as_token();
+        // NPC holder 身份门：校验 holder_id 为稳定 actor id，并用规范化（trim）后的 id 落库。
+        // 集合 holder（gm/player_party/system）维持空串。非法 NPC id → fail-closed，不写任何边。
+        let npc_holder_id;
+        let holder_id: &str = match kind {
+            trpg_model::KnowledgeHolderKind::Npc => {
+                let holder = trpg_model::KnowledgeHolder::npc_from_actor_id(edge.holder_id)
+                    .map_err(|u| anyhow::anyhow!("upsert_knowledge_edge: {u}"))?;
+                npc_holder_id = holder
+                    .holder_id()
+                    .expect("npc holder 必有 stable id")
+                    .to_string();
+                npc_holder_id.as_str()
+            }
+            _ => edge.holder_id,
+        };
+        sqlx::query(
+            r#"
+            insert into knowledge_edges
+              (edge_id, session_id, holder_kind, holder_id, fact_id, knowledge_state,
+               confidence, learned_at_turn_id, disclosure_policy, source_event_id, reason)
+            values (
+              'ke_' || md5($1 || ':' || $2 || ':' || $3 || ':' || $4),
+              $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+            )
+            on conflict (session_id, holder_kind, holder_id, fact_id)
+            do update set
+              knowledge_state = excluded.knowledge_state,
+              confidence = coalesce(excluded.confidence, knowledge_edges.confidence),
+              learned_at_turn_id = coalesce(excluded.learned_at_turn_id, knowledge_edges.learned_at_turn_id),
+              disclosure_policy = coalesce(excluded.disclosure_policy, knowledge_edges.disclosure_policy),
+              source_event_id = coalesce(excluded.source_event_id, knowledge_edges.source_event_id),
+              reason = coalesce(excluded.reason, knowledge_edges.reason),
+              updated_at = now()
+            "#,
+        )
+        .bind(edge.session_id)
+        .bind(holder_kind)
+        .bind(holder_id)
+        .bind(edge.fact_id)
+        .bind(edge.knowledge_state)
+        .bind(edge.confidence)
+        .bind(edge.learned_at_turn_id)
+        .bind(edge.disclosure_policy)
+        .bind(edge.source_event_id)
+        .bind(edge.reason)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// 通用 holder 真知识投影：本会话指定 (holder_kind, holder_id) 的 knows_true distinct
+    /// fact_id 集，按 fact_id 稳定排序。只取确知为真态——信念态（believes_*/misinformed）
+    /// 一律不入，故任何 holder 的「错误信念」都不会被当成其已知真相泄露。
+    pub async fn list_holder_known_fact_ids(
+        &self,
+        session_id: &str,
+        holder_kind: &str,
+        holder_id: &str,
+    ) -> Result<Vec<String>> {
         let rows = sqlx::query(
             r#"
             select fact_id
             from knowledge_edges
             where session_id = $1
-              and holder_kind = 'player_party'
-              and holder_id = ''
+              and holder_kind = $2
+              and holder_id = $3
               and knowledge_state = 'knows_true'
             order by fact_id
             "#,
         )
         .bind(session_id)
+        .bind(holder_kind)
+        .bind(holder_id)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.into_iter().map(|r| r.get::<String, _>("fact_id")).collect())
+        Ok(rows
+            .into_iter()
+            .map(|r| r.get::<String, _>("fact_id"))
+            .collect())
+    }
+
+    /// GM 真相投影：本会话 GM holder 确知为真（knows_true）的 distinct fact_id 集。
+    /// = 世界真相视图。某 holder 的 believes_false/misinformed 信念边绝不混入此视图。
+    pub async fn gm_truth_view(&self, session_id: &str) -> Result<Vec<String>> {
+        self.list_holder_known_fact_ids(session_id, "gm", "").await
+    }
+
+    /// 玩家知识投影：本会话 player_party 确知为真的 distinct fact_id 集
+    /// （= [`Db::list_player_known_fact_ids`]）。未知/暴露/信念态一律不入——
+    /// context 装载的事实不会因此对玩家可见。
+    pub async fn player_knowledge_view(&self, session_id: &str) -> Result<Vec<String>> {
+        self.list_player_known_fact_ids(session_id).await
+    }
+
+    /// P0b 玩家已知事实投影：本会话 (player_party, knows_true) 的 distinct fact_id 集，
+    /// 按 fact_id 稳定排序。revealed-facts 兼容投影的统一真相源（list_revealed_facts 委托）。
+    pub async fn list_player_known_fact_ids(&self, session_id: &str) -> Result<Vec<String>> {
+        self.list_holder_known_fact_ids(session_id, "player_party", "")
+            .await
     }
 
     /// 反剧透 revealed-facts 账本投影（P0b 起委托 KnowledgeEdge）：本会话已揭示的
@@ -3006,7 +3583,358 @@ impl Db {
         self.list_player_known_fact_ids(session_id).await
     }
 
-    pub async fn list_world_events_since(&self, session_id: &str, since_tick: i64, since_event_seq: i64, limit: i64) -> Result<Vec<WorldEvent>> {
+    /// P0c 玩家暴露写穿（`PlayerExposed` 事件 API 面）：把一个实体记为"玩家在可见虚构里
+    /// 见过/听说过"——计入玩家暴露投影（[`Db::list_surfaced_entities`]），但**不**揭示其
+    /// 隐藏身份/秘密事实（不写 knowledge_edges，故不进 revealed-facts）。复用 domain_events
+    /// 表，幂等键 `de_exposed_{session}_{entity}`（同 session+entity 重放 on-conflict no-op）。
+    /// 与 `ContextSurfaced`（隐藏 context 装载）严格区分。
+    pub async fn record_player_exposed_entity(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        entity_id: &str,
+        entity_kind: &str,
+        reason: Option<&str>,
+    ) -> Result<()> {
+        let data = serde_json::json!({
+            "entity_id": entity_id,
+            "entity_kind": entity_kind,
+            "reason": reason,
+        });
+        let ev = trpg_model::DomainEvent::new(
+            format!("de_exposed_{session_id}_{entity_id}"),
+            session_id,
+            turn_id,
+            trpg_model::DomainEventKind::PlayerExposed,
+            data,
+        );
+        self.append_domain_event(&ev).await
+    }
+
+    /// NPC 习得事实写穿（`NpcLearnedFact` 事件 API 面）：把一条事实记为**某个具体
+    /// NPC**（stable `npc_actor_id`）已习得——这是 NPC 心智的知识输入，只作用于目标 NPC，
+    /// **绝不**触碰 player_party 或其它 holder。
+    ///
+    /// **durable NPC holder（TC-KNOW-04）**：稳定 NPC 身份解析成功后，除落 `NpcLearnedFact`
+    /// 事件账本外，还写穿 durable `knowledge_edges(holder_kind='npc', knows_true)`——NpcLearnedFact
+    /// 不再 event-only。事件账本始终保留（即使将来 durable 路径放宽/收紧），两者经确定性
+    /// 幂等键对齐。`npc_actor_id` 经 TC-KNOW-00 actor-identity 契约校验：空串 / 占位串 /
+    /// 展示名/对抗方标签形态全部 fail-closed 拒绝（绝不拿 LLM 文本冒充 stable actor id），
+    /// 此时既不落事件也不写边。
+    /// 幂等键 `de_npc_learned_{session}_{npc}_{fact}`（事件 on-conflict no-op；durable 边唯一键
+    /// (session,'npc',npc,fact) on-conflict 更新）→ 重放既不重复事件也不重复边。
+    pub async fn record_npc_learned_fact(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        npc_actor_id: &str,
+        fact_id: &str,
+        reason: Option<&str>,
+    ) -> Result<()> {
+        // fail-closed：经 TC-KNOW-00 actor-identity 契约校验稳定 NPC holder 身份。
+        // 空串 / 占位串 / 展示名/对抗方标签形态全部被拒，绝不拿 LLM 文本冒充 stable actor id。
+        let holder = trpg_model::KnowledgeHolder::npc_from_actor_id(npc_actor_id)
+            .map_err(|u| anyhow::anyhow!("record_npc_learned_fact: {u}"))?;
+        // 用契约规范化（trim 后）的稳定 id 作事件主键/数据/holder_id，跨 raw 空白幂等。
+        let npc_actor_id = holder.holder_id().expect("npc holder 必有 stable id");
+        let data = serde_json::json!({
+            "npc_actor_id": npc_actor_id,
+            "fact_id": fact_id,
+            "reason": reason,
+        });
+        let ev = trpg_model::DomainEvent::new(
+            format!("de_npc_learned_{session_id}_{npc_actor_id}_{fact_id}"),
+            session_id,
+            turn_id,
+            trpg_model::DomainEventKind::NpcLearnedFact,
+            data,
+        );
+        // 先落事件账本（语义真相源之一），再写穿 durable NPC 边（TC-KNOW-04）。
+        self.append_domain_event(&ev).await?;
+        self.upsert_knowledge_edge(KnowledgeEdgeInput {
+            session_id,
+            holder_kind: "npc",
+            holder_id: npc_actor_id,
+            fact_id,
+            knowledge_state: "knows_true",
+            confidence: None,
+            learned_at_turn_id: Some(turn_id),
+            disclosure_policy: None,
+            source_event_id: Some(&ev.event_id),
+            reason,
+        })
+        .await
+    }
+
+    /// NPC 已知事实投影：本会话**指定 NPC**（`npc_actor_id`）确知为真（knows_true）的 distinct
+    /// `fact_id` 集，从 durable `knowledge_edges`（holder_kind='npc'）投影（TC-KNOW-04）。
+    /// 按 (holder_kind, holder_id) 严格过滤 → 只返回目标 NPC 的事实，绝不混入别的 NPC、
+    /// player_party 或 gm。信念态（believes_*/misinformed）一律不入：NPC 的错误信念不算其已知真相，
+    /// 更不是世界真相。按 fact_id 稳定排序（委托 [`Db::list_holder_known_fact_ids`]）。
+    pub async fn list_npc_known_fact_ids(
+        &self,
+        session_id: &str,
+        npc_actor_id: &str,
+    ) -> Result<Vec<String>> {
+        self.list_holder_known_fact_ids(session_id, "npc", npc_actor_id)
+            .await
+    }
+
+    /// NPC 心智事实投影（TC-NPC-03）：本会话**指定 NPC** 自己持有的 `(fact_id, knowledge_state)`
+    /// 条目，仅取 `knows_true` 与三种信念态（`believes_true`/`believes_false`/`misinformed`）。
+    /// 与 [`Db::list_npc_known_fact_ids`] 的区别：后者只投影确知为真（供真知识/世界真相一致性
+    /// 判定），本接口额外带回信念态，供 NPC 心智视图把「确知」与「相信（可能为假）」分别标注——
+    /// 信念态绝不被升格为已知真相。严格按 (holder_kind='npc', holder_id=<目标 NPC>) 过滤：
+    /// gm / player_party / 别的 NPC 的边一律不入。其余态（unknown/heard_about/suspects/…）排除。
+    /// `npc_actor_id` 经 actor-identity 契约规范化后查询；未知 state token fail-closed 跳过该行
+    /// （绝不把未知态误当某已知态）。按 fact_id 稳定排序。
+    pub async fn list_npc_mind_facts(
+        &self,
+        session_id: &str,
+        npc_actor_id: &str,
+    ) -> Result<Vec<NpcKnowledgeEntry>> {
+        let holder = trpg_model::KnowledgeHolder::npc_from_actor_id(npc_actor_id)
+            .map_err(|u| anyhow::anyhow!("list_npc_mind_facts: {u}"))?;
+        let npc_id = holder.holder_id().expect("npc holder 必有 stable id");
+        let rows = sqlx::query(
+            r#"
+            select fact_id, knowledge_state
+            from knowledge_edges
+            where session_id = $1
+              and holder_kind = 'npc'
+              and holder_id = $2
+              and knowledge_state in ('knows_true', 'believes_true', 'believes_false', 'misinformed')
+            order by fact_id
+            "#,
+        )
+        .bind(session_id)
+        .bind(npc_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| {
+                let fact_id = r.get::<String, _>("fact_id");
+                let token = r.get::<String, _>("knowledge_state");
+                // fail-closed：未知 state token 跳过该行，绝不误当已知态。
+                KnowledgeState::from_token(&token).map(|state| NpcKnowledgeEntry { fact_id, state })
+            })
+            .collect())
+    }
+
+    /// 写穿 durable NPC relationship（TC-NPC-02）：把一个 NPC 对玩家方/PC/NPC/阵营的
+    /// 结构化态度状态持久化，不依赖 free-form memory summary。fail-closed：`npc_id`
+    /// 经 TC-KNOW-00 actor-identity 契约校验为稳定 actor id（空/占位/展示名形态全部被拒），
+    /// 否则不写任何行。数值通道由模型层在每次 delta 时夹紧到边界（迁移 CHECK 为兜底）。
+    /// 唯一键 (session, npc_id, target_kind, target_id) on-conflict 更新各通道与派生态、
+    /// 证据集与 updated_at，重写幂等。
+    pub async fn upsert_npc_relationship(&self, rel: &NpcRelationship) -> Result<()> {
+        // 身份门：稳定 NPC holder 校验（kind 通过 ≠ id 合法）。规范化（trim）后落库。
+        let holder = trpg_model::KnowledgeHolder::npc_from_actor_id(&rel.npc_id)
+            .map_err(|u| anyhow::anyhow!("upsert_npc_relationship: {u}"))?;
+        let npc_id = holder.holder_id().expect("npc holder 必有 stable id");
+        // target 身份门：NpcRelationship 字段/枚举 variant 全 public 且可由 serde 构造，
+        // 故写边界必须重新校验+规范化 target id（pc/npc/faction 经 TC-KNOW-00 kind-specific
+        // 契约；非法 target id → fail-closed，不写任何行）。用规范化后的 kind/id 落库。
+        let target = rel
+            .target
+            .validated()
+            .map_err(|e| anyhow::anyhow!("upsert_npc_relationship target: {e}"))?;
+        let evidence = serde_json::to_value(&rel.evidence_event_ids)?;
+        let stance = serde_json::to_value(rel.stance)?
+            .as_str()
+            .expect("stance serializes to a string token")
+            .to_string();
+        sqlx::query(
+            r#"
+            insert into npc_relationships
+              (session_id, npc_id, target_kind, target_id, trust, respect, affection, debt,
+               fear, suspicion, hostility, leverage, talkativeness, interaction_desire, stance,
+               last_interaction_turn_id, evidence_event_ids)
+            values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+            on conflict (session_id, npc_id, target_kind, target_id)
+            do update set
+              trust = excluded.trust,
+              respect = excluded.respect,
+              affection = excluded.affection,
+              debt = excluded.debt,
+              fear = excluded.fear,
+              suspicion = excluded.suspicion,
+              hostility = excluded.hostility,
+              leverage = excluded.leverage,
+              talkativeness = excluded.talkativeness,
+              interaction_desire = excluded.interaction_desire,
+              stance = excluded.stance,
+              last_interaction_turn_id = excluded.last_interaction_turn_id,
+              evidence_event_ids = excluded.evidence_event_ids,
+              updated_at = now()
+            "#,
+        )
+        .bind(&rel.session_id)
+        .bind(npc_id)
+        .bind(target.kind_token())
+        .bind(target.target_id())
+        .bind(rel.trust)
+        .bind(rel.respect)
+        .bind(rel.affection)
+        .bind(rel.debt)
+        .bind(rel.fear)
+        .bind(rel.suspicion)
+        .bind(rel.hostility)
+        .bind(rel.leverage)
+        .bind(rel.talkativeness)
+        .bind(rel.interaction_desire)
+        .bind(&stance)
+        .bind(rel.last_interaction_turn_id.as_deref())
+        .bind(&evidence)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// 读回 durable NPC relationship（TC-NPC-02）。无行返回 None（首次互动）。
+    /// `npc_id` 同样经 actor-identity 契约规范化后查询，跨 raw 空白稳定命中。
+    pub async fn load_npc_relationship(
+        &self,
+        session_id: &str,
+        npc_id: &str,
+        target_kind: &str,
+        target_id: &str,
+    ) -> Result<Option<NpcRelationship>> {
+        let holder = trpg_model::KnowledgeHolder::npc_from_actor_id(npc_id)
+            .map_err(|u| anyhow::anyhow!("load_npc_relationship: {u}"))?;
+        let npc_id = holder.holder_id().expect("npc holder 必有 stable id");
+        let row = sqlx::query(
+            r#"
+            select target_kind, target_id, trust, respect, affection, debt, fear, suspicion,
+                   hostility, leverage, talkativeness, interaction_desire, stance,
+                   last_interaction_turn_id, evidence_event_ids
+            from npc_relationships
+            where session_id = $1 and npc_id = $2 and target_kind = $3 and target_id = $4
+            "#,
+        )
+        .bind(session_id)
+        .bind(npc_id)
+        .bind(target_kind)
+        .bind(target_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(r) = row else { return Ok(None) };
+        let target = NpcRelationshipTarget::from_parts(
+            &r.get::<String, _>("target_kind"),
+            &r.get::<String, _>("target_id"),
+        )
+        .map_err(|e| anyhow::anyhow!("load_npc_relationship: {e}"))?;
+        let stance: RelationshipStance =
+            serde_json::from_value(serde_json::Value::String(r.get::<String, _>("stance")))?;
+        let evidence_event_ids: Vec<String> =
+            serde_json::from_value(r.get::<serde_json::Value, _>("evidence_event_ids"))?;
+        Ok(Some(NpcRelationship {
+            session_id: session_id.to_string(),
+            npc_id: npc_id.to_string(),
+            target,
+            trust: r.get("trust"),
+            respect: r.get("respect"),
+            affection: r.get("affection"),
+            debt: r.get("debt"),
+            fear: r.get("fear"),
+            suspicion: r.get("suspicion"),
+            hostility: r.get("hostility"),
+            leverage: r.get("leverage"),
+            talkativeness: r.get("talkativeness"),
+            interaction_desire: r.get("interaction_desire"),
+            stance,
+            last_interaction_turn_id: r.get("last_interaction_turn_id"),
+            evidence_event_ids,
+        }))
+    }
+
+    /// 写穿 durable NPC profile（TC-D3-01）：把一个静态、源生 NPC persona
+    /// （[`trpg_model::NpcProfile`]）整体持久化，供后续 mind/behavior production wiring
+    /// 复用，而非只在测试里构造瞬时结构体。fail-closed：`profile.actor_id` 经 TC-KNOW-00
+    /// actor-identity 契约校验为稳定 actor id（空/占位/展示名形态全部被拒），否则不写任何行。
+    /// 完整 profile（含 GM-only secrets）落进 profile_json —— durable 存储是 GM 的真相源；
+    /// 仅 safe view 可进入 prompt-facing 适配层。name/role 为冗余索引列。唯一键
+    /// (session_id, actor_id) on-conflict 更新 profile_json/name/role 与 updated_at，重写幂等。
+    pub async fn upsert_npc_profile(&self, session_id: &str, profile: &NpcProfile) -> Result<()> {
+        // 身份门：稳定 NPC holder 校验（kind 通过 ≠ id 合法）。规范化（trim）后落库。
+        let holder = trpg_model::KnowledgeHolder::npc_from_actor_id(&profile.actor_id)
+            .map_err(|u| anyhow::anyhow!("upsert_npc_profile: {u}"))?;
+        let actor_id = holder.holder_id().expect("npc holder 必有 stable id");
+        // 完整 profile JSON（含 GM-only secrets）是 durable 真相源。
+        let profile_json = serde_json::to_value(profile)?;
+        sqlx::query(
+            r#"
+            insert into npc_profiles (session_id, actor_id, name, role, profile_json)
+            values ($1,$2,$3,$4,$5)
+            on conflict (session_id, actor_id)
+            do update set
+              name = excluded.name,
+              role = excluded.role,
+              profile_json = excluded.profile_json,
+              updated_at = now()
+            "#,
+        )
+        .bind(session_id)
+        .bind(actor_id)
+        .bind(&profile.name)
+        .bind(profile.role.as_deref())
+        .bind(&profile_json)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// 读回 durable NPC profile（TC-D3-01）。无行返回 None（profile 未持久化）。
+    /// `actor_id` 同样经 actor-identity 契约规范化后查询，跨 raw 空白稳定命中。
+    /// fail-closed：若反序列化出的 `profile.actor_id` 与请求/行的稳定 actor id 不一致，
+    /// 返回 Err 而非 profile（防止串行身份漂移）。
+    pub async fn load_npc_profile(
+        &self,
+        session_id: &str,
+        actor_id: &str,
+    ) -> Result<Option<NpcProfile>> {
+        let holder = trpg_model::KnowledgeHolder::npc_from_actor_id(actor_id)
+            .map_err(|u| anyhow::anyhow!("load_npc_profile: {u}"))?;
+        let actor_id = holder.holder_id().expect("npc holder 必有 stable id");
+        let row = sqlx::query(
+            r#"
+            select profile_json
+            from npc_profiles
+            where session_id = $1 and actor_id = $2
+            "#,
+        )
+        .bind(session_id)
+        .bind(actor_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(r) = row else { return Ok(None) };
+        let profile: NpcProfile =
+            serde_json::from_value(r.get::<serde_json::Value, _>("profile_json"))?;
+        // 身份一致性门：反序列化出的 profile 必须挂在被请求/落库的同一稳定 actor id 上。
+        // 校验 profile.actor_id 自身可解析为稳定 holder，且其规范化值与行 actor_id 相等。
+        let profile_holder = trpg_model::KnowledgeHolder::npc_from_actor_id(&profile.actor_id)
+            .map_err(|u| anyhow::anyhow!("load_npc_profile: stored profile actor_id: {u}"))?;
+        let profile_actor_id = profile_holder
+            .holder_id()
+            .expect("npc holder 必有 stable id");
+        if profile_actor_id != actor_id {
+            return Err(anyhow::anyhow!(
+                "load_npc_profile: stored profile actor_id {:?} does not match row actor_id {:?}",
+                profile_actor_id,
+                actor_id
+            ));
+        }
+        Ok(Some(profile))
+    }
+
+    pub async fn list_world_events_since(
+        &self,
+        session_id: &str,
+        since_tick: i64,
+        since_event_seq: i64,
+        limit: i64,
+    ) -> Result<Vec<WorldEvent>> {
         let rows = sqlx::query(
             r#"
             select event_id, campaign_id, session_id, world_tick, event_seq, turn_id, frame_id,
@@ -3027,7 +3955,12 @@ impl Db {
         rows.into_iter().map(row_to_world_event).collect()
     }
 
-    pub async fn insert_world_time_advance(&self, from: &WorldTimeState, to: &WorldTimeState, event: &WorldEvent) -> Result<()> {
+    pub async fn insert_world_time_advance(
+        &self,
+        from: &WorldTimeState,
+        to: &WorldTimeState,
+        event: &WorldEvent,
+    ) -> Result<()> {
         sqlx::query(
             r#"
             insert into world_time_advances
@@ -3076,7 +4009,11 @@ impl Db {
         Ok(())
     }
 
-    pub async fn list_due_scheduled_events(&self, session_id: &str, tick: i64) -> Result<Vec<ScheduledEvent>> {
+    pub async fn list_due_scheduled_events(
+        &self,
+        session_id: &str,
+        tick: i64,
+    ) -> Result<Vec<ScheduledEvent>> {
         let rows = sqlx::query(
             r#"
             select scheduled_event_id, campaign_id, session_id, due_tick, event_kind, payload_json,
@@ -3093,7 +4030,11 @@ impl Db {
         rows.into_iter().map(row_to_scheduled_event).collect()
     }
 
-    pub async fn update_scheduled_event_status(&self, scheduled_event_id: &str, status: ScheduledEventStatus) -> Result<()> {
+    pub async fn update_scheduled_event_status(
+        &self,
+        scheduled_event_id: &str,
+        status: ScheduledEventStatus,
+    ) -> Result<()> {
         sqlx::query("update scheduled_events set status = $2 where scheduled_event_id = $1")
             .bind(scheduled_event_id)
             .bind(status.as_str())
@@ -3102,7 +4043,10 @@ impl Db {
         Ok(())
     }
 
-    pub async fn get_context_watermark(&self, session_id: &str) -> Result<Option<ContextWatermark>> {
+    pub async fn get_context_watermark(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<ContextWatermark>> {
         let row = sqlx::query(
             "select session_id, last_compiled_world_tick, last_compiled_event_seq, compiled_context_hash, updated_at from context_watermarks where session_id = $1",
         )
@@ -3199,8 +4143,10 @@ impl Db {
         Ok(())
     }
 
-
-    pub async fn insert_actionable_situation_brief(&self, brief: &ActionableSituationBrief) -> Result<()> {
+    pub async fn insert_actionable_situation_brief(
+        &self,
+        brief: &ActionableSituationBrief,
+    ) -> Result<()> {
         sqlx::query(
             r#"
             insert into actionable_situation_briefs
@@ -3222,7 +4168,10 @@ impl Db {
         Ok(())
     }
 
-    pub async fn upsert_player_facing_clue_board(&self, board: &PlayerFacingClueBoard) -> Result<()> {
+    pub async fn upsert_player_facing_clue_board(
+        &self,
+        board: &PlayerFacingClueBoard,
+    ) -> Result<()> {
         sqlx::query(
             r#"
             insert into player_facing_clue_boards
@@ -3266,7 +4215,12 @@ impl Db {
         Ok(())
     }
 
-    pub async fn insert_clock_tick(&self, session_id: &str, turn_id: &str, tick: &ClockTick) -> Result<()> {
+    pub async fn insert_clock_tick(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        tick: &ClockTick,
+    ) -> Result<()> {
         sqlx::query(
             r#"
             insert into clock_tick_events
@@ -3284,7 +4238,11 @@ impl Db {
         Ok(())
     }
 
-    pub async fn upsert_spotlight_state(&self, session_id: &str, state: &SpotlightState) -> Result<()> {
+    pub async fn upsert_spotlight_state(
+        &self,
+        session_id: &str,
+        state: &SpotlightState,
+    ) -> Result<()> {
         sqlx::query(
             r#"
             insert into spotlight_states
@@ -3314,11 +4272,18 @@ impl Db {
             .await?;
         Ok(rows
             .into_iter()
-            .filter_map(|r| serde_json::from_value(r.get::<serde_json::Value, _>("state_json")).ok())
+            .filter_map(|r| {
+                serde_json::from_value(r.get::<serde_json::Value, _>("state_json")).ok()
+            })
             .collect())
     }
 
-    pub async fn insert_effect_contract(&self, effect: &EffectContract, session_id: &str, turn_id: &str) -> Result<()> {
+    pub async fn insert_effect_contract(
+        &self,
+        effect: &EffectContract,
+        session_id: &str,
+        turn_id: &str,
+    ) -> Result<()> {
         sqlx::query(
             r#"
             insert into effect_contracts
@@ -3343,8 +4308,11 @@ impl Db {
         Ok(())
     }
 
-
-    pub async fn list_effect_contracts_for_turn(&self, session_id: &str, turn_id: &str) -> Result<Vec<EffectContract>> {
+    pub async fn list_effect_contracts_for_turn(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+    ) -> Result<Vec<EffectContract>> {
         let rows = sqlx::query(
             r#"
             select effect_json
@@ -3486,7 +4454,10 @@ impl Db {
         Ok(())
     }
 
-    pub async fn insert_player_value_verification(&self, verification: &PlayerValueVerification) -> Result<()> {
+    pub async fn insert_player_value_verification(
+        &self,
+        verification: &PlayerValueVerification,
+    ) -> Result<()> {
         sqlx::query(
             r#"
             insert into player_value_verifications
@@ -3522,7 +4493,10 @@ impl Db {
         Ok(())
     }
 
-    pub async fn insert_table_override_agreement(&self, agreement: &TableOverrideAgreement) -> Result<()> {
+    pub async fn insert_table_override_agreement(
+        &self,
+        agreement: &TableOverrideAgreement,
+    ) -> Result<()> {
         sqlx::query(
             r#"
             insert into table_override_agreements
@@ -3549,7 +4523,11 @@ impl Db {
         Ok(())
     }
 
-    pub async fn list_recent_player_value_verifications(&self, session_id: &str, limit: i64) -> Result<Vec<PlayerValueVerification>> {
+    pub async fn list_recent_player_value_verifications(
+        &self,
+        session_id: &str,
+        limit: i64,
+    ) -> Result<Vec<PlayerValueVerification>> {
         let rows = sqlx::query(
             r#"
             select verification_id, claim_id, session_id, turn_id, status, canonical_value_json,
@@ -3565,31 +4543,30 @@ impl Db {
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.into_iter().map(|row| PlayerValueVerification {
-            verification_id: row.get("verification_id"),
-            claim_id: row.get("claim_id"),
-            session_id: row.get("session_id"),
-            turn_id: row.get("turn_id"),
-            status: player_value_status_from_str(&row.get::<String, _>("status")),
-            canonical_value_json: row.get("canonical_value_json"),
-            acceptable_range_json: row.get("acceptable_range_json"),
-            comparison_json: row.get("comparison_json"),
-            source_refs: serde_json::from_value(row.get::<serde_json::Value, _>("source_refs")).unwrap_or_default(),
-            warning_public: row.get("warning_public"),
-            suggestion_public: row.get("suggestion_public"),
-            accepted_if_player_insists: row.get("accepted_if_player_insists"),
-            balance_risk: row.get("balance_risk"),
-            verifier_json: row.get("verifier_json"),
-            world_tick: row.get("world_tick"),
-            created_at: row.get("created_at"),
-        }).collect())
+        Ok(rows
+            .into_iter()
+            .map(|row| PlayerValueVerification {
+                verification_id: row.get("verification_id"),
+                claim_id: row.get("claim_id"),
+                session_id: row.get("session_id"),
+                turn_id: row.get("turn_id"),
+                status: player_value_status_from_str(&row.get::<String, _>("status")),
+                canonical_value_json: row.get("canonical_value_json"),
+                acceptable_range_json: row.get("acceptable_range_json"),
+                comparison_json: row.get("comparison_json"),
+                source_refs: serde_json::from_value(row.get::<serde_json::Value, _>("source_refs"))
+                    .unwrap_or_default(),
+                warning_public: row.get("warning_public"),
+                suggestion_public: row.get("suggestion_public"),
+                accepted_if_player_insists: row.get("accepted_if_player_insists"),
+                balance_risk: row.get("balance_risk"),
+                verifier_json: row.get("verifier_json"),
+                world_tick: row.get("world_tick"),
+                created_at: row.get("created_at"),
+            })
+            .collect())
     }
-
-
-
 }
-
-
 
 fn player_value_status_from_str(s: &str) -> PlayerValueVerificationStatus {
     match s {
@@ -3616,9 +4593,14 @@ fn row_to_interaction_gate(row: sqlx::postgres::PgRow) -> Result<InteractionGate
         _ => GateKind::PlayerRollRequired,
     };
     let status = gate_status_from_str(&row.get::<String, _>("status"));
-    let allowed_options: Vec<ActionOption> = serde_json::from_value(row.get::<serde_json::Value, _>("allowed_options")).unwrap_or_default();
-    let expected_input: ExpectedInput = serde_json::from_value(row.get::<serde_json::Value, _>("expected_input")).unwrap_or_default();
-    let source_refs: Vec<SourceRef> = serde_json::from_value(row.get::<serde_json::Value, _>("source_refs")).unwrap_or_default();
+    let allowed_options: Vec<ActionOption> =
+        serde_json::from_value(row.get::<serde_json::Value, _>("allowed_options"))
+            .unwrap_or_default();
+    let expected_input: ExpectedInput =
+        serde_json::from_value(row.get::<serde_json::Value, _>("expected_input"))
+            .unwrap_or_default();
+    let source_refs: Vec<SourceRef> =
+        serde_json::from_value(row.get::<serde_json::Value, _>("source_refs")).unwrap_or_default();
     let on_unparseable = gate_fallback_from_str(&row.get::<String, _>("on_unparseable"));
     let on_new_action = gate_fallback_from_str(&row.get::<String, _>("on_new_action"));
     let on_timeout = gate_fallback_from_str(&row.get::<String, _>("on_timeout"));
@@ -3651,7 +4633,6 @@ fn row_to_interaction_gate(row: sqlx::postgres::PgRow) -> Result<InteractionGate
         updated_at: row.get("updated_at"),
     })
 }
-
 
 fn row_to_frame_event(row: sqlx::postgres::PgRow) -> Result<FrameEvent> {
     Ok(FrameEvent {
@@ -3699,20 +4680,32 @@ fn row_to_state_frame(row: sqlx::postgres::PgRow) -> Result<StateFrame> {
         ruleset_id: row.get("ruleset_id"),
         module_id: row.get("module_id"),
         parent_frame_id: row.get("parent_frame_id"),
-        scope: Scope { scope_type: scope_type_from_str(&row.get::<String, _>("scope_type")), scope_id: row.get("scope_id") },
+        scope: Scope {
+            scope_type: scope_type_from_str(&row.get::<String, _>("scope_type")),
+            scope_id: row.get("scope_id"),
+        },
         status,
         title: row.get("title"),
         objective: row.get("objective"),
         static_refs: row.get("static_refs"),
         working_state: row.get("working_state"),
         active_gate_ids: row.get("active_gate_ids"),
-        local_clocks: serde_json::from_value(row.get::<serde_json::Value, _>("local_clocks")).unwrap_or_default(),
-        local_facts: serde_json::from_value(row.get::<serde_json::Value, _>("local_facts")).unwrap_or_default(),
-        local_modifiers: serde_json::from_value(row.get::<serde_json::Value, _>("local_modifiers")).unwrap_or_default(),
+        local_clocks: serde_json::from_value(row.get::<serde_json::Value, _>("local_clocks"))
+            .unwrap_or_default(),
+        local_facts: serde_json::from_value(row.get::<serde_json::Value, _>("local_facts"))
+            .unwrap_or_default(),
+        local_modifiers: serde_json::from_value(row.get::<serde_json::Value, _>("local_modifiers"))
+            .unwrap_or_default(),
         event_count: row.get::<i32, _>("event_count") as u32,
         last_event_ids: row.get("last_event_ids"),
-        retention_policy: serde_json::from_value(row.get::<serde_json::Value, _>("retention_policy")).unwrap_or_default(),
-        compaction_policy: serde_json::from_value(row.get::<serde_json::Value, _>("compaction_policy")).unwrap_or_default(),
+        retention_policy: serde_json::from_value(
+            row.get::<serde_json::Value, _>("retention_policy"),
+        )
+        .unwrap_or_default(),
+        compaction_policy: serde_json::from_value(
+            row.get::<serde_json::Value, _>("compaction_policy"),
+        )
+        .unwrap_or_default(),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     })
@@ -3720,35 +4713,40 @@ fn row_to_state_frame(row: sqlx::postgres::PgRow) -> Result<StateFrame> {
 
 fn row_to_pending_check(row: sqlx::postgres::PgRow) -> Result<PendingCheck> {
     let contract_json: serde_json::Value = row.get("contract_json");
-    let contract: CheckContract = serde_json::from_value(contract_json).unwrap_or_else(|_| CheckContract {
-        check_id: row.get("check_id"),
-        session_id: row.get("session_id"),
-        turn_id: "unknown".into(),
-        ruleset_id: "unknown".into(),
-        module_id: None,
-        initiator: ActorRef { actor_id: "unknown".into(), actor_kind: ActorKind::PlayerCharacter, display_name: None },
-        target_actor: None,
-        opposition: OppositionModel::NoMechanicalOpposition,
-        action_summary: String::new(),
-        intent_kind: "unknown".into(),
-        check_label: "Pending check".into(),
-        dice_expression: "1d10".into(),
-        modifiers: vec![],
-        target: CheckTargetModel::UnknownUntilLookup,
-        tested_parameter: None,
-        opponent_tested_parameter: None,
-        actor_snapshot_ids: vec![],
-        source_refs: vec![],
-        learned_packet_ids: vec![],
-        roll_visibility: RollVisibility::PlayerRollRequired,
-        roll_authority: RollAuthority::Player,
-        disclosure: RollDisclosurePolicy::for_visibility(RollVisibility::PlayerRollRequired),
-        stakes: CheckStakes::default(),
-        confidence: RulingConfidence::Low,
-        ruling_status: RulingStatus::Provisional,
-        advice_refs: vec![],
-        expires_at_turn: None,
-    });
+    let contract: CheckContract =
+        serde_json::from_value(contract_json).unwrap_or_else(|_| CheckContract {
+            check_id: row.get("check_id"),
+            session_id: row.get("session_id"),
+            turn_id: "unknown".into(),
+            ruleset_id: "unknown".into(),
+            module_id: None,
+            initiator: ActorRef {
+                actor_id: "unknown".into(),
+                actor_kind: ActorKind::PlayerCharacter,
+                display_name: None,
+            },
+            target_actor: None,
+            opposition: OppositionModel::NoMechanicalOpposition,
+            action_summary: String::new(),
+            intent_kind: "unknown".into(),
+            check_label: "Pending check".into(),
+            dice_expression: "1d10".into(),
+            modifiers: vec![],
+            target: CheckTargetModel::UnknownUntilLookup,
+            tested_parameter: None,
+            opponent_tested_parameter: None,
+            actor_snapshot_ids: vec![],
+            source_refs: vec![],
+            learned_packet_ids: vec![],
+            roll_visibility: RollVisibility::PlayerRollRequired,
+            roll_authority: RollAuthority::Player,
+            disclosure: RollDisclosurePolicy::for_visibility(RollVisibility::PlayerRollRequired),
+            stakes: CheckStakes::default(),
+            confidence: RulingConfidence::Low,
+            ruling_status: RulingStatus::Provisional,
+            advice_refs: vec![],
+            expires_at_turn: None,
+        });
     let status_str: String = row.get("status");
     let status = match status_str.as_str() {
         "resolved" => PendingCheckStatus::Resolved,
@@ -3834,7 +4832,11 @@ fn candidate_status_from_str(s: &str) -> LearningCandidateStatus {
     }
 }
 
-fn locator_entry_from_material(owner_id: &str, owner_kind: &str, entry: &MaterialIndexEntry) -> BookLocatorEntry {
+fn locator_entry_from_material(
+    owner_id: &str,
+    owner_kind: &str,
+    entry: &MaterialIndexEntry,
+) -> BookLocatorEntry {
     let first_ref = entry.source_refs.first().cloned().unwrap_or_default();
     let page = first_ref.page;
     let mut search_terms = entry.tags.clone();
@@ -3846,7 +4848,12 @@ fn locator_entry_from_material(owner_id: &str, owner_kind: &str, entry: &Materia
         owner_id: owner_id.to_string(),
         owner_kind: owner_kind.to_string(),
         label: entry.title.clone(),
-        category: entry.tags.iter().find(|t| t.as_str() != "locator" && t.as_str() != "cold_data").cloned().unwrap_or_else(|| "section".to_string()),
+        category: entry
+            .tags
+            .iter()
+            .find(|t| t.as_str() != "locator" && t.as_str() != "cold_data")
+            .cloned()
+            .unwrap_or_else(|| "section".to_string()),
         source_document_id: first_ref.source_id.clone(),
         page_start: page,
         page_end: page,
@@ -3854,7 +4861,11 @@ fn locator_entry_from_material(owner_id: &str, owner_kind: &str, entry: &Materia
         search_terms,
         summary: entry.summary.clone(),
         confidence: 0.65,
-        parse_policy: if matches!(entry.material_type, MaterialType::ColdDataLocator) { "on_demand".to_string() } else { "located".to_string() },
+        parse_policy: if matches!(entry.material_type, MaterialType::ColdDataLocator) {
+            "on_demand".to_string()
+        } else {
+            "located".to_string()
+        },
         tags: entry.tags.clone(),
         source_refs: entry.source_refs.clone(),
     }
@@ -3865,11 +4876,19 @@ fn split_sql_statements(sql: &str) -> Vec<&str> {
 }
 
 fn due_source_str(s: &DueSource) -> &'static str {
-    match s { DueSource::Threshold => "threshold", DueSource::Hook => "hook", DueSource::SemanticTrigger => "semantic_trigger" }
+    match s {
+        DueSource::Threshold => "threshold",
+        DueSource::Hook => "hook",
+        DueSource::SemanticTrigger => "semantic_trigger",
+    }
 }
 
 fn due_status_str(s: &DueStatus) -> &'static str {
-    match s { DueStatus::Open => "open", DueStatus::Resolved => "resolved", DueStatus::Waived => "waived" }
+    match s {
+        DueStatus::Open => "open",
+        DueStatus::Resolved => "resolved",
+        DueStatus::Waived => "waived",
+    }
 }
 
 /// 行→MechanicDue；source/status 列值认不出 → None（fail-closed 跳过该行）。
@@ -3921,20 +4940,24 @@ fn row_to_context_block(row: sqlx::postgres::PgRow) -> Result<ContextBlock> {
         visibility,
         stability,
         cache_zone,
-        scope: Scope { scope_type, scope_id: row.get("scope_id") },
+        scope: Scope {
+            scope_type,
+            scope_id: row.get("scope_id"),
+        },
         priority: row.get("priority"),
         version: row.get::<i32, _>("version") as u32,
         tags: row.get::<Vec<String>, _>("tags"),
         source_refs,
         dependencies,
         content_hash: row.get("content_hash"),
-        token_estimate: row.get::<Option<i32>, _>("token_estimate").map(|v| v as u32),
+        token_estimate: row
+            .get::<Option<i32>, _>("token_estimate")
+            .map(|v| v as u32),
         expires_at_turn: row.get("expires_at_turn"),
         expires_at_scene: row.get("expires_at_scene"),
         load_reason: row.get("load_reason"),
     })
 }
-
 
 fn row_to_memory_event(row: sqlx::postgres::PgRow) -> Result<MemoryEvent> {
     Ok(MemoryEvent {
@@ -3961,7 +4984,10 @@ fn row_to_memory_fact(row: sqlx::postgres::PgRow) -> Result<MemoryFact> {
     Ok(MemoryFact {
         fact_id: row.get("fact_id"),
         session_id: row.get("session_id"),
-        scope: Scope { scope_type: scope_type_from_str(&row.get::<String, _>("scope_type")), scope_id: row.get("scope_id") },
+        scope: Scope {
+            scope_type: scope_type_from_str(&row.get::<String, _>("scope_type")),
+            scope_id: row.get("scope_id"),
+        },
         visibility: visibility_from_str(&row.get::<String, _>("visibility")),
         subject: row.get("subject"),
         predicate: row.get("predicate"),
@@ -3984,14 +5010,19 @@ fn row_to_memory_snapshot(row: sqlx::postgres::PgRow) -> Result<MemorySnapshot> 
         session_id: row.get("session_id"),
         ruleset_id: row.get("ruleset_id"),
         module_id: row.get("module_id"),
-        scope: Scope { scope_type: scope_type_from_str(&row.get::<String, _>("scope_type")), scope_id: row.get("scope_id") },
+        scope: Scope {
+            scope_type: scope_type_from_str(&row.get::<String, _>("scope_type")),
+            scope_id: row.get("scope_id"),
+        },
         visibility: visibility_from_str(&row.get::<String, _>("visibility")),
         title: row.get("title"),
         summary_markdown: row.get("summary_markdown"),
         included_event_ids: row.get::<Vec<String>, _>("included_event_ids"),
         included_fact_ids: row.get::<Vec<String>, _>("included_fact_ids"),
         version: row.get::<i32, _>("version") as u32,
-        token_estimate: row.get::<Option<i32>, _>("token_estimate").map(|v| v as u32),
+        token_estimate: row
+            .get::<Option<i32>, _>("token_estimate")
+            .map(|v| v as u32),
         content_hash: row.get("content_hash"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
@@ -4011,8 +5042,12 @@ impl SnakeCase for String {
         let mut out = String::new();
         for (i, ch) in self.chars().enumerate() {
             if ch.is_uppercase() {
-                if i > 0 { out.push('_'); }
-                for c in ch.to_lowercase() { out.push(c); }
+                if i > 0 {
+                    out.push('_');
+                }
+                for c in ch.to_lowercase() {
+                    out.push(c);
+                }
             } else {
                 out.push(ch);
             }
@@ -4029,7 +5064,6 @@ fn cache_zone_from_str(s: &str) -> CacheZone {
         _ => CacheZone::PinnedMiddle,
     }
 }
-
 
 fn row_to_learned_packet(row: sqlx::postgres::PgRow) -> Result<LearnedPacket> {
     let source_refs: Vec<SourceRef> = serde_json::from_value(row.get("source_refs"))?;
@@ -4123,7 +5157,6 @@ fn gate_fallback_from_str(s: &str) -> GateFallbackPolicy {
     }
 }
 
-
 fn memory_kind_from_str(s: &str) -> MemoryKind {
     match s {
         "fact" => MemoryKind::Fact,
@@ -4144,7 +5177,6 @@ fn memory_status_from_str(s: &str) -> MemoryStatus {
     }
 }
 
-
 fn learning_stage_from_str(s: &str) -> LearningStage {
     match s {
         "unseen" => LearningStage::Unseen,
@@ -4163,7 +5195,6 @@ fn ruling_confidence_from_str(s: &str) -> RulingConfidence {
         _ => RulingConfidence::Medium,
     }
 }
-
 
 fn row_to_world_time_state(row: sqlx::postgres::PgRow) -> Result<WorldTimeState> {
     Ok(WorldTimeState {
@@ -4434,9 +5465,21 @@ fn block_kind_from_str(s: &str) -> BlockKind {
 /// shaped `{"resource_tracks": [ ... ], "dice_core": { ... }}`. Mirrors the chargen
 /// override convention. Returns the parsed override doc, or None when absent/unreadable.
 fn read_kernel_override_file(ruleset_id: &str) -> Option<serde_json::Value> {
-    let safe: String = ruleset_id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).collect();
+    let safe: String = ruleset_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
     let dir = std::env::var("TRPG_DATA_DIR").unwrap_or_else(|_| "data".into());
-    let p = std::path::Path::new(&dir).join("parsed").join("rules").join(format!("{safe}.rule_kernel.override.json"));
+    let p = std::path::Path::new(&dir)
+        .join("parsed")
+        .join("rules")
+        .join(format!("{safe}.rule_kernel.override.json"));
     // Local data/ file wins (unchanged path). When it is absent/unreadable, fall
     // back to the binary-embedded copy so a clean checkout (no data/) reproduces
     // the migrated values byte-for-byte.
@@ -4453,11 +5496,19 @@ fn read_kernel_override_file(ruleset_id: &str) -> Option<serde_json::Value> {
 fn embedded_kernel_override(ruleset_id: &str) -> Option<&'static str> {
     Some(match ruleset_id {
         "brp_orc" => include_str!("../embedded_config/rules/brp_orc.rule_kernel.override.json"),
-        "call_of_cthulhu_7e" => include_str!("../embedded_config/rules/call_of_cthulhu_7e.rule_kernel.override.json"),
-        "cyberpunk_red" => include_str!("../embedded_config/rules/cyberpunk_red.rule_kernel.override.json"),
+        "call_of_cthulhu_7e" => {
+            include_str!("../embedded_config/rules/call_of_cthulhu_7e.rule_kernel.override.json")
+        }
+        "cyberpunk_red" => {
+            include_str!("../embedded_config/rules/cyberpunk_red.rule_kernel.override.json")
+        }
         "dnd5e" => include_str!("../embedded_config/rules/dnd5e.rule_kernel.override.json"),
-        "sword_world_2_5" => include_str!("../embedded_config/rules/sword_world_2_5.rule_kernel.override.json"),
-        "triangle_agency" => include_str!("../embedded_config/rules/triangle_agency.rule_kernel.override.json"),
+        "sword_world_2_5" => {
+            include_str!("../embedded_config/rules/sword_world_2_5.rule_kernel.override.json")
+        }
+        "triangle_agency" => {
+            include_str!("../embedded_config/rules/triangle_agency.rule_kernel.override.json")
+        }
         _ => return None,
     })
 }
@@ -4469,31 +5520,54 @@ fn embedded_kernel_override(ruleset_id: &str) -> Option<&'static str> {
 /// / check_label_policy / dice_qualification / referee_value_bands.
 fn apply_kernel_strategy_overrides(kernel: &mut RuleKernel, doc: &serde_json::Value) {
     if let Some(v) = doc.get("combat_profile") {
-        if let Ok(p) = serde_json::from_value::<trpg_model::CombatProfile>(v.clone()) { kernel.combat_profile = Some(p); }
+        if let Ok(p) = serde_json::from_value::<trpg_model::CombatProfile>(v.clone()) {
+            kernel.combat_profile = Some(p);
+        }
     }
     if let Some(v) = doc.get("combat_mode_policy") {
-        if let Ok(p) = serde_json::from_value::<trpg_model::CombatModePolicy>(v.clone()) { kernel.combat_mode_policy = Some(p); }
+        if let Ok(p) = serde_json::from_value::<trpg_model::CombatModePolicy>(v.clone()) {
+            kernel.combat_mode_policy = Some(p);
+        }
     }
     if let Some(v) = doc.get("check_label_policy") {
-        if let Ok(p) = serde_json::from_value::<trpg_model::CheckLabelPolicy>(v.clone()) { kernel.check_label_policy = Some(p); }
+        if let Ok(p) = serde_json::from_value::<trpg_model::CheckLabelPolicy>(v.clone()) {
+            kernel.check_label_policy = Some(p);
+        }
     }
     if let Some(v) = doc.get("dice_qualification") {
-        if let Ok(p) = serde_json::from_value::<trpg_model::DiceQualification>(v.clone()) { kernel.dice_qualification = Some(p); }
+        if let Ok(p) = serde_json::from_value::<trpg_model::DiceQualification>(v.clone()) {
+            kernel.dice_qualification = Some(p);
+        }
     }
     if let Some(v) = doc.get("referee_value_bands") {
-        if let Ok(p) = serde_json::from_value::<trpg_model::RefereeValueBands>(v.clone()) { kernel.referee_value_bands = Some(p); }
+        if let Ok(p) = serde_json::from_value::<trpg_model::RefereeValueBands>(v.clone()) {
+            kernel.referee_value_bands = Some(p);
+        }
     }
     if let Some(v) = doc.get("search_profile") {
-        if let Ok(p) = serde_json::from_value::<trpg_model::RuleKernelSearchProfile>(v.clone()) { kernel.search_profile = Some(p); }
+        if let Ok(p) = serde_json::from_value::<trpg_model::RuleKernelSearchProfile>(v.clone()) {
+            kernel.search_profile = Some(p);
+        }
     }
 }
 
 /// P0-2: read a module config file `{TRPG_DATA_DIR}/modules/{id}.module_config.json`.
 /// Mirrors `read_kernel_override_file`. None when absent/unreadable/malformed.
 fn read_module_config_file(module_id: &str) -> Option<ModuleConfig> {
-    let safe: String = module_id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' { c } else { '_' }).collect();
+    let safe: String = module_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
     let dir = std::env::var("TRPG_DATA_DIR").unwrap_or_else(|_| "data".into());
-    let p = std::path::Path::new(&dir).join("modules").join(format!("{safe}.module_config.json"));
+    let p = std::path::Path::new(&dir)
+        .join("modules")
+        .join(format!("{safe}.module_config.json"));
     // Local data/ file wins; else the binary-embedded copy (clean-checkout).
     if let Ok(text) = std::fs::read_to_string(&p) {
         return serde_json::from_str(&text).ok();
@@ -4529,7 +5603,10 @@ fn merge_module_config(
             }
             Some(cfg)
         }
-        (None, Some(ext)) => Some(ModuleConfig { director: Some(ext), ..Default::default() }),
+        (None, Some(ext)) => Some(ModuleConfig {
+            director: Some(ext),
+            ..Default::default()
+        }),
         (None, None) => None,
     }
 }
@@ -4538,22 +5615,42 @@ fn merge_module_config(
 /// Container values like `success_bands` (an array whose ids may repeat, e.g. two
 /// fumble bands) are REPLACED wholesale, not deep-merged — the override supplies the
 /// full corrected value for any key it sets. A non-object base is replaced entirely.
-fn merge_dice_core(base: serde_json::Value, over: &serde_json::Map<String, serde_json::Value>) -> serde_json::Value {
+fn merge_dice_core(
+    base: serde_json::Value,
+    over: &serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Value {
     let mut obj = base.as_object().cloned().unwrap_or_default();
-    for (k, v) in over { obj.insert(k.clone(), v.clone()); }
+    for (k, v) in over {
+        obj.insert(k.clone(), v.clone());
+    }
     serde_json::Value::Object(obj)
 }
 
 /// Merge override resource_tracks into base by track `id` (case-insensitive):
 /// an override replaces a same-id base track; new ids are appended. Mirrors
 /// chargen `merge_override`.
-fn merge_resource_tracks(base: Vec<serde_json::Value>, overrides: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
-    let idof = |v: &serde_json::Value| v.get("id").and_then(|x| x.as_str()).unwrap_or("").trim().to_ascii_lowercase();
+fn merge_resource_tracks(
+    base: Vec<serde_json::Value>,
+    overrides: Vec<serde_json::Value>,
+) -> Vec<serde_json::Value> {
+    let idof = |v: &serde_json::Value| {
+        v.get("id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase()
+    };
     let mut out = base;
     for o in overrides {
         let oid = idof(&o);
-        if oid.is_empty() { continue; }
-        if let Some(slot) = out.iter_mut().find(|b| idof(b) == oid) { *slot = o; } else { out.push(o); }
+        if oid.is_empty() {
+            continue;
+        }
+        if let Some(slot) = out.iter_mut().find(|b| idof(b) == oid) {
+            *slot = o;
+        } else {
+            out.push(o);
+        }
     }
     out
 }
@@ -4565,7 +5662,10 @@ mod merge_module_config_tests {
 
     fn cfg_with_fact(text: &str) -> DirectorModuleConfig {
         DirectorModuleConfig {
-            scene_facts: vec![DirectorSceneFact { text: text.into(), source: "x".into() }],
+            scene_facts: vec![DirectorSceneFact {
+                text: text.into(),
+                source: "x".into(),
+            }],
             ..Default::default()
         }
     }
@@ -4580,7 +5680,10 @@ mod merge_module_config_tests {
     /// sidecar.director 存在 → 整块盖掉 extracted(验收 2 override 胜)。
     #[test]
     fn sidecar_director_wins_over_extracted() {
-        let sidecar = ModuleConfig { director: Some(cfg_with_fact("override")), ..Default::default() };
+        let sidecar = ModuleConfig {
+            director: Some(cfg_with_fact("override")),
+            ..Default::default()
+        };
         let out = merge_module_config(Some(sidecar), Some(cfg_with_fact("extracted"))).unwrap();
         assert_eq!(out.director.unwrap().scene_facts[0].text, "override");
     }
@@ -4589,13 +5692,21 @@ mod merge_module_config_tests {
     #[test]
     fn extracted_fills_when_sidecar_has_no_director() {
         let sidecar = ModuleConfig {
-            npc_actor_bindings: vec![NpcActorBinding { matcher: vec!["boss".into()], actor_id: "npc.boss".into(), display_name: None }],
+            npc_actor_bindings: vec![NpcActorBinding {
+                matcher: vec!["boss".into()],
+                actor_id: "npc.boss".into(),
+                display_name: None,
+            }],
             director: None,
             ..Default::default()
         };
         let out = merge_module_config(Some(sidecar), Some(cfg_with_fact("extracted"))).unwrap();
         assert_eq!(out.director.unwrap().scene_facts[0].text, "extracted");
-        assert_eq!(out.npc_actor_bindings.len(), 1, "sidecar 非 director 字段必须保留");
+        assert_eq!(
+            out.npc_actor_bindings.len(),
+            1,
+            "sidecar 非 director 字段必须保留"
+        );
     }
 
     /// 都没有 → None(回退通用兜底)。
@@ -4630,8 +5741,12 @@ mod turn_trace_serde_tests {
         });
 
         let value = serde_json::to_value(&trace).expect("serialize TurnTrace to Value");
-        let back: TurnTrace = serde_json::from_value(value).expect("deserialize Value to TurnTrace");
-        assert_eq!(trace, back, "jsonb round-trip must preserve the full TurnTrace");
+        let back: TurnTrace =
+            serde_json::from_value(value).expect("deserialize Value to TurnTrace");
+        assert_eq!(
+            trace, back,
+            "jsonb round-trip must preserve the full TurnTrace"
+        );
     }
 }
 
@@ -4642,21 +5757,40 @@ mod dice_core_override_tests {
 
     #[test]
     fn override_replaces_bands_wholesale_and_keeps_untouched_keys() {
-        let base = json!({"compare":"roll_under","success_bands":[{"id":"regular"},{"id":"extreme"}]});
+        let base =
+            json!({"compare":"roll_under","success_bands":[{"id":"regular"},{"id":"extreme"}]});
         let over = json!({"success_bands":[{"id":"critical"},{"id":"failure"}]});
         let merged = merge_dice_core(base, over.as_object().unwrap());
         // untouched base key survives
-        assert_eq!(merged.get("compare").and_then(|v| v.as_str()), Some("roll_under"));
+        assert_eq!(
+            merged.get("compare").and_then(|v| v.as_str()),
+            Some("roll_under")
+        );
         // success_bands REPLACED wholesale, not appended/merged-by-id
-        let ids: Vec<&str> = merged.get("success_bands").and_then(|v| v.as_array()).unwrap()
-            .iter().filter_map(|b| b.get("id").and_then(|x| x.as_str())).collect();
-        assert_eq!(ids, vec!["critical", "failure"], "array key must be replaced, not deep-merged");
+        let ids: Vec<&str> = merged
+            .get("success_bands")
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|b| b.get("id").and_then(|x| x.as_str()))
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["critical", "failure"],
+            "array key must be replaced, not deep-merged"
+        );
     }
 
     #[test]
     fn non_object_base_is_replaced_by_override() {
-        let merged = merge_dice_core(json!(null), json!({"compare":"meet_or_beat"}).as_object().unwrap());
-        assert_eq!(merged.get("compare").and_then(|v| v.as_str()), Some("meet_or_beat"));
+        let merged = merge_dice_core(
+            json!(null),
+            json!({"compare":"meet_or_beat"}).as_object().unwrap(),
+        );
+        assert_eq!(
+            merged.get("compare").and_then(|v| v.as_str()),
+            Some("meet_or_beat")
+        );
     }
 
     /// （A4 回归）override merge 与编译遍升级出的新字段兼容：
@@ -4670,20 +5804,34 @@ mod dice_core_override_tests {
     fn override_merge_keeps_upgraded_fields() {
         use super::merge_resource_tracks;
         // ① untouched key keeps the upgraded semantics
-        let base = json!({"dice":"1d100","success_bands":[{"id":"regular","semantics":"plain success"}]});
+        let base =
+            json!({"dice":"1d100","success_bands":[{"id":"regular","semantics":"plain success"}]});
         let merged = merge_dice_core(base, json!({"dice":"1d20"}).as_object().unwrap());
         assert_eq!(merged.get("dice").and_then(|v| v.as_str()), Some("1d20"));
         assert_eq!(
-            merged.pointer("/success_bands/0/semantics").and_then(|v| v.as_str()),
+            merged
+                .pointer("/success_bands/0/semantics")
+                .and_then(|v| v.as_str()),
             Some("plain success"),
             "shallow merge: an untouched key keeps its upgraded fields"
         );
         // ② an override that sets success_bands replaces the WHOLE value
         let base = json!({"success_bands":[{"id":"regular","semantics":"plain success"}]});
-        let merged = merge_dice_core(base, json!({"success_bands":[{"id":"critical"}]}).as_object().unwrap());
-        let bands = merged.get("success_bands").and_then(|v| v.as_array()).unwrap();
+        let merged = merge_dice_core(
+            base,
+            json!({"success_bands":[{"id":"critical"}]})
+                .as_object()
+                .unwrap(),
+        );
+        let bands = merged
+            .get("success_bands")
+            .and_then(|v| v.as_array())
+            .unwrap();
         assert_eq!(bands.len(), 1);
-        assert_eq!(bands[0].get("id").and_then(|v| v.as_str()), Some("critical"));
+        assert_eq!(
+            bands[0].get("id").and_then(|v| v.as_str()),
+            Some("critical")
+        );
         assert!(
             bands[0].get("semantics").is_none(),
             "wholesale replacement: an override file must carry the FULL fields it wants to keep"
@@ -4696,11 +5844,17 @@ mod dice_core_override_tests {
         ];
         let merged = merge_resource_tracks(base, vec![json!({"id":"luck","max":50})]);
         assert_eq!(
-            merged[0].pointer("/thresholds/0/followup_procedure_id").and_then(|v| v.as_str()),
+            merged[0]
+                .pointer("/thresholds/0/followup_procedure_id")
+                .and_then(|v| v.as_str()),
             Some("x.temp"),
             "untouched track keeps the upgraded followup_procedure_id"
         );
-        assert_eq!(merged[1].get("max").and_then(|v| v.as_i64()), Some(50), "overridden track replaced wholesale");
+        assert_eq!(
+            merged[1].get("max").and_then(|v| v.as_i64()),
+            Some(50),
+            "overridden track replaced wholesale"
+        );
     }
 }
 
@@ -4728,11 +5882,24 @@ mod kernel_strategy_override_tests {
             "dice_qualification": {"bare_dice_template": "{dice}+0"}
         });
         apply_kernel_strategy_overrides(&mut kernel, &doc);
-        let cmp = kernel.combat_mode_policy.expect("combat_mode_policy layered");
+        let cmp = kernel
+            .combat_mode_policy
+            .expect("combat_mode_policy layered");
         assert_eq!(cmp.fallback_mode, CombatMode::Firefight);
         assert_eq!(cmp.rules[0].mode, CombatMode::Netrun);
-        assert_eq!(kernel.check_label_policy.unwrap().labels.get("hack").map(String::as_str), Some("TECH check"));
-        assert_eq!(kernel.dice_qualification.unwrap().bare_dice_template, "{dice}+0");
+        assert_eq!(
+            kernel
+                .check_label_policy
+                .unwrap()
+                .labels
+                .get("hack")
+                .map(String::as_str),
+            Some("TECH check")
+        );
+        assert_eq!(
+            kernel.dice_qualification.unwrap().bare_dice_template,
+            "{dice}+0"
+        );
         // a doc with none of the keys leaves the kernel fields None
         let mut k2 = RuleKernel::default();
         apply_kernel_strategy_overrides(&mut k2, &json!({"resource_tracks": []}));
@@ -4753,24 +5920,45 @@ mod kernel_strategy_override_tests {
             return;
         }
         // SAFETY (test): single-threaded set of an env var for read_*_file.
-        unsafe { std::env::set_var("TRPG_DATA_DIR", &dir); }
+        unsafe {
+            std::env::set_var("TRPG_DATA_DIR", &dir);
+        }
         // cyberpunk override: firefight fallback + hack/disable_device netrun rule.
         let mut k = RuleKernel::default();
-        let doc = super::read_kernel_override_file("cyberpunk_red").expect("cyberpunk override present");
+        let doc =
+            super::read_kernel_override_file("cyberpunk_red").expect("cyberpunk override present");
         apply_kernel_strategy_overrides(&mut k, &doc);
         let cmp = k.combat_mode_policy.expect("cyberpunk combat_mode_policy");
         assert_eq!(cmp.fallback_mode, CombatMode::Firefight);
-        assert!(cmp.rules.iter().any(|r| r.mode == CombatMode::Netrun && r.when_action_kinds.iter().any(|a| a == "hack")));
+        assert!(cmp.rules.iter().any(
+            |r| r.mode == CombatMode::Netrun && r.when_action_kinds.iter().any(|a| a == "hack")
+        ));
         assert_eq!(
-            k.check_label_policy.unwrap().labels.get("hack").map(String::as_str),
+            k.check_label_policy
+                .unwrap()
+                .labels
+                .get("hack")
+                .map(String::as_str),
             Some("appropriate TECH / Interface / Basic Tech check")
         );
         assert_eq!(k.dice_qualification.unwrap().bare_dice_template, "{dice}+0");
         // module config: scav_boss / athena_drone bindings + DV 14/12 table.
-        let cfg = read_module_config_file("cyberpunk_red.homecoming").expect("homecoming module_config present");
-        assert!(cfg.npc_actor_bindings.iter().any(|b| b.actor_id == "npc.scav_boss"));
-        assert!(cfg.npc_actor_bindings.iter().any(|b| b.actor_id == "npc.athena_drone"));
-        let dvs: Vec<i32> = cfg.technical_option_table.unwrap().iter().map(|t| t.dv).collect();
+        let cfg = read_module_config_file("cyberpunk_red.homecoming")
+            .expect("homecoming module_config present");
+        assert!(cfg
+            .npc_actor_bindings
+            .iter()
+            .any(|b| b.actor_id == "npc.scav_boss"));
+        assert!(cfg
+            .npc_actor_bindings
+            .iter()
+            .any(|b| b.actor_id == "npc.athena_drone"));
+        let dvs: Vec<i32> = cfg
+            .technical_option_table
+            .unwrap()
+            .iter()
+            .map(|t| t.dv)
+            .collect();
         assert_eq!(dvs, vec![14, 12]);
     }
 
@@ -4800,30 +5988,54 @@ mod kernel_strategy_override_tests {
         }
         let _restore = Restore(prev, tmp.clone());
         // SAFETY (test): env set under ENV_LOCK.
-        unsafe { std::env::set_var("TRPG_DATA_DIR", &tmp); }
+        unsafe {
+            std::env::set_var("TRPG_DATA_DIR", &tmp);
+        }
 
         // sanity: the empty dir really has no override/module files.
-        assert!(!tmp.join("parsed/rules").exists(), "temp data dir must be empty");
+        assert!(
+            !tmp.join("parsed/rules").exists(),
+            "temp data dir must be empty"
+        );
 
         // cyberpunk override comes from the embedded copy: search_profile +
         // check_label_policy present, combat_mode_policy firefight fallback.
         let mut k = RuleKernel::default();
         let doc = super::read_kernel_override_file("cyberpunk_red")
             .expect("cyberpunk override via embedded fallback");
-        assert!(doc.get("search_profile").is_some(), "embedded override carries search_profile");
-        assert!(doc.get("check_label_policy").is_some(), "embedded override carries check_label_policy");
+        assert!(
+            doc.get("search_profile").is_some(),
+            "embedded override carries search_profile"
+        );
+        assert!(
+            doc.get("check_label_policy").is_some(),
+            "embedded override carries check_label_policy"
+        );
         apply_kernel_strategy_overrides(&mut k, &doc);
-        assert_eq!(k.combat_mode_policy.expect("combat_mode_policy").fallback_mode, CombatMode::Firefight);
+        assert_eq!(
+            k.combat_mode_policy
+                .expect("combat_mode_policy")
+                .fallback_mode,
+            CombatMode::Firefight
+        );
 
         // triangle override also resolves from embedded.
-        assert!(super::read_kernel_override_file("triangle_agency").is_some(),
-            "triangle override via embedded fallback");
+        assert!(
+            super::read_kernel_override_file("triangle_agency").is_some(),
+            "triangle override via embedded fallback"
+        );
 
         // module config from embedded: director + scav_boss/athena_drone bindings.
         let cfg = read_module_config_file("cyberpunk_red.homecoming")
             .expect("homecoming module_config via embedded fallback");
-        assert!(cfg.npc_actor_bindings.iter().any(|b| b.actor_id == "npc.scav_boss"));
-        assert!(cfg.npc_actor_bindings.iter().any(|b| b.actor_id == "npc.athena_drone"));
+        assert!(cfg
+            .npc_actor_bindings
+            .iter()
+            .any(|b| b.actor_id == "npc.scav_boss"));
+        assert!(cfg
+            .npc_actor_bindings
+            .iter()
+            .any(|b| b.actor_id == "npc.athena_drone"));
 
         // direct helper-fn check (no env / no Db needed).
         assert!(super::embedded_module_config("cyberpunk_red.homecoming").is_some());
@@ -4854,22 +6066,46 @@ mod kernel_strategy_override_tests {
         }
         let _restore = Restore(prev, tmp.clone());
         // SAFETY (test): env set under ENV_LOCK.
-        unsafe { std::env::set_var("TRPG_DATA_DIR", &tmp); }
+        unsafe {
+            std::env::set_var("TRPG_DATA_DIR", &tmp);
+        }
 
         let doc = super::read_kernel_override_file("call_of_cthulhu_7e")
             .expect("CoC override via embedded fallback");
-        let tracks = doc.get("resource_tracks").and_then(|v| v.as_array())
+        let tracks = doc
+            .get("resource_tracks")
+            .and_then(|v| v.as_array())
             .expect("CoC embedded override carries resource_tracks");
-        let find = |id: &str| tracks.iter().find(|t| t.get("id").and_then(|v| v.as_str()) == Some(id));
+        let find = |id: &str| {
+            tracks
+                .iter()
+                .find(|t| t.get("id").and_then(|v| v.as_str()) == Some(id))
+        };
         let hp = find("hit_points").expect("hit_points track present");
-        assert_eq!(hp.get("derived_from").and_then(|v| v.as_str()), Some("hp_max"),
-            "hit_points must link to formula id hp_max");
-        assert!(hp.get("on_outcome").and_then(|v| v.as_array()).map(|a| !a.is_empty()).unwrap_or(false),
-            "hit_points must carry damage on_outcome");
-        assert!(hp.get("thresholds").and_then(|v| v.as_array()).map(|a| !a.is_empty()).unwrap_or(false),
-            "hit_points must carry wound/dying thresholds");
+        assert_eq!(
+            hp.get("derived_from").and_then(|v| v.as_str()),
+            Some("hp_max"),
+            "hit_points must link to formula id hp_max"
+        );
+        assert!(
+            hp.get("on_outcome")
+                .and_then(|v| v.as_array())
+                .map(|a| !a.is_empty())
+                .unwrap_or(false),
+            "hit_points must carry damage on_outcome"
+        );
+        assert!(
+            hp.get("thresholds")
+                .and_then(|v| v.as_array())
+                .map(|a| !a.is_empty())
+                .unwrap_or(false),
+            "hit_points must carry wound/dying thresholds"
+        );
         let mp = find("magic_points").expect("magic_points track present");
-        assert_eq!(mp.get("derived_from").and_then(|v| v.as_str()), Some("mp_max"),
-            "magic_points must link to formula id mp_max");
+        assert_eq!(
+            mp.get("derived_from").and_then(|v| v.as_str()),
+            Some("mp_max"),
+            "magic_points must link to formula id mp_max"
+        );
     }
 }

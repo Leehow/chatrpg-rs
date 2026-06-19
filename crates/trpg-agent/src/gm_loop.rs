@@ -65,7 +65,10 @@ impl TurnLedgerSnapshot {
             collect_json_tokens(&result.roll.result, &mut tokens);
             collect_json_tokens(&result.outcome, &mut tokens);
             for patch in &result.committed_patches {
-                collect_json_tokens(&serde_json::to_value(patch).unwrap_or(Value::Null), &mut tokens);
+                collect_json_tokens(
+                    &serde_json::to_value(patch).unwrap_or(Value::Null),
+                    &mut tokens,
+                );
             }
         }
         for effect in &self.effect_contracts {
@@ -78,7 +81,10 @@ impl TurnLedgerSnapshot {
                 push_token(&mut tokens, target);
             }
             for patch in &effect.proposed_patches {
-                collect_json_tokens(&serde_json::to_value(patch).unwrap_or(Value::Null), &mut tokens);
+                collect_json_tokens(
+                    &serde_json::to_value(patch).unwrap_or(Value::Null),
+                    &mut tokens,
+                );
             }
         }
         for impact in &self.parameter_impacts {
@@ -241,9 +247,17 @@ impl NarrationVerifier {
                     ));
                 }
             }
-        } else if submission.mechanical_claims.is_empty() {
-            // 引用为空 → 回退子串扫描（可观测技术债：detail 带标注前缀，不静默）。
-            if text_says_check_or_roll(&text) && !ledger.has_check_fact() {
+        }
+
+        if submission.mechanical_claims.is_empty() {
+            // 无结构化 claim → 回退子串扫描（可观测技术债：detail 带标注前缀，不静默）。
+            // 即使 final narration 引用了合法 check/roll ledger id，也不能让这些引用
+            // 掩盖额外声称的资源/伤害/状态变化；effect 仍必须有 apply_effect /
+            // parameter impact 证据。
+            let luck_spend_adjustment =
+                text_says_luck_spend_adjustment(&text) && ledger.has_effect_evidence();
+            if text_says_check_or_roll(&text) && !luck_spend_adjustment && !ledger.has_check_fact()
+            {
                 findings.push(VerifierFinding::blocker(
                     VerifierFindingKind::MissingCheck,
                     "fallback:substring_scan: final narration mentions a check/roll, but no ledger check fact exists",
@@ -257,7 +271,9 @@ impl NarrationVerifier {
             }
         }
 
-        if ledger.has_visible_player_result() && !text_contains_any(&text, &ledger.visible_evidence_tokens()) {
+        if ledger.has_visible_player_result()
+            && !text_contains_any(&text, &ledger.visible_evidence_tokens())
+        {
             findings.push(VerifierFinding::blocker(
                 VerifierFindingKind::OmittedVisibleResult,
                 "player-visible roll/effect evidence exists in the ledger, but final narration does not mention any visible ledger token",
@@ -361,10 +377,12 @@ fn next_action_for(findings: &[VerifierFinding]) -> Option<VerifierNextAction> {
         .any(|f| f.kind == VerifierFindingKind::MissingRollExecution)
     {
         Some(VerifierNextAction::CallExecuteCheck)
-    } else if findings
-        .iter()
-        .any(|f| matches!(f.kind, VerifierFindingKind::MissingEffect | VerifierFindingKind::InventedEffect))
-    {
+    } else if findings.iter().any(|f| {
+        matches!(
+            f.kind,
+            VerifierFindingKind::MissingEffect | VerifierFindingKind::InventedEffect
+        )
+    }) {
         Some(VerifierNextAction::CallApplyEffect)
     } else {
         Some(VerifierNextAction::ReviseText)
@@ -450,21 +468,166 @@ fn text_contains_any(text: &str, tokens: &[String]) -> bool {
     tokens.iter().any(|token| text.contains(token))
 }
 
-fn text_says_check_or_roll(text: &str) -> bool {
+fn chars_before(text: &str, byte_idx: usize, count: usize) -> String {
+    text[..byte_idx]
+        .chars()
+        .rev()
+        .take(count)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
+}
+
+fn chars_after(text: &str, byte_idx: usize, count: usize) -> String {
+    text[byte_idx..].chars().take(count).collect()
+}
+
+fn text_window(text: &str, byte_idx: usize, before: usize, after: usize) -> String {
+    format!(
+        "{}{}",
+        chars_before(text, byte_idx, before),
+        chars_after(text, byte_idx, after)
+    )
+}
+
+fn mechanical_term_is_negated(text: &str, byte_idx: usize) -> bool {
+    let window = text_window(text, byte_idx, 24, 8);
     [
-        "检定", "掷骰", "骰", "投掷", "roll", "check", "test", "saving throw", "difficulty", "dv",
+        "没有自动触发",
+        "没有触发",
+        "未触发",
+        "不会触发",
+        "不触发",
+        "不需要",
+        "无需",
+        "无须",
+        "不用",
+        "不必",
+        "免于",
+        "不造成",
+        "未造成",
+        "没有造成",
+        "没有损失",
+        "未损失",
+        "没有失去",
+        "未失去",
+        "没有伤害",
+        "无伤害",
     ]
     .iter()
-    .any(|term| text.contains(term))
+    .any(|marker| window.contains(marker))
+}
+
+fn term_followed_by_check_word(text: &str, byte_idx: usize, term: &str) -> bool {
+    let after_idx = byte_idx + term.len();
+    let after = chars_after(text, after_idx, 8);
+    ["检定", "豁免", "check", "test", "roll"]
+        .iter()
+        .any(|word| after.contains(word))
+}
+
+fn context_has_number(text: &str) -> bool {
+    text.chars().any(|c| c.is_ascii_digit())
+        || [
+            "一点", "两点", "三点", "四点", "五点", "六点", "七点", "八点", "九点", "十点",
+        ]
+        .iter()
+        .any(|word| text.contains(word))
+}
+
+fn text_says_check_or_roll(text: &str) -> bool {
+    [
+        "检定",
+        "掷骰",
+        "骰",
+        "投掷",
+        "roll",
+        "check",
+        "test",
+        "saving throw",
+        "difficulty",
+        "dv",
+    ]
+    .iter()
+    .any(|term| {
+        text.match_indices(term)
+            .any(|(idx, _)| !mechanical_term_is_negated(text, idx))
+    })
+}
+
+fn text_says_luck_spend_adjustment(text: &str) -> bool {
+    let mentions_luck = text.contains("luck") || text.contains("幸运");
+    let spends_luck = ["花费", "消耗", "扣除", "花掉", "spend", "spent"]
+        .iter()
+        .any(|term| text.contains(term));
+    let adjusts_result = [
+        "改为",
+        "变为",
+        "调整",
+        "降到",
+        "降至",
+        "提高到",
+        "提高至",
+        "adjust",
+        "turn",
+    ]
+    .iter()
+    .any(|term| text.contains(term));
+    let names_result = ["检定结果", "结果", "成功", "失败", "roll result", "outcome"]
+        .iter()
+        .any(|term| text.contains(term));
+    mentions_luck && spends_luck && adjusts_result && names_result
 }
 
 fn text_says_effect(text: &str) -> bool {
-    [
-        "hp", "damage", "伤害", "损失", "失去", "扣", "san", "sanity", "理智", "resource", "资源",
-        "condition", "状态", "clock", "进度", "破坏", "摧毁",
-    ]
-    .iter()
-    .any(|term| text.contains(term))
+    let effect_terms = [
+        "hp",
+        "生命值",
+        "damage",
+        "伤害",
+        "损失",
+        "失去",
+        "扣",
+        "san",
+        "sanity",
+        "理智",
+        "luck",
+        "幸运",
+        "resource",
+        "资源",
+        "condition",
+        "状态",
+        "clock",
+        "进度",
+        "破坏",
+        "摧毁",
+    ];
+    let effect_verbs = [
+        "受到", "造成", "失去", "损失", "扣", "扣除", "花费", "消耗", "减少", "降低", "恢复",
+        "回复", "增加", "治疗", "获得", "陷入", "移除", "推进", "破坏", "摧毁",
+    ];
+
+    effect_terms.iter().any(|term| {
+        text.match_indices(term).any(|(idx, _)| {
+            if mechanical_term_is_negated(text, idx) {
+                return false;
+            }
+            if matches!(*term, "伤害" | "理智" | "san" | "sanity")
+                && term_followed_by_check_word(text, idx, term)
+            {
+                return false;
+            }
+
+            let context = text_window(text, idx, 18, 18);
+            let has_effect_verb = effect_verbs.iter().any(|verb| context.contains(verb));
+            let object_state_term = matches!(
+                *term,
+                "condition" | "状态" | "clock" | "进度" | "破坏" | "摧毁"
+            );
+            object_state_term || (has_effect_verb && context_has_number(&context))
+        })
+    })
 }
 
 fn text_asks_player_for_manual_roll(text: &str) -> bool {
@@ -643,8 +806,8 @@ mod tests {
             ..Default::default()
         };
         let submission = FinalNarrationSubmission {
-            player_visible_text: "这里需要一次潜行检定。请只回复 `roll`，系统会调用骰子工具并写入结果。"
-                .into(),
+            player_visible_text:
+                "这里需要一次潜行检定。请只回复 `roll`，系统会调用骰子工具并写入结果。".into(),
             mechanical_claims: vec![MechanicalClaim::new(
                 MechanicalClaimKind::Check,
                 "需要潜行检定",
@@ -713,8 +876,11 @@ mod tests {
 
         assert!(!result.accepted);
         assert!(
-            result.findings.iter().any(|f| f.kind == VerifierFindingKind::InventedEffect
-                && f.detail.contains("check_不存在")),
+            result
+                .findings
+                .iter()
+                .any(|f| f.kind == VerifierFindingKind::InventedEffect
+                    && f.detail.contains("check_不存在")),
             "{:?}",
             result.findings
         );
@@ -735,8 +901,100 @@ mod tests {
 
         assert!(!result.accepted);
         assert!(
-            result.findings.iter().any(|f| f.kind == VerifierFindingKind::InventedEffect
-                && f.detail.starts_with("fallback:substring_scan: ")),
+            result
+                .findings
+                .iter()
+                .any(|f| f.kind == VerifierFindingKind::InventedEffect
+                    && f.detail.starts_with("fallback:substring_scan: ")),
+            "{:?}",
+            result.findings
+        );
+    }
+
+    #[test]
+    fn verifier_fallback_ignores_negated_no_roll_no_effect_text() {
+        // Live CoC regression: the GM may explicitly say no roll/effect is
+        // triggered. That sentence must not create retroactive mechanical debt.
+        let ledger = TurnLedgerSnapshot::default();
+        let submission = FinalNarrationSubmission {
+            player_visible_text:
+                "此刻没有自动触发的理智检定或伤害检定；你只是抵达并观察小镇入口，基础可见信息不需要掷骰。"
+                    .into(),
+            mechanical_claims: vec![],
+            referenced_ledger_ids: vec![],
+        };
+
+        let result = NarrationVerifier::default().verify(&ledger, &submission);
+
+        assert!(result.accepted, "{:?}", result.findings);
+        assert!(result.findings.is_empty(), "{:?}", result.findings);
+    }
+
+    #[test]
+    fn verifier_fallback_allows_luck_spend_adjusting_prior_roll_with_effect_evidence() {
+        // Live CoC regression: spending Luck to adjust an already-rolled check
+        // is an effect/resource spend in this turn, not a second fresh check.
+        let mut effect = sample_effect("effect_luck_spend", "pc.current");
+        effect.visibility = Visibility::GmOnly;
+        let mut impact = sample_impact("impact_luck", "pc.current", "resources.luck.current", 36);
+        impact.visibility = Visibility::GmOnly;
+        let ledger = TurnLedgerSnapshot {
+            effect_contracts: vec![effect],
+            parameter_impacts: vec![impact],
+            ..Default::default()
+        };
+        let submission = FinalNarrationSubmission {
+            player_visible_text:
+                "[system]你花费 36 点 Luck，将手枪检定结果从 91 降到 55，刚好改为普通成功。[/system]\n[roll]上一枪经 Luck 花费改为成功：子弹命中追踪皮卡前轮。[/roll]"
+                    .into(),
+            mechanical_claims: vec![],
+            referenced_ledger_ids: vec![],
+        };
+
+        let result = NarrationVerifier::default().verify(&ledger, &submission);
+
+        assert!(result.accepted, "{:?}", result.findings);
+        assert!(
+            result
+                .findings
+                .iter()
+                .all(|f| f.kind != VerifierFindingKind::MissingCheck),
+            "{:?}",
+            result.findings
+        );
+    }
+
+    #[test]
+    fn verifier_structured_check_refs_still_reject_effect_claim_without_effect_evidence() {
+        // Live playtest regression: a turn can correctly reference a rolled check
+        // while the final narration also claims HP loss. A valid check id must not
+        // mask the missing apply_effect / parameter-impact ledger evidence.
+        let result_record = sample_result(
+            "check_heat",
+            RollVisibility::PublicGmRoll,
+            "1d100",
+            json!({"total": 87, "band": "failure"}),
+        );
+        let ledger = TurnLedgerSnapshot {
+            check_contracts: vec![sample_check("check_heat", "高温与疲惫")],
+            dice_rolls: vec![result_record.roll.clone()],
+            check_results: vec![result_record],
+            ..Default::default()
+        };
+        let submission = FinalNarrationSubmission {
+            player_visible_text: "高温与疲惫造成体力损耗：林岚失去 1 点生命值。".into(),
+            mechanical_claims: vec![],
+            referenced_ledger_ids: vec!["check_heat".into(), "roll_check_heat".into()],
+        };
+
+        let result = NarrationVerifier::default().verify(&ledger, &submission);
+
+        assert!(!result.accepted, "{:?}", result.findings);
+        assert!(
+            result
+                .findings
+                .iter()
+                .any(|f| f.kind == VerifierFindingKind::InventedEffect),
             "{:?}",
             result.findings
         );

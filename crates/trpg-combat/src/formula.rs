@@ -29,7 +29,12 @@ pub struct CompiledFormula {
 /// Compile a single additive roll formula. Returns `None` when the formula is
 /// not a simple dice roll (multiplication, max/min, pure threshold, etc.) or
 /// has no dice term — those evaluators are handled elsewhere, not by a roll.
-pub fn compile_formula(field_id: &str, formula: &str, stats: &Value, skills: &Value) -> Option<CompiledFormula> {
+pub fn compile_formula(
+    field_id: &str,
+    formula: &str,
+    stats: &Value,
+    skills: &Value,
+) -> Option<CompiledFormula> {
     // Keep only the attacker-side roll: drop anything from a comparison onward
     // ("... vs DV", "1d10 < BODY", "= DV", etc.).
     let head = formula
@@ -77,7 +82,11 @@ pub fn compile_formula(field_id: &str, formula: &str, stats: &Value, skills: &Va
             Some((label, val)) => {
                 let v = if neg { -val } else { val };
                 sum += v;
-                modifiers.push(CheckModifier { label, value: v as i32, source_ref: None });
+                modifiers.push(CheckModifier {
+                    label,
+                    value: v as i32,
+                    source_ref: None,
+                });
             }
             None => unresolved.push(t.to_string()),
         }
@@ -89,7 +98,13 @@ pub fn compile_formula(field_id: &str, formula: &str, stats: &Value, skills: &Va
     } else {
         format!("{dice}{sum}")
     };
-    Some(CompiledFormula { field_id: field_id.to_string(), dice, expression, modifiers, unresolved })
+    Some(CompiledFormula {
+        field_id: field_id.to_string(),
+        dice,
+        expression,
+        modifiers,
+        unresolved,
+    })
 }
 
 /// Returns true when a formula is eligible for exact dice compilation (not a
@@ -122,7 +137,9 @@ fn is_dice(t: &str) -> bool {
 
 fn normalize(s: &str) -> String {
     let n = s.trim().to_ascii_lowercase().replace([' ', '-'], "_");
-    n.strip_prefix("relevant_").map(|x| x.to_string()).unwrap_or(n)
+    n.strip_prefix("relevant_")
+        .map(|x| x.to_string())
+        .unwrap_or(n)
 }
 
 /// Look up a named stat/skill in actor data, then fall back to generic-role
@@ -135,7 +152,13 @@ pub fn resolve_token(token: &str, stats: &Value, skills: &Value) -> Option<(Stri
     if let Some(v) = lookup(skills, &norm) {
         return Some((token.trim().to_string(), v));
     }
-    const RANGED: &[&str] = &["Handgun", "Shoulder Arms", "Heavy Weapons", "Autofire", "Archery"];
+    const RANGED: &[&str] = &[
+        "Handgun",
+        "Shoulder Arms",
+        "Heavy Weapons",
+        "Autofire",
+        "Archery",
+    ];
     const MELEE: &[&str] = &["Brawling", "Melee Weapon", "Martial Arts"];
     let aliases: &[&str] = match norm.as_str() {
         "ranged_weapon_skill" | "weapon_skill" | "ranged_skill" => RANGED,
@@ -208,11 +231,21 @@ mod tests {
     #[test]
     fn ranged_attack_binds_ref_and_weapon_skill() {
         let (s, k) = solo();
-        let c = compile_formula("ranged_attack_roll", "1d10 + REF + ranged_weapon_skill", &s, &k).unwrap();
+        let c = compile_formula(
+            "ranged_attack_roll",
+            "1d10 + REF + ranged_weapon_skill",
+            &s,
+            &k,
+        )
+        .unwrap();
         assert_eq!(c.dice, "1d10");
         assert_eq!(c.expression, "1d10+14"); // REF 8 + Handgun 6
         assert!(c.unresolved.is_empty());
-        let labels: Vec<_> = c.modifiers.iter().map(|m| (m.label.as_str(), m.value)).collect();
+        let labels: Vec<_> = c
+            .modifiers
+            .iter()
+            .map(|m| (m.label.as_str(), m.value))
+            .collect();
         assert!(labels.contains(&("REF", 8)));
         assert!(labels.contains(&("Handgun", 6)));
     }
@@ -220,7 +253,13 @@ mod tests {
     #[test]
     fn melee_attack_binds_dex_and_brawling() {
         let (s, k) = solo();
-        let c = compile_formula("melee_attack_roll", "1d10 + DEX + melee_attack_skill", &s, &k).unwrap();
+        let c = compile_formula(
+            "melee_attack_roll",
+            "1d10 + DEX + melee_attack_skill",
+            &s,
+            &k,
+        )
+        .unwrap();
         assert_eq!(c.expression, "1d10+12"); // DEX 7 + Brawling 5
     }
 
@@ -241,7 +280,13 @@ mod tests {
     #[test]
     fn drops_comparison_tail() {
         let (s, k) = solo();
-        let c = compile_formula("ranged", "REF + ranged_weapon_skill + 1d10 vs Autofire_Range_Table_DV", &s, &k).unwrap();
+        let c = compile_formula(
+            "ranged",
+            "REF + ranged_weapon_skill + 1d10 vs Autofire_Range_Table_DV",
+            &s,
+            &k,
+        )
+        .unwrap();
         assert_eq!(c.expression, "1d10+14");
     }
 
@@ -290,16 +335,26 @@ mod tests {
 
     #[test]
     fn provisional_seed_not_eligible_for_exact_compilation() {
-        let f = seed_formula("mechanic.attack.ranged.total", "1d10 + REF + ranged_weapon_skill");
-        assert!(!formula_eligible_for_exact_compilation(&f),
-            "provisional_seed must not be eligible for exact compilation");
+        let f = seed_formula(
+            "mechanic.attack.ranged.total",
+            "1d10 + REF + ranged_weapon_skill",
+        );
+        assert!(
+            !formula_eligible_for_exact_compilation(&f),
+            "provisional_seed must not be eligible for exact compilation"
+        );
     }
 
     #[test]
     fn exact_executable_is_eligible_for_compilation() {
-        let f = exact_formula("mechanic.attack.ranged.total", "1d10 + REF + ranged_weapon_skill");
-        assert!(formula_eligible_for_exact_compilation(&f),
-            "exact_executable tier must be eligible for compilation");
+        let f = exact_formula(
+            "mechanic.attack.ranged.total",
+            "1d10 + REF + ranged_weapon_skill",
+        );
+        assert!(
+            formula_eligible_for_exact_compilation(&f),
+            "exact_executable tier must be eligible for compilation"
+        );
     }
 
     #[test]
@@ -313,8 +368,10 @@ mod tests {
             tier: None,
             ..Default::default()
         };
-        assert!(formula_eligible_for_exact_compilation(&f),
-            "absent tier => exact_executable (backward compat)");
+        assert!(
+            formula_eligible_for_exact_compilation(&f),
+            "absent tier => exact_executable (backward compat)"
+        );
     }
 
     #[test]
@@ -327,8 +384,10 @@ mod tests {
             tier: Some("operational_abstract".into()),
             ..Default::default()
         };
-        assert!(!formula_eligible_for_exact_compilation(&f),
-            "operational_abstract must not be eligible for exact compilation");
+        assert!(
+            !formula_eligible_for_exact_compilation(&f),
+            "operational_abstract must not be eligible for exact compilation"
+        );
     }
 
     #[test]
@@ -336,15 +395,23 @@ mod tests {
         // Even if someone bypasses the guard, the formula text itself would
         // return None from compile_formula (no dice term in generic seeds).
         let (s, k) = solo();
-        let formula = "ruleset source-backed dice expression + actor facet + target/opposition facet";
+        let formula =
+            "ruleset source-backed dice expression + actor facet + target/opposition facet";
         let result = compile_formula("mechanic.core_check", formula, &s, &k);
-        assert!(result.is_none(), "generic seed formula has no dice term → compile returns None");
+        assert!(
+            result.is_none(),
+            "generic seed formula has no dice term → compile returns None"
+        );
     }
 
     #[test]
     fn resolve_attack_dv_reads_pack_entry() {
         let pack = vec![
-            dv("ranged_attack_dv.close", "13", "≤6m, source-anchored RED close DV"),
+            dv(
+                "ranged_attack_dv.close",
+                "13",
+                "≤6m, source-anchored RED close DV",
+            ),
             dv("ranged_attack_dv.medium", "15", "7-12m"),
         ];
         let (v, label) = resolve_attack_dv(&pack, "close").unwrap();

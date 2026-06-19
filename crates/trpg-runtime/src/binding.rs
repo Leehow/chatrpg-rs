@@ -22,9 +22,9 @@
 use std::collections::HashSet;
 use trpg_model::{
     AssetFacet, BindingPlan, BindingVerdict, ExecutionTier, NeedResolutionTrace, RuleKernel,
-    SourceRef, CAP_ACTOR_PATCH, CAP_CHECK_COUNT_FACES, CAP_CHECK_MEET_OR_BEAT, CAP_CHECK_OPPOSED,
-    CAP_CHECK_ROLL_UNDER, CAP_CLOCK_TICK, CAP_RESOURCE_DELTA, CAP_TABLE_LOOKUP,
-    CAP_VISIBILITY_REVEAL, ALL_CAPABILITIES,
+    SourceRef, ALL_CAPABILITIES, CAP_ACTOR_PATCH, CAP_CHECK_COUNT_FACES, CAP_CHECK_MEET_OR_BEAT,
+    CAP_CHECK_OPPOSED, CAP_CHECK_ROLL_UNDER, CAP_CLOCK_TICK, CAP_RESOURCE_DELTA, CAP_TABLE_LOOKUP,
+    CAP_VISIBILITY_REVEAL,
 };
 
 /// 已注册 capability id 集合。resolver 按 `has` 判定候选是否可机械执行。
@@ -72,60 +72,54 @@ pub fn resolve_binding(
     }
 
     // 候选中命中 registry 的子集（保序）。
-    let registered: Vec<String> = candidates
-        .iter()
-        .filter(|c| reg.has(c))
-        .cloned()
-        .collect();
+    let registered: Vec<String> = candidates.iter().filter(|c| reg.has(c)).cloned().collect();
 
     let has_source = !source_refs.is_empty();
     let has_candidates = !candidates.is_empty();
     let has_registered = !registered.is_empty();
 
-    let (verdict, capability, execution_tier, confidence, unresolved_reason) = if has_candidates
-        && has_registered
-        && has_source
-    {
-        (
-            BindingVerdict::Exact,
-            Some(registered[0].clone()),
-            ExecutionTier::ExactExecution,
-            0.9_f32,
-            None,
-        )
-    } else if has_candidates && has_registered && !has_source {
-        (
-            BindingVerdict::Partial,
-            Some(registered[0].clone()),
-            ExecutionTier::PartialExecution,
-            0.6_f32,
-            None,
-        )
-    } else if has_candidates && !has_registered && has_source {
-        (
-            BindingVerdict::Guided,
-            None,
-            ExecutionTier::GuidedRuling,
-            0.4_f32,
-            Some("no registered capability for candidates".to_string()),
-        )
-    } else if !has_candidates && has_source {
-        (
-            BindingVerdict::SourceOnly,
-            None,
-            ExecutionTier::SourceOnly,
-            0.3_f32,
-            None,
-        )
-    } else {
-        (
-            BindingVerdict::Unsupported,
-            None,
-            ExecutionTier::SourceOnly,
-            0.0_f32,
-            Some("no facet candidates or source".to_string()),
-        )
-    };
+    let (verdict, capability, execution_tier, confidence, unresolved_reason) =
+        if has_candidates && has_registered && has_source {
+            (
+                BindingVerdict::Exact,
+                Some(registered[0].clone()),
+                ExecutionTier::ExactExecution,
+                0.9_f32,
+                None,
+            )
+        } else if has_candidates && has_registered && !has_source {
+            (
+                BindingVerdict::Partial,
+                Some(registered[0].clone()),
+                ExecutionTier::PartialExecution,
+                0.6_f32,
+                None,
+            )
+        } else if has_candidates && !has_registered && has_source {
+            (
+                BindingVerdict::Guided,
+                None,
+                ExecutionTier::GuidedRuling,
+                0.4_f32,
+                Some("no registered capability for candidates".to_string()),
+            )
+        } else if !has_candidates && has_source {
+            (
+                BindingVerdict::SourceOnly,
+                None,
+                ExecutionTier::SourceOnly,
+                0.3_f32,
+                None,
+            )
+        } else {
+            (
+                BindingVerdict::Unsupported,
+                None,
+                ExecutionTier::SourceOnly,
+                0.0_f32,
+                Some("no facet candidates or source".to_string()),
+            )
+        };
 
     BindingPlan {
         binding_id: format!("bind:{need_kind}"),

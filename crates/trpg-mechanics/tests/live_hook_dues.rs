@@ -16,8 +16,13 @@ const RULESET: &str = "rs_b5_hook_dues_test";
 async fn ensure_table(db: &Db) {
     for stmt in include_str!("../../../migrations/0027_mechanic_dues_v120.sql").split(';') {
         let s = stmt.trim();
-        if s.is_empty() { continue; }
-        sqlx::query(s).execute(&db.pool).await.expect("0027 statement must apply");
+        if s.is_empty() {
+            continue;
+        }
+        sqlx::query(s)
+            .execute(&db.pool)
+            .await
+            .expect("0027 statement must apply");
     }
 }
 
@@ -39,38 +44,86 @@ fn test_kernel() -> RuleKernel {
 }
 
 async fn cleanup(db: &Db) {
-    sqlx::query("delete from mechanic_dues where session_id=$1").bind(SESSION).execute(&db.pool).await.unwrap();
-    sqlx::query("delete from rule_kernels where ruleset_id=$1").bind(RULESET).execute(&db.pool).await.unwrap();
+    sqlx::query("delete from mechanic_dues where session_id=$1")
+        .bind(SESSION)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("delete from rule_kernels where ruleset_id=$1")
+        .bind(RULESET)
+        .execute(&db.pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
 async fn open_due_suppresses_refire_and_turn_waive_does_not() {
-    let url = match std::env::var("DATABASE_URL") { Ok(u) => u, Err(_) => { eprintln!("SKIP: DATABASE_URL unset"); return; } };
-    let db = match Db::connect(&url).await { Ok(d) => d, Err(e) => { eprintln!("SKIP: connect: {e}"); return; } };
+    let url = match std::env::var("DATABASE_URL") {
+        Ok(u) => u,
+        Err(_) => {
+            eprintln!("SKIP: DATABASE_URL unset");
+            return;
+        }
+    };
+    let db = match Db::connect(&url).await {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("SKIP: connect: {e}");
+            return;
+        }
+    };
     ensure_table(&db).await;
     cleanup(&db).await;
-    db.upsert_rule_kernel(&test_kernel()).await.expect("kernel upsert");
+    db.upsert_rule_kernel(&test_kernel())
+        .await
+        .expect("kernel upsert");
     let svc = RefereeCombatService::new(db.clone());
 
     // 首发：TurnStart 钩子条目 → 1 条 due 落库并返回。
-    let first = svc.dues_for_hook(SESSION, "turn_1", RULESET, &HookEvent::TurnStart).await.unwrap();
+    let first = svc
+        .dues_for_hook(SESSION, "turn_1", RULESET, &HookEvent::TurnStart)
+        .await
+        .unwrap();
     assert_eq!(first.len(), 1, "first fire must produce one due: {first:?}");
     assert_eq!(first[0].mechanic_id.as_deref(), Some("test.upkeep"));
     assert_eq!(first[0].hook_event.as_deref(), Some("turn_start"));
 
     // 抑制规则 ①：同 (mechanic_id, hook_event) 已有 open due → 不再产。
-    let second = svc.dues_for_hook(SESSION, "turn_2", RULESET, &HookEvent::TurnStart).await.unwrap();
-    assert!(second.is_empty(), "open due must suppress refire: {second:?}");
+    let second = svc
+        .dues_for_hook(SESSION, "turn_2", RULESET, &HookEvent::TurnStart)
+        .await
+        .unwrap();
+    assert!(
+        second.is_empty(),
+        "open due must suppress refire: {second:?}"
+    );
 
     // waive(scope=turn) 后 → 再产（turn 豁免下回合仍提醒，spec §5.3）。
-    db.update_mechanic_due_status(&first[0].due_id, "waived", Some("test"), Some("turn")).await.unwrap();
-    let third = svc.dues_for_hook(SESSION, "turn_3", RULESET, &HookEvent::TurnStart).await.unwrap();
-    assert_eq!(third.len(), 1, "turn-scoped waiver must NOT suppress: {third:?}");
+    db.update_mechanic_due_status(&first[0].due_id, "waived", Some("test"), Some("turn"))
+        .await
+        .unwrap();
+    let third = svc
+        .dues_for_hook(SESSION, "turn_3", RULESET, &HookEvent::TurnStart)
+        .await
+        .unwrap();
+    assert_eq!(
+        third.len(),
+        1,
+        "turn-scoped waiver must NOT suppress: {third:?}"
+    );
 
     // waive(scope=scene) 后 → 不产（场景内豁免有效）。
-    db.update_mechanic_due_status(&third[0].due_id, "waived", Some("test"), Some("scene")).await.unwrap();
-    let fourth = svc.dues_for_hook(SESSION, "turn_4", RULESET, &HookEvent::TurnStart).await.unwrap();
-    assert!(fourth.is_empty(), "scene-scoped waiver must suppress: {fourth:?}");
+    db.update_mechanic_due_status(&third[0].due_id, "waived", Some("test"), Some("scene"))
+        .await
+        .unwrap();
+    let fourth = svc
+        .dues_for_hook(SESSION, "turn_4", RULESET, &HookEvent::TurnStart)
+        .await
+        .unwrap();
+    assert!(
+        fourth.is_empty(),
+        "scene-scoped waiver must suppress: {fourth:?}"
+    );
 
     cleanup(&db).await;
 }

@@ -77,9 +77,15 @@ impl NeedResolver for SceneNeedResolver {
 
         // 复用 module_scene_blocks_for_turn 的 project 成员校验：
         // 仅当 module 隶属本 project 时才继续（防跨 project 泄漏）。
-        let project_ok = scene_need.project_module_ids.iter().any(|id| id == module_id);
+        let project_ok = scene_need
+            .project_module_ids
+            .iter()
+            .any(|id| id == module_id);
         if !project_ok {
-            tracing::warn!(module_id, "SceneNeedResolver: module not in project, skipping");
+            tracing::warn!(
+                module_id,
+                "SceneNeedResolver: module not in project, skipping"
+            );
             return Ok(NeedOutcome::default());
         }
 
@@ -104,14 +110,17 @@ impl NeedResolver for SceneNeedResolver {
         .unwrap_or_default();
         let (guarded_node, guarded_npcs) = guard_scene(node, &graph.npcs, &revealed);
         let blocks = resolve_scene_blocks(module_id, &guarded_node, &guarded_npcs, &graph.scenes);
-        Ok(NeedOutcome { blocks, source_refs: vec![] })
+        Ok(NeedOutcome {
+            blocks,
+            source_refs: vec![],
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use trpg_model::{ModuleGraph, ScenarioLink, ScenarioNode, SceneExtractionStatus, LinkType};
+    use trpg_model::{LinkType, ModuleGraph, ScenarioLink, ScenarioNode, SceneExtractionStatus};
 
     /// 核心等价断言：resolver 内部调用的纯函数路径与直调 scene_node_to_blocks 字节相同。
     /// resolver 是"包同一逻辑"非新算法，此测试是函数级回归护栏。
@@ -142,10 +151,12 @@ mod tests {
         // resolver 内纯函数路径（等价调用）
         let actual = resolve_scene_blocks("mod1", &n, &npcs, &scenes);
 
-        let e_bytes: Vec<_> = expected.iter()
+        let e_bytes: Vec<_> = expected
+            .iter()
             .map(|b| serde_json::to_vec(b).unwrap())
             .collect();
-        let a_bytes: Vec<_> = actual.iter()
+        let a_bytes: Vec<_> = actual
+            .iter()
             .map(|b| serde_json::to_vec(b).unwrap())
             .collect();
         assert_eq!(e_bytes.len(), a_bytes.len(), "块数必须相同");
@@ -162,8 +173,14 @@ mod tests {
         n.extraction_status = SceneExtractionStatus::SkeletonOnly;
         let expected = scene_node_to_blocks("mod1", &n, &[], &[]);
         let actual = resolve_scene_blocks("mod1", &n, &[], &[]);
-        let e_bytes: Vec<_> = expected.iter().map(|b| serde_json::to_vec(b).unwrap()).collect();
-        let a_bytes: Vec<_> = actual.iter().map(|b| serde_json::to_vec(b).unwrap()).collect();
+        let e_bytes: Vec<_> = expected
+            .iter()
+            .map(|b| serde_json::to_vec(b).unwrap())
+            .collect();
+        let a_bytes: Vec<_> = actual
+            .iter()
+            .map(|b| serde_json::to_vec(b).unwrap())
+            .collect();
         assert_eq!(e_bytes, a_bytes, "SkeletonOnly 降级块字节必须等价");
     }
 
@@ -200,6 +217,9 @@ mod tests {
         n.extraction_status = SceneExtractionStatus::SkeletonOnly;
         g.scenes = vec![n];
         let result = pick_scene_node(&g, None);
-        assert!(result.is_none(), "无 DeepExtracted 场景应 fail-closed 返回 None");
+        assert!(
+            result.is_none(),
+            "无 DeepExtracted 场景应 fail-closed 返回 None"
+        );
     }
 }
