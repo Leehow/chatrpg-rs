@@ -29,6 +29,7 @@ use trpg_model::{
     DomainEventKind, OppositionModel, RollAuthority, RollDisclosurePolicy, RollVisibility,
     RulingConfidence, RulingStatus, WorldReactionSet,
 };
+use crate::ports::{EngineRulesAdapter, RulesPort};
 use trpg_runtime::RuntimeEngine;
 
 /// Env gate `TRPG_WORLD_NPC_ACTION` — default **OFF**. Mirrors the `TRPG_NARRATOR_SPLIT` /
@@ -203,7 +204,10 @@ pub async fn resolve_world_attack_intents(
         }
         let contract =
             prepare_npc_attack_binding(session_id, turn_id, ruleset_id, &cand.npc_id, None);
-        match engine
+        // P7.3b: dispatch the Rules-layer auto-roll through the RulesPort adapter
+        // (EngineRulesAdapter) — a thin byte-identical delegate, but a real production
+        // caller of RulesPort::execute_system_roll_bundle.
+        match EngineRulesAdapter(engine)
             .execute_system_roll_bundle(session_id, turn_id, &contract)
             .await
         {

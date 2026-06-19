@@ -159,12 +159,14 @@ fn adapters_satisfy_port_bounds() {
 // dead trait (this project has been bitten 4×). These source-grep guards PIN that
 // the real turn_loop control plane dispatches through each WIRED adapter, so a future
 // refactor that quietly bypasses the Port back to the raw fn is caught by CI.
-// RulesPort is intentionally NOT asserted here: its real production callers (gate.rs,
-// tools/settle.rs, npc_action.rs) live OUTSIDE the P7.3 write_set — it is an honest
-// `forward` pending P7.8, not a wired dispatch.
+// P7.3b: RulesPort is now wired too — its real production callers (gate.rs head-gate
+// resolution + npc_action.rs World-attack auto-roll) dispatch through EngineRulesAdapter,
+// completing 6/6 Port dispatch. See `rules_port_has_production_caller` below.
 // ---------------------------------------------------------------------------
 
 const TURN_LOOP_SRC: &str = include_str!("../src/turn_loop.rs");
+const GATE_SRC: &str = include_str!("../src/gate.rs");
+const NPC_ACTION_SRC: &str = include_str!("../src/npc_action.rs");
 
 #[test]
 fn narrator_port_has_production_caller() {
@@ -177,6 +179,23 @@ fn narrator_port_has_production_caller() {
     assert!(
         TURN_LOOP_SRC.contains(".narrate("),
         "NarratorPort::narrate must be the production call (not raw run_narrator)"
+    );
+}
+
+#[test]
+fn rules_port_has_production_caller() {
+    // P7.3b: gate.rs head-gate resolution AND npc_action.rs World-attack auto-roll both
+    // dispatch the Rules-layer resolve through EngineRulesAdapter (not the raw engine
+    // method), so RulesPort has a real production caller — no longer a forwarded dead trait.
+    assert!(
+        GATE_SRC.contains("EngineRulesAdapter(engine)")
+            && GATE_SRC.contains(".resolve_check_with_input("),
+        "RulesPort must be dispatched through EngineRulesAdapter::resolve_check_with_input in gate.rs"
+    );
+    assert!(
+        NPC_ACTION_SRC.contains("EngineRulesAdapter(engine)")
+            && NPC_ACTION_SRC.contains(".execute_system_roll_bundle("),
+        "RulesPort must be dispatched through EngineRulesAdapter::execute_system_roll_bundle in npc_action.rs"
     );
 }
 

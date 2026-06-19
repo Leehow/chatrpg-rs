@@ -1,4 +1,5 @@
 use crate::ledger::TurnLedger;
+use crate::ports::RulesPort;
 use anyhow::Result;
 use serde_json::Value;
 use std::sync::Arc;
@@ -45,8 +46,12 @@ pub(crate) async fn resolve_pending_gate(
         {
             Some(pending) => {
                 let contract = pending.contract.clone();
+                // P7.3b: dispatch the Rules-layer resolve through the RulesPort adapter
+                // (EngineRulesAdapter) instead of the raw engine method — byte-identical
+                // (the adapter is a thin delegate), but this is RulesPort's real production
+                // caller, completing 6/6 Port dispatch.
                 Some(
-                    engine
+                    crate::ports::EngineRulesAdapter(engine)
                         .resolve_check_with_input(
                             session_id,
                             turn_id,
