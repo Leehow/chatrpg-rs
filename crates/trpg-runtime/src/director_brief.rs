@@ -85,6 +85,16 @@ pub async fn prepare_director_brief(
     // §二十四-#13: rejected threads come from the REAL persisted player-interest signals.
     let rejected: Vec<String> = rejected_thread_ids(&story);
 
+    // P5 revision (Gap 2): load the REAL persisted spotlight roster so a non-acting,
+    // under-spotlighted player can actually be selected (§二十四-#2). `load_spotlight_states`
+    // is the durable `SpotlightState` surface (carries `spotlight_count`) — exactly what
+    // `pick_spotlight_target` consumes. Fail-soft: a read error ⇒ `Err` ⇒ `unwrap_or_default`
+    // ⇒ empty roster ⇒ `pick_spotlight_target` returns `None` (the existing safe behavior).
+    let spotlights: Vec<SpotlightState> = db
+        .load_spotlight_states(session_id)
+        .await
+        .unwrap_or_default();
+
     build_director_block(
         mode,
         candidates,
@@ -92,6 +102,7 @@ pub async fn prepare_director_brief(
         gm_truth.as_deref(),
         player_known.as_deref(),
         &rejected,
+        &spotlights,
         acting_actor_id,
     )
 }
@@ -115,6 +126,12 @@ pub fn rejected_thread_ids(story: &StoryState) -> Vec<String> {
 /// commits it. Minimal by design — `validated()` fail-closes a corrupt proposal before the
 /// idempotent upsert (same packet replay ⇒ same single row). Returns the DB error untouched
 /// so the caller's turn-commit path decides fatality (story persistence is non-blocking).
+///
+/// P6: production writer (thread extraction) will call `apply_story_proposals`; P5 wires the
+/// READ side only (`load_story_state` in `prepare_director_brief` is load-bearing). This write
+/// loop has no P5 production caller by the honest narrowing — it is NOT dead code: the
+/// round-trip tests prove it works and P6's thread-extraction step is its caller. Do not
+/// remove it.
 pub async fn apply_story_proposals(
     db: &Db,
     session_id: &str,
@@ -139,23 +156,23 @@ pub fn build_director_block(
     gm_truth: Option<&[String]>,
     player_known: Option<&[String]>,
     rejected: &[String],
+    spotlights: &[SpotlightState],
     acting_actor_id: &str,
 ) -> Option<String> {
     if mode == DirectorMode::Disabled {
         return None;
     }
-    // Spotlight roster persistence is out of P5.5 scope; empty roster ⇒ `pick_spotlight_target`
-    // → None (the spotlight model lives in a separate store; story_state holds the narrative
-    // channels only).
-    let spotlights: Vec<SpotlightState> = Vec::new();
-
+    // P5 revision (Gap 2): `spotlights` is now the REAL persisted roster resolved by the async
+    // caller (`load_spotlight_states`, fail-soft to empty). An empty roster still degrades to
+    // `pick_spotlight_target` → None (the existing safe behavior). Keeping this core DB-free
+    // lets the wiring proof stay testable without a live Postgres.
     let plan = build_director_brief_packet(
         mode,
         candidates,
         story,
         player_known,
         gm_truth,
-        &spotlights,
+        spotlights,
         rejected,
         acting_actor_id,
     );
@@ -201,6 +218,7 @@ mod tests {
             Some(&["truth".into()]),
             Some(&[]),
             &[],
+            &[],
             "pc_1",
         );
         assert!(block.is_none(), "Disabled must produce no packet block");
@@ -215,6 +233,7 @@ mod tests {
             &StoryState::default(),
             None,
             None,
+            &[],
             &[],
             "pc_1",
         )
@@ -235,6 +254,7 @@ mod tests {
             Some(&["fact_secret".into()]),
             None, // player_known read "failed"
             &[],
+            &[],
             "pc_1",
         )
         .expect("ON mode yields a block");
@@ -254,6 +274,7 @@ mod tests {
             &StoryState::default(),
             Some(&["fact_known".into(), "fact_secret".into()]),
             Some(&["fact_known".into()]),
+            &[],
             &[],
             "pc_1",
         )
@@ -305,5 +326,61 @@ mod tests {
     #[test]
     fn rejected_thread_ids_empty_for_default_story() {
         assert!(rejected_thread_ids(&StoryState::default()).is_empty());
+    }
+
+    // P5 revision (Gap 2): when REAL spotlight states are present, a non-acting,
+    // under-spotlighted player is rendered as the packet's spotlight_target. Absent roster
+    // ⇒ no target line (the existing safe `None`). This proves the runtime now feeds the
+    // pure core a live roster instead of the old hardcoded empty `Vec`.
+    #[test]
+    fn present_spotlight_states_select_non_acting_target() {
+        let spotlights = vec![
+            SpotlightState {
+                player_id: "pc_1".into(),
+                spotlight_count: 4,
+                ..Default::default()
+            },
+            SpotlightState {
+                player_id: "pc_quiet".into(),
+                spotlight_count: 0,
+                ..Default::default()
+            },
+        ];
+        let block = build_director_block(
+            DirectorMode::OnDemand,
+            &[cand("npc_a", vec!["e1"])],
+            &StoryState::default(),
+            None,
+            None,
+            &[],
+            &spotlights,
+            "pc_1", // acting actor is heavily spotlighted; must be skipped
+        )
+        .expect("ON mode yields a block");
+        assert!(
+            block.contains("spotlight_target: pc_quiet"),
+            "present roster must surface the under-spotlighted non-acting target"
+        );
+    }
+
+    // P5 revision (Gap 2): absent spotlight states ⇒ no target line (fail-soft `None`),
+    // matching the load-error path (`load_spotlight_states` Err ⇒ empty roster).
+    #[test]
+    fn absent_spotlight_states_yield_no_target() {
+        let block = build_director_block(
+            DirectorMode::OnDemand,
+            &[cand("npc_a", vec!["e1"])],
+            &StoryState::default(),
+            None,
+            None,
+            &[],
+            &[], // empty roster (load error or genuinely no roster)
+            "pc_1",
+        )
+        .expect("ON mode yields a block");
+        assert!(
+            !block.contains("spotlight_target:"),
+            "empty roster must NOT emit a spotlight_target (fail-soft None)"
+        );
     }
 }

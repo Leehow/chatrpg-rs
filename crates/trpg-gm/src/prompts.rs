@@ -117,6 +117,20 @@ impl TurnMessages {
         self.messages.clone()
     }
 
+    /// P5 revision (Gap 3): a DIRECT, deterministic packet-presence signal on the ACTUAL
+    /// assembled messages — true iff the `[director_packet]` marker was folded into the GM
+    /// BP3 tail. Unlike `bp3_hash` (= `compiled.dynamic_hash`, computed at compile BEFORE the
+    /// packet tail is appended in `assemble`), this inspects the post-assemble message text,
+    /// so it legitimately proves the packet entered the GM prompt. OFF / empty packet ⇒ false
+    /// (the tail is filtered out → byte-identical baseline). Scoped, side-effect-free.
+    pub fn contains_director_packet(&self) -> bool {
+        self.messages.iter().any(|m| {
+            m.get("content")
+                .and_then(Value::as_str)
+                .is_some_and(|c| c.contains("[director_packet]"))
+        })
+    }
+
     /// 缓存稳定可观测：前 first_n 条消息序列化字节的稳定哈希（Task 9 回归用）。
     /// first_n 截顶到 assemble 产出段长度：工具轮尾部追加的消息永不进哈希窗口。
     pub fn prefix_byte_hash(&self, first_n: usize) -> String {
@@ -756,6 +770,33 @@ mod director_packet_wiring_tests {
         assert!(
             dynamic.find("[director_packet]").unwrap() < dynamic.find("[Player Input]").unwrap(),
             "packet must precede Player Input within the [gm] BP3 message"
+        );
+    }
+
+    // ── P5 revision (Gap 3): the DIRECT packet-presence signal on the assembled messages —
+    //    ON ⇒ true, OFF/empty ⇒ false. This is the correct evidence (vs the invalid bp3-hash,
+    //    which hashes `compiled.dynamic` BEFORE the packet tail is appended). The live ON turn
+    //    drives this exact `assemble` path, so a true here mirrors the live packet entering BP3.
+    #[test]
+    fn contains_director_packet_true_on_false_off() {
+        let history = vec![ChatMessage {
+            role: "assistant".to_string(),
+            content: "old".to_string(),
+        }];
+        let on = TurnMessages::assemble(&compiled(), "SKILL", &history, &base_tail(Some(PACKET)));
+        assert!(
+            on.contains_director_packet(),
+            "ON: assembled messages must report the packet present"
+        );
+        let off = TurnMessages::assemble(&compiled(), "SKILL", &history, &base_tail(None));
+        assert!(
+            !off.contains_director_packet(),
+            "OFF: no packet in the assembled messages"
+        );
+        let empty = TurnMessages::assemble(&compiled(), "SKILL", &history, &base_tail(Some("  ")));
+        assert!(
+            !empty.contains_director_packet(),
+            "empty packet is filtered out → reported absent"
         );
     }
 

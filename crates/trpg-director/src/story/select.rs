@@ -128,6 +128,27 @@ pub fn build_director_brief_packet(
         }
     }
 
+    // §二十四-#2 graceful empty-story playability: a non-empty pool but NO selectable
+    // primary thread (empty `active_threads`, or every thread rejected/terminal) means
+    // normal thread-driven selection produced nothing to spotlight. Rather than emit a
+    // bare Respond with zero affordances, fold in the pure `fallback_beat_plan` — its
+    // allowed beat_kind (Respond/Consequence/Choice) + ≥2 open_player_affordances + zero
+    // reveal — while still attaching the pool's resolvable candidates as concrete actors.
+    // Reveal stays the fail-closed `compute_reveal` output (the empty-story fallback owns
+    // its own zero-reveal; we keep whatever the knowledge surfaces legitimately allow).
+    if primary_thread_id.is_none() {
+        let mut plan = super::fallback::fallback_beat_plan(story, _spotlights, acting_actor_id);
+        let selected_world_candidates =
+            select_candidates(candidates, &uniquely_resolvable, &[]);
+        plan.focus_actor_ids = selected_world_candidates
+            .iter()
+            .map(|r| r.npc_id.clone())
+            .collect();
+        plan.selected_world_candidates = selected_world_candidates;
+        plan.reveal_candidate_fact_ids = reveal_candidate_fact_ids;
+        return plan;
+    }
+
     // Select pool candidates relevant to the spotlighted threads, retaining only keys that
     // are uniquely resolvable in the pool (pool-filter, §二十四-#3 + codex fold #1).
     let spotlighted: Vec<&StoryThread> = scored

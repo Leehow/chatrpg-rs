@@ -6,8 +6,8 @@
 
 use trpg_director::{build_director_brief_packet, DirectorMode};
 use trpg_model::{
-    DirectorPlan, NpcActionIntent, NpcActionKind, PlayerInterestSignal, StoryState, StoryThread,
-    StoryThreadStatus, WorldCandidateRef, WorldReactionCandidate,
+    BeatKind, DirectorPlan, NpcActionIntent, NpcActionKind, PlayerInterestSignal, SpotlightState,
+    StoryState, StoryThread, StoryThreadStatus, WorldCandidateRef, WorldReactionCandidate,
 };
 
 fn cand(npc: &str, events: Vec<&str>, action: Option<NpcActionKind>) -> WorldReactionCandidate {
@@ -231,6 +231,109 @@ fn rejected_thread_never_becomes_primary_or_secondary() {
         .secondary_thread_ids
         .contains(&"t_rejected".to_string()));
     assert_eq!(plan.primary_thread_id.as_deref(), Some("t_ok"));
+}
+
+// ── §24-#2: empty-story fallback is wired into build_director_brief_packet ─────────
+// Gap 1 regression: an EMPTY StoryState (no usable threads) + a NON-empty candidate
+// pool must NOT silently fall through to a bare Respond with zero affordances. The pure
+// `fallback_beat_plan` must be folded in: a fallback beat_kind ∈ {Respond, Consequence,
+// Choice} AND ≥2 open_player_affordances, while still attaching pool actors.
+#[test]
+fn empty_story_folds_in_fallback_beat_plan() {
+    let pool = vec![cand("npc_a", vec!["e1"], Some(NpcActionKind::Speak))];
+    let story = StoryState::default(); // no active_threads ⇒ no selectable primary
+    let plan = build_director_brief_packet(
+        DirectorMode::OnDemand,
+        &pool,
+        &story,
+        None,
+        None,
+        &[],
+        &[],
+        "pc_acting",
+    );
+    assert!(
+        matches!(
+            plan.beat_kind,
+            BeatKind::Respond | BeatKind::Consequence | BeatKind::Choice
+        ),
+        "empty story must carry a fallback beat_kind, got {:?}",
+        plan.beat_kind
+    );
+    assert!(
+        plan.open_player_affordances.len() >= 2,
+        "empty story fallback must offer ≥2 affordances, got {}",
+        plan.open_player_affordances.len()
+    );
+    assert!(
+        plan.primary_thread_id.is_none(),
+        "empty story has no primary thread to spotlight"
+    );
+    // Pool actors are still attached so the turn has concrete NPCs to react.
+    assert!(
+        !plan.selected_world_candidates.is_empty(),
+        "fallback must still attach the resolvable pool candidates"
+    );
+    assert!(plan.focus_actor_ids.contains(&"npc_a".to_string()));
+}
+
+// Gap 1: when EVERY thread is rejected (no selectable primary), the same fallback fold
+// applies — anti-railroad must not leave the player with a bare empty plan.
+#[test]
+fn all_rejected_threads_fall_back_to_playable_plan() {
+    let pool = vec![cand("npc_a", vec!["e1"], Some(NpcActionKind::Speak))];
+    let mut story = StoryState::default();
+    story.active_threads.push(thread("t_rejected", "npc_a", 1.0));
+    let plan = build_director_brief_packet(
+        DirectorMode::OnDemand,
+        &pool,
+        &story,
+        None,
+        None,
+        &[],
+        &["t_rejected".to_string()],
+        "pc_acting",
+    );
+    assert!(plan.primary_thread_id.is_none());
+    assert!(
+        plan.open_player_affordances.len() >= 2,
+        "all-rejected must still yield ≥2 affordances via fallback"
+    );
+}
+
+// Gap 1: the folded-in fallback still surfaces a spotlight target when a roster exists,
+// proving the empty-story path keeps multi-player rotation alive.
+#[test]
+fn empty_story_fallback_still_surfaces_spotlight_target() {
+    let pool = vec![cand("npc_a", vec!["e1"], Some(NpcActionKind::Speak))];
+    let story = StoryState::default();
+    let roster = vec![
+        SpotlightState {
+            player_id: "pc_acting".into(),
+            spotlight_count: 5,
+            ..Default::default()
+        },
+        SpotlightState {
+            player_id: "pc_quiet".into(),
+            spotlight_count: 0,
+            ..Default::default()
+        },
+    ];
+    let plan = build_director_brief_packet(
+        DirectorMode::OnDemand,
+        &pool,
+        &story,
+        None,
+        None,
+        &roster,
+        &[],
+        "pc_acting",
+    );
+    assert_eq!(
+        plan.spotlight_target.as_deref(),
+        Some("pc_quiet"),
+        "fallback must spotlight the under-spotlighted non-acting player"
+    );
 }
 
 // ── Disabled mode → minimal no-op plan ───────────────────────────────────────────
