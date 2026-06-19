@@ -5560,6 +5560,14 @@ fn apply_kernel_strategy_overrides(kernel: &mut RuleKernel, doc: &serde_json::Va
             kernel.search_profile = Some(p);
         }
     }
+    // P0 dehardcode: layer source-backed firearm profiles (additive — appended to
+    // any base list). Migrates trpg-object's hardcoded CoC `.45 Automatic` branch
+    // into data. A malformed value is ignored (fail-closed → no extra profiles).
+    if let Some(v) = doc.get("firearm_profiles") {
+        if let Ok(mut p) = serde_json::from_value::<Vec<trpg_model::FirearmProfile>>(v.clone()) {
+            kernel.firearm_profiles.append(&mut p);
+        }
+    }
 }
 
 /// P0-2: read a module config file `{TRPG_DATA_DIR}/modules/{id}.module_config.json`.
@@ -5724,6 +5732,49 @@ mod merge_module_config_tests {
     #[test]
     fn both_absent_is_none() {
         assert!(merge_module_config(None, None).is_none());
+    }
+}
+
+#[cfg(test)]
+mod firearm_profile_override_tests {
+    use super::{apply_kernel_strategy_overrides, embedded_kernel_override};
+    use trpg_model::RuleKernel;
+
+    /// P0 dehardcode: the CoC override doc carries the migrated `.45 Automatic`
+    /// firearm profile, and `apply_kernel_strategy_overrides` layers it onto the
+    /// kernel byte-for-byte the legacy hardcoded values. Asserts against the
+    /// binary-embedded (git-tracked, shipped) override — the source of truth — so
+    /// the test is independent of any local `data/` mirror.
+    #[test]
+    fn coc_override_supplies_firearm_profile() {
+        let doc: serde_json::Value = serde_json::from_str(
+            embedded_kernel_override("call_of_cthulhu_7e").expect("CoC override embedded"),
+        )
+        .expect("CoC override parses");
+        let mut kernel: RuleKernel = serde_json::from_str(
+            r#"{"kernel_id":"t","ruleset_id":"call_of_cthulhu_7e","version":"1"}"#,
+        )
+        .unwrap();
+        assert!(kernel.firearm_profiles.is_empty());
+        apply_kernel_strategy_overrides(&mut kernel, &doc);
+        assert_eq!(
+            kernel.firearm_profiles.len(),
+            1,
+            "CoC override must add exactly the .45 Automatic profile"
+        );
+        let fp = &kernel.firearm_profiles[0];
+        assert_eq!(fp.def_id_suffix, "weapon.45_automatic");
+        assert!(fp.matches("colt m1911 .45 automatic handgun"));
+        assert_eq!(
+            fp.profile.get("damage_expression").and_then(|v| v.as_str()),
+            Some("1d10+2")
+        );
+        assert_eq!(
+            fp.profile.get("ammo_capacity").and_then(|v| v.as_i64()),
+            Some(7)
+        );
+        assert_eq!(fp.source_refs.len(), 1);
+        assert_eq!(fp.source_refs[0].page, Some(414));
     }
 }
 

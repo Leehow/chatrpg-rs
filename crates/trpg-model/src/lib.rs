@@ -202,6 +202,58 @@ pub struct SourceRef {
     pub note: Option<String>,
 }
 
+/// P0 dehardcode: a data-driven, source-backed firearm weapon profile carried by
+/// the RuleKernel (override layer). Replaces trpg-object's per-ruleset hardcoded
+/// CoC `.45 Automatic` branch — the engine now matches purely on this data, with
+/// no ruleset-name literal in `.rs`. All fields additive / backward-compatible
+/// (`#[serde(default)]`); an empty `firearm_profiles` (legacy kernels) → no match.
+///
+/// Matching (case-insensitive substring over the lowercased `name + text`):
+///   - matches if ANY `match_keywords` entry is a substring (OR of single terms), OR
+///   - any `match_keyword_groups` inner group has ALL its terms present (AND group).
+/// The AND group preserves the legacy `(.45 && automatic)` non-contiguous clause
+/// that a flat OR list cannot express.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default, PartialEq)]
+pub struct FirearmProfile {
+    /// OR of single lowercase substrings (e.g. `m1911`, `colt .45`, `.45 automatic`).
+    #[serde(default)]
+    pub match_keywords: Vec<String>,
+    /// OR of AND-groups: each inner vec matches only when ALL its lowercase
+    /// substrings are present (e.g. `[".45", "automatic"]`).
+    #[serde(default)]
+    pub match_keyword_groups: Vec<Vec<String>>,
+    /// def_id suffix appended to the ruleset id, e.g. `weapon.45_automatic` →
+    /// `call_of_cthulhu_7e.weapon.45_automatic`.
+    #[serde(default)]
+    pub def_id_suffix: String,
+    /// The mechanical weapon profile (mirrors the legacy `json!({...})` table row).
+    #[serde(default)]
+    pub profile: serde_json::Value,
+    /// Source references for the profile (mirrors the legacy page-414 ref).
+    #[serde(default)]
+    pub source_refs: Vec<SourceRef>,
+}
+
+impl FirearmProfile {
+    /// True when this profile matches the given lowercased haystack
+    /// (`name + " " + text`, already `to_ascii_lowercase`d by the caller).
+    pub fn matches(&self, hay_lower: &str) -> bool {
+        if self
+            .match_keywords
+            .iter()
+            .any(|k| hay_lower.contains(&k.to_ascii_lowercase()))
+        {
+            return true;
+        }
+        self.match_keyword_groups.iter().any(|group| {
+            !group.is_empty()
+                && group
+                    .iter()
+                    .all(|k| hay_lower.contains(&k.to_ascii_lowercase()))
+        })
+    }
+}
+
 #[derive(
     Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,
 )]
@@ -1648,6 +1700,11 @@ pub struct RuleKernel {
     /// ruleset_aliases_for contains(ruleset_name) branches. None → generic base.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search_profile: Option<RuleKernelSearchProfile>,
+    /// P0 dehardcode: data-driven source-backed firearm profiles — replaces
+    /// trpg-object's hardcoded CoC `.45 Automatic` branch. Empty (legacy kernels /
+    /// rulesets with no firearm data) → engine produces no source-backed profile.
+    #[serde(default)]
+    pub firearm_profiles: Vec<FirearmProfile>,
 }
 
 /// The id of the kernel resource_track that represents Hit Points, found

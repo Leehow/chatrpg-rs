@@ -154,5 +154,39 @@
         }
       }
     ]
-  }
+  },
+  "_note_p0_firearm_profiles": "P0 dehardcode: migrates trpg-object's hardcoded CoC '.45 Automatic' source-backed weapon branch (lib.rs source_backed_declared_firearm_profile) into data. Engine now matches purely on this; no ruleset-name literal in .rs. EQUIVALENCE: profile + source_ref + match keywords are byte-for-byte the legacy json!/SourceRef. match_keyword_groups [[.45, automatic]] preserves the legacy non-contiguous (.45 && automatic) clause.",
+  "firearm_profiles": [
+    {
+      "match_keywords": ["m1911", "colt .45", ".45 automatic"],
+      "match_keyword_groups": [[".45", "automatic"]],
+      "def_id_suffix": "weapon.45_automatic",
+      "profile": {
+        "weapon_profile_source": "source_backed_table_row",
+        "rules_table_name": ".45 Automatic",
+        "skill": "Firearms (Handgun)",
+        "damage_expression": "1d10+2",
+        "base_range": "15 yards",
+        "attacks_per_round": "1 (3)",
+        "ammo_capacity": 7,
+        "malfunction": 100,
+        "cost_1920s": "$40",
+        "cost_modern": "$375",
+        "era": "1920s, Modern",
+        "source_row": ".45 Automatic      Firearms (handgun)      1D10+2      15 yards      1 (3)      7      $40/$375      100      1920s, Modern"
+      },
+      "source_refs": [
+        {
+          "source_id": "call_of_cthulhu_keeper_rulebook_40th_anniversary_sandy_petersen",
+          "page": 414,
+          "anchor_id": "call_of_cthulhu_keeper_rulebook_40th_anniversary_sandy_petersen:page:414",
+          "section_path": [],
+          "char_start": null,
+          "char_end": null,
+          "text_hash": null,
+          "note": "weapon table row: .45 Automatic / Firearms (handgun) / 1D10+2 / 15 yards / 1 (3) / 7 / malfunction 100"
+        }
+      ]
+    }
+  ]
 }

@@ -69,8 +69,22 @@ impl ObjectService {
         sheet: &Value,
         world_tick: i64,
     ) -> Result<Vec<ObjectInstance>> {
+        // Data-driven source-backed firearm profiles come from the kernel's
+        // `firearm_profiles` (override layer) — no per-ruleset hardcode. Absent
+        // kernel / no firearm data → no source-backed profile (generic behavior).
+        let kernel = self
+            .db
+            .load_rule_kernel(ruleset_id)
+            .await
+            .ok()
+            .flatten();
         let objects = inventory_weapon_instances_from_sheet(
-            session_id, ruleset_id, actor_id, sheet, world_tick,
+            session_id,
+            ruleset_id,
+            actor_id,
+            sheet,
+            world_tick,
+            kernel.as_ref(),
         );
         for obj in &objects {
             if let Some(def) = definition_for_source_backed_declared_weapon(ruleset_id, obj) {
@@ -2179,6 +2193,7 @@ fn inventory_weapon_instances_from_sheet(
     actor_id: &str,
     sheet: &Value,
     world_tick: i64,
+    kernel: Option<&RuleKernel>,
 ) -> Vec<ObjectInstance> {
     let mut out = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
@@ -2206,7 +2221,7 @@ fn inventory_weapon_instances_from_sheet(
         }
         let mut object_def_id = None;
         if let Some((def_id, profile, source_refs)) =
-            source_backed_declared_firearm_profile(ruleset_id, &name, &text)
+            source_backed_declared_firearm_profile(kernel, ruleset_id, &name, &text)
         {
             if let (Some(dst), Some(src)) = (mechanical_state.as_object_mut(), profile.as_object())
             {
@@ -2267,53 +2282,23 @@ fn inventory_weapon_instances_from_sheet(
     out
 }
 
+/// P0 dehardcode: GENERIC source-backed firearm profile resolver. Reads the
+/// kernel's data-driven `firearm_profiles` (carried by the override layer) instead
+/// of a hardcoded per-ruleset branch. Returns `(def_id, profile, source_refs)` for
+/// the first profile whose keywords match the declared name+text, or `None` when
+/// there is no kernel, no `firearm_profiles`, or no match (non-CoC / no data →
+/// behavior unchanged). `ruleset_id` is used only to namespace the def_id.
 fn source_backed_declared_firearm_profile(
+    kernel: Option<&RuleKernel>,
     ruleset_id: &str,
     name: &str,
     text: &str,
 ) -> Option<(String, Value, Vec<SourceRef>)> {
-    if ruleset_id != "call_of_cthulhu_7e" {
-        return None;
-    }
+    let kernel = kernel?;
     let hay = format!("{name} {text}").to_ascii_lowercase();
-    let is_45_auto = hay.contains("m1911")
-        || hay.contains("colt .45")
-        || hay.contains(".45 automatic")
-        || (hay.contains(".45") && hay.contains("automatic"));
-    if !is_45_auto {
-        return None;
-    }
-    let source_ref = SourceRef {
-        source_id: "call_of_cthulhu_keeper_rulebook_40th_anniversary_sandy_petersen".into(),
-        page: Some(414),
-        anchor_id: Some(
-            "call_of_cthulhu_keeper_rulebook_40th_anniversary_sandy_petersen:page:414".into(),
-        ),
-        section_path: vec![],
-        char_start: None,
-        char_end: None,
-        text_hash: None,
-        note: Some("weapon table row: .45 Automatic / Firearms (handgun) / 1D10+2 / 15 yards / 1 (3) / 7 / malfunction 100".into()),
-    };
-    let profile = json!({
-        "weapon_profile_source": "source_backed_table_row",
-        "rules_table_name": ".45 Automatic",
-        "skill": "Firearms (Handgun)",
-        "damage_expression": "1d10+2",
-        "base_range": "15 yards",
-        "attacks_per_round": "1 (3)",
-        "ammo_capacity": 7,
-        "malfunction": 100,
-        "cost_1920s": "$40",
-        "cost_modern": "$375",
-        "era": "1920s, Modern",
-        "source_row": ".45 Automatic      Firearms (handgun)      1D10+2      15 yards      1 (3)      7      $40/$375      100      1920s, Modern"
-    });
-    Some((
-        format!("{}.weapon.45_automatic", safe_id(ruleset_id)),
-        profile,
-        vec![source_ref],
-    ))
+    let fp = kernel.firearm_profiles.iter().find(|fp| fp.matches(&hay))?;
+    let def_id = format!("{}.{}", safe_id(ruleset_id), fp.def_id_suffix);
+    Some((def_id, fp.profile.clone(), fp.source_refs.clone()))
 }
 
 fn definition_for_source_backed_declared_weapon(
@@ -2691,8 +2676,56 @@ mod object_use_tests {
         }
     }
 
+    /// A CoC kernel carrying the `.45 Automatic` firearm profile — byte-for-byte
+    /// the data shipped in `call_of_cthulhu_7e.rule_kernel.override.json`. This is
+    /// what `load_rule_kernel` (override merge) produces in prod; the test builds it
+    /// inline so the pure (DB-free) resolver can be asserted equivalent to the old
+    /// hardcoded branch.
+    fn coc_firearm_kernel() -> RuleKernel {
+        let mut k: RuleKernel = serde_json::from_str(
+            r#"{"kernel_id":"t","ruleset_id":"call_of_cthulhu_7e","version":"1"}"#,
+        )
+        .unwrap();
+        k.firearm_profiles = serde_json::from_value(json!([
+            {
+                "match_keywords": ["m1911", "colt .45", ".45 automatic"],
+                "match_keyword_groups": [[".45", "automatic"]],
+                "def_id_suffix": "weapon.45_automatic",
+                "profile": {
+                    "weapon_profile_source": "source_backed_table_row",
+                    "rules_table_name": ".45 Automatic",
+                    "skill": "Firearms (Handgun)",
+                    "damage_expression": "1d10+2",
+                    "base_range": "15 yards",
+                    "attacks_per_round": "1 (3)",
+                    "ammo_capacity": 7,
+                    "malfunction": 100,
+                    "cost_1920s": "$40",
+                    "cost_modern": "$375",
+                    "era": "1920s, Modern",
+                    "source_row": ".45 Automatic      Firearms (handgun)      1D10+2      15 yards      1 (3)      7      $40/$375      100      1920s, Modern"
+                },
+                "source_refs": [
+                    {
+                        "source_id": "call_of_cthulhu_keeper_rulebook_40th_anniversary_sandy_petersen",
+                        "page": 414,
+                        "anchor_id": "call_of_cthulhu_keeper_rulebook_40th_anniversary_sandy_petersen:page:414",
+                        "section_path": [],
+                        "char_start": null,
+                        "char_end": null,
+                        "text_hash": null,
+                        "note": "weapon table row: .45 Automatic / Firearms (handgun) / 1D10+2 / 15 yards / 1 (3) / 7 / malfunction 100"
+                    }
+                ]
+            }
+        ]))
+        .unwrap();
+        k
+    }
+
     #[test]
     fn created_character_inventory_seeds_loaded_firearm() {
+        let kernel = coc_firearm_kernel();
         let sheet = json!({
             "name": "test investigator",
             "skills": {"Firearms (Handgun)": 60},
@@ -2704,6 +2737,7 @@ mod object_use_tests {
             "pc.current",
             &sheet,
             12,
+            Some(&kernel),
         );
         assert_eq!(objects.len(), 1);
         let pistol = &objects[0];
@@ -2738,6 +2772,115 @@ mod object_use_tests {
             .tags
             .iter()
             .any(|t| t == "created_character_inventory"));
+    }
+
+    /// (i) Field-for-field equivalence with the pre-dehardcode hardcoded output:
+    /// def_id, every profile field, and the page-414 source_ref must be identical.
+    #[test]
+    fn data_driven_firearm_profile_matches_legacy_fields() {
+        let kernel = coc_firearm_kernel();
+        let (def_id, profile, source_refs) = source_backed_declared_firearm_profile(
+            Some(&kernel),
+            "call_of_cthulhu_7e",
+            "Colt M1911",
+            ".45 automatic heavy handgun, one loaded 7-round magazine",
+        )
+        .expect("CoC .45 must match");
+        assert_eq!(def_id, "call_of_cthulhu_7e.weapon.45_automatic");
+        assert_eq!(
+            profile.get("weapon_profile_source").and_then(|v| v.as_str()),
+            Some("source_backed_table_row")
+        );
+        assert_eq!(
+            profile.get("rules_table_name").and_then(|v| v.as_str()),
+            Some(".45 Automatic")
+        );
+        assert_eq!(
+            profile.get("skill").and_then(|v| v.as_str()),
+            Some("Firearms (Handgun)")
+        );
+        assert_eq!(
+            profile.get("damage_expression").and_then(|v| v.as_str()),
+            Some("1d10+2")
+        );
+        assert_eq!(
+            profile.get("base_range").and_then(|v| v.as_str()),
+            Some("15 yards")
+        );
+        assert_eq!(
+            profile.get("attacks_per_round").and_then(|v| v.as_str()),
+            Some("1 (3)")
+        );
+        assert_eq!(
+            profile.get("ammo_capacity").and_then(|v| v.as_i64()),
+            Some(7)
+        );
+        assert_eq!(profile.get("malfunction").and_then(|v| v.as_i64()), Some(100));
+        assert_eq!(source_refs.len(), 1);
+        let sr = &source_refs[0];
+        assert_eq!(
+            sr.source_id,
+            "call_of_cthulhu_keeper_rulebook_40th_anniversary_sandy_petersen"
+        );
+        assert_eq!(sr.page, Some(414));
+        assert_eq!(
+            sr.anchor_id.as_deref(),
+            Some("call_of_cthulhu_keeper_rulebook_40th_anniversary_sandy_petersen:page:414")
+        );
+    }
+
+    /// (ii) GENERIC: no kernel, a kernel with no firearm_profiles, and a kernel with
+    /// profiles but no keyword hit all yield `None` (non-CoC / no-data unchanged).
+    #[test]
+    fn no_kernel_or_no_match_yields_none() {
+        // No kernel at all.
+        assert!(source_backed_declared_firearm_profile(
+            None,
+            "call_of_cthulhu_7e",
+            "Colt M1911",
+            ".45 automatic"
+        )
+        .is_none());
+        // Kernel present but no firearm_profiles (e.g. a non-CoC ruleset).
+        let bare: RuleKernel = serde_json::from_str(
+            r#"{"kernel_id":"t","ruleset_id":"cyberpunk_red","version":"1"}"#,
+        )
+        .unwrap();
+        assert!(source_backed_declared_firearm_profile(
+            Some(&bare),
+            "cyberpunk_red",
+            "Militech .45",
+            ".45 automatic"
+        )
+        .is_none());
+        // CoC firearm kernel but the declared weapon matches nothing.
+        let kernel = coc_firearm_kernel();
+        assert!(source_backed_declared_firearm_profile(
+            Some(&kernel),
+            "call_of_cthulhu_7e",
+            "Lee-Enfield rifle",
+            "bolt-action .303 rifle"
+        )
+        .is_none());
+    }
+
+    /// (iii) Keyword matching is data-driven and equivalent to the legacy
+    /// `is_45_auto`: m1911 / colt .45 / ".45 automatic" (contiguous) and the
+    /// non-contiguous `.45 ... automatic` AND-clause all match; unrelated text does
+    /// not. Mirrors the old `||` chain exactly.
+    #[test]
+    fn keyword_match_equivalent_to_legacy_is_45_auto() {
+        let kernel = coc_firearm_kernel();
+        let hit = |name: &str, text: &str| {
+            source_backed_declared_firearm_profile(Some(&kernel), "call_of_cthulhu_7e", name, text)
+                .is_some()
+        };
+        assert!(hit("M1911", "service pistol")); // m1911
+        assert!(hit("revolver", "a Colt .45 sidearm")); // colt .45
+        assert!(hit("handgun", ".45 automatic")); // ".45 automatic" contiguous
+        assert!(hit("automatic pistol", "chambered in .45")); // .45 && automatic (non-contiguous)
+        assert!(!hit("Lee-Enfield", "bolt-action .303 rifle")); // unrelated
+        assert!(!hit("shotgun", "12 gauge automatic")); // automatic w/o .45 → no match
     }
 
     fn contract_for_trigger(intent: &str, label: &str, summary: &str) -> CheckContract {
