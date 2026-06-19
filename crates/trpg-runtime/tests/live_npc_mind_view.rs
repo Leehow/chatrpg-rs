@@ -9,7 +9,7 @@
 //!      cargo test -p trpg-runtime --test live_npc_mind_view -- --nocapture
 //! 无 DATABASE_URL 时 SKIP（fail-closed，不卡 CI）。
 use trpg_db::Db;
-use trpg_model::NpcProfile;
+use trpg_model::{NpcProfile, NpcRelationshipTarget};
 
 async fn seed_npc_edge(db: &Db, session: &str, npc_id: &str, fact_id: &str, state: &str) {
     sqlx::query(
@@ -69,21 +69,34 @@ async fn load_npc_mind_and_behavior_from_durable_edges() {
         ..Default::default()
     };
 
+    // The player party is the relationship target the runtime gates secrets against.
+    let relationship_targets = [NpcRelationshipTarget::PlayerParty];
+
     // load_npc_mind_view assembles relationships + knowledge from the DB.
-    let view = trpg_runtime::load_npc_mind_view(&db, &session, npc_id, &profile)
-        .await
-        .unwrap();
+    let view =
+        trpg_runtime::load_npc_mind_view(&db, &session, npc_id, &profile, &relationship_targets)
+            .await
+            .unwrap();
     assert_eq!(view.npc_id, npc_id);
     let mut known = view.known_fact_ids();
     known.sort();
     assert_eq!(known, vec!["alices_own_secret", "hidden_passage"]);
     assert_eq!(view.belief_fact_ids(), vec!["rumor_about_lord"]);
 
-    // load_npc_behavior_plan: a true fact the party does NOT know is withheld; the shared
-    // fact is not; the false belief never becomes a secret.
-    let plan = trpg_runtime::load_npc_behavior_plan(&db, &session, npc_id, &profile)
-        .await
-        .unwrap();
+    // load_active_npc_guidance: the production active-NPC secret gate derives the player
+    // party's known facts from durable edges, so a true fact the party does NOT know is
+    // withheld; the shared fact is not; the false belief never becomes a secret.
+    let player_known = db.list_player_known_fact_ids(&session).await.unwrap();
+    let plan = trpg_runtime::load_active_npc_guidance(
+        &db,
+        &session,
+        npc_id,
+        &profile,
+        &relationship_targets,
+        &player_known,
+    )
+    .await
+    .unwrap();
     assert!(
         plan.facts_will_withhold
             .iter()
@@ -107,9 +120,15 @@ async fn load_npc_mind_and_behavior_from_durable_edges() {
 
     // npc.opposition fails closed at the runtime boundary.
     assert!(
-        trpg_runtime::load_npc_mind_view(&db, &session, "npc.opposition", &profile)
-            .await
-            .is_err(),
+        trpg_runtime::load_npc_mind_view(
+            &db,
+            &session,
+            "npc.opposition",
+            &profile,
+            &relationship_targets
+        )
+        .await
+        .is_err(),
         "runtime mind view must reject the opposition placeholder"
     );
 
