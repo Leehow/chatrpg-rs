@@ -269,14 +269,26 @@ impl NpcRelationship {
     }
 
     /// interaction_desire = rapport minus aversion (averaged so it stays in band),
-    /// nudged by base talkativeness. Positive = seek interaction, negative = avoid.
+    /// nudged by base talkativeness and by the NPC's transactional stake in the target.
+    /// Positive = seek interaction, negative = avoid.
     fn derive_interaction_desire(&self) -> i16 {
         let rapport = self.trust as i64 + self.respect as i64 + self.affection as i64;
         let aversion = self.hostility as i64 + self.suspicion as i64 + self.fear as i64;
         let base = (rapport - aversion) / 3;
         // talkativeness 0..100 (mid 50) contributes a -25..+25 sociability bias.
         let talk_bias = (self.talkativeness as i64 - 50) / 2;
-        clamp_signed(base + talk_bias)
+        // 设计3 §7.3 `+ debt_or_leverage`: both an owed debt (felt obligation toward the
+        // target) and perceived leverage over the target are engagement pulls — an indebted
+        // NPC seeks the target to settle accounts, a high-leverage NPC seeks them to press
+        // the advantage (e.g. a greedy fixer). Summed and averaged (/3, matching rapport's
+        // banding) so the term stays bounded and additive rather than dominating.
+        //
+        // TODO(设计3 §7.3): goal_need / danger_pressure / secrecy_pressure are also part of
+        // the full formula but have no struct-resident input source on NpcRelationship yet;
+        // they are intentionally omitted here to keep the derivation deterministic and
+        // bounded. Add them when those signals are modeled (likely via NpcBehaviorContext).
+        let stake_pull = (self.debt as i64 + self.leverage as i64) / 3;
+        clamp_signed(base + talk_bias + stake_pull)
     }
 
     /// Deterministic stance bands, checked most-severe first so a hostile NPC never
@@ -510,6 +522,52 @@ mod tests {
         .unwrap();
         assert_eq!(r.stance, RelationshipStance::Hostile);
         assert!(r.interaction_desire < 0, "hostility should suppress desire");
+    }
+
+    #[test]
+    fn leverage_and_debt_raise_interaction_desire() {
+        // 设计3 §7.3: a greedy fixer perceiving high leverage over the target seeks
+        // interaction MORE than the same NPC with no leverage (presses the advantage).
+        let mut baseline = rel();
+        NpcRelationshipDelta {
+            trust: 20,
+            respect: 20,
+            evidence_event_ids: vec!["e".into()],
+            ..Default::default()
+        }
+        .apply_to(&mut baseline)
+        .unwrap();
+
+        let mut greedy = baseline.clone();
+        NpcRelationshipDelta {
+            leverage: 80,
+            evidence_event_ids: vec!["e_lev".into()],
+            ..Default::default()
+        }
+        .apply_to(&mut greedy)
+        .unwrap();
+        assert!(
+            greedy.interaction_desire > baseline.interaction_desire,
+            "high leverage must raise interaction desire ({} !> {})",
+            greedy.interaction_desire,
+            baseline.interaction_desire
+        );
+
+        // Debt (felt obligation toward the target) is likewise an engagement pull.
+        let mut indebted = baseline.clone();
+        NpcRelationshipDelta {
+            debt: 60,
+            evidence_event_ids: vec!["e_debt".into()],
+            ..Default::default()
+        }
+        .apply_to(&mut indebted)
+        .unwrap();
+        assert!(
+            indebted.interaction_desire > baseline.interaction_desire,
+            "debt must raise interaction desire ({} !> {})",
+            indebted.interaction_desire,
+            baseline.interaction_desire
+        );
     }
 
     #[test]
