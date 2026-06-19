@@ -5,6 +5,8 @@ use crate::obligations::{
     carryover_memory_event, ObligationLedger, RetroDebtKind, RetroactiveEffectDebt,
 };
 use crate::plugins::load_gm_skill_with_plugins;
+// P7.3：控制面经 Port 适配器派发（Port trait 方法需在作用域内）。
+use crate::ports::{DirectorPort, KernelPort, NarratorPort, PolicyPort, WorldPort};
 use crate::prompts::{DynamicTailInput, TurnMessages};
 use crate::stream::RedactingBuffer;
 use crate::tools::{AwaitingPlayerRoll, SceneDeepExtractFn, ToolCtx, ToolRegistry};
@@ -1070,8 +1072,10 @@ impl GmLoop {
         // （可能含规则原文）。forbidden_reveals P1 为空（P2/P3 收窄）。
         let narration = crate::packet::NarrationPacket::project(&adj, "", &[]);
         let private_tokens = ctx.ledger.private_roll_tokens();
-        let narrated = self
-            .run_narrator(&narration, &private_tokens, tx, cancel)
+        // P7.3：P1 Narrator 派发经 NarratorPort 适配器（GmLoopNarratorAdapter 仅委托
+        // `GmLoop::run_narrator`）——dispatch 间接，byte-identical（无行为变更）。
+        let narrated = crate::ports::GmLoopNarratorAdapter(self)
+            .narrate(&narration, &private_tokens, tx, cancel)
             .await;
         match narrated {
             Some(text) if !text.trim().is_empty() => {
@@ -1635,15 +1639,12 @@ impl GmLoop {
                 }
             }
         }
-        let (mut reaction_set, plans) = trpg_runtime::world::load_world_reaction_plans(
-            &self.engine.db,
-            session_id,
-            &npc_ids,
-            &profiles,
-            &targets,
-            &player_known,
-        )
-        .await;
+        // P7.3：World 反应计划装载经 WorldPort 适配器派发（EngineWorldAdapter 仅委托
+        // `load_world_reaction_plans`，set 为 lossy/plans 为 lossless render 源不变）——
+        // dispatch 间接，byte-identical（OFF 默认无行为变更）。
+        let (mut reaction_set, plans) = crate::ports::EngineWorldAdapter(&self.engine)
+            .load_reaction_plans(session_id, &npc_ids, &profiles, &targets, &player_known)
+            .await;
         // P4.6 Part B (flag-gated, default OFF): when an active NPC's reaction implies an
         // Attack intent, the World layer EMITS the typed intent (it resolves nothing). The
         // Rules/Kernel path settles it downstream via `execute_system_roll_bundle` (the SAME
@@ -1706,13 +1707,17 @@ impl GmLoop {
             .actor_id
             .clone()
             .unwrap_or_else(|| "pc.current".to_string());
-        ctx.director_packet_block = trpg_runtime::prepare_director_brief(
-            &self.engine.db,
-            session_id,
-            &reaction_set.reactions,
-            &acting_actor_id,
-        )
-        .await;
+        // P7.3：Director 简报渲染（thin-async 运行时缝）经 DirectorPort 适配器派发
+        // （DirectorAdapter::prepare_brief 仅委托 `prepare_director_brief`，flag OFF ⇒ None
+        // byte-identical 基线）——dispatch 间接，无行为变更。
+        ctx.director_packet_block = crate::ports::DirectorAdapter
+            .prepare_brief(
+                &self.engine,
+                session_id,
+                &reaction_set.reactions,
+                &acting_actor_id,
+            )
+            .await;
         // The GM-context guidance bytes render from the retained (lossless) plans via the
         // SAME `to_guidance_block` method as before — provably byte-identical (locked by
         // `render_is_byte_identical_to_legacy_join`).
@@ -1813,7 +1818,9 @@ impl GmLoop {
             findings: gate_findings,
             next_required_action: None,
         };
-        let gate = crate::presentation_gate::presentation_gate_decision(&gate_input);
+        // P7.3：PresentationGate 判定经 PolicyPort 适配器派发（PresentationPolicyAdapter 仅
+        // 委托 `presentation_gate_decision` 纯函数）——dispatch 间接，byte-identical。
+        let gate = crate::ports::PresentationPolicyAdapter.presentation_gate(&gate_input);
         // gate 决策折一条 advisory trace（OFF/ON 都记，零行为变更；§20 explain --plugins 可见）。
         traces.push(presentation_gate_trace(&gate));
 
@@ -1869,12 +1876,15 @@ impl GmLoop {
         // 正文模糊扫描。图谱缺失/DB 抖动 → 空 = 不检测（fail-soft，绝不 panic/拦流）。已揭示的
         // 由 verifier 侧按 fact_id 过滤放行。**绝不**渲染进 prompt（只活在本私有 verifier 输入）。
         let load_npcs = should_load_npc_views(active_npc_ids, visible_text, &secret_terms);
-        let private_view = trpg_runtime::build_verifier_private_view(
-            &self.engine.db,
-            &request.session_id,
-            if load_npcs { active_npc_ids } else { &[] },
-        )
-        .await;
+        // P7.3：verifier 私有视图装配（只读 fold）经 KernelPort 适配器派发
+        // （EngineKernelAdapter 仅委托 `build_verifier_private_view`）——dispatch 间接，
+        // byte-identical（read-only，绝不获取 PlayerPartyEdge side-write，见 ports.rs 不变量①）。
+        let private_view = crate::ports::EngineKernelAdapter(&self.engine)
+            .verifier_private_view(
+                &request.session_id,
+                if load_npcs { active_npc_ids } else { &[] },
+            )
+            .await;
         let player_known_fact_ids = private_view.player_known.known_fact_ids_sorted();
         let plugin_ctx = crate::plugin::PluginContext {
             session_id: request.session_id.clone(),
@@ -2220,8 +2230,10 @@ impl GmLoop {
         );
         let narration = crate::packet::NarrationPacket::project(&adj, "", &forbidden);
         let private_tokens = ctx.ledger.private_roll_tokens();
-        let regenerated = self
-            .run_narrator(&narration, &private_tokens, tx, cancel)
+        // P7.3：repair-ladder 的 Narrator 重生同样经 NarratorPort 适配器派发（byte-identical）。
+        // `&mut self` 处只读重借 `&*self` 构造适配器，不持有跨 await 的可变借用。
+        let regenerated = crate::ports::GmLoopNarratorAdapter(&*self)
+            .narrate(&narration, &private_tokens, tx, cancel)
             .await;
         if let Some(text) = regenerated {
             if !text.trim().is_empty() {
@@ -2342,10 +2354,13 @@ impl GmLoop {
             return;
         }
         nominations.sort_by(|a, b| a.fact_id.cmp(&b.fact_id));
+        // P7.3：PresentationCommit reveal 提交（KernelPort 的唯一真实 commit primitive）经
+        // KernelPort 适配器派发（EngineKernelAdapter::commit_reveal_fact 仅委托 `engine.reveal_fact`，
+        // 幂等不变）——dispatch 间接，byte-identical（Block ⇒ 上方早返，零落库不变）。
+        let kernel = crate::ports::EngineKernelAdapter(&self.engine);
         for n in &nominations {
-            if let Err(err) = self
-                .engine
-                .reveal_fact(
+            if let Err(err) = kernel
+                .commit_reveal_fact(
                     &request.session_id,
                     &request.turn_id,
                     &n.fact_id,
