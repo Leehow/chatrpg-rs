@@ -1095,6 +1095,238 @@ async fn phase_debt_load_initializes_obligations_no_panic() {
     );
 }
 
+// ============================ P1 Adjudicator/Narrator split（TRPG_NARRATOR_SPLIT）============================
+//
+// 这些测试直接驱动 `run_agent_loop`（stream_prose 参数）与 `run_narrator`，绕开进程级
+// env flag（避免并行测试间 env 竞争）：env 解析本身在 execute.rs 已有 P1.4 接线，行为
+// 等价于 `stream_prose = !narrator_split`。
+
+use crate::turn_event::TurnEvent;
+use tokio::sync::mpsc;
+
+/// 跑头部确定性 phase（与 phase_context_assembly_produces_nonempty_blocks 同序）把
+/// `ctx.messages` 组装好，让 run_agent_loop 可直接消费。input 引用 fixture 的 request/state。
+async fn ready_ctx(gm: &mut GmLoop, input: &GmTurnInput<'_>) -> TurnContext {
+    let mut ctx = TurnContext::new();
+    gm.phase_record_player_action(&mut ctx, input).await;
+    gm.phase_refresh_live_derived(&mut ctx, input).await;
+    gm.phase_reconcile(&mut ctx, input).await;
+    gm.phase_gate(&mut ctx, input).await;
+    gm.phase_stimulus_pass(&mut ctx, input).await;
+    gm.phase_opposed_prepass(&mut ctx, input).await;
+    gm.phase_mode_inference(&mut ctx, input).await.unwrap();
+    gm.phase_debt_load(&mut ctx, input).await;
+    gm.phase_context_assembly(&mut ctx, input).await.unwrap();
+    ctx
+}
+
+/// 排空 channel 收集 Delta payload（按到达序）。
+fn drain_deltas(rx: &mut mpsc::Receiver<TurnEvent>) -> Vec<String> {
+    let mut out = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        if let TurnEvent::Delta(d) = ev {
+            out.push(d);
+        }
+    }
+    out
+}
+
+// P1.7-1 OFF==baseline：stream_prose=true（= flag OFF 路径）逐块 Delta 直发，
+// 拼接等于 adjudicator 散文全文。这是 execute.rs OFF 分支（!narrator_split=true）的
+// 结构等价路径——OFF 不调用任何 Narrator，Delta 序列就是 adjudicator ContentDelta 序列。
+#[tokio::test]
+async fn off_path_streams_adjudicator_deltas_byte_equivalent_to_baseline() {
+    let (mut gm, _llm, request, state) = loop_fixture(
+        vec![vec![
+            StreamEvent::ContentDelta("门吱呀打开，".to_string()),
+            StreamEvent::ContentDelta("一股霉味扑面。".to_string()),
+            StreamEvent::Done {
+                finish_reason: Some("stop".to_string()),
+            },
+        ]],
+        ToolRegistry::from_tools(vec![]),
+        1,
+    );
+    let input = GmTurnInput {
+        request: &request,
+        state: &state,
+        user_input: "我推开门",
+        history: &[],
+        recent_transcript: None,
+    };
+    let mut ctx = ready_ctx(&mut gm, &input).await;
+    let (tx, mut rx) = mpsc::channel(64);
+    let signal = gm
+        .run_agent_loop(&mut ctx, &input, &tx, None, /* stream_prose */ true)
+        .await;
+    drop(tx);
+    assert_eq!(signal, crate::execute::AgentSignal::Narration);
+    let deltas = drain_deltas(&mut rx);
+    // 逐块直发、不合并：与 baseline on_delta 字节序列一致。
+    assert_eq!(
+        deltas,
+        vec!["门吱呀打开，".to_string(), "一股霉味扑面。".to_string()]
+    );
+    // 拼接 == ctx.visible_text（adjudicator 全文）== baseline assistant_output。
+    assert_eq!(deltas.concat(), ctx.visible_text);
+    assert_eq!(ctx.visible_text, "门吱呀打开，一股霉味扑面。");
+}
+
+// P1.7-2 ON buffer 模式：stream_prose=false（= flag ON 路径）下 adjudicator ContentDelta
+// **不**经 tx 流出（玩家在 agent loop 期间收不到任何 Delta），但全文累积进 ctx.visible_text
+// 供 Narrator 投影。
+#[tokio::test]
+async fn on_path_buffers_adjudicator_prose_without_streaming() {
+    let (mut gm, _llm, request, state) = loop_fixture(
+        vec![vec![
+            StreamEvent::ContentDelta("GM 机械裁定：".to_string()),
+            StreamEvent::ContentDelta("命中并造成 3 点伤害。".to_string()),
+            StreamEvent::Done {
+                finish_reason: Some("stop".to_string()),
+            },
+        ]],
+        ToolRegistry::from_tools(vec![]),
+        1,
+    );
+    let input = GmTurnInput {
+        request: &request,
+        state: &state,
+        user_input: "我攻击",
+        history: &[],
+        recent_transcript: None,
+    };
+    let mut ctx = ready_ctx(&mut gm, &input).await;
+    let (tx, mut rx) = mpsc::channel(64);
+    let signal = gm
+        .run_agent_loop(&mut ctx, &input, &tx, None, /* stream_prose */ false)
+        .await;
+    drop(tx);
+    assert_eq!(signal, crate::execute::AgentSignal::Narration);
+    let deltas = drain_deltas(&mut rx);
+    assert!(
+        deltas.is_empty(),
+        "buffer 模式：agent loop 期间 adjudicator prose 绝不直发玩家，实得 {deltas:?}"
+    );
+    // 但全文 buffer 进 visible_text 供 Narrator 投影/fail-soft。
+    assert_eq!(ctx.visible_text, "GM 机械裁定：命中并造成 3 点伤害。");
+}
+
+// P1.7-3 Narrator 无 mutation 工具：run_narrator 必须以 **空 tools vec + ToolChoice::None**
+// 调 stream_chat_with_tools（物理上无法 mutate 账本）。用 MockLlm 捕获的 choices/requests 断言。
+#[tokio::test]
+async fn narrator_runs_with_empty_tools_and_tool_choice_none() {
+    let (gm, llm, _request, _state) = loop_fixture(
+        vec![vec![
+            StreamEvent::ContentDelta("你挥剑斩下，".to_string()),
+            StreamEvent::ContentDelta("敌人踉跄后退。".to_string()),
+            StreamEvent::Done {
+                finish_reason: Some("stop".to_string()),
+            },
+        ]],
+        ToolRegistry::from_tools(vec![]),
+        1,
+    );
+    let packet = crate::packet::NarrationPacket {
+        player_input: "我攻击".to_string(),
+        what_happened: vec!["check c1: 成功".to_string()],
+        what_changed: vec!["effect e1 (damage)".to_string()],
+        player_perceivable_facts: vec![],
+        style_profile: "中性".to_string(),
+        forbidden_reveals: vec![],
+    };
+    let (tx, mut rx) = mpsc::channel(64);
+    let out = gm.run_narrator(&packet, &[], &tx, None).await;
+    drop(tx);
+    assert_eq!(
+        out.as_deref(),
+        Some("你挥剑斩下，敌人踉跄后退。"),
+        "Narrator 返回拼接后的玩家散文"
+    );
+    let deltas = drain_deltas(&mut rx);
+    assert_eq!(deltas.concat(), "你挥剑斩下，敌人踉跄后退。");
+    // 结构断言：Narrator 这次 LLM 调用 ToolChoice::None。
+    let choices = llm.choices.lock().unwrap();
+    assert_eq!(choices.len(), 1, "Narrator 恰好一次 LLM 调用");
+    assert!(
+        matches!(choices[0], ToolChoice::None),
+        "Narrator 必须 ToolChoice::None（物理无 mutation 工具），实得 {:?}",
+        choices[0]
+    );
+    // 空 tools schema 经 build_narrator_messages → stream_chat_with_tools(vec![])；
+    // 同时 narrator 请求绝不携带 GM 内部裁定散文（player-safe 投影）。
+    let reqs = llm.requests.lock().unwrap();
+    let req_json = serde_json::to_string(&reqs[0]).unwrap();
+    assert!(
+        !req_json.contains("机械裁定") && !req_json.contains("adjudicator"),
+        "Narrator 请求绝不含 adjudicator 内部散文"
+    );
+}
+
+// P1.7-4 AwaitingPlayerRoll ON==OFF：桌面骰 gate 终态不经 Narrator——run_agent_loop 在
+// stream_prose=false（ON）下命中 awaiting 时，行为与 stream_prose=true（OFF）一致：
+// 发 AwaitingPlayerRoll 事件、返回 AwaitingPlayerRoll 信号。（execute.rs 仅在
+// signal==Narration 时调 Narrator，故 awaiting 路径 ON/OFF 字节等价。）
+#[tokio::test]
+async fn awaiting_player_roll_identical_on_off() {
+    async fn run(stream_prose: bool) -> (crate::execute::AgentSignal, Vec<TurnEvent>) {
+        let gate_tool = ScriptedTool {
+            name: "request_player_roll",
+            record: false,
+            fail_code: None,
+            awaiting: true,
+        };
+        let (mut gm, _llm, request, state) = loop_fixture(
+            vec![vec![
+                StreamEvent::ToolCalls(vec![tool_call("request_player_roll")]),
+                StreamEvent::Done {
+                    finish_reason: Some("tool".to_string()),
+                },
+            ]],
+            ToolRegistry::from_tools(vec![Box::new(gate_tool)]),
+            1,
+        );
+        let input = GmTurnInput {
+            request: &request,
+            state: &state,
+            user_input: "撬锁",
+            history: &[],
+            recent_transcript: None,
+        };
+        let mut ctx = ready_ctx(&mut gm, &input).await;
+        let (tx, mut rx) = mpsc::channel(64);
+        let signal = gm
+            .run_agent_loop(&mut ctx, &input, &tx, None, stream_prose)
+            .await;
+        drop(tx);
+        let mut events = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            events.push(ev);
+        }
+        (signal, events)
+    }
+    let (sig_on, ev_on) = run(false).await; // ON (buffer)
+    let (sig_off, ev_off) = run(true).await; // OFF (direct)
+    assert_eq!(sig_on, crate::execute::AgentSignal::AwaitingPlayerRoll);
+    assert_eq!(sig_off, crate::execute::AgentSignal::AwaitingPlayerRoll);
+    // 两路都恰好发一个 AwaitingPlayerRoll，且 prompt_public 一致；无 Delta 泄漏。
+    let extract = |evs: &[TurnEvent]| -> Vec<(String, String)> {
+        evs.iter()
+            .filter_map(|e| match e {
+                TurnEvent::AwaitingPlayerRoll {
+                    check_id,
+                    prompt_public,
+                } => Some((check_id.clone(), prompt_public.clone())),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(extract(&ev_on), extract(&ev_off));
+    assert_eq!(
+        extract(&ev_on),
+        vec![("check_gate".to_string(), "Roll 1d100 now.".to_string())]
+    );
+}
+
 // R5 Task1b 边界测试：编译级断言 save_turn-only 的 finalize 与 heavy memory 写
 // 各有独立入口（finalize_save_turn = critical 只 save；heavy_finalize_memory =
 // heavy turn 记忆 + audit；phase_finalize_heavy_memory = execute.rs heavy 段桥）。

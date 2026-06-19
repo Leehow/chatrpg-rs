@@ -322,7 +322,11 @@ mod npc_behavior {
         let npcs = vec![("Lars".to_string(), proj)];
         let narration = format!("Lars loudly brings up {TABOO} in front of everyone.");
         let out = npc_behavior_consistency_findings(&narration, &npcs, &[]);
-        assert_eq!(out.len(), 1, "forbidden behavior exhibited → one finding: {out:?}");
+        assert_eq!(
+            out.len(),
+            1,
+            "forbidden behavior exhibited → one finding: {out:?}"
+        );
         assert_eq!(out[0].kind, VerifierFindingKind::InventedEffect);
         assert!(
             out[0].detail.contains("npc_lars"),
@@ -351,8 +355,7 @@ mod npc_behavior {
         );
         assert!(ok.is_empty(), "consistent behavior must pass: {ok:?}");
         // Surfaces the taboo term but does not name the NPC → visibility gate skips it.
-        let unrelated =
-            format!("Somewhere, a rumor about {TABOO} spreads on its own.");
+        let unrelated = format!("Somewhere, a rumor about {TABOO} spreads on its own.");
         assert!(
             npc_behavior_consistency_findings(&unrelated, &npcs, &[]).is_empty(),
             "narration not naming the NPC → skipped"
