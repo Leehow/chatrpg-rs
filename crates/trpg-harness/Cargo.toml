@@ -25,3 +25,6 @@ sqlx.workspace = true
 # `FactSurfaceMarker`) so the harness's deterministic post-output spoiler check is
 # the SAME mechanism the GM's NoSpoiler plugin uses, not a parallel reimplementation.
 trpg-model = { path = "../trpg-model" }
+
+[dev-dependencies]
+trpg-runtime = { path = "../trpg-runtime" }

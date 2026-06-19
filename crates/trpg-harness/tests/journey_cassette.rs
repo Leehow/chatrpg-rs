@@ -38,6 +38,10 @@ fn pass_turn() -> FixtureTurn {
         ]),
         newest_contest_row: Some(resolved_row()),
         player_visible_body: "你成功切断了供电电缆，公寓陷入黑暗。".to_string(),
+        knowledge: None,
+        npc_social: None,
+        memory: None,
+        flight_recorder: None,
     }
 }
 
@@ -149,6 +153,10 @@ fn perception_fixture_turn_is_fail_closed() {
         ]),
         newest_contest_row: Some(provisional_row()),
         player_visible_body: "你屏息观察，门后毫无动静。".to_string(),
+        knowledge: None,
+        npc_social: None,
+        memory: None,
+        flight_recorder: None,
     };
     let ev = fixture_turn_evidence(&turn, &["发现".to_string(), "没有动静".to_string()]);
     assert!(ev.awaiting_binding && !ev.resolved_check_present);
