@@ -76,6 +76,7 @@ mod npc_behavior {
             errata_blocks: &[],
             obligations_block: None,
             npc_guidance_block: npc_guidance,
+            director_packet_block: None,
         };
         let messages = TurnMessages::assemble(&compiled, "GM_SKILL", &[], &tail);
         messages

@@ -21,6 +21,13 @@ pub struct DynamicTailInput<'a> {
     /// NPC 的回合字节不变，缓存稳定）。仅含安全 persona 投影 + reveal/withhold fact id，
     /// 绝无 GM-only secret 文本或玩家未知 fact 散文。
     pub npc_guidance_block: Option<&'a str>,
+    /// P5.6 Director brief packet (`[director_packet]…[/director_packet]`): GM-only decision
+    /// scaffolding rendered from the typed [`trpg_model::DirectorPlan`]. Appended after
+    /// `npc_guidance_block`, before Player Input — same `[gm]` BP3 message, NEVER the
+    /// player-visible narration. None/empty ⇒ no block (flag OFF ⇒ byte-identical baseline).
+    /// Carries only ids / enum tokens / short structural strings (content-safety owned by the
+    /// renderer, since this is a GM-tail string that bypasses the ContextFilter).
+    pub director_packet_block: Option<&'a str>,
 }
 
 /// 回合消息容器：assemble 渲染一次、整回合复用；工具轮只在尾部 push，
@@ -66,6 +73,12 @@ impl TurnMessages {
             dynamic.push_str(block);
         }
         if let Some(block) = tail.npc_guidance_block.filter(|b| !b.trim().is_empty()) {
+            dynamic.push_str("\n\n");
+            dynamic.push_str(block);
+        }
+        // P5.6 Director brief packet — mirrors npc_guidance_block exactly (same [gm] BP3
+        // message, Option::filter empty). flag OFF ⇒ None ⇒ nothing appended ⇒ byte-identical.
+        if let Some(block) = tail.director_packet_block.filter(|b| !b.trim().is_empty()) {
             dynamic.push_str("\n\n");
             dynamic.push_str(block);
         }
@@ -226,6 +239,7 @@ mod tests {
             errata_blocks: &["[gm_errata]fix[/gm_errata]".to_string()],
             obligations_block: Some("[obligations_carryover]debt[/obligations_carryover]"),
             npc_guidance_block: None,
+            director_packet_block: None,
         };
         let messages = TurnMessages::assemble(&compiled(), "SKILL", &history, &tail);
         let raw = messages.to_request_messages();
@@ -276,6 +290,7 @@ mod tests {
             errata_blocks: &[],
             obligations_block: None,
             npc_guidance_block: None,
+            director_packet_block: None,
         };
         let mut empty_pinned = compiled();
         empty_pinned.pinned_text = "  ".to_string();
@@ -311,6 +326,7 @@ mod tests {
             errata_blocks: &[],
             obligations_block: None,
             npc_guidance_block: None,
+            director_packet_block: None,
         };
         let mut messages = TurnMessages::assemble(&compiled(), "SKILL", &[], &tail);
         let before = messages.prefix_byte_hash(4);
@@ -442,6 +458,7 @@ mod cache_stability_tests {
             errata_blocks: &[],
             obligations_block: None,
             npc_guidance_block: None,
+            director_packet_block: None,
         };
         let a = TurnMessages::assemble(&compiled(), "skill", &[], &tail);
         let b = TurnMessages::assemble(&compiled(), "skill", &[], &tail);
@@ -459,6 +476,7 @@ mod cache_stability_tests {
             errata_blocks: &[],
             obligations_block: None,
             npc_guidance_block: None,
+            director_packet_block: None,
         };
         let mut m = TurnMessages::assemble(
             &compiled(),
@@ -490,6 +508,7 @@ mod cache_stability_tests {
             errata_blocks: &[],
             obligations_block: None,
             npc_guidance_block: None,
+            director_packet_block: None,
         };
         let m = TurnMessages::assemble(&compiled(), "skill", &[], &tail);
         assert_eq!(m.prefix_byte_hash(2), m.prefix_byte_hash(2));
@@ -516,6 +535,7 @@ mod cache_stability_tests {
             errata_blocks: &[],
             obligations_block: None,
             npc_guidance_block: None,
+            director_packet_block: None,
         };
         let turn1 = TurnMessages::assemble(&compiled(), "skill", &turn1_history, &tail1);
         let mut turn2_history = turn1_history.clone();
@@ -533,6 +553,7 @@ mod cache_stability_tests {
             errata_blocks: &[],
             obligations_block: None,
             npc_guidance_block: None,
+            director_packet_block: None,
         };
         let turn2 = TurnMessages::assemble(&compiled(), "skill", &turn2_history, &tail2);
         let raw1 = turn1.to_request_messages();
@@ -609,6 +630,7 @@ mod cache_stability_tests {
             errata_blocks: &[],
             obligations_block: None,
             npc_guidance_block: None,
+            director_packet_block: None,
         };
         let skill_none = load_gm_skill_with_mode(&dir, "rs", None).unwrap();
         let skill_combat = load_gm_skill_with_mode(&dir, "rs", Some("combat")).unwrap();
@@ -639,6 +661,7 @@ mod cache_stability_tests {
             errata_blocks: &[],
             obligations_block: None,
             npc_guidance_block: None,
+            director_packet_block: None,
         };
         let turn1 = TurnMessages::assemble(&compiled(), &skill, &[], &tail1);
         let history = vec![
@@ -657,6 +680,7 @@ mod cache_stability_tests {
             errata_blocks: &[],
             obligations_block: None,
             npc_guidance_block: None,
+            director_packet_block: None,
         };
         let turn2 = TurnMessages::assemble(&compiled(), &skill, &history, &tail2);
         assert_eq!(
@@ -665,5 +689,129 @@ mod cache_stability_tests {
             "same mode across turns must keep prefix bytes stable"
         );
         std::fs::remove_dir_all(dir).ok();
+    }
+}
+
+/// P5.6 wiring proof: the Director brief packet enters the GM-only `[gm][BP3]` user message
+/// (ON), is absent + byte-identical to baseline (OFF), and is never copied by the SYSTEM into
+/// the player-visible path. The packet content is produced upstream; here we only prove the
+/// assemble-level wiring (Option::filter mirror of `npc_guidance_block`).
+#[cfg(test)]
+mod director_packet_wiring_tests {
+    use super::*;
+    use serde_json::Value;
+    use trpg_model::{ChatMessage, CompiledContext};
+
+    fn compiled() -> CompiledContext {
+        CompiledContext {
+            prefix_text: "BP1".to_string(),
+            pinned_text: "BP2".to_string(),
+            dynamic_text: "BP3".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn base_tail<'a>(packet: Option<&'a str>) -> DynamicTailInput<'a> {
+        DynamicTailInput {
+            user_input: "go",
+            resolved_gate_facts: &[],
+            errata_blocks: &[],
+            obligations_block: None,
+            npc_guidance_block: None,
+            director_packet_block: packet,
+        }
+    }
+
+    fn last_dynamic(m: &TurnMessages) -> String {
+        m.to_request_messages()
+            .last()
+            .and_then(|x| x.get("content"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    }
+
+    const PACKET: &str = "[director_packet]\nbeat_kind: reveal\n[/director_packet]";
+
+    // ── ON: the serialized ctx.messages CONTAINS the packet signature, inside [gm][BP3]. ──
+    #[test]
+    fn on_packet_reaches_gm_bp3_message() {
+        let history = vec![ChatMessage {
+            role: "assistant".to_string(),
+            content: "old".to_string(),
+        }];
+        let m = TurnMessages::assemble(&compiled(), "SKILL", &history, &base_tail(Some(PACKET)));
+        let raw = serde_json::to_string(&m.to_request_messages()).unwrap();
+        assert!(
+            raw.contains("[director_packet]"),
+            "packet must reach ctx.messages"
+        );
+        assert!(
+            raw.contains("beat_kind: reveal"),
+            "beat_kind signature must appear"
+        );
+        // It lands in the LAST (BP3) user message, after npc_guidance, before Player Input.
+        let dynamic = last_dynamic(&m);
+        assert!(dynamic.contains("[BP3: Dynamic Context]"));
+        assert!(
+            dynamic.find("[director_packet]").unwrap() < dynamic.find("[Player Input]").unwrap(),
+            "packet must precede Player Input within the [gm] BP3 message"
+        );
+    }
+
+    // ── OFF: absent AND byte-identical to the pre-change baseline (None packet). ──
+    #[test]
+    fn off_packet_is_byte_identical_to_baseline() {
+        let history = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "hi".to_string(),
+        }];
+        let baseline = TurnMessages::assemble(&compiled(), "SKILL", &history, &base_tail(None));
+        // An explicit empty packet must also be filtered out (Option::filter empty) → identical.
+        let empty = TurnMessages::assemble(&compiled(), "SKILL", &history, &base_tail(Some("  ")));
+        let baseline_bytes = serde_json::to_vec(&baseline.to_request_messages()).unwrap();
+        let empty_bytes = serde_json::to_vec(&empty.to_request_messages()).unwrap();
+        assert_eq!(
+            baseline_bytes, empty_bytes,
+            "OFF / empty packet must be byte-identical to baseline"
+        );
+        assert!(!last_dynamic(&baseline).contains("[director_packet]"));
+        // Full prefix hash unchanged (mirror P1.7/P4.6 hash compare).
+        assert_eq!(
+            baseline.prefix_byte_hash(usize::MAX),
+            empty.prefix_byte_hash(usize::MAX)
+        );
+    }
+
+    // ── player-invisible: the SYSTEM never copies the packet outside the [gm] message. The
+    //    only user/assistant messages are the [gm] BP2/BP3 envelopes + history; no separate
+    //    player-visible message carries the packet (narrow claim: the system does not copy it,
+    //    not that a model won't paraphrase). ──
+    #[test]
+    fn packet_is_only_in_gm_message_never_a_player_visible_one() {
+        let history = vec![ChatMessage {
+            role: "assistant".to_string(),
+            content: "prior narration".to_string(),
+        }];
+        let m = TurnMessages::assemble(&compiled(), "SKILL", &history, &base_tail(Some(PACKET)));
+        let msgs = m.to_request_messages();
+        let mut carriers = 0;
+        for msg in &msgs {
+            let content = msg.get("content").and_then(Value::as_str).unwrap_or("");
+            if content.contains("[director_packet]") {
+                carriers += 1;
+                // The sole carrier is the GM BP3 user message (a `[gm]`-wrapped envelope).
+                assert!(
+                    content.contains("[gm]") && content.contains("[BP3: Dynamic Context]"),
+                    "packet appeared outside the [gm] BP3 message"
+                );
+            }
+        }
+        assert_eq!(
+            carriers, 1,
+            "exactly one (GM-only) message may carry the packet"
+        );
+        // The history (player-visible prior narration) is never mutated to carry it.
+        assert!(!history[0].content.contains("[director_packet]"));
     }
 }

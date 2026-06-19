@@ -24,7 +24,9 @@
 //! secret prose or fact bodies. Reveals are by `fact_id`, not fact text.
 
 pub mod fallback;
+pub mod render;
 pub mod select;
 
 pub use fallback::{fallback_beat_plan, pick_spotlight_target};
+pub use render::render_director_packet_block;
 pub use select::build_director_brief_packet;

@@ -214,6 +214,11 @@ pub(crate) struct TurnContext {
     // —— T4 agent_loop 产物（run_agent_loop 填，尾部 phase 读）——
     visible_text: String,
     awaiting_gate: Option<AwaitingPlayerRoll>,
+    // P5.6 Director brief packet（`build_npc_behavior_guidance` 在 World 候选池仍活时填，
+    // `phase_context_assembly` 读进 DynamicTailInput.director_packet_block）。flag
+    // `TRPG_DIRECTOR_PACKET` 默认 OFF ⇒ 恒 None ⇒ 不写块 ⇒ 字节等价基线。仅入 [gm] BP3，
+    // 绝不入玩家可见 narration。
+    director_packet_block: Option<String>,
 }
 impl TurnContext {
     pub(crate) fn new() -> Self {
@@ -239,6 +244,7 @@ impl TurnContext {
             presentation_gate: crate::presentation_gate::PresentationGate::Allow,
             visible_text: String::new(),
             awaiting_gate: None,
+            director_packet_block: None,
         }
     }
 
@@ -1363,12 +1369,16 @@ impl GmLoop {
         // 折进 ctx.resolved_gate_facts（→ dynamic tail / player_perceivable_facts，load-bearing）
         // 并向 Flight Recorder 记一条可观测 trace —— OFF ⇒ 全 no-op ⇒ 字节不变。
         let npc_guidance = self.build_npc_behavior_guidance(ctx, input).await;
+        // P5.6: the Director packet was stashed on ctx by build_npc_behavior_guidance (flag OFF
+        // ⇒ None ⇒ no block ⇒ byte-identical). Mirror npc_guidance: pass as Option<&str>.
+        let director_packet = ctx.director_packet_block.clone();
         let tail = DynamicTailInput {
             user_input: input.user_input,
             resolved_gate_facts: &ctx.resolved_gate_facts,
             errata_blocks: &ctx.errata_blocks,
             obligations_block: ctx.obligations_block.as_deref(),
             npc_guidance_block: npc_guidance.as_deref(),
+            director_packet_block: director_packet.as_deref(),
         };
         ctx.messages = Some(TurnMessages::assemble(
             &ctx.compiled,
@@ -1625,12 +1635,33 @@ impl GmLoop {
                 ctx.resolved_gate_facts.push(o.to_gate_fact());
                 // (b) observable: the resolution is recorded in the flight recorder. Summary
                 //     carries only npc id + verdict band (no secret prose).
-                ctx.plugin_contributions.push(npc_action_resolved_trace(&format!(
-                    "{}: blocked={} success={:?} tier={:?} check_id={}",
-                    o.npc_id, o.blocked, o.success, o.success_tier, o.check_id
-                )));
+                ctx.plugin_contributions
+                    .push(npc_action_resolved_trace(&format!(
+                        "{}: blocked={} success={:?} tier={:?} check_id={}",
+                        o.npc_id, o.blocked, o.success, o.success_tier, o.check_id
+                    )));
             }
         }
+        // P5.6: build the GM-only Director brief packet from the ALREADY-LOADED World
+        // candidate pool (`reaction_set.reactions`) — no NPC re-load. Flag `TRPG_DIRECTOR_PACKET`
+        // default OFF ⇒ `prepare_director_brief` short-circuits to None ⇒ no block ⇒
+        // byte-identical baseline. ON ⇒ the rendered `[director_packet]` string is stashed on
+        // ctx and folded into DynamicTailInput.director_packet_block by phase_context_assembly
+        // (GM-only BP3 tail — NEVER the player-visible narration). gm_truth / player_known are
+        // loaded inside `prepare_director_brief` as SEPARATE Option reads (codex fold #4).
+        let acting_actor_id = input
+            .request
+            .viewer
+            .actor_id
+            .clone()
+            .unwrap_or_else(|| "pc.current".to_string());
+        ctx.director_packet_block = trpg_runtime::prepare_director_brief(
+            &self.engine.db,
+            session_id,
+            &reaction_set.reactions,
+            &acting_actor_id,
+        )
+        .await;
         // The GM-context guidance bytes render from the retained (lossless) plans via the
         // SAME `to_guidance_block` method as before — provably byte-identical (locked by
         // `render_is_byte_identical_to_legacy_join`).
@@ -2911,8 +2942,8 @@ mod projection_verifier_tests {
             (&npc_ids, text, &terms, true), // 三者全非空 → 载入
             (&[], text, &terms, false),     // 无活动 NPC → 跳过
             (&npc_ids, "", &terms, false),  // 空念白 → 跳过
-            (&npc_ids, text, &[], false),   // 无 secret_terms → 跳过（旧路径早返，故行为一致性也被门掉）
-            (&[], "", &[], false),          // 全空 → 跳过
+            (&npc_ids, text, &[], false), // 无 secret_terms → 跳过（旧路径早返，故行为一致性也被门掉）
+            (&[], "", &[], false),        // 全空 → 跳过
         ];
         for (ids, vis, st, expected) in cases {
             let load = should_load_npc_views(ids, vis, st);

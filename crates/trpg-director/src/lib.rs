@@ -9,7 +9,10 @@ mod clock;
 mod spotlight;
 mod story;
 pub use spotlight::SpotlightParticipant;
-pub use story::{build_director_brief_packet, fallback_beat_plan, pick_spotlight_target};
+pub use story::{
+    build_director_brief_packet, fallback_beat_plan, pick_spotlight_target,
+    render_director_packet_block,
+};
 
 #[cfg(test)]
 mod dehardcode_tests;
@@ -64,6 +67,20 @@ fn parse_vectors(names: &[String]) -> Vec<ActionVector> {
         .iter()
         .filter_map(|n| serde_json::from_value::<ActionVector>(json!(n)).ok())
         .collect()
+}
+
+/// P5.6 brief-packet wiring gate — a DEDICATED default-OFF flag, deliberately NOT
+/// `ActionableSituationDirector::from_env_or_default()` (whose `TRPG_ACTIONABLE_DIRECTOR_ENABLE_V13`
+/// defaults to **true → OnDemand**, LIVING_PLAN §1). When `TRPG_DIRECTOR_PACKET` is unset/false
+/// this returns `DirectorMode::Disabled` ⇒ no packet built ⇒ `director_packet_block: None` ⇒
+/// assemble appends nothing ⇒ byte-identical baseline. ON ⇒ `OnDemand` (the packet is built and
+/// rendered into the GM-only BP3 tail; it never reaches the player-visible path).
+pub fn director_packet_mode_from_env() -> DirectorMode {
+    if env_bool("TRPG_DIRECTOR_PACKET", false) {
+        DirectorMode::OnDemand
+    } else {
+        DirectorMode::Disabled
+    }
 }
 
 impl ActionableSituationDirector {
@@ -861,4 +878,26 @@ fn env_usize(key: &str, default: usize) -> usize {
 }
 fn id(prefix: &str) -> String {
     format!("{}_{}", prefix, Uuid::new_v4().simple())
+}
+
+#[cfg(test)]
+mod packet_flag_tests {
+    use super::*;
+
+    /// P5.6 flag contract: `director_packet_mode_from_env` is default-OFF (Disabled) and is
+    /// NOT wired to the `from_env_or_default` enable flag (which defaults true). A single test
+    /// owns the env mutation to avoid cross-test races on this process-global var.
+    #[test]
+    fn director_packet_flag_defaults_off_and_toggles() {
+        // Default (unset) ⇒ Disabled.
+        std::env::remove_var("TRPG_DIRECTOR_PACKET");
+        assert_eq!(director_packet_mode_from_env(), DirectorMode::Disabled);
+        // Explicit "1" ⇒ OnDemand.
+        std::env::set_var("TRPG_DIRECTOR_PACKET", "1");
+        assert_eq!(director_packet_mode_from_env(), DirectorMode::OnDemand);
+        // Explicit "0" ⇒ Disabled again.
+        std::env::set_var("TRPG_DIRECTOR_PACKET", "0");
+        assert_eq!(director_packet_mode_from_env(), DirectorMode::Disabled);
+        std::env::remove_var("TRPG_DIRECTOR_PACKET");
+    }
 }
