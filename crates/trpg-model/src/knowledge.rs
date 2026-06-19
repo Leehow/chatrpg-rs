@@ -1,15 +1,17 @@
 //! KnowledgeEdge 账本（v1）：把「事实身份/真相」与「谁知道/怀疑/相信/误信它」分离。
-//! durable 持久化 holder 当前为 gm / player_party / system / npc（见 [`KnowledgeHolderKind::is_durable_persistable`]）；
-//! TC-KNOW-04 已打开具体 NPC 的 durable 边（actor-id 契约见 TC-KNOW-00）；pc / faction holder 的
-//! durable 边仍 gated（留待后续任务），写入对其 fail-closed。
+//! durable 持久化 holder 现为全部六类 gm / player_party / system / npc / pc / faction
+//! （见 [`KnowledgeHolderKind::is_durable_persistable`]）：TC-KNOW-04 打开了具体 NPC，本任务
+//! 在 actor-identity 契约（TC-KNOW-00）落地后补齐了 pc / faction 的 durable 边。
+//! 带身份 holder（npc / pc / faction）写库前必经稳定 actor id 校验，非法 id 仍 fail-closed
+//! （集合 holder gm / player_party / system 为 id-less 运行时身份）。
 //! revealed-facts 兼容投影 = 本表 (player_party, knows_true) 子集；
 //! 与 domain_events.PlayerLearnedFact 写穿对齐（见 trpg-db record_revealed_fact）。
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// 知识 holder 种类（v1）。durable 持久化为 gm / player_party / system / npc；
-/// pc / faction 为模型层可表达态，但 durable knowledge_edges 写入对其 fail-closed
-/// （schema CHECK 为 gm/player_party/system/npc；NPC durable 边见 TC-KNOW-04，pc/faction 仍 gated）。
+/// 知识 holder 种类（v1）。durable 持久化为全部六类 gm / player_party / system / npc / pc / faction
+/// （schema CHECK 见 migration 0037；带身份 holder npc/pc/faction 写库前还须经 actor-identity 契约
+/// 校验稳定 id —— kind 通过 ≠ id 合法，非法 id fail-closed）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KnowledgeHolderKind {
@@ -19,11 +21,11 @@ pub enum KnowledgeHolderKind {
     PlayerParty,
     /// 运行时/系统 holder（durable）：runtime 拥有的非角色知识（如系统裁决记录）。
     System,
-    /// 具体玩家角色（模型层；durable 写入 gated 到后续 actor-id 任务）。
+    /// 具体玩家角色（durable）：须挂稳定 actor id（见 [`KnowledgeHolder::player_character_from_actor_id`]）。
     Pc,
     /// 具体 NPC（durable）：TC-KNOW-04 已打开持久化，须挂稳定 actor id（见 [`KnowledgeHolder::npc_from_actor_id`]）。
     Npc,
-    /// 阵营 / 派系（模型层；durable 写入 gated 到后续任务）。
+    /// 阵营 / 派系（durable）：须挂稳定 id（见 [`KnowledgeHolder::faction_from_id`]）。
     Faction,
 }
 
@@ -54,11 +56,13 @@ impl KnowledgeHolderKind {
     }
 
     /// 当前是否允许把该 holder kind 的边写入 durable knowledge_edges。
-    /// gm / player_party / system / npc 为真——pc / faction 的 durable 持久化仍 gated。
+    /// 全部六类 gm / player_party / system / npc / pc / faction 均为真（pc/faction 在 actor-identity
+    /// 契约落地后由本任务补齐，migration 0037 widen CHECK）。
     /// system 可 durable 的理由：它是 runtime 拥有的稳定身份（非 LLM 即兴文本）。
-    /// npc（TC-KNOW-04）可 durable 的前提：写库前必经 actor-identity 契约
-    /// （[`KnowledgeHolder::npc_from_actor_id`]）解析出稳定 actor id —— 仅 kind 通过门
-    /// 不代表 holder_id 合法，未解析/即兴 NPC 串仍 fail-closed（见 db upsert_knowledge_edge）。
+    /// 带身份 holder（npc / pc / faction）可 durable 的前提：写库前必经 actor-identity 契约
+    /// （[`KnowledgeHolder::npc_from_actor_id`] / [`KnowledgeHolder::player_character_from_actor_id`]
+    /// / [`KnowledgeHolder::faction_from_id`]）解析出稳定 id —— 仅 kind 通过门不代表 holder_id 合法，
+    /// 未解析/即兴/展示名串仍 fail-closed（见 db upsert_knowledge_edge）。
     pub fn is_durable_persistable(&self) -> bool {
         matches!(
             self,
@@ -66,6 +70,8 @@ impl KnowledgeHolderKind {
                 | KnowledgeHolderKind::PlayerParty
                 | KnowledgeHolderKind::System
                 | KnowledgeHolderKind::Npc
+                | KnowledgeHolderKind::Pc
+                | KnowledgeHolderKind::Faction
         )
     }
 }
@@ -185,14 +191,15 @@ pub struct KnowledgeEdge {
 // -----------------------------------------------------------------------------
 // TC-KNOW-00 Actor Identity Contract（稳定知识 holder 身份门）
 //
-// durable NPC（及未来 pc/faction）knowledge holder 必须挂在 source-backed / runtime-owned
+// durable npc / pc / faction knowledge holder 必须挂在 source-backed / runtime-owned
 // 的稳定 actor id 上，绝不能用展示名、念白文本、对抗方标签或 LLM 即兴串冒充。本契约提供：
 //   1) 稳定 holder 身份类型 `KnowledgeHolder`（gm / player_party / pc:<id> / npc:<id> /
 //      faction:<id>），扩展走「新增 variant」而非让文本凭空造 holder —— fail-closed 扩展。
-//   2) NPC（及 pc/faction）actor id 的保守校验，不安全输入返回 typed `UnresolvedHolder`。
+//   2) npc / pc / faction actor id 的保守校验，不安全输入返回 typed `UnresolvedHolder`。
 //   3) 从 source/runtime 的 `ActorRef` 解析到稳定 holder 的 resolver；解析不出即 Unresolved。
 // gm / player_party 行为保持兼容（见 `KnowledgeHolderKind` 与 db 写穿路径不变）。
-// durable knowledge_edges(holder_kind='npc') 持久化仍 gated 到 TC-KNOW-04；本契约只定义身份。
+// durable knowledge_edges 现已对全部六类 holder 开放（npc=TC-KNOW-04，pc/faction 本任务，
+// migration 0037）；本契约负责身份门，db upsert 在写库前据此对非法 id fail-closed。
 // -----------------------------------------------------------------------------
 
 /// holder 身份解析失败的归因（typed，绝不退化成「拿原串当 holder」）。
@@ -314,11 +321,11 @@ pub enum KnowledgeHolder {
     Gm,
     /// 玩家方集合 holder（durable 已支持；与具体 PC 区分）。
     PlayerParty,
-    /// 具体玩家角色（稳定 actor id）。
+    /// 具体玩家角色（稳定 actor id）。durable 持久化本任务已打开（migration 0037）。
     PlayerCharacter(String),
     /// 具体 NPC（稳定 actor id）。durable 持久化 TC-KNOW-04 已打开。
     Npc(String),
-    /// 阵营 / 派系（稳定 id）。durable 持久化仍 gated（留待后续任务）。
+    /// 阵营 / 派系（稳定 id）。durable 持久化本任务已打开（migration 0037）。
     Faction(String),
 }
 
@@ -354,13 +361,19 @@ impl KnowledgeHolder {
     }
 
     /// durable knowledge_edges 是否已允许该 holder 持久化。
-    /// gm / player_party / npc 为真——TC-KNOW-04 已打开 NPC 持久化；faction / pc 仍 gated。
+    /// 全部五个 variant（gm / player_party / npc / pc / faction）均为真：TC-KNOW-04 打开 NPC，
+    /// 本任务在 actor-identity 契约落地后补齐 pc / faction（migration 0037）。
     /// 持久化逻辑据此判断是否写 knowledge_edges；本契约自身不写任何边。
-    /// 注意：NPC 的 durable 写入还要求 holder_id 经 actor-identity 校验通过（kind 通过 ≠ id 合法）。
+    /// 注意：带身份 holder（npc / pc / faction）的 durable 写入还要求 holder_id 经 actor-identity
+    /// 校验通过（kind 通过 ≠ id 合法）；非法 id 在 db upsert 处 fail-closed。
     pub fn is_durable_today(&self) -> bool {
         matches!(
             self,
-            KnowledgeHolder::Gm | KnowledgeHolder::PlayerParty | KnowledgeHolder::Npc(_)
+            KnowledgeHolder::Gm
+                | KnowledgeHolder::PlayerParty
+                | KnowledgeHolder::Npc(_)
+                | KnowledgeHolder::PlayerCharacter(_)
+                | KnowledgeHolder::Faction(_)
         )
     }
 
@@ -425,8 +438,8 @@ mod tests {
         );
     }
 
-    /// v1 holder kind：gm/player_party/system/npc durable（TC-KNOW-04 打开 npc），
-    /// pc/faction 仍 fail-closed；token round-trip 稳定，序列化与 token 对齐。
+    /// v1 holder kind：全部六类 gm/player_party/system/npc/pc/faction 均 durable
+    /// （TC-KNOW-04 打开 npc，本任务补齐 pc/faction）；token round-trip 稳定，序列化与 token 对齐。
     #[test]
     fn holder_kind_durability_and_tokens() {
         for (k, tok, durable) in [
@@ -434,8 +447,8 @@ mod tests {
             (KnowledgeHolderKind::PlayerParty, "player_party", true),
             (KnowledgeHolderKind::System, "system", true),
             (KnowledgeHolderKind::Npc, "npc", true),
-            (KnowledgeHolderKind::Pc, "pc", false),
-            (KnowledgeHolderKind::Faction, "faction", false),
+            (KnowledgeHolderKind::Pc, "pc", true),
+            (KnowledgeHolderKind::Faction, "faction", true),
         ] {
             assert_eq!(k.as_token(), tok);
             assert_eq!(KnowledgeHolderKind::from_token(tok), Some(k));
@@ -522,10 +535,10 @@ mod tests {
         assert_eq!(holder.kind_token(), "npc");
         assert_eq!(holder.holder_id(), Some("npc_alice"));
         assert_eq!(holder.token(), "npc:npc_alice");
-        // TC-KNOW-04：稳定 NPC 身份现已可 durable 持久化（pc/faction 仍 gated）。
+        // TC-KNOW-04 打开 NPC，本任务补齐 pc/faction：稳定身份 holder 现均可 durable 持久化。
         assert!(holder.is_durable_today());
-        assert!(!KnowledgeHolder::Faction("f_guild".into()).is_durable_today());
-        assert!(!KnowledgeHolder::PlayerCharacter("pc_hero".into()).is_durable_today());
+        assert!(KnowledgeHolder::Faction("f_guild".into()).is_durable_today());
+        assert!(KnowledgeHolder::PlayerCharacter("pc_hero".into()).is_durable_today());
     }
 
     /// 仅有展示名、无稳定 actor id 的 NPC 输入必须 fail-closed，绝不拿展示名当 holder。
@@ -603,6 +616,81 @@ mod tests {
         let evil = KnowledgeHolder::npc_from_actor_id("player_party").unwrap();
         assert_eq!(evil.token(), "npc:player_party");
         assert_ne!(evil.token(), party.token());
+    }
+
+    /// 本任务：稳定 pc / faction 身份现可 durable 持久化，token 带各自前缀且与 npc/gm/party 互异。
+    #[test]
+    fn pc_and_faction_holders_are_durable_with_stable_ids() {
+        let pc = KnowledgeHolder::player_character_from_actor_id("  pc_hero  ")
+            .expect("稳定 pc id 必须可解析");
+        assert_eq!(pc, KnowledgeHolder::PlayerCharacter("pc_hero".to_string()));
+        assert_eq!(pc.kind_token(), "pc");
+        assert_eq!(pc.holder_id(), Some("pc_hero"));
+        assert_eq!(pc.token(), "pc:pc_hero");
+        assert!(pc.is_durable_today(), "稳定 pc holder 现可 durable");
+
+        let faction =
+            KnowledgeHolder::faction_from_id("guild_thieves").expect("稳定 faction id 必须可解析");
+        assert_eq!(
+            faction,
+            KnowledgeHolder::Faction("guild_thieves".to_string())
+        );
+        assert_eq!(faction.kind_token(), "faction");
+        assert_eq!(faction.token(), "faction:guild_thieves");
+        assert!(
+            faction.is_durable_today(),
+            "稳定 faction holder 现可 durable"
+        );
+
+        // 带前缀 token 绝不与 npc / gm / player_party 撞，即便 id 字面相同。
+        let npc = KnowledgeHolder::npc_from_actor_id("pc_hero").unwrap();
+        assert_ne!(pc.token(), npc.token());
+        assert_ne!(pc.token(), KnowledgeHolder::Gm.token());
+        assert_ne!(faction.token(), KnowledgeHolder::PlayerParty.token());
+    }
+
+    /// fail-closed：pc / faction 的非法 id（空 / 占位 / 展示名 / 标签形态）必须被拒，
+    /// 返回 typed Unresolved 而非把原串当 holder——kind 可 durable ≠ id 合法。
+    #[test]
+    fn pc_and_faction_reject_unstable_ids() {
+        for bad in [
+            "",
+            "   ",
+            "unknown",
+            "n/a",
+            "The Hero",
+            "Thieves Guild",
+            "pc:hero",
+            "faction#3",
+        ] {
+            assert!(
+                KnowledgeHolder::player_character_from_actor_id(bad).is_err(),
+                "非法 pc id 必须 fail-closed: {bad:?}"
+            );
+            assert!(
+                KnowledgeHolder::faction_from_id(bad).is_err(),
+                "非法 faction id 必须 fail-closed: {bad:?}"
+            );
+        }
+        // 归因 typed：空串 Empty、占位 Placeholder、展示名形态 NotIdShaped。
+        assert_eq!(
+            KnowledgeHolder::player_character_from_actor_id("")
+                .unwrap_err()
+                .reason,
+            UnresolvedReason::Empty
+        );
+        assert_eq!(
+            KnowledgeHolder::faction_from_id("unknown")
+                .unwrap_err()
+                .reason,
+            UnresolvedReason::Placeholder
+        );
+        assert_eq!(
+            KnowledgeHolder::faction_from_id("Thieves Guild")
+                .unwrap_err()
+                .reason,
+            UnresolvedReason::NotIdShaped
+        );
     }
 
     /// gm / player_party 行为不被 actor identity 契约改变：token / holder_id / durable 语义不变，

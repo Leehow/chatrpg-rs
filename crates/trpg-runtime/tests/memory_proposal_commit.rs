@@ -217,6 +217,133 @@ mod memory_proposal {
     }
 
     #[tokio::test]
+    async fn commit_pc_faction_knowledge_update_writes_durable_edge() {
+        // pc / faction holders are durable (this task): a valid knowledge_update commits a
+        // durable knowledge edge under that holder, readable back by holder projection and
+        // never leaked to player_party.
+        let session = format!("sess_mpc_{}", uuid::Uuid::new_v4().simple());
+        let Some((db, _guard)) = setup(&session).await else {
+            return;
+        };
+        let ctx = CommitContext {
+            session_id: &session,
+            turn_id: "turn1",
+        };
+
+        let proposals = try_proposals_from_json(&json!({"proposals": [
+            {
+                "proposal_kind": "knowledge_update",
+                "fact_id": "f_pc",
+                "holder": {"holder_kind": "pc", "holder_id": "pc_hero"},
+                "knowledge_state": "knows_true",
+                "source_event_ids": ["ev_pc"]
+            },
+            {
+                "proposal_kind": "knowledge_update",
+                "fact_id": "f_faction",
+                "holder": {"holder_kind": "faction", "holder_id": "guild_thieves"},
+                "knowledge_state": "suspects",
+                "source_event_ids": ["ev_fac"]
+            }
+        ]}))
+        .expect("valid pc/faction knowledge updates");
+
+        let report = review_and_commit_proposals(&db, &ctx, &proposals)
+            .await
+            .unwrap();
+        assert_eq!(report.committed(), 2, "pc + faction edges committed");
+        assert_eq!(report.rejected(), 0);
+
+        // pc knows_true → durable edge readable by holder projection.
+        assert_eq!(
+            db.list_holder_known_fact_ids(&session, "pc", "pc_hero")
+                .await
+                .unwrap(),
+            vec!["f_pc".to_string()],
+            "durable pc knows_true edge written and projected"
+        );
+        // faction suspects is a belief, not known truth → NOT in its known projection,
+        // but the durable edge row exists.
+        assert!(
+            db.list_holder_known_fact_ids(&session, "faction", "guild_thieves")
+                .await
+                .unwrap()
+                .is_empty(),
+            "faction suspects is belief, not known truth"
+        );
+        let faction_rows: i64 = sqlx::query_scalar(
+            "select count(*) from knowledge_edges where session_id=$1 and holder_kind='faction' \
+             and holder_id='guild_thieves' and fact_id='f_faction' and knowledge_state='suspects'",
+        )
+        .bind(&session)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(faction_rows, 1, "durable faction suspects edge written");
+
+        // Neither leaks into player_party knowledge.
+        let player_known = db
+            .list_holder_known_fact_ids(&session, "player_party", "")
+            .await
+            .unwrap();
+        assert!(
+            !player_known.contains(&"f_pc".to_string())
+                && !player_known.contains(&"f_faction".to_string()),
+            "pc/faction edges never leak to player_party"
+        );
+
+        purge(&db, &session).await;
+    }
+
+    #[tokio::test]
+    async fn commit_pc_faction_unstable_id_writes_nothing() {
+        // An unstable pc/faction id fails the model gate → batch aborts before any write,
+        // proving fail-closed at the live commit boundary (display-name shaped id).
+        let session = format!("sess_mpc_{}", uuid::Uuid::new_v4().simple());
+        let Some((db, _guard)) = setup(&session).await else {
+            return;
+        };
+        let ctx = CommitContext {
+            session_id: &session,
+            turn_id: "turn1",
+        };
+
+        // Build directly so the unstable entry reaches the pipeline's pre-validation gate.
+        let raw = json!({"proposals": [{
+            "proposal_kind": "knowledge_update",
+            "fact_id": "f_bad",
+            "holder": {"holder_kind": "faction", "holder_id": "Thieves Guild"},
+            "knowledge_state": "knows_true",
+            "source_event_ids": ["ev_bad"]
+        }]});
+        let proposals: Vec<trpg_model::MemoryExtractionProposal> = raw["proposals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| serde_json::from_value(v.clone()).unwrap())
+            .collect();
+
+        let report = review_and_commit_proposals(&db, &ctx, &proposals)
+            .await
+            .unwrap();
+        assert!(report.committed_nothing(), "unstable id commits nothing");
+        assert_eq!(report.rejected(), 1);
+
+        let count: i64 =
+            sqlx::query_scalar("select count(*) from knowledge_edges where session_id=$1")
+                .bind(&session)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            count, 0,
+            "no durable edge written for an unstable holder id"
+        );
+
+        purge(&db, &session).await;
+    }
+
+    #[tokio::test]
     async fn commit_relationship_delta_reuses_evidence_gate() {
         let session = format!("sess_mpc_{}", uuid::Uuid::new_v4().simple());
         let Some((db, _guard)) = setup(&session).await else {

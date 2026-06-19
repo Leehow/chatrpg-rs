@@ -1,15 +1,16 @@
 //! KnowledgeEdge v1 live 验收：把「事实身份/真相」与「谁知道/相信/误信它」分离。
 //! 覆盖必需验收测试：
-//!   - knowledge_edge_roundtrip            通用 durable upsert 往返（gm/system + v1 字段；pc/faction fail-closed）
+//!   - knowledge_edge_roundtrip            通用 durable upsert 往返（gm/system + v1 字段）
 //!   - player_projection_hides_unknown_fact 玩家投影只见 knows_true，未知/信念态隐藏
 //!   - npc_projection_is_holder_specific    durable NPC 投影按 holder 隔离（TC-KNOW-04）
 //!   - npc_durable_upsert_identity_gated    通用 upsert npc：稳定 id 成功、非法 id fail-closed 无行
+//!   - pc_faction_durable_upsert_identity_gated  通用 upsert pc/faction：稳定 id 成功、非法 id fail-closed 无行
 //!   - npc_belief_not_world_truth_or_known  NPC 信念不进其已知真相，更不是 GM 世界真相
 //!   - npc_learned_fact_replay_is_idempotent 重放同一 NpcLearnedFact 不重复边/事件
 //!   - false_belief_not_world_truth         false belief 是信念，绝不进 GM 世界真相视图
 //!   - player_reveal_updates_player_party_only  reveal 只更新 player_party，不碰 gm/npc
-//! TC-KNOW-04 已打开 durable NPC knowledge_edges（holder_kind='npc'）：NpcLearnedFact 写穿 durable 边
-//! 且保留事件账本；pc/faction durable holder 仍 gated。
+//! TC-KNOW-04 已打开 durable NPC knowledge_edges（holder_kind='npc'）；本任务在 actor-identity
+//! 契约落地后补齐 pc/faction durable holder（migration 0037）——带身份 holder 写库前均经稳定 id 校验。
 //! Run: DATABASE_URL=postgres://chatrpg:chatrpg@127.0.0.1:54347/chatrpg \
 //!      cargo test -p trpg-db --test live_knowledge_edges -- --nocapture
 //! 无 DATABASE_URL 时 SKIP（fail-closed，不卡 CI）。
@@ -109,7 +110,7 @@ async fn knowledge_projection_returns_player_party_knows_true_only() {
 
 /// 验收：通用 durable upsert 往返。gm / system holder 边落库后能按 holder 投影读回，
 /// v1 字段（confidence / learned_at_turn_id / disclosure_policy）持久化，重 upsert 幂等。
-/// 仍 gated 的 holder（pc / faction）fail-closed 拒绝、绝不写库（npc 已开，单测见下）。
+/// 未知 holder token fail-closed 拒绝、绝不写库（npc/pc/faction 身份门单测见下）。
 #[tokio::test]
 async fn knowledge_edge_roundtrip() {
     let Some(db) = connect_or_skip().await else {
@@ -197,25 +198,102 @@ async fn knowledge_edge_roundtrip() {
     .unwrap();
     assert_eq!(cnt, 1, "重 upsert 幂等：仍一条 gm 边");
 
-    // fail-closed：仍 gated 的 holder（pc / faction）被拒，且不写任何边。
-    for kind in ["pc", "faction"] {
-        assert!(
-            db.upsert_knowledge_edge(KnowledgeEdgeInput {
-                session_id: &session,
-                holder_kind: kind,
-                holder_id: "id_x",
-                fact_id: "fact_x",
-                knowledge_state: "knows_true",
-                confidence: None,
-                learned_at_turn_id: None,
-                disclosure_policy: None,
-                source_event_id: None,
-                reason: None,
-            })
-            .await
-            .is_err(),
-            "durable {kind} holder 仍 gated：必须 fail-closed 拒绝"
+    // fail-closed：未知 holder token 被拒，且不写任何边（pc/faction 已开，身份门见专测）。
+    assert!(
+        db.upsert_knowledge_edge(KnowledgeEdgeInput {
+            session_id: &session,
+            holder_kind: "dragon",
+            holder_id: "",
+            fact_id: "fact_x",
+            knowledge_state: "knows_true",
+            confidence: None,
+            learned_at_turn_id: None,
+            disclosure_policy: None,
+            source_event_id: None,
+            reason: None,
+        })
+        .await
+        .is_err(),
+        "未知 holder token 必须 fail-closed 拒绝"
+    );
+    let cnt: i64 = sqlx::query_scalar(
+        "select count(*) from knowledge_edges where session_id=$1 and holder_kind='dragon'",
+    )
+    .bind(&session)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(cnt, 0, "fail-closed：未知 holder token 边一条都没写");
+
+    purge(&db, &session).await;
+}
+
+/// 验收：通用 upsert_knowledge_edge 的 pc / faction 身份门（本任务 + TC-KNOW-00）。
+/// 稳定 pc / faction id（带首尾空白）→ 契约 trim 规范化后写入成功且按 holder 投影读回；
+/// 非法 id（空 / 占位 / 展示名形态）→ fail-closed，绝不写任何 pc / faction 边。
+#[tokio::test]
+async fn pc_faction_durable_upsert_identity_gated() {
+    let Some(db) = connect_or_skip().await else {
+        return;
+    };
+    let session = format!("sess_pcfac_{}", uuid::Uuid::new_v4().simple());
+    purge(&db, &session).await;
+
+    // 稳定 id（带首尾空白）→ 契约 trim 规范化后成功落库，按 holder 投影读回。
+    for (kind, raw_id, norm_id, fact) in [
+        ("pc", "  pc_hero  ", "pc_hero", "fact_pc_secret"),
+        (
+            "faction",
+            " guild_thieves ",
+            "guild_thieves",
+            "fact_faction_plan",
+        ),
+    ] {
+        db.upsert_knowledge_edge(KnowledgeEdgeInput {
+            session_id: &session,
+            holder_kind: kind,
+            holder_id: raw_id,
+            fact_id: fact,
+            knowledge_state: "knows_true",
+            confidence: Some(0.7),
+            learned_at_turn_id: Some("t1"),
+            disclosure_policy: None,
+            source_event_id: None,
+            reason: Some("本任务打开"),
+        })
+        .await
+        .unwrap_or_else(|e| panic!("稳定 {kind} id 必须成功: {e}"));
+        assert_eq!(
+            db.list_holder_known_fact_ids(&session, kind, norm_id)
+                .await
+                .unwrap(),
+            vec![fact.to_string()],
+            "规范化 {kind} id（{norm_id}）按 holder 投影读回"
         );
+    }
+
+    // 非法 pc / faction id 全部 fail-closed，且不写任何边。
+    for kind in ["pc", "faction"] {
+        for bad in ["", "  ", "unknown", "n/a", "The Hero", "Thieves Guild"] {
+            assert!(
+                db.upsert_knowledge_edge(KnowledgeEdgeInput {
+                    session_id: &session,
+                    holder_kind: kind,
+                    holder_id: bad,
+                    fact_id: "fact_x",
+                    knowledge_state: "knows_true",
+                    confidence: None,
+                    learned_at_turn_id: None,
+                    disclosure_policy: None,
+                    source_event_id: None,
+                    reason: None,
+                })
+                .await
+                .is_err(),
+                "非法 {kind} id 必须 fail-closed: {bad:?}"
+            );
+        }
+        // 只应有先前那一条合法边（非法写入一条都没落）。
         let cnt: i64 = sqlx::query_scalar(
             "select count(*) from knowledge_edges where session_id=$1 and holder_kind=$2",
         )
@@ -224,7 +302,7 @@ async fn knowledge_edge_roundtrip() {
         .fetch_one(&db.pool)
         .await
         .unwrap();
-        assert_eq!(cnt, 0, "fail-closed：{kind} 边一条都没写");
+        assert_eq!(cnt, 1, "非法 {kind} id 不写边，仅合法一条");
     }
 
     purge(&db, &session).await;
