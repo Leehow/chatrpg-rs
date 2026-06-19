@@ -21,8 +21,8 @@
 //! - **Evidence-preserving.** Every variant carries source/evidence refs for later
 //!   commit review; a candidate with no provenance fails closed.
 use crate::{
-    KnowledgeHolder, KnowledgeHolderKind, KnowledgeState, MemoryFact, NpcRelationshipDelta,
-    NpcRelationshipTarget, RelationshipError, UnresolvedHolder,
+    FactTruthStatus, KnowledgeHolder, KnowledgeHolderKind, KnowledgeState, MemoryFact,
+    NpcRelationshipDelta, NpcRelationshipTarget, RelationshipError, UnresolvedHolder,
 };
 use serde::{Deserialize, Serialize};
 
@@ -182,6 +182,10 @@ pub struct WorldFactCandidate {
     pub source_event_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
+    /// 设计3 §4 — 该事实命题**自身**的真假分类（与「谁相信它」的 [`KnowledgeState`] 正交）。
+    /// 加性可空：缺省 `None`（未标），对齐 `memory_facts.truth_status` 可空列。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truth_status: Option<FactTruthStatus>,
 }
 
 impl WorldFactCandidate {
@@ -205,6 +209,7 @@ impl WorldFactCandidate {
             confidence: self.confidence,
             source_event_ids: self.source_event_ids.clone(),
             turn_id: self.turn_id.clone(),
+            truth_status: self.truth_status,
         })
     }
 }

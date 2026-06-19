@@ -20,6 +20,7 @@ fn world_fact() -> WorldFactCandidate {
         confidence: Some(0.9),
         source_event_ids: vec!["ev_scene1".into()],
         turn_id: Some("t1".into()),
+        truth_status: None,
     }
 }
 
