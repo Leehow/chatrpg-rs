@@ -20,6 +20,7 @@
 //! never handed GM world truth.
 use crate::npc_mind::{NpcMindView, RelationshipSummary};
 use crate::npc_relationship::RelationshipStance;
+use crate::world_reaction::WorldReactionCandidate;
 use serde::{Deserialize, Serialize};
 
 /// Reveal willingness (0..100) a known secret must reach before it moves from
@@ -193,6 +194,35 @@ impl NpcBehaviorPlan {
             preferred_actions,
             forbidden_actions,
             source_event_ids: ctx.source_event_ids.clone(),
+        }
+    }
+
+    /// Pure projection of this derived plan into a commit-nothing
+    /// [`WorldReactionCandidate`] for the World simulation layer (P4.3).
+    ///
+    /// No async, no IO, no DB, no mutation — same plan in ⇒ same candidate out. Scores
+    /// are normalized to `0.0..=1.0`:
+    /// - `urgency = interaction_desire / 100`
+    /// - `feasibility = min(willingness_to_help, risk_tolerance) / 100`
+    /// - `risk = risk_tolerance / 100`
+    ///
+    /// **Disclosure safety (§二十四-#4):** `knowledge_basis` is sourced ONLY from
+    /// [`Self::facts_can_reveal`] — `facts_will_withhold` can NEVER leak into the
+    /// candidate, so the World layer never grounds a reaction on a fact the NPC cannot
+    /// disclose. This carries no action intent (mechanical follow-through is wired
+    /// later, gated, in P4.6); a bare projection proposes posture only.
+    pub fn to_reaction_candidate(&self) -> WorldReactionCandidate {
+        WorldReactionCandidate {
+            npc_id: self.npc_id.clone(),
+            stance: enum_word(&self.stance, "neutral"),
+            emotional_state: enum_word(&self.emotional_state, "neutral"),
+            urgency: f64::from(self.interaction_desire) / 100.0,
+            feasibility: f64::from(self.willingness_to_help.min(self.risk_tolerance)) / 100.0,
+            risk: f64::from(self.risk_tolerance) / 100.0,
+            action_intent: None,
+            // ONLY revealable facts — withheld facts must never enter the World basis.
+            knowledge_basis: self.facts_can_reveal.clone(),
+            source_event_ids: self.source_event_ids.clone(),
         }
     }
 
@@ -463,4 +493,7 @@ mod tests {
         let plan = NpcBehaviorPlan::derive(&view(rel(0, 0, 0), &entries), &ctx);
         assert_eq!(plan.source_event_ids, vec!["evt_1", "evt_2"]);
     }
+    // P4.3 `to_reaction_candidate` projection tests (incl. the §24-#4 withheld-fact
+    // leak guard) live in the sibling integration test `tests/reaction_candidate.rs`
+    // to keep this file lean (it predates the ≤400-line budget).
 }

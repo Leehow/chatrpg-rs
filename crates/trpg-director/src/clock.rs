@@ -1,4 +1,4 @@
-use trpg_model::{ClockTick, ConflictIntent, FrameRelation, SituationActionKind};
+use trpg_model::ClockTick;
 
 use crate::{env_bool, DirectorInput};
 
@@ -11,35 +11,18 @@ use crate::{env_bool, DirectorInput};
 /// Fail-closed: no conflict, no intent, or a non-stalling intent ⇒ no tick. Because
 /// we never literal-match, paraphrases the old keyword list missed are caught
 /// (semantic), and bare keywords with no semantic signal no longer false-fire.
+///
+/// THIN SHIM (P4.5, codex F8a): this retains only the environment gate
+/// (`TRPG_DIRECTOR_CLOCK_ON_STALL`) + the `DirectorInput → ConflictIntent` extraction,
+/// then DELEGATES the pure tick derivation to the single source of truth
+/// [`trpg_model::derive_clock_proposals`]. Behavior is byte-identical to the prior
+/// inlined logic — the predicate and `ClockTick` construction were moved verbatim.
 pub(crate) fn maybe_tick_clocks(input: DirectorInput<'_>) -> Vec<ClockTick> {
     if !env_bool("TRPG_DIRECTOR_CLOCK_ON_STALL", true) {
         return vec![];
     }
-    let Some(intent) = input.conflict.and_then(|c| c.intent.as_ref()) else {
-        return vec![];
-    };
-    if !is_world_pressure_intent(intent) {
-        return vec![];
-    }
-    vec![ClockTick {
-        clock_id: "clock.scene_pressure".into(),
-        label: "局势压力".into(),
-        previous: 0,
-        current: 1,
-        max: 4,
-        reason: "语义判定玩家本回合停顿/观望/等待、未推进局势，世界继续行动。".into(),
-        visible_to_players: true,
-    }]
-}
-
-/// The player is not advancing the active frame, so the world keeps moving.
-/// Consumes the semantic router's classification; extend with new non-advancing
-/// categories here — never with literal-string checks.
-fn is_world_pressure_intent(intent: &ConflictIntent) -> bool {
-    matches!(
-        intent.relation_to_active_frame,
-        FrameRelation::PauseAndObserve
-    ) || matches!(intent.action_kind, SituationActionKind::WaitOrHoldAction)
+    let intent = input.conflict.and_then(|c| c.intent.as_ref());
+    trpg_model::derive_clock_proposals(intent)
 }
 
 #[cfg(test)]
