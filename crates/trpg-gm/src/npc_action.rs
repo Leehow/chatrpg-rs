@@ -5,7 +5,11 @@
 //! [`trpg_model::WorldReactionCandidate`]); it rolls no dice and resolves nothing. THIS
 //! module is the **Rules/Kernel side**: it takes a World-emitted Attack intent and routes
 //! it through the SAME mechanical-resolution entry the GM `roll_check` tool uses
-//! ([`RuntimeEngine::resolve_check_with_input`]). The dice/outcome live entirely in Rules.
+//! ([`RuntimeEngine::execute_system_roll_bundle`] — exactly what `tools::settle` calls). It
+//! hydrates the ruleset's core mechanic via `apply_kernel_defaults_if_unsourced`, so an
+//! NPC-initiated attack against a CoC-style kernel resolves to a REAL hit/miss band (not a
+//! `blocked: missing_source_backed_parameters` stub). The dice/outcome live entirely in
+//! Rules; the World layer never rolls.
 //!
 //! ## Flag gate (behavior-preserving)
 //! All of this is behind `TRPG_WORLD_NPC_ACTION` (default OFF). OFF ⇒ this module is never
@@ -85,22 +89,65 @@ pub fn prepare_npc_attack_binding(
     }
 }
 
+/// One World-NPC-attack resolution outcome (Rules-side), returned so the caller can both
+/// (a) fold a player-perceivable fact into the turn and (b) assert the real mechanics. This
+/// is the typed, observably-consumed result — NOT a silently discarded side effect.
+#[derive(Debug, Clone)]
+pub struct WorldAttackOutcome {
+    /// The attacking NPC id (initiator of the System roll).
+    pub npc_id: String,
+    /// The deterministic `check_results` row id this resolution committed.
+    pub check_id: String,
+    /// `true`/`false` once the kernel resolves a hit/miss; `None` if the kernel left it
+    /// unresolved (e.g. degree-only) or the contract genuinely blocked.
+    pub success: Option<bool>,
+    /// The named success band/tier when the kernel emits one (e.g. CoC "常规成功"); else None.
+    pub success_tier: Option<String>,
+    /// `true` when Rules returned the `blocked: missing_source_backed_parameters` stub
+    /// (the kernel could not hydrate source-backed params for this attack).
+    pub blocked: bool,
+    /// The full outcome JSON (the source of truth; the fields above are a typed digest).
+    pub outcome: serde_json::Value,
+}
+
+impl WorldAttackOutcome {
+    /// A single player-perceivable `[roll]…[/roll]` fact line for the dynamic tail. This is
+    /// the load-bearing consumption: it flows into `resolved_gate_facts` →
+    /// `player_perceivable_facts`, so the resolved attack actually reaches the GM context.
+    pub fn to_gate_fact(&self) -> String {
+        let verdict = match (self.blocked, self.success) {
+            (true, _) => "paused (source-backed params pending)".to_string(),
+            (false, Some(true)) => match &self.success_tier {
+                Some(t) => format!("HIT ({t})"),
+                None => "HIT".to_string(),
+            },
+            (false, Some(false)) => match &self.success_tier {
+                Some(t) => format!("MISS ({t})"),
+                None => "MISS".to_string(),
+            },
+            (false, None) => "resolved (no hit/miss verdict)".to_string(),
+        };
+        format!("[roll]World NPC attack ({}): {}[/roll]", self.npc_id, verdict)
+    }
+}
+
 /// Route every World-emitted Attack intent in `set` through Rules mechanical resolution.
 ///
 /// For each candidate carrying an `Attack` intent: build the NPC-attack contract and call
-/// [`RuntimeEngine::resolve_check_with_input`] — the SAME entry the GM `roll_check` tool
-/// uses (so the roll happens in Rules, never in World). Returns a fact line per resolved
-/// attack (advisory; the caller folds it into the dynamic tail). fail-closed/fail-soft: a
-/// missing display name or a resolution error skips that NPC and never aborts the turn.
+/// [`RuntimeEngine::execute_system_roll_bundle`] — the SAME entry the GM `roll_check` tool
+/// uses via `tools::settle` (so the roll happens in Rules, never in World, AND the kernel
+/// core mechanic is hydrated → a real hit/miss band rather than a blocked stub). Returns a
+/// typed [`WorldAttackOutcome`] per resolved attack so the caller can fold a gate fact AND
+/// assert the mechanics. fail-soft: a resolution error skips that NPC, never aborts the turn.
 pub async fn resolve_world_attack_intents(
     engine: &RuntimeEngine,
     session_id: &str,
     turn_id: &str,
     ruleset_id: &str,
     set: &WorldReactionSet,
-) -> Vec<String> {
+) -> Vec<WorldAttackOutcome> {
     use trpg_model::NpcActionKind;
-    let mut facts = Vec::new();
+    let mut outcomes = Vec::new();
     for cand in &set.reactions {
         let Some(intent) = &cand.action_intent else {
             continue;
@@ -111,15 +158,25 @@ pub async fn resolve_world_attack_intents(
         let contract =
             prepare_npc_attack_binding(session_id, turn_id, ruleset_id, &cand.npc_id, None);
         match engine
-            .resolve_check_with_input(session_id, turn_id, &contract, "")
+            .execute_system_roll_bundle(session_id, turn_id, &contract)
             .await
         {
-            Ok(result) => {
-                facts.push(format!(
-                    "[roll]World NPC attack ({}) resolved: {}[/roll]",
-                    cand.npc_id,
-                    serde_json::to_string(&result.outcome).unwrap_or_default()
-                ));
+            Ok(bundle) => {
+                let outcome = &bundle.primary.outcome;
+                outcomes.push(WorldAttackOutcome {
+                    npc_id: cand.npc_id.clone(),
+                    check_id: bundle.primary.check_id.clone(),
+                    success: outcome.get("success").and_then(|v| v.as_bool()),
+                    success_tier: outcome
+                        .get("success_tier")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    blocked: outcome
+                        .get("blocked")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                    outcome: outcome.clone(),
+                });
             }
             Err(err) => {
                 tracing::warn!(
@@ -130,7 +187,7 @@ pub async fn resolve_world_attack_intents(
             }
         }
     }
-    facts
+    outcomes
 }
 
 #[cfg(test)]

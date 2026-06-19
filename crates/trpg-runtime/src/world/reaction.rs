@@ -250,6 +250,22 @@ mod tests {
     }
 
     #[test]
+    fn assemble_only_reflects_supplied_plans_no_phantom_candidate() {
+        // §24-#3 negative pool (pure mirror of the live counter-example): the assembled set
+        // contains ONLY the plans handed in. A candidate cannot appear for an NPC that was
+        // never loaded into the pool — assembling from an empty plan slice yields no
+        // candidate, and assembling from one plan never invents a second.
+        assert!(assemble_world_reaction_set(&[]).reactions.is_empty());
+        let one = vec![plan("npc_only", 0, 0, 80, &[])];
+        let set = assemble_world_reaction_set(&one);
+        assert_eq!(set.reactions.len(), 1, "exactly the one supplied NPC");
+        assert!(
+            !set.reactions.iter().any(|c| c.npc_id == "npc_phantom"),
+            "§24-#3: a non-supplied NPC must never leak a candidate"
+        );
+    }
+
+    #[test]
     fn assemble_preserves_plan_order_and_count() {
         let plans = vec![plan("npc_a", 0, 0, 70, &[]), plan("npc_b", 80, 0, 0, &[])];
         let set = assemble_world_reaction_set(&plans);

@@ -130,6 +130,29 @@ pub const VIEW_LOADER_PLUGIN_ID: &str = "core.view_loader";
 /// Trace kind for a knowledge/NPC view-load provenance entry.
 pub const VIEW_LOAD_KIND: &str = "view_load";
 
+/// Synthetic plugin id for the P4.6 World NPC-action resolution provenance entry, so the
+/// flag-ON Attack slice is OBSERVABLE in the persisted `TurnTrace` (FRAMEWORK §2: a
+/// DB-mutating resolution must never be a silent `let _` drop). Reuses the existing
+/// `PluginContributionTrace` shape — no schema change; carries only npc id + verdict band,
+/// never secret prose.
+pub const NPC_ACTION_PLUGIN_ID: &str = "core.world_npc_action";
+
+/// Trace kind for a resolved World NPC-action (Attack) outcome.
+pub const NPC_ACTION_KIND: &str = "npc_action_resolved";
+
+/// Build one NPC-action resolution provenance entry for the flight recorder. `summary`
+/// carries the npc id + the hit/miss band only (no secret content, no GM-only prose).
+pub fn npc_action_resolved_trace(summary: &str) -> trpg_model::PluginContributionTrace {
+    trpg_model::PluginContributionTrace {
+        plugin_id: NPC_ACTION_PLUGIN_ID.to_string(),
+        hook: crate::plugin::PluginHook::ContextAssembly
+            .as_str()
+            .to_string(),
+        kind: NPC_ACTION_KIND.to_string(),
+        summary: summary.to_string(),
+    }
+}
+
 /// Build one view-load provenance entry (kind `view_load`) for the flight recorder.
 /// `view` is the view name (e.g. `gm_context`, `player_knowledge_view`,
 /// `npc_mind_views`); `detail` is a count/id summary, never secret content.
@@ -1335,8 +1358,11 @@ impl GmLoop {
             }
         }
         // 活动 NPC 行为指引（TC-D3-02）：fail-soft 派生 prompt-safe 块；无块 ⇒ None ⇒
-        // dynamic tail 不写块（非 NPC 回合字节不变，缓存稳定）。
-        let npc_guidance = self.build_npc_behavior_guidance(input).await;
+        // dynamic tail 不写块（非 NPC 回合字节不变，缓存稳定）。P4.6 Part B（flag-gated）：
+        // 当 World 反应隐含 Attack intent 时，本调用还会把 Rules 结算出的 NPC-action 结果
+        // 折进 ctx.resolved_gate_facts（→ dynamic tail / player_perceivable_facts，load-bearing）
+        // 并向 Flight Recorder 记一条可观测 trace —— OFF ⇒ 全 no-op ⇒ 字节不变。
+        let npc_guidance = self.build_npc_behavior_guidance(ctx, input).await;
         let tail = DynamicTailInput {
             user_input: input.user_input,
             resolved_gate_facts: &ctx.resolved_gate_facts,
@@ -1520,6 +1546,7 @@ impl GmLoop {
     /// withheld secret id（仅 id，绝无 GM-only secret 文本或玩家未知 fact 散文）。
     pub(crate) async fn build_npc_behavior_guidance(
         &self,
+        ctx: &mut TurnContext,
         input: &GmTurnInput<'_>,
     ) -> Option<String> {
         let active = &input.state.active_npc_ids;
@@ -1569,13 +1596,22 @@ impl GmLoop {
         .await;
         // P4.6 Part B (flag-gated, default OFF): when an active NPC's reaction implies an
         // Attack intent, the World layer EMITS the typed intent (it resolves nothing). The
-        // Rules/Kernel path settles it downstream via `resolve_check_with_input` (the SAME
-        // entry the GM `roll_check` tool uses). OFF ⇒ no-op ⇒ byte-identical turn. The
-        // resolution is committed to the check_result store (mechanical proof in Rules);
-        // it never aborts the turn nor mutates the player-visible guidance bytes.
+        // Rules/Kernel path settles it downstream via `execute_system_roll_bundle` (the SAME
+        // entry the GM `roll_check` tool uses via `tools::settle`, with kernel-default
+        // hydration ⇒ a real hit/miss band). OFF ⇒ no-op ⇒ byte-identical turn.
+        //
+        // The resolved outcome is OBSERVABLY CONSUMED (FRAMEWORK §2, no silent `let _`
+        // drop): (a) folded as a player-perceivable `[roll]` gate fact into
+        // `ctx.resolved_gate_facts` (→ dynamic tail / `player_perceivable_facts`), making
+        // the slice load-bearing; and (b) emitted as a `npc_action_resolved` Flight Recorder
+        // trace so the resolution is asserted in the persisted `TurnTrace`.
+        //
+        // P6.x TODO: fold the full NpcActionResolved event into a ResolutionCommit (typed
+        // mechanical state-patch back into the turn ledger) rather than only the advisory
+        // gate-fact + trace surfaced here. The check_results row already lands in Rules.
         if crate::npc_action::world_npc_action_enabled() {
             trpg_runtime::world::derive_attack_intents(&plans, &mut reaction_set);
-            let _ = crate::npc_action::resolve_world_attack_intents(
+            let outcomes = crate::npc_action::resolve_world_attack_intents(
                 &self.engine,
                 session_id,
                 &input.request.turn_id,
@@ -1583,6 +1619,17 @@ impl GmLoop {
                 &reaction_set,
             )
             .await;
+            for o in &outcomes {
+                // (a) load-bearing: the resolved attack reaches the GM context as a
+                //     player-perceivable fact (NOT discarded).
+                ctx.resolved_gate_facts.push(o.to_gate_fact());
+                // (b) observable: the resolution is recorded in the flight recorder. Summary
+                //     carries only npc id + verdict band (no secret prose).
+                ctx.plugin_contributions.push(npc_action_resolved_trace(&format!(
+                    "{}: blocked={} success={:?} tier={:?} check_id={}",
+                    o.npc_id, o.blocked, o.success, o.success_tier, o.check_id
+                )));
+            }
         }
         // The GM-context guidance bytes render from the retained (lossless) plans via the
         // SAME `to_guidance_block` method as before — provably byte-identical (locked by
