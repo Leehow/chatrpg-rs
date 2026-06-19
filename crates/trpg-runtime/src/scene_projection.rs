@@ -328,6 +328,13 @@ pub fn stamp_opposed_check(
     });
 }
 
+/// 跨测试模块共享的 env 串行锁：`TRPG_SCENE_DEEP_BLOCK_CACHE_ZONE` 是进程级全局，
+/// 凡读/写它的测试都必须在同一把锁上串行，否则并行跑时 env 变更会和别处的"两次读
+/// env 期望字节一致"断言竞争。提升到 crate 级（`pub(crate)`）使 scene_need_resolver
+/// 的字节等价测试也能锁同一把。仅 `#[cfg(test)]`，零生产路径。
+#[cfg(test)]
+pub(crate) static N3_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod module_scene_proj_tests {
     use super::*;
@@ -589,7 +596,8 @@ mod module_scene_proj_tests {
 
     // env 是进程级全局：所有读/写 TRPG_SCENE_DEEP_BLOCK_CACHE_ZONE 的测试串行执行，
     // 且每个写测试用 guard 在退出时恢复原值，避免污染默认行为断言（并行跑）。
-    static N3_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // 锁现已提升到 crate 级 super::N3_ENV_LOCK，与 scene_need_resolver 的字节等价测试共用。
+    use super::N3_ENV_LOCK;
 
     struct DeepZoneEnvGuard {
         prev: Option<String>,
