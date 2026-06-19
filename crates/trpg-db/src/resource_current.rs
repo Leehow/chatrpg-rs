@@ -5,6 +5,7 @@
 use anyhow::Result;
 use serde_json::{json, Value};
 use sqlx::Row;
+use std::hash::{Hash, Hasher};
 use trpg_model::*;
 use uuid::Uuid;
 
@@ -129,6 +130,19 @@ impl Db {
             None => value,
         };
         let path = format!("resources.{}.current", track_id);
+        // Read the PRIOR current value before the upsert so the ResourceChanged
+        // event_id can key on the actual (prior -> capped) transition (codex#2).
+        let prior: Option<i32> = sqlx::query_scalar::<_, Value>(
+            "select value_json from generic_parameter_states where session_id=$1 and target_kind='actor' and target_id=$2 and parameter_path=$3",
+        )
+        .bind(session_id)
+        .bind(actor_id)
+        .bind(&path)
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| jval_to_i32(&v));
         sqlx::query(r#"
             insert into generic_parameter_states
               (id, state_id, session_id, target_kind, target_id, parameter_path, value_json, visibility, source_refs, provisional_reason, world_tick, updated_at)
@@ -140,6 +154,46 @@ impl Db {
         .bind(Uuid::new_v4()).bind(format!("generic_state_{}", Uuid::new_v4().simple())).bind(session_id).bind(actor_id).bind(&path)
         .bind(json!(capped)).bind(visibility.as_str()).bind(serde_json::to_value(source_refs)?).bind(world_tick)
         .execute(&self.pool).await?;
+
+        // eventlog write-through (additive / fail-soft, mirrors insert_dice_roll): after the
+        // successful generic_parameter_states upsert, append a ResourceChanged domain event.
+        // The append failing only warns — it MUST NOT change this function's Result (OFF==baseline).
+        //
+        // # ResourceChanged data schema contract (pin — consumers depend on these keys):
+        //   data = { "actor_id": <str>, "track_id": <str>, "value": <i32 capped/stored>,
+        //            "cap": <i32|null>, "visibility": <str token> }
+        //
+        // # event_id uniqueness (codex#2): world_tick is constantly 0 (world_tick_hint()==0),
+        // so it CANNOT discriminate. Instead key on a content hash of the actual transition
+        // (prior_value, capped, cap, visibility). A genuinely different change (e.g. 65->99 vs
+        // 99->65) hashes differently => two rows; a true replay of the SAME transition hashes
+        // identically => `on conflict (event_id) do nothing` folds it (idempotent).
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        prior.hash(&mut hasher);
+        capped.hash(&mut hasher);
+        cap.hash(&mut hasher);
+        visibility.as_str().hash(&mut hasher);
+        let change_hash = hasher.finish();
+        let event_id = format!(
+            "de_resource_{}_{}_{}_{:016x}",
+            session_id, actor_id, track_id, change_hash
+        );
+        let ev = trpg_model::DomainEvent::new(
+            event_id,
+            session_id.to_string(),
+            String::new(),
+            trpg_model::DomainEventKind::ResourceChanged,
+            json!({
+                "actor_id": actor_id,
+                "track_id": track_id,
+                "value": capped,
+                "cap": cap,
+                "visibility": visibility.as_str(),
+            }),
+        );
+        if let Err(e) = self.append_domain_event(&ev).await {
+            tracing::warn!(error=%e, "append ResourceChanged domain event failed (non-fatal)");
+        }
         Ok(capped)
     }
 }

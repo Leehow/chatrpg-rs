@@ -64,6 +64,15 @@ pub enum DomainEventKind {
     /// NpcLearnedFact 的 write-through 缺口（关系提交此前是裸表 upsert、无事件账本）。data 带
     /// npc_id / target / delta 摘要 + 派生 stance/desire。幂等 per 证据集（on-conflict-do-nothing）。
     RelationshipChanged,
+    /// P6.2 蓝图§五：actor 某 resource track 的 CURRENT 值经
+    /// `write_resource_current`（generic_parameter_states 单源 upsert）发生变更——写穿的
+    /// 领域事件。data 带 actor_id / track_id / value（capped 后实存）/ cap / visibility（见
+    /// `write_resource_current` 的「schema contract」doc-block）。
+    ///
+    /// 幂等键 codex#2：world_tick 恒 0，不能进 event_id；改用 (prior_value→capped, cap,
+    /// visibility) 的内容哈希作判别——**真不同的变更产不同 event_id**（两次不同 transition
+    /// 落两行），**同一 transition 的重放仍幂等**（on conflict do nothing 折叠）。
+    ResourceChanged,
 }
 
 impl DomainEventKind {
@@ -87,6 +96,7 @@ impl DomainEventKind {
             DomainEventKind::ClientDisconnected => "ClientDisconnected",
             DomainEventKind::FactRevealed => "FactRevealed",
             DomainEventKind::RelationshipChanged => "RelationshipChanged",
+            DomainEventKind::ResourceChanged => "ResourceChanged",
         }
     }
 
@@ -108,6 +118,7 @@ impl DomainEventKind {
             "ClientDisconnected" => DomainEventKind::ClientDisconnected,
             "FactRevealed" => DomainEventKind::FactRevealed,
             "RelationshipChanged" => DomainEventKind::RelationshipChanged,
+            "ResourceChanged" => DomainEventKind::ResourceChanged,
             _ => DomainEventKind::TurnStarted,
         }
     }
@@ -329,6 +340,46 @@ mod tests {
         assert_ne!(
             DomainEventKind::RelationshipChanged,
             DomainEventKind::NpcLearnedFact
+        );
+    }
+
+    #[test]
+    fn resource_changed_kind_token_and_serde_roundtrip() {
+        // P6.2：resource CURRENT 写穿事件。token 稳定契约 + serde 闭环 + 与既有 14 variant 区分。
+        let k = DomainEventKind::ResourceChanged;
+        assert_eq!(k.as_str(), "ResourceChanged");
+        assert_eq!(DomainEventKind::from_str_token("ResourceChanged"), k);
+        let v = serde_json::to_value(k).unwrap();
+        assert_eq!(
+            v.as_str(),
+            Some("ResourceChanged"),
+            "serde token 必与 as_str 一致"
+        );
+        let back: DomainEventKind = serde_json::from_value(v).unwrap();
+        assert_eq!(back, k);
+        // 新 token 必与既有 14 个全部不相交（不碰旧 token——round-trip 守卫锁死它们）。
+        for existing in [
+            "TurnStarted",
+            "TurnFinalized",
+            "TurnFailed",
+            "SceneTransitioned",
+            "DiceRolled",
+            "CheckResolved",
+            "EntitySurfaced",
+            "ContextSurfaced",
+            "PlayerExposed",
+            "PlayerLearnedFact",
+            "NpcLearnedFact",
+            "ClientDisconnected",
+            "FactRevealed",
+            "RelationshipChanged",
+        ] {
+            assert_ne!(k.as_str(), existing, "ResourceChanged token 必与既有 14 个不同");
+        }
+        // fail-closed 未知回退不受影响。
+        assert_eq!(
+            DomainEventKind::from_str_token("Bogus"),
+            DomainEventKind::TurnStarted
         );
     }
 
