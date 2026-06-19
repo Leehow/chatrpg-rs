@@ -61,6 +61,14 @@ pub struct ToolCtx<'a> {
     /// 共享引用，故复用 obligations 同款 `&Mutex` 内点改模式。
     /// None = flag OFF / 单测未挂 ⇒ reveal_fact 回退即时落库（F13 字节级基线）。
     pub nominated_reveals: Option<&'a Mutex<Vec<RevealNomination>>>,
+    /// P6 revision (§二十四-#13 commit half)：story-write 拒绝提名通道
+    /// （TRPG_STORY_WRITE_LOOP ON 时由 turn_loop 注入）。`note_player_rejection` 工具
+    /// （LLM PROPOSES 玩家拒绝某线索）把一条 RejectionNomination 推进此互斥单元，
+    /// PresentationCommit 边界 drain 后调 `commit_story_writes`（Kernel COMMITS）持久化，
+    /// 使下一回合 P5.3 selector 真把该线索 drop——给 `commit_story_writes` 一个真正的
+    /// per-turn 生产调用方（不再 dead-by-tests）。复用 `nominated_reveals` 同款 `&Mutex`
+    /// 内点改模式。None = flag OFF / 单测未挂 ⇒ 工具不注册、通道不挂（字节级基线）。
+    pub rejected_nominations: Option<&'a Mutex<Vec<RejectionNomination>>>,
 }
 
 /// P6.7：一条「玩家认知事实」提名。reveal_fact 在 gating ON 时产出，
@@ -69,6 +77,14 @@ pub struct ToolCtx<'a> {
 pub struct RevealNomination {
     pub fact_id: String,
     pub reason: Option<String>,
+}
+
+/// P6 revision：一条「玩家拒绝某剧情线索」提名（§二十四-#13 producer 半边）。
+/// `note_player_rejection` 工具在 story-write loop ON 时产出（LLM PROPOSES），
+/// PresentationCommit 边界 drain 后经 `commit_story_writes` 持久化（Kernel COMMITS）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RejectionNomination {
+    pub thread_id: String,
 }
 
 /// 工具单次执行的产物。
@@ -251,25 +267,32 @@ impl ToolRegistry {
     /// exit_mode（13→14，任何姿态下均可用 = 基础 14）；Knowledge P0a 尾部追加
     /// reveal_fact（15，显式 GM 揭示 = 基础 15）。
     pub fn standard() -> Self {
-        Self {
-            tools: vec![
-                Box::new(check::RollCheckTool),
-                Box::new(check::RequestPlayerRollTool),
-                Box::new(effect::ApplyEffectTool),
-                Box::new(effect::ChangeTrackTool),
-                Box::new(world::RetrieveRulesTool),
-                Box::new(npc::GetActorTool),
-                Box::new(npc::EnsureNpcParamTool),
-                Box::new(world::NavigateSceneTool),
-                Box::new(world::AdvanceTimeTool),
-                Box::new(world::RememberTool),
-                Box::new(mechanic::LookupMechanicTool),
-                Box::new(mechanic::WaiveObligationTool),
-                Box::new(crate::mode::EnterModeTool),
-                Box::new(crate::mode::ExitModeTool),
-                Box::new(world::RevealFactTool),
-            ],
+        let mut tools: Vec<Box<dyn GmTool>> = vec![
+            Box::new(check::RollCheckTool),
+            Box::new(check::RequestPlayerRollTool),
+            Box::new(effect::ApplyEffectTool),
+            Box::new(effect::ChangeTrackTool),
+            Box::new(world::RetrieveRulesTool),
+            Box::new(npc::GetActorTool),
+            Box::new(npc::EnsureNpcParamTool),
+            Box::new(world::NavigateSceneTool),
+            Box::new(world::AdvanceTimeTool),
+            Box::new(world::RememberTool),
+            Box::new(mechanic::LookupMechanicTool),
+            Box::new(mechanic::WaiveObligationTool),
+            Box::new(crate::mode::EnterModeTool),
+            Box::new(crate::mode::ExitModeTool),
+            Box::new(world::RevealFactTool),
+        ];
+        // P6 revision (§二十四-#13 producer): `note_player_rejection` is appended ONLY when the
+        // story-write loop is ON. OFF ⇒ the base 15-tool schema bytes are byte-identical to the
+        // frozen baseline (the registration is the only place the producer enters the agent loop,
+        // so OFF==baseline holds for the schemas the LLM sees). It lands at the very tail so the
+        // first 15 schema bytes never shift.
+        if trpg_runtime::story_write_loop_enabled() {
+            tools.push(Box::new(world::NotePlayerRejectionTool));
         }
+        Self { tools }
     }
 
     /// 三期 §4.3 工具按 mode 组装：基础 15（任何姿态可用）+ manifest.extra_tools
@@ -445,6 +468,7 @@ mod tests {
             current_mode: None,
             opposed_binding: None,
             nominated_reveals: None,
+            rejected_nominations: None,
         };
         let mut ledger = TurnLedger::new();
         let outcome = registry
@@ -485,6 +509,7 @@ mod tests {
             current_mode: None,
             opposed_binding: None,
             nominated_reveals: None,
+            rejected_nominations: None,
         };
         let mut ledger = TurnLedger::new();
         let outcome = registry

@@ -277,6 +277,7 @@ mod tests {
             current_mode: None,
             opposed_binding: None,
             nominated_reveals: None,
+            rejected_nominations: None,
         };
         let mut ledger = TurnLedger::new();
         // ToolOutput 无 Debug，unwrap_err 不可用——match 取 Err。

@@ -222,6 +222,10 @@ pub(crate) struct TurnContext {
     // P6.7 reveal-gating 提名（agent_loop 内 reveal_fact 在 TRPG_REVEAL_GATING ON 时填，
     // PresentationCommit 边界在终审 Allow 后排序提交）。OFF ⇒ 恒空（reveal_fact 即时落库，基线）。
     nominated_reveals: Vec<crate::tools::RevealNomination>,
+    // P6 revision (§二十四-#13 producer→commit)：note_player_rejection 在 TRPG_STORY_WRITE_LOOP ON
+    // 时填本回合玩家拒绝的线索提名；PresentationCommit 边界 drain 后调 commit_story_writes 持久化。
+    // OFF ⇒ 恒空（工具不注册、通道不挂 ⇒ 字节级基线）。
+    rejected_nominations: Vec<crate::tools::RejectionNomination>,
 }
 impl TurnContext {
     pub(crate) fn new() -> Self {
@@ -249,6 +253,7 @@ impl TurnContext {
             awaiting_gate: None,
             director_packet_block: None,
             nominated_reveals: Vec::new(),
+            rejected_nominations: Vec::new(),
         }
     }
 
@@ -430,6 +435,10 @@ impl GmLoop {
                 current_mode: mode_id.as_deref(),
                 opposed_binding: opposed_binding.as_ref(),
                 nominated_reveals: reveal_gating.then_some(&reveals_cell),
+                // R1 legacy path has no PresentationCommit boundary to drain rejections (it commits
+                // reveals inline); the story-write producer lives on the production run_agent_loop
+                // path. Leave the channel unhooked here (byte-identical baseline).
+                rejected_nominations: None,
             };
             // R1 follow-up: run_agent_loop (execute.rs) duplicates this loop; dedupe when run_gm_turn is retired.
             'rounds: for round in 0..max_tool_rounds {
@@ -759,6 +768,11 @@ impl GmLoop {
         let reveal_gating = reveal_gating_enabled();
         let reveals_cell: std::sync::Mutex<Vec<crate::tools::RevealNomination>> =
             std::sync::Mutex::new(std::mem::take(&mut ctx.nominated_reveals));
+        // P6 revision (§二十四-#13)：story-write loop ON ⇒ 注入拒绝提名通道供 note_player_rejection
+        // 填；PresentationCommit 边界 drain 后 commit_story_writes 持久化。OFF ⇒ 不注入（基线）。
+        let story_write_loop = trpg_runtime::story_write_loop_enabled();
+        let rejections_cell: std::sync::Mutex<Vec<crate::tools::RejectionNomination>> =
+            std::sync::Mutex::new(std::mem::take(&mut ctx.rejected_nominations));
         {
             let tools = ctx.mode_tools.as_ref().unwrap_or(&self.tools);
             let tool_ctx = ToolCtx {
@@ -771,6 +785,7 @@ impl GmLoop {
                 current_mode: mode_id.as_deref(),
                 opposed_binding: opposed_binding.as_ref(),
                 nominated_reveals: reveal_gating.then_some(&reveals_cell),
+                rejected_nominations: story_write_loop.then_some(&rejections_cell),
             };
             'rounds: for round in 0..max_tool_rounds {
                 // P1-3 follow-up：本轮起点先查取消——已 fire 则连 LLM 请求都不发（最省 token）。
@@ -963,6 +978,11 @@ impl GmLoop {
             .unwrap_or_else(|p| p.into_inner());
         // P6.7：取回本回合 reveal 提名（gating ON 时非空）供 PresentationCommit 提交。
         ctx.nominated_reveals = reveals_cell.into_inner().unwrap_or_else(|p| p.into_inner());
+        // P6 revision：取回本回合玩家拒绝提名（story-write loop ON 时非空）供 PresentationCommit
+        // 边界 drain → commit_story_writes 持久化。
+        ctx.rejected_nominations = rejections_cell
+            .into_inner()
+            .unwrap_or_else(|p| p.into_inner());
         // —— 终态 A：request_player_roll gate ——
         if let Some(gate) = awaiting {
             ctx.visible_text = visible_text;
@@ -2267,6 +2287,46 @@ impl GmLoop {
         let nominations = std::mem::take(&mut ctx.nominated_reveals);
         self.commit_nominated_reveals(request, nominations, allow)
             .await;
+        // (3) P6 revision (§二十四-#13)：drain 本回合玩家拒绝提名 → commit_story_writes 持久化。
+        // 这是 commit_story_writes 的真正 per-turn 生产调用方（不再 dead-by-tests）。终审 Allow 时
+        // 才提交（Block 回合的整段叙事被拦，拒绝信号一并丢弃，与 reveal 同口径）。
+        let rejections = std::mem::take(&mut ctx.rejected_nominations);
+        self.commit_story_rejections(request, rejections, allow)
+            .await;
+    }
+
+    /// P6 revision：把本回合 note_player_rejection 提名 drain 进 `commit_story_writes`
+    /// （`TRPG_STORY_WRITE_LOOP` 内部再 gate：OFF ⇒ 该函数即时 Ok 空操作 ⇒ 字节级基线）。
+    /// 这是给 `commit_story_writes` 的真实 per-turn 调用方：LLM 经 note_player_rejection PROPOSES，
+    /// Kernel 在此 COMMITS，下一回合 P5.3 selector 真把该线索 drop。失败只 warn——剧情持久化
+    /// 绝不反向中断已交付的叙事（与 reveal 提交同款 fail-soft）。
+    async fn commit_story_rejections(
+        &self,
+        request: &ContextRequest,
+        rejections: Vec<crate::tools::RejectionNomination>,
+        allow: bool,
+    ) {
+        if !allow || rejections.is_empty() {
+            return;
+        }
+        let proposals: Vec<trpg_model::PlayerInterestSignal> = rejections
+            .iter()
+            .map(|r| trpg_runtime::rejection_proposal(&r.thread_id))
+            .collect();
+        if let Err(err) = trpg_runtime::commit_story_writes(
+            &self.engine.db,
+            &request.session_id,
+            &proposals,
+            &[],
+            &request.turn_id,
+        )
+        .await
+        {
+            tracing::warn!(
+                error = %err,
+                "PresentationCommit story rejection persist failed (non-fatal)"
+            );
+        }
     }
 
     /// P6.7 commit primitive 包装：终审 Allow 时按 fact_id 排序逐条 engine.reveal_fact

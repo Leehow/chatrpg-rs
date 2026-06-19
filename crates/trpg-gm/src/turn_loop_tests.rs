@@ -1410,6 +1410,7 @@ async fn reveal_gating_off_is_immediate_baseline() {
         current_mode: None,
         opposed_binding: None,
         nominated_reveals: None, // OFF / 未挂 ⇒ 即时落库
+        rejected_nominations: None,
     };
     let registry = ToolRegistry::standard();
     let mut ledger = TurnLedger::new();
@@ -1453,6 +1454,7 @@ async fn reveal_gating_on_nominates_without_immediate_write() {
         current_mode: None,
         opposed_binding: None,
         nominated_reveals: Some(&cell), // ON ⇒ 提名通道在位
+        rejected_nominations: None,
     };
     let registry = ToolRegistry::standard();
     let mut ledger = TurnLedger::new();
@@ -1619,5 +1621,182 @@ fn p37_hooks_relocated_to_commit_boundaries() {
     assert!(
         !finalize.contains("PluginHook::BeforeCommit"),
         "phase_finalize 不应再触发 BeforeCommit（已重定位）"
+    );
+}
+
+// ==================== P6 revision: §二十四-#13 per-turn rejection producer→commit ====================
+
+use crate::tools::RejectionNomination;
+
+/// FULL TURN CHAIN (story-write loop ON): a turn whose GM noted a player rejection — a
+/// `RejectionNomination` on the turn ctx, exactly what the `note_player_rejection` tool produces —
+/// is drained at `presentation_commit_boundary` → `commit_story_writes` PERSISTS it → the NEXT
+/// turn's selector input (`rejected_thread_ids`) flags that thread for drop. This is the production
+/// per-turn caller for `commit_story_writes` (no longer dead-by-tests). The selector's actual
+/// primary/secondary drop on this input is locked by trpg-runtime's `live_story_write_loop`
+/// full-chain test (trpg-gm does not depend on trpg-director).
+#[tokio::test]
+async fn presentation_commit_drains_rejection_then_persists_for_next_turn_selector() {
+    use trpg_model::{StoryState, StoryThread, StoryThreadStatus};
+    use trpg_runtime::director_brief::rejected_thread_ids;
+
+    let session = format!("s_reject_chain_{}", uuid::Uuid::new_v4().simple());
+    let Some((mut gm, request)) = real_gm(&session).await else {
+        eprintln!("SKIP: DATABASE_URL unset");
+        return;
+    };
+    gm.engine
+        .db
+        .create_session(&session, "call_of_cthulhu_7e", None)
+        .await
+        .expect("create_session");
+
+    // Seed two threads; thr_b is the STRONGER (higher urgency/interest) so only a persisted
+    // rejection can keep it out of the spotlight next turn.
+    let seed = StoryState {
+        active_threads: vec![
+            StoryThread {
+                thread_id: "thr_a".into(),
+                status: StoryThreadStatus::Active,
+                urgency: 0.3,
+                player_interest: 0.4,
+                ..Default::default()
+            },
+            StoryThread {
+                thread_id: "thr_b".into(),
+                status: StoryThreadStatus::Escalating,
+                urgency: 0.9,
+                player_interest: 0.9,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    gm.engine
+        .db
+        .upsert_story_state(&session, &seed, "t0")
+        .await
+        .unwrap();
+
+    // BEFORE: nothing is rejected (the selector would pick the stronger thr_b).
+    let before = gm.engine.db.load_story_state(&session).await.unwrap().unwrap();
+    assert!(
+        rejected_thread_ids(&before).is_empty(),
+        "pre-turn: no rejection ⇒ stronger thr_b is selectable"
+    );
+
+    // THIS TURN: the GM noted a player rejection of thr_b (what note_player_rejection nominates).
+    std::env::set_var("TRPG_STORY_WRITE_LOOP", "1");
+    let mut ctx = TurnContext::new();
+    ctx.rejected_nominations = vec![RejectionNomination {
+        thread_id: "thr_b".into(),
+    }];
+    ctx.presentation_gate = PresentationGate::Allow;
+    gm.presentation_commit_boundary(&mut ctx, &request).await;
+    std::env::remove_var("TRPG_STORY_WRITE_LOOP");
+
+    // PERSISTED: the rejection is now durable and is the NEXT turn's selector input.
+    let after = gm.engine.db.load_story_state(&session).await.unwrap().unwrap();
+    assert_eq!(
+        rejected_thread_ids(&after),
+        vec!["thr_b".to_string()],
+        "PresentationCommit drained the nomination → commit_story_writes persisted thr_b rejected; \
+         next turn's P5.3 selector reads this and drops thr_b"
+    );
+}
+
+/// OFF==baseline: with the flag OFF, draining a rejection nomination is a complete no-op —
+/// story_state is byte-identical to the seed (the producer never persists anything).
+#[tokio::test]
+async fn presentation_commit_rejection_off_is_baseline_no_write() {
+    use trpg_model::{StoryState, StoryThread, StoryThreadStatus};
+    use trpg_runtime::director_brief::rejected_thread_ids;
+
+    std::env::remove_var("TRPG_STORY_WRITE_LOOP"); // ensure OFF regardless of ordering
+    let session = format!("s_reject_off_{}", uuid::Uuid::new_v4().simple());
+    let Some((mut gm, request)) = real_gm(&session).await else {
+        eprintln!("SKIP: DATABASE_URL unset");
+        return;
+    };
+    gm.engine
+        .db
+        .create_session(&session, "call_of_cthulhu_7e", None)
+        .await
+        .expect("create_session");
+    let seed = StoryState {
+        active_threads: vec![StoryThread {
+            thread_id: "thr_b".into(),
+            status: StoryThreadStatus::Escalating,
+            urgency: 0.9,
+            player_interest: 0.9,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    gm.engine
+        .db
+        .upsert_story_state(&session, &seed, "t0")
+        .await
+        .unwrap();
+
+    let mut ctx = TurnContext::new();
+    ctx.rejected_nominations = vec![RejectionNomination {
+        thread_id: "thr_b".into(),
+    }];
+    ctx.presentation_gate = PresentationGate::Allow;
+    gm.presentation_commit_boundary(&mut ctx, &request).await;
+
+    let after = gm.engine.db.load_story_state(&session).await.unwrap().unwrap();
+    assert_eq!(after, seed, "OFF: story_state byte-identical to seed (no write)");
+    assert!(
+        rejected_thread_ids(&after).is_empty(),
+        "OFF: no rejection persisted"
+    );
+}
+
+/// Block ⇒ rejection nominations are dropped (same gate discipline as reveal commit): a Blocked
+/// turn never persists the story write.
+#[tokio::test]
+async fn presentation_commit_rejection_block_drops() {
+    use trpg_model::{StoryState, StoryThread, StoryThreadStatus};
+    use trpg_runtime::director_brief::rejected_thread_ids;
+
+    let session = format!("s_reject_block_{}", uuid::Uuid::new_v4().simple());
+    let Some((mut gm, request)) = real_gm(&session).await else {
+        eprintln!("SKIP: DATABASE_URL unset");
+        return;
+    };
+    gm.engine
+        .db
+        .create_session(&session, "call_of_cthulhu_7e", None)
+        .await
+        .expect("create_session");
+    let seed = StoryState {
+        active_threads: vec![StoryThread {
+            thread_id: "thr_b".into(),
+            status: StoryThreadStatus::Escalating,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    gm.engine
+        .db
+        .upsert_story_state(&session, &seed, "t0")
+        .await
+        .unwrap();
+
+    std::env::set_var("TRPG_STORY_WRITE_LOOP", "1");
+    let mut ctx = TurnContext::new();
+    ctx.rejected_nominations = vec![RejectionNomination {
+        thread_id: "thr_b".into(),
+    }];
+    ctx.presentation_gate = block_gate(); // 终审 Block
+    gm.presentation_commit_boundary(&mut ctx, &request).await;
+    std::env::remove_var("TRPG_STORY_WRITE_LOOP");
+
+    let after = gm.engine.db.load_story_state(&session).await.unwrap().unwrap();
+    assert!(
+        rejected_thread_ids(&after).is_empty(),
+        "Block ⇒ rejection nomination dropped, nothing persisted"
     );
 }

@@ -229,6 +229,7 @@ async fn agent_path_prepass_injects_opposed_and_npc_defense_drives_verdict() {
         current_mode: None,
         opposed_binding: Some(&binding),
         nominated_reveals: None,
+        rejected_nominations: None,
     };
     let mut ledger = TurnLedger::new();
     // 注意：GM agent 调 roll_check **不传 opposed**（这正是产品痛点：5/5 次漏填）。

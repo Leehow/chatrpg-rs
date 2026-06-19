@@ -83,6 +83,7 @@ mod tests {
             current_mode: None,
             opposed_binding: None,
             nominated_reveals: None,
+            rejected_nominations: None,
         };
         let out = AskClarificationTool
             .call(&ctx, &mut ledger, json!({"question": "去哪个门?"}))
@@ -110,6 +111,7 @@ mod tests {
             current_mode: None,
             opposed_binding: None,
             nominated_reveals: None,
+            rejected_nominations: None,
         };
         let err = match AskClarificationTool
             .call(&ctx, &mut ledger, json!({}))

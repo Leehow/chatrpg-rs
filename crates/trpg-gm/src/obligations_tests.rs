@@ -87,6 +87,7 @@ async fn waive_unknown_target_errs() {
         current_mode: None,
         opposed_binding: None,
         nominated_reveals: None,
+        rejected_nominations: None,
     };
     let mut turn_ledger = TurnLedger::new();
     let err = match crate::tools::mechanic::WaiveObligationTool

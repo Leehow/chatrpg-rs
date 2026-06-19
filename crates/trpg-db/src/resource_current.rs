@@ -158,6 +158,20 @@ impl Db {
         // eventlog write-through (additive / fail-soft, mirrors insert_dice_roll): after the
         // successful generic_parameter_states upsert, append a ResourceChanged domain event.
         // The append failing only warns — it MUST NOT change this function's Result (OFF==baseline).
+        // The authoritative current value is the generic_parameter_states row written ABOVE; this
+        // append is a PARALLEL additive ledger and the state write is NOT rolled back if it fails.
+        //
+        // # HONEST FRAMING (P6 revision — do NOT overclaim):
+        //   ResourceChanged is a *best-effort current-state write-through breadcrumb keyed on the
+        //   transition content*. It is NOT faithful append-only event-sourcing and NOT replay-folded
+        //   by any projection — nothing reconstructs the current value by folding these events; the
+        //   generic_parameter_states row is the source of truth. Because the event_id is a content
+        //   hash of (prior, capped, cap, visibility), a repeated-IDENTICAL transition is SWALLOWED
+        //   (`on conflict do nothing`), so the ledger is lossy w.r.t. how-many-times a value was
+        //   re-asserted — it records distinct transition *shapes*, not an authoritative history of
+        //   every write. DefaultHasher is NOT a stable cross-version content hash (its algorithm is
+        //   unspecified and may change between std/toolchain versions), so these event_ids are NOT a
+        //   durable cross-version identity — they only dedup within a single build's lifetime.
         //
         // # ResourceChanged data schema contract (pin — consumers depend on these keys):
         //   data = { "actor_id": <str>, "track_id": <str>, "value": <i32 capped/stored>,
@@ -167,7 +181,8 @@ impl Db {
         // so it CANNOT discriminate. Instead key on a content hash of the actual transition
         // (prior_value, capped, cap, visibility). A genuinely different change (e.g. 65->99 vs
         // 99->65) hashes differently => two rows; a true replay of the SAME transition hashes
-        // identically => `on conflict (event_id) do nothing` folds it (idempotent).
+        // identically => `on conflict (event_id) do nothing` folds it (idempotent dedup, NOT a
+        // replay-fold of state — see HONEST FRAMING above).
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         prior.hash(&mut hasher);
         capped.hash(&mut hasher);

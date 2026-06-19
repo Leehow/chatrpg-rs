@@ -49,6 +49,7 @@ async fn reveal_fact_tool_writes_fact_revealed_ledger() {
         current_mode: None,
         opposed_binding: None,
         nominated_reveals: None,
+        rejected_nominations: None,
     };
     let registry = trpg_gm::ToolRegistry::standard();
     let mut ledger = trpg_gm::TurnLedger::new();

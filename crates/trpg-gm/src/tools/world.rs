@@ -1,5 +1,7 @@
 use crate::ledger::TurnLedger;
-use crate::tools::{GmTool, RevealNomination, ToolCtx, ToolError, ToolOutput, ToolSpec};
+use crate::tools::{
+    GmTool, RejectionNomination, RevealNomination, ToolCtx, ToolError, ToolOutput, ToolSpec,
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
@@ -449,6 +451,98 @@ impl GmTool for RevealFactTool {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct NotePlayerRejectionArgs {
+    pub thread_id: String,
+}
+
+pub fn parse_note_player_rejection_args(value: Value) -> Result<NotePlayerRejectionArgs> {
+    let args: NotePlayerRejectionArgs = serde_json::from_value(value).map_err(|e| {
+        ToolError::recoverable(
+            "invalid_arguments",
+            format!("note_player_rejection arguments invalid: {e}"),
+            Some("Provide the thread_id the player explicitly refused.".to_string()),
+        )
+    })?;
+    if args.thread_id.trim().is_empty() {
+        return Err(ToolError::recoverable(
+            "invalid_arguments",
+            "thread_id is required",
+            Some("Use the story thread_id the player declined to pursue.".to_string()),
+        ));
+    }
+    Ok(args)
+}
+
+/// P6 revision (§二十四-#13 producer): the GM records that the player EXPLICITLY rejected a story
+/// thread (refused the hook, walked away, told the NPC "no"). The LLM PROPOSES — this tool only
+/// pushes a [`RejectionNomination`] into the turn-context channel; it commits NOTHING itself
+/// (ReadOnly-to-the-turn). The Kernel COMMITS at the PresentationCommit boundary, draining the
+/// nominations into [`trpg_runtime::commit_story_writes`] (gated by `TRPG_STORY_WRITE_LOOP`), which
+/// persists `PlayerInterestSignal{rejected:true}` so the NEXT turn's P5.3 director selector drops
+/// the thread. When the story-write loop is OFF the channel is never injected (`None`) and the tool
+/// is not even registered, so the OFF baseline is byte-identical.
+pub struct NotePlayerRejectionTool;
+#[async_trait]
+impl GmTool for NotePlayerRejectionTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "note_player_rejection",
+            schema: json!({
+                "type": "function",
+                "function": {
+                    "name": "note_player_rejection",
+                    "description": "Record that the player explicitly rejected or refused a story thread (declined the hook, walked away, told an NPC no). Call only when the fiction shows a genuine refusal; this does not advance the scene, it only nominates the thread to be dropped from future spotlight selection.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "thread_id": {
+                                "type": "string",
+                                "description": "The story thread_id the player declined to pursue."
+                            }
+                        },
+                        "required": ["thread_id"]
+                    }
+                }
+            }),
+        }
+    }
+
+    /// ReadOnly w.r.t. the turn: it produces a proposal only (no DB write here). The capability bit
+    /// stays the default `Mutating` because the drained commit DOES write story_state — keeping it
+    /// out of the Narrator-safe ReadOnly whitelist is the fail-closed correct choice.
+    async fn call(
+        &self,
+        ctx: &ToolCtx<'_>,
+        _ledger: &mut TurnLedger,
+        args: Value,
+    ) -> Result<ToolOutput> {
+        let args = parse_note_player_rejection_args(args)?;
+        let thread_id = args.thread_id.trim().to_string();
+        // The channel is present iff the story-write loop is ON (turn_loop injects it). When absent
+        // the tool is a structured no-op nomination (it is not registered in that case, but stay
+        // defensive): report not-nominated so the GM knows the signal was dropped.
+        if let Some(cell) = ctx.rejected_nominations {
+            let mut nominations = cell.lock().unwrap_or_else(|p| p.into_inner());
+            if !nominations.iter().any(|n| n.thread_id == thread_id) {
+                nominations.push(RejectionNomination {
+                    thread_id: thread_id.clone(),
+                });
+            }
+            return Ok(ToolOutput::ok(json!({
+                "thread_id": thread_id,
+                "nominated": true,
+                "persisted": false,
+            })));
+        }
+        Ok(ToolOutput::ok(json!({
+            "thread_id": thread_id,
+            "nominated": false,
+            "persisted": false,
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -464,7 +558,9 @@ mod tests {
     fn registry_has_twelve_tools_in_stable_order() {
         // 三期批1 加入 enter_mode / exit_mode → 基础工具集扩为 14；
         // Knowledge P0a 尾部追加 reveal_fact → 基础 15。测试名保留（历史），
-        // 断言更新到真实顺序。
+        // 断言更新到真实顺序。P6 revision：note_player_rejection 仅 story-write loop ON 时追加，
+        // 这里显式 OFF 钉死 15-tool 基线（OFF==baseline 字节稳定）。
+        std::env::remove_var("TRPG_STORY_WRITE_LOOP");
         let names = crate::tools::ToolRegistry::standard()
             .schemas()
             .into_iter()
@@ -510,6 +606,61 @@ mod tests {
         // 空白 fact_id 同样 fail-closed。
         let err = parse_reveal_fact_args(json!({"fact_id":"   "})).unwrap_err();
         assert!(err.to_string().contains("invalid_arguments"));
+    }
+
+    #[test]
+    fn note_player_rejection_args_require_thread_id() {
+        let err = parse_note_player_rejection_args(json!({})).unwrap_err();
+        assert!(err.to_string().contains("invalid_arguments"));
+        let err = parse_note_player_rejection_args(json!({"thread_id":"   "})).unwrap_err();
+        assert!(err.to_string().contains("invalid_arguments"));
+        let ok = parse_note_player_rejection_args(json!({"thread_id":"thr_x"})).unwrap();
+        assert_eq!(ok.thread_id, "thr_x");
+    }
+
+    /// P6 revision: note_player_rejection is appended to `standard()` ONLY when the story-write
+    /// loop is ON. OFF ⇒ the frozen 15-tool baseline; ON ⇒ 16 tools, with the producer at the tail
+    /// (so the first 15 schema bytes never shift). Both branches asserted in one test to keep the
+    /// process-global env mutation tightly scoped.
+    #[test]
+    fn note_player_rejection_registered_only_when_story_write_loop_on() {
+        std::env::remove_var("TRPG_STORY_WRITE_LOOP");
+        let off: Vec<String> = crate::tools::ToolRegistry::standard()
+            .schemas()
+            .into_iter()
+            .map(|v| {
+                v.pointer("/function/name")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(off.len(), 15, "OFF ⇒ frozen 15-tool baseline");
+        assert!(
+            !off.contains(&"note_player_rejection".to_string()),
+            "OFF ⇒ producer tool absent (byte-identical baseline)"
+        );
+
+        std::env::set_var("TRPG_STORY_WRITE_LOOP", "1");
+        let on: Vec<String> = crate::tools::ToolRegistry::standard()
+            .schemas()
+            .into_iter()
+            .map(|v| {
+                v.pointer("/function/name")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            })
+            .collect();
+        std::env::remove_var("TRPG_STORY_WRITE_LOOP");
+
+        assert_eq!(on.len(), 16, "ON ⇒ producer tool appended");
+        assert_eq!(
+            on.last().map(String::as_str),
+            Some("note_player_rejection"),
+            "producer lands at the TAIL so the first 15 schema bytes are unchanged"
+        );
+        assert_eq!(&on[..15], &off[..], "first 15 tools identical ON vs OFF");
     }
 
     #[test]

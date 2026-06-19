@@ -7,6 +7,15 @@
 //!
 //! 守理念：事件 kind/数据通用，不按规则集名（零规则集硬编码）；serde default
 //! 向后兼容；本切片只表示 + 落库，projection 派生留后续。
+//!
+//! ## 权威性诚实说明（P6 revision — 不可过度声称 / honest authority framing）
+//! domain_events 是一条**与状态写并行的 additive 账本**，**fail-soft 写在状态写之后**
+//! （`append_domain_event` 失败只 warn，绝不回滚已成功的状态写——见
+//! `insert_dice_roll` / `DiceRolled`、`CheckResolved`、`resource_current::ResourceChanged`
+//! 的同款写穿模式）。它**尚未**是唯一权威源：今天每个 kind 的权威值仍是各自的状态表
+//! （dice_rolls / check_results / generic_parameter_states …）；本日志正按 blueprint §5.2
+//! 的渐进迁移**逐步成为** source-of-truth，但当前阶段没有任何 projection 折叠它来重建状态。
+//! 因此 doc-comment 不应声称「event-log 即权威源」——准确表述是「正在成为权威源的并行账本」。
 
 use crate::SourceRef;
 use chrono::{DateTime, Utc};
