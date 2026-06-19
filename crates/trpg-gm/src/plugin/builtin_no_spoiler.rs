@@ -245,6 +245,9 @@ impl RuntimePlugin for NoSpoilerGuard {
             // 流后：私有泄漏术语命中未揭示 fact → SecretLeak finding（不门控模组：
             // 无 secret_terms 即空贡献，生产零行为变更）。
             PluginHook::AfterLlmStream => Self::secret_leak_findings(ctx),
+            // 本守卫不挂 HeavyPostprocess（不在 hooks()），host 不会以此 hook 调用它；
+            // 防御性返回空贡献。
+            PluginHook::HeavyPostprocess => vec![],
         }
     }
 }
