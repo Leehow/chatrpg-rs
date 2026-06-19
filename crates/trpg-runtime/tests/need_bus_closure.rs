@@ -38,18 +38,23 @@ fn getter_direct_calls_removed_from_kernel() {
 #[test]
 fn projection_calls_and_memory_preserved_in_kernel() {
     let body = prepare_turn_context_body();
+    // 断言"调用点保留"用**带前导点的方法调用** token（`.method(`）而非 `self.method(`：
+    // rustfmt 会把长链 `match self\n    .memory_blocks_for_turn(...)` 的 `self` 与 `.method(`
+    // 拆到两行,使 `self.method(` 连续子串不再出现(纯格式,调用仍在)。前导点唯一标识调用点
+    // (方法**定义** `async fn method(` 无前导点,且 body 切片已截到下一 pub async fn 之前),
+    // 故对格式重排稳健 —— 修预存的脆性 grep 断言。
     for required in [
-        "self.memory_blocks_for_turn(", // 本期非目标，必须保留
-        "self.state_frame_blocks_for_turn(",
-        "self.world_time_blocks_for_turn(",
-        "self.object_blocks_for_turn(",
-        "self.ability_blocks_for_turn(",
-        "self.rule_binding_blocks_for_turn(",
-        "self.player_value_referee_blocks_for_turn(",
-        "self.referee_combat_blocks_for_turn(",
-        "self.contest_blocks_for_turn(",
+        ".memory_blocks_for_turn(", // 本期非目标，必须保留
+        ".state_frame_blocks_for_turn(",
+        ".world_time_blocks_for_turn(",
+        ".object_blocks_for_turn(",
+        ".ability_blocks_for_turn(",
+        ".rule_binding_blocks_for_turn(",
+        ".player_value_referee_blocks_for_turn(",
+        ".referee_combat_blocks_for_turn(",
+        ".contest_blocks_for_turn(",
         // BP1 active-kernel projection (非 query-driven 获取，原样保留)
-        "self.rule_steward_prefix_blocks_for_turn(",
+        ".rule_steward_prefix_blocks_for_turn(",
     ] {
         assert!(
             body.contains(required),
