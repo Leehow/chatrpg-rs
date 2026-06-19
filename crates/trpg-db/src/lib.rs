@@ -17,14 +17,14 @@ pub struct Db {
 const MIGRATION_ADVISORY_LOCK_KEY: i64 = 0x6b6e_6f77_6d69_67;
 
 /// 通用 durable KnowledgeEdge upsert 入参（v1）。borrow 短生命周期，避免拷贝。
-/// holder_kind 必须是 durable 可持久化 token（gm/player_party/system/npc）；
+/// holder_kind 必须是 durable 可持久化 token（gm/player_party/system/npc/pc/faction）；
 /// 否则 [`Db::upsert_knowledge_edge`] 在写库前 fail-closed 拒绝。
-/// 当 holder_kind=`npc` 时，holder_id 还须经 actor-identity 契约校验为稳定 actor id，
-/// 否则同样 fail-closed（不写任何边）。
+/// 当 holder_kind 为带身份 holder（npc/pc/faction）时，holder_id 还须经 actor-identity 契约
+/// 校验为稳定 id，否则同样 fail-closed（不写任何边）。
 pub struct KnowledgeEdgeInput<'a> {
     pub session_id: &'a str,
     pub holder_kind: &'a str,
-    /// 集合 holder（gm/player_party/system）用空串 `""`；带身份 holder（npc）用其稳定 actor id。
+    /// 集合 holder（gm/player_party/system）用空串 `""`；带身份 holder（npc/pc/faction）用其稳定 id。
     pub holder_id: &'a str,
     pub fact_id: &'a str,
     pub knowledge_state: &'a str,
@@ -83,6 +83,7 @@ impl Db {
             include_str!("../../../migrations/0034_knowledge_edges_npc_holders.sql"),
             include_str!("../../../migrations/0035_npc_relationships.sql"),
             include_str!("../../../migrations/0036_npc_profiles.sql"),
+            include_str!("../../../migrations/0037_knowledge_edges_pc_faction_holders.sql"),
         ];
         // 在单一事务内先取事务级顾问锁，串行化所有并发/跨进程 migrate() 调用。
         // 0033 等迁移用 drop-then-add 重建命名 CHECK 约束（非幂等的两段式 DDL），
@@ -3452,16 +3453,19 @@ impl Db {
 
     /// 通用 durable KnowledgeEdge upsert（v1）：把任意 durable holder 的一条知识边落账。
     /// **fail-closed 门**：写库前校验 holder_kind 必须是 durable 可持久化态
-    /// （gm / player_party / system / npc，见 [`trpg_model::KnowledgeHolderKind::is_durable_persistable`]）。
-    /// 非 durable holder（pc/faction）或未知 token 直接返回 Err，绝不写 knowledge_edges
-    /// （pc/faction durable 边仍 gated）。
-    /// **NPC 身份门**（TC-KNOW-04 + TC-KNOW-00）：holder_kind=`npc` 时 holder_id 还须经
-    /// [`trpg_model::KnowledgeHolder::npc_from_actor_id`] 校验为稳定 actor id（空/占位/展示名形态
+    /// （gm / player_party / system / npc / pc / faction，见
+    /// [`trpg_model::KnowledgeHolderKind::is_durable_persistable`]）。未知 token 直接返回 Err，
+    /// 绝不写 knowledge_edges。
+    /// **身份门**（TC-KNOW-04/TC-KNOW-00 + 本任务 pc/faction）：holder_kind 为带身份 holder
+    /// （npc/pc/faction）时 holder_id 还须经对应 actor-identity 契约构造器
+    /// （[`trpg_model::KnowledgeHolder::npc_from_actor_id`] /
+    /// [`trpg_model::KnowledgeHolder::player_character_from_actor_id`] /
+    /// [`trpg_model::KnowledgeHolder::faction_from_id`]）校验为稳定 id（空/占位/展示名形态
     /// 全部 fail-closed），并以契约规范化（trim）后的 id 落库——kind 通过 ≠ id 合法。
     /// edge_id 由 (session, holder_kind, holder_id, fact) md5 确定性生成；on-conflict 唯一键
     /// 更新态/置信度/来源/理由/披露策略（coalesce 保留旧非空），重放幂等。
     /// 注意：player_party 的兼容写穿路径仍走 [`Db::upsert_knowledge_edge_player_party`]
-    /// （edge_id 方案与 0032 回填对齐），本通用接口服务 gm / system / npc holder。
+    /// （edge_id 方案与 0032 回填对齐），本通用接口服务 gm / system / npc / pc / faction holder。
     pub async fn upsert_knowledge_edge(&self, edge: KnowledgeEdgeInput<'_>) -> Result<()> {
         // fail-closed：非 durable holder kind 在写库前拒绝（不发明 holder、不漏写半条）。
         let kind = trpg_model::KnowledgeHolderKind::from_token(edge.holder_kind)
@@ -3473,18 +3477,25 @@ impl Db {
                 )
             })?;
         let holder_kind = kind.as_token();
-        // NPC holder 身份门：校验 holder_id 为稳定 actor id，并用规范化（trim）后的 id 落库。
-        // 集合 holder（gm/player_party/system）维持空串。非法 NPC id → fail-closed，不写任何边。
-        let npc_holder_id;
+        // 带身份 holder 身份门：校验 holder_id 为稳定 id，并用规范化（trim）后的 id 落库。
+        // 集合 holder（gm/player_party/system）维持空串。非法 id → fail-closed，不写任何边。
+        use trpg_model::{KnowledgeHolder, KnowledgeHolderKind};
+        let resolved_holder_id;
         let holder_id: &str = match kind {
-            trpg_model::KnowledgeHolderKind::Npc => {
-                let holder = trpg_model::KnowledgeHolder::npc_from_actor_id(edge.holder_id)
-                    .map_err(|u| anyhow::anyhow!("upsert_knowledge_edge: {u}"))?;
-                npc_holder_id = holder
+            KnowledgeHolderKind::Npc | KnowledgeHolderKind::Pc | KnowledgeHolderKind::Faction => {
+                let holder = match kind {
+                    KnowledgeHolderKind::Npc => KnowledgeHolder::npc_from_actor_id(edge.holder_id),
+                    KnowledgeHolderKind::Pc => {
+                        KnowledgeHolder::player_character_from_actor_id(edge.holder_id)
+                    }
+                    _ => KnowledgeHolder::faction_from_id(edge.holder_id),
+                }
+                .map_err(|u| anyhow::anyhow!("upsert_knowledge_edge: {u}"))?;
+                resolved_holder_id = holder
                     .holder_id()
-                    .expect("npc holder 必有 stable id")
+                    .expect("带身份 holder 必有 stable id")
                     .to_string();
-                npc_holder_id.as_str()
+                resolved_holder_id.as_str()
             }
             _ => edge.holder_id,
         };

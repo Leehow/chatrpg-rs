@@ -99,8 +99,8 @@ pub struct CommitContext<'a> {
 }
 
 /// Per-proposal disposition. `Done` = a durable write happened; `Rejected` = invalid (the
-/// batch committed nothing); `Skipped` = valid but intentionally not committed in this
-/// version (e.g. a holder kind whose durable edge is still gated).
+/// batch committed nothing); `Skipped` = valid but intentionally not committed (the gating
+/// hook — currently latent, since every holder kind is durable after pc/faction opened).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommitStatus {
@@ -201,7 +201,11 @@ enum CommitAction {
         target: NpcRelationshipTarget,
         delta: NpcRelationshipDelta,
     },
-    /// Valid but intentionally not committed in this version.
+    /// Valid but intentionally not committed — the typed "no durable write" path. Currently
+    /// latent: every holder kind is durable after pc/faction opened (this task), so no arm
+    /// constructs it; the report's `Skipped` status + executor handling are retained as the
+    /// commit-pipeline's gating hook for any holder/state a future task wants to defer.
+    #[allow(dead_code)]
     Skip { reason: String },
 }
 
@@ -309,9 +313,9 @@ fn aborted_report(
 /// for the runtime session-authority guard — a proposal that tries to choose its own
 /// destination session instead of the commit context's: a relationship candidate naming a
 /// different `session_id`, or a legacy `MemoryFact` whose `session_id` (or session-scope id)
-/// disagrees with the context. That aborts the batch like a validation failure. A
-/// valid-but-currently-ungated combination (e.g. a pc/faction holder edge) is a deliberate
-/// `Ok(`[`CommitAction::Skip`]`)`, not an error.
+/// disagrees with the context. That aborts the batch like a validation failure. Every
+/// durable holder (gm / player_party / system / npc / pc / faction) routes to a write; the
+/// [`CommitAction::Skip`] gating path is retained but currently unused.
 fn plan_action(
     p: &MemoryExtractionProposal,
     ctx: &CommitContext<'_>,
@@ -406,9 +410,15 @@ fn plan_action(
                         reason,
                     }
                 }
+                // Every durable holder that has no dedicated learned-event path (gm / system,
+                // any non-true npc, and now pc / faction) commits one durable edge. The
+                // holder_id was already normalized by ProposalHolder::validated(); the DB
+                // upsert re-validates pc/faction/npc ids and fails closed on an unstable id.
                 kind @ (KnowledgeHolderKind::Npc
                 | KnowledgeHolderKind::Gm
-                | KnowledgeHolderKind::System) => CommitAction::DurableEdge {
+                | KnowledgeHolderKind::System
+                | KnowledgeHolderKind::Pc
+                | KnowledgeHolderKind::Faction) => CommitAction::DurableEdge {
                     holder_kind: kind.as_token(),
                     holder_id: c.holder.holder_id.clone().unwrap_or_default(),
                     fact_id,
@@ -417,12 +427,6 @@ fn plan_action(
                     learned_at_turn_id,
                     source_event_id,
                     reason,
-                },
-                KnowledgeHolderKind::Pc | KnowledgeHolderKind::Faction => CommitAction::Skip {
-                    reason: format!(
-                        "durable knowledge edge for holder kind `{}` is gated (no partial write)",
-                        c.holder.holder_kind.as_token()
-                    ),
                 },
             }
         }
@@ -772,14 +776,66 @@ mod tests {
     }
 
     #[test]
-    fn pc_holder_knowledge_update_is_skipped_not_committed() {
-        // A valid pc holder is durable-gated: it must Skip, never write a partial edge.
+    fn pc_and_faction_holders_route_to_durable_edge() {
+        // pc / faction holders are now durable: a valid one plans a DurableEdge carrying the
+        // normalized id, never a Skip (no dedicated learned-event path, so knows_true too
+        // commits straight to a durable edge).
         let p = plans_of(json!({"proposals": [{
             "proposal_kind": "knowledge_update",
             "fact_id": "f1", "holder": {"holder_kind": "pc", "holder_id": "pc_hero"},
             "knowledge_state": "knows_true", "source_event_ids": ["ev1"]
         }]}));
-        assert!(matches!(p[0].action, CommitAction::Skip { .. }));
+        match &p[0].action {
+            CommitAction::DurableEdge {
+                holder_kind,
+                holder_id,
+                ..
+            } => {
+                assert_eq!(*holder_kind, "pc");
+                assert_eq!(holder_id, "pc_hero");
+            }
+            other => panic!("expected DurableEdge, got {}", other.durable_path()),
+        }
+
+        let p = plans_of(json!({"proposals": [{
+            "proposal_kind": "knowledge_update",
+            "fact_id": "f1", "holder": {"holder_kind": "faction", "holder_id": "guild_thieves"},
+            "knowledge_state": "suspects", "source_event_ids": ["ev1"]
+        }]}));
+        match &p[0].action {
+            CommitAction::DurableEdge {
+                holder_kind,
+                holder_id,
+                ..
+            } => {
+                assert_eq!(*holder_kind, "faction");
+                assert_eq!(holder_id, "guild_thieves");
+            }
+            other => panic!("expected DurableEdge, got {}", other.durable_path()),
+        }
+    }
+
+    #[test]
+    fn pc_faction_unstable_id_aborts_batch_no_write() {
+        // An unstable pc/faction id fails the model `validated()` gate (display-name shape),
+        // so the whole batch is Aborted before any write — fail-closed preserved.
+        for holder in [
+            json!({"holder_kind": "pc", "holder_id": "The Hero"}),
+            json!({"holder_kind": "faction", "holder_id": "Thieves Guild"}),
+        ] {
+            let batch = proposals(json!([{
+                "proposal_kind": "knowledge_update",
+                "fact_id": "f1", "holder": holder,
+                "knowledge_state": "knows_true", "source_event_ids": ["ev1"]
+            }]));
+            match plan_batch(&batch, &ctx()) {
+                BatchPlan::Aborted(report) => {
+                    assert!(report.committed_nothing(), "unstable id writes nothing");
+                    assert_eq!(report.rejected(), 1);
+                }
+                BatchPlan::Ready(_) => panic!("unstable pc/faction id must abort, not be ready"),
+            }
+        }
     }
 
     #[test]
