@@ -21,6 +21,7 @@ uuid.workspace = true
 trpg-agent = { path = "../trpg-agent" }
 trpg-combat = { path = "../trpg-combat" }
 trpg-db = { path = "../trpg-db" }
+trpg-director = { path = "../trpg-director" }
 trpg-interaction = { path = "../trpg-interaction" }
 trpg-llm = { path = "../trpg-llm" }
 trpg-mechanics = { path = "../trpg-mechanics" }
