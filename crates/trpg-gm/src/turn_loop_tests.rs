@@ -1628,13 +1628,21 @@ fn p37_hooks_relocated_to_commit_boundaries() {
 
 use crate::tools::RejectionNomination;
 
-/// FULL TURN CHAIN (story-write loop ON): a turn whose GM noted a player rejection — a
-/// `RejectionNomination` on the turn ctx, exactly what the `note_player_rejection` tool produces —
-/// is drained at `presentation_commit_boundary` → `commit_story_writes` PERSISTS it → the NEXT
-/// turn's selector input (`rejected_thread_ids`) flags that thread for drop. This is the production
-/// per-turn caller for `commit_story_writes` (no longer dead-by-tests). The selector's actual
-/// primary/secondary drop on this input is locked by trpg-runtime's `live_story_write_loop`
-/// full-chain test (trpg-gm does not depend on trpg-director).
+/// SEGMENT (b) of the §二十四-#13 chain — nomination → persist. NOT a single end-to-end test.
+/// The §二十四-#13 coverage is SEGMENTED: 3 segments that COMPOSE the chain, each pinned by its own
+/// test (a real GM-loop e2e would need a live LLM to actually call the tool, so it is not feasible
+/// deterministically):
+///   (a) tool → nomination: `note_player_rejection` tool invocation pushes a `RejectionNomination`
+///       (crates/trpg-gm/src/tools/world.rs `call` + tests `note_player_rejection_args_require_thread_id`).
+///   (b) nomination → persist (THIS test): a `RejectionNomination` injected on the turn ctx — exactly
+///       the shape segment (a) produces — is drained at `presentation_commit_boundary` →
+///       `commit_story_writes` PERSISTS it → the NEXT turn's selector input (`rejected_thread_ids`)
+///       flags that thread for drop. This is the production per-turn caller for `commit_story_writes`
+///       (no longer dead-by-tests). NOTE: this segment manually injects the nomination rather than
+///       routing it through the tool, so it does not exercise segment (a)'s tool path.
+///   (c) persist → selector-drop: trpg-runtime's `live_story_write_loop` test drives the real P5.3
+///       selector and asserts the rejected thread is NOT in primary/secondary
+///       (crates/trpg-runtime/tests/live_story_write_loop.rs; trpg-gm does not depend on trpg-director).
 #[tokio::test]
 async fn presentation_commit_drains_rejection_then_persists_for_next_turn_selector() {
     use trpg_model::{StoryState, StoryThread, StoryThreadStatus};

@@ -20,14 +20,18 @@ use trpg_model::{AssetEnvelope, BindingPlan, DomainEvent, DomainEventKind, Execu
 // mutation 工具在册。P1 隔离 Narrator 后，本断言将演化为『Narrator registry **不含**
 // mutation 工具』——届时此基线翻面，正是 P1 完成的可观测信号。
 
-/// standard() 注册表当前含 15 工具（schema 字节稳定铁律的计数侧锚）。
+/// standard() 注册表的 BASE（flag-OFF）形状含 15 工具（schema 字节稳定铁律的计数侧锚）。
+/// `note_player_rejection`（P6 §二十四-#13 producer）仅 `TRPG_STORY_WRITE_LOOP=1` 时追加为第 16，
+/// 故必须显式 OFF 这个 process-global env 才能确定地钉死 15-tool 基线——否则环境里若已设该 flag
+/// 本门会伪红（数到 16）。OFF 分支即"LLM 看到的冻结基线"。
 #[test]
 fn standard_registry_has_fifteen_tools() {
+    std::env::remove_var("TRPG_STORY_WRITE_LOOP"); // 钉死 flag-OFF 基线，免受环境 flag 干扰
     let schemas = crate::tools::ToolRegistry::standard().schemas();
     assert_eq!(
         schemas.len(),
         15,
-        "ToolRegistry::standard() 工具数应为 15（P0 基线；改工具集需同步 schema 字节回归测试）"
+        "ToolRegistry::standard() flag-OFF 工具数应为 15（P0 基线；改工具集需同步 schema 字节回归测试）"
     );
 }
 

@@ -1,8 +1,10 @@
-//! P6.8a — story_state WRITE-loop live acceptance (§二十四-#13 full chain + StoryThreadOpened
+//! P6.8a — story_state WRITE-loop live acceptance (§二十四-#13 persist→selector segment + StoryThreadOpened
 //! + OFF==baseline). The WRITE side closes the read/write asymmetry (P5⑤#3): P5 only LOADED
 //! `rejected`; here the runtime PERSISTS it and the P5.3 selector then drops the thread.
 //!
-//! Full chain proven end-to-end:
+//! Segment (c) of the §二十四-#13 chain — persist → selector-drop (the WRITE side, proven against
+//! a live DB). This is one of 3 segments that COMPOSE the chain (not a single tool-to-selector e2e;
+//! the tool→nomination segment lives in trpg-gm). What this file proves directly:
 //!   reject proposal → `commit_story_writes` (flag ON) → reload via `load_story_state`
 //!   → `build_director_brief_packet` (the real P5.3 selector) → rejected thread NOT in
 //!   primary/secondary.

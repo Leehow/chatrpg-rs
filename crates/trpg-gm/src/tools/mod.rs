@@ -554,9 +554,12 @@ mod capability_guard_tests {
         "reveal_fact",
     ];
 
-    /// standard() 恰好 3 ReadOnly + 12 Mutating；ReadOnly 集合逐名锁定。
+    /// standard() flag-OFF 基线恰好 3 ReadOnly + 12 Mutating（共 15）；ReadOnly 集合逐名锁定。
+    /// 显式 OFF `TRPG_STORY_WRITE_LOOP`：否则环境里若已设该 flag，会多出第 16 个 Mutating
+    /// (`note_player_rejection`) 令 12/15 计数伪红。
     #[test]
     fn standard_has_exactly_three_readonly_twelve_mutating() {
+        std::env::remove_var("TRPG_STORY_WRITE_LOOP"); // 钉死 flag-OFF 基线
         let reg = ToolRegistry::standard();
         let mut readonly: Vec<&str> = reg
             .tools
@@ -682,6 +685,9 @@ mod schema_stability_tests {
     /// schema；两者序列化字节不同 → 工具 schema 变化是 mode 切换的有因失效依据。
     #[test]
     fn mode_switch_changes_tool_schema_bytes() {
+        // for_mode 派生自 standard()，故同样受 TRPG_STORY_WRITE_LOOP 影响（ON ⇒ 多一个 base 工具
+        // → 16/18）。显式 OFF 钉死 15/17 计数基线，免受环境 flag 干扰。
+        std::env::remove_var("TRPG_STORY_WRITE_LOOP");
         let dir = temp_data_dir_with_manifest(
             "combat",
             r#"{"mode_id":"combat","frame_kind":"combat","extra_tools":["open_combat_frame","close_frame"]}"#,
