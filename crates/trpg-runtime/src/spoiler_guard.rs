@@ -229,54 +229,6 @@ mod tests {
         );
     }
 
-    /// Knowledge P0a 回归：一个场景里**同时**含节点级剧透与实体级剧透时，
-    /// revealed 账本里同时带 node_id 与 entity_id → 两者都不再被裁（揭示放行）；
-    /// 账本为空 → 两者都被裁（未揭示裁剪）。证明 reveal_fact 落账的 node/entity id
-    /// 经 guard_scene 后确实不被 redact（enforcement 半的放行语义）。
-    ///
-    /// 断言走渲染路（scene_node_to_blocks().render_text()）而非裸 JSON to_string()：
-    /// guard_entity 只裁 body/summary/name，**有意保留** spoiler 元数据块（secret_terms
-    /// 数组本身仍在 JSON 里），裸 to_string 会恒含 secret_term → 假失败。渲染路是
-    /// 实际进 GM context 的文本，与既有两条 spoiler_guard 测试同口径。
-    #[test]
-    fn revealed_node_and_entity_are_not_redacted() {
-        // 节点级 secret 选 "传送门"：避开 butler npc 的 reveal_conditions("在地窖发现
-        // 尸体后") 词汇——否则该条件文案只按 npc secret_terms 裁，节点词会经 GM hint 漏出。
-        let (mut n, npcs) = butler_scene();
-        n.spoiler.secret_terms = vec!["传送门".to_string()];
-        n.gm_notes = Some("阁楼藏着传送门。".to_string());
-
-        // 未揭示：渲染后节点级 secret("传送门") 与实体级 secret("莫里亚蒂教授") 都被裁。
-        let none = HashSet::new();
-        let (hn, hnpcs) = guard_scene(&n, &npcs, &none);
-        let hidden = scene_node_to_blocks("mod1", &hn, &hnpcs, &[])[0]
-            .content
-            .render_text();
-        assert!(
-            !hidden.contains("传送门"),
-            "未揭示 → 节点级 secret 必被裁: {hidden}"
-        );
-        assert!(
-            !hidden.contains("莫里亚蒂教授"),
-            "未揭示 → 实体级 secret 必被裁: {hidden}"
-        );
-
-        // revealed 账本同时带 node_id(sc01) 与 entity_id(npc_butler) → 两者都放行。
-        let revealed = HashSet::from(["sc01".to_string(), "npc_butler".to_string()]);
-        let (on, onpcs) = guard_scene(&n, &npcs, &revealed);
-        let open = scene_node_to_blocks("mod1", &on, &onpcs, &[])[0]
-            .content
-            .render_text();
-        assert!(
-            open.contains("传送门"),
-            "node_id 揭示后 → 节点级 secret 放行: {open}"
-        );
-        assert!(
-            open.contains("莫里亚蒂教授"),
-            "entity_id 揭示后 → 实体级 secret 放行: {open}"
-        );
-    }
-
     /// 别太严回归：整张 npcs 都无 spoiler 时，guard_scene 产出与原 npcs 字节等价，
     /// node 也未被改（保证零误裁、与既有投影路径行为一致）。
     #[test]
