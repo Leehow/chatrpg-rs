@@ -190,6 +190,129 @@ mod npc_behavior {
         assert!(!blank.contains("[npc_behavior_guidance"));
     }
 
+    // ============ TC-D3-06: projection-driven NPC consistency after-stream pass ============
+    //
+    // These exercise the exact pure seam `run_after_llm_stream_hook` runs per active NPC
+    // (minus the durable profile/projection reads): build the NPC's own speech projection
+    // and feed `npc_consistency_findings` the same private `secret_terms` the verifier
+    // already consumes. Deterministic, no DB.
+
+    use trpg_agent::{VerifierFinding, VerifierFindingKind};
+    use trpg_gm::plugin::SecretTerm;
+    use trpg_gm::turn_loop::npc_consistency_findings;
+    use trpg_runtime::{npc_speech_projection_from_mind, NpcSpeechProjection};
+
+    fn secret_term(term: &str, fact_id: &str) -> SecretTerm {
+        SecretTerm {
+            term: term.into(),
+            fact_id: Some(fact_id.into()),
+        }
+    }
+
+    /// Build the speaking NPC's own speech projection from in-memory knowledge, secret-gated
+    /// against the player party, exactly as `project_for_npc_speech` does after the DB load.
+    fn speech_proj(entries: &[NpcKnowledgeEntry], player_known: &[String]) -> NpcSpeechProjection {
+        let v = view(&profile(), rel(0, 0, 80), entries);
+        npc_speech_projection_from_mind(v, player_known)
+    }
+
+    /// No active NPC → the consistency pass is a no-op (empty), regardless of narration.
+    #[test]
+    fn active_npc_consistency_no_npc_is_noop() {
+        let terms = vec![secret_term("the portal in the cellar", "hidden_fact")];
+        let out = npc_consistency_findings(
+            "Lars whispers: the portal in the cellar is real.",
+            &[],
+            &terms,
+            &[],
+        );
+        assert!(out.is_empty(), "no active NPC must produce no findings");
+    }
+
+    /// Active NPC whose narration mentions a fact it KNOWS but the party does not (withheld
+    /// secret) → a redacted `SecretLeak` finding that references the fact id, never the term.
+    #[test]
+    fn active_npc_withheld_fact_mention_yields_redacted_secret_leak() {
+        const TERM: &str = "the portal in the cellar";
+        let terms = vec![secret_term(TERM, "hidden_fact")];
+        // Lars knows `hidden_fact`; the party knows nothing → it is a withheld secret.
+        let proj = speech_proj(&[entry("hidden_fact")], &[]);
+        let npcs = vec![("Lars".to_string(), proj)];
+        // Narration plausibly involves Lars (name) and surfaces the secret term.
+        let narration = format!("Lars leans in: {TERM} hums faintly.");
+
+        let out = npc_consistency_findings(&narration, &npcs, &terms, &[]);
+        assert_eq!(
+            out.len(),
+            1,
+            "withheld fact disclosure → one finding: {out:?}"
+        );
+        assert_eq!(out[0].kind, VerifierFindingKind::SecretLeak);
+        assert!(
+            out[0].detail.contains("hidden_fact"),
+            "finding must reference the fact id: {}",
+            out[0].detail
+        );
+        assert!(
+            !out[0].detail.contains(TERM),
+            "finding must never echo the matched secret term: {}",
+            out[0].detail
+        );
+
+        // De-dupe: if the player projection already flagged this same fact, the NPC pass
+        // suppresses the duplicate (same fact already covered by an existing SecretLeak).
+        let existing = vec![VerifierFinding {
+            kind: VerifierFindingKind::SecretLeak,
+            severity: out[0].severity,
+            detail: "player-visible narration exposes player-unknown fact 'hidden_fact'".into(),
+        }];
+        assert!(
+            npc_consistency_findings(&narration, &npcs, &terms, &existing).is_empty(),
+            "existing SecretLeak for the same fact → NPC pass de-dupes to empty"
+        );
+
+        // Visibility gate: narration that does not name the NPC is skipped (low false positives).
+        let unrelated = format!("A draft stirs; {TERM} hums faintly.");
+        assert!(
+            npc_consistency_findings(&unrelated, &npcs, &terms, &[]).is_empty(),
+            "narration not naming the NPC → skipped"
+        );
+    }
+
+    /// A fact the PLAYER already knows (so the player projection leak check allows it) but
+    /// the speaking NPC does NOT hold still yields an NPC consistency finding — the NPC is
+    /// the speaker, and it cannot honestly state a fact it does not know.
+    #[test]
+    fn active_npc_player_known_but_npc_unknown_fact_flags_when_speaker() {
+        const TERM: &str = "the duke's hidden heir";
+        let terms = vec![secret_term(TERM, "shared_fact")];
+        let player_known = vec!["shared_fact".to_string()];
+        // Lars knows only `own_fact`; he does NOT hold `shared_fact` at all.
+        let proj = speech_proj(&[entry("own_fact")], &player_known);
+        let npcs = vec![("Lars".to_string(), proj)];
+        let narration = format!("Lars confides: {TERM} walks among us.");
+
+        // No existing SecretLeak (the player projection allows a player-known fact), yet the
+        // NPC-speaker consistency check still fires because Lars cannot know `shared_fact`.
+        let out = npc_consistency_findings(&narration, &npcs, &terms, &[]);
+        assert!(
+            !out.is_empty(),
+            "NPC-unknown fact stated by the speaker → consistency finding: {out:?}"
+        );
+        assert!(
+            out.iter().any(|f| f.detail.contains("shared_fact")),
+            "finding must reference the fact id: {out:?}"
+        );
+        assert!(
+            out.iter().any(|f| f.detail.contains("npc_lars")),
+            "finding must reference the speaking NPC: {out:?}"
+        );
+        assert!(
+            out.iter().all(|f| !f.detail.contains(TERM)),
+            "finding must never echo the matched secret term: {out:?}"
+        );
+    }
+
     /// DB-gated end-to-end: persist a profile + relationship + knowledge edges, then run
     /// the real durable load path (`load_npc_profile` → `load_active_npc_guidance`) exactly
     /// as the GM loop does, and assert a prompt-safe block is produced with GM-only secrets
