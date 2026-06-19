@@ -44,6 +44,10 @@ pub mod npc_behavior_consistency;
 pub use npc_behavior_consistency::*;
 pub mod fact_truth_status;
 pub use fact_truth_status::*;
+pub mod story;
+pub use story::*;
+pub mod director_plan;
+pub use director_plan::*;
 
 pub const PROJECT_SCHEMA_VERSION: &str = "chatrpg.project_bundle.v1";
 pub const RULE_SCHEMA_VERSION: &str = "chatrpg.rule_bundle.v1";
