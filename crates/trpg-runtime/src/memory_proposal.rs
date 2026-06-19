@@ -16,9 +16,9 @@
 use serde::Serialize;
 use serde_json::Value;
 use trpg_model::{
-    KnowledgeHolderKind, KnowledgeState, MemoryExtractionProposal, MemoryFact, MemoryFactCandidate,
-    MemoryStatus, NpcRelationshipDelta, NpcRelationshipTarget, ProposalError, Scope, ScopeType,
-    Visibility,
+    FactTruthStatus, KnowledgeHolderKind, KnowledgeState, MemoryExtractionProposal, MemoryFact,
+    MemoryFactCandidate, MemoryStatus, NpcRelationshipDelta, NpcRelationshipTarget, ProposalError,
+    Scope, ScopeType, Visibility,
 };
 
 /// Bridge already-extracted relationship-triple [`MemoryFact`]s (see
@@ -84,11 +84,69 @@ pub fn try_proposals_from_json(
 // domain-event write, or an `npc_relationships` mutation — always through the existing
 // state-owner DB APIs (never raw SQL here, never a plugin write).
 
-use trpg_db::{Db, KnowledgeEdgeInput};
+use trpg_db::{Db, KnowledgeEdgeInput, WorldFactRow};
 
 /// Default confidence for a committed world-fact candidate that carries none. A neutral
 /// midpoint: the proposal asserted the fact (with evidence) but gave no explicit score.
 const WORLD_FACT_DEFAULT_CONFIDENCE: f32 = 0.5;
+
+/// P3 layered-runtime knowledge-kernel mode (env `TRPG_KNOWLEDGE_KERNEL`, default `Off`).
+/// A tri-state instead of a bare bool (codex P3.5 finding) so acceptance + rollback are crisp:
+/// - `Off`   — world-fact commits write ONLY `memory_facts` (byte-equal to baseline; recall
+///             unchanged; no extra DB query). The default.
+/// - `Shadow`— additionally populate the first-class `world_facts` identity table + derive the
+///             truth-aware GM knowledge edge, and run the advisory orphan-ref check. Every
+///             additive write is best-effort: failure only `warn!`s, never rolls back the
+///             baseline row nor blocks the commit.
+/// - `Enforce`— like `Shadow`, but a FAILED additive world-fact / GM-edge write PROPAGATES
+///             (aborts the action) instead of being swallowed — for use only after backfill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KnowledgeKernelMode {
+    Off,
+    Shadow,
+    Enforce,
+}
+
+impl KnowledgeKernelMode {
+    fn from_env() -> Self {
+        Self::parse(&std::env::var("TRPG_KNOWLEDGE_KERNEL").unwrap_or_default())
+    }
+
+    /// Pure parse of the flag value (kept separate from `from_env` so it is testable without
+    /// mutating the process-global environment — env-race-free per the flake discipline).
+    fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "on" | "shadow" => KnowledgeKernelMode::Shadow,
+            "enforce" => KnowledgeKernelMode::Enforce,
+            // unset / "0" / "off" / "false" / anything unrecognized → fail-safe to baseline.
+            _ => KnowledgeKernelMode::Off,
+        }
+    }
+
+    /// Any non-Off mode: the additive knowledge-kernel writes + advisory checks are active.
+    fn is_on(self) -> bool {
+        !matches!(self, KnowledgeKernelMode::Off)
+    }
+
+    /// Enforce mode: additive-write failures propagate instead of being swallowed.
+    fn is_enforce(self) -> bool {
+        matches!(self, KnowledgeKernelMode::Enforce)
+    }
+}
+
+/// Truth-aware GM knowledge-edge derivation for a committed world fact (pure, no IO). The GM
+/// (omniscient over world truth) gets an edge ONLY when the proposition's own truth axis is
+/// decided: `True` → `knows_true`; `False`/`Lie` → `believes_false`. `Rumor`/`Subjective`/
+/// `Unknown` and an unclassified (`None`) fact get NO auto edge — respecting `FactTruthStatus`'s
+/// documented fail-closed default (unclassified = neither true nor false), so rumors/lies never
+/// enter `gm_truth_view` as confirmed truth (codex P3.4 finding; §13 / §24-#8).
+fn gm_truth_edge_state(truth: Option<FactTruthStatus>) -> Option<&'static str> {
+    match truth {
+        Some(FactTruthStatus::True) => Some("knows_true"),
+        Some(FactTruthStatus::False) | Some(FactTruthStatus::Lie) => Some("believes_false"),
+        _ => None,
+    }
+}
 
 /// Where/when a batch of proposals is being committed. `turn_id` is the commit turn used
 /// for domain-event provenance when a candidate carries none of its own.
@@ -162,8 +220,21 @@ impl CommitReport {
 /// One planned durable action for a validated proposal. Holds owned data so the pure plan
 /// phase needs no DB; the executor turns each into exactly one state-owner call.
 enum CommitAction {
-    /// New world fact → `memory_facts` (first-stage Fact Store).
-    WorldFact(MemoryFact),
+    /// New world fact. **Dual-write (P3, behavior-preserving)**: `memory_fact` ALWAYS lands in
+    /// `memory_facts` (baseline — keeps `retrieve_memory` recall byte-equal to baseline, fixes
+    /// the recall regression a hard-cut would have caused — codex F6). When env flag
+    /// `TRPG_KNOWLEDGE_KERNEL` is ON, the `world_fact` identity row is ADDITIONALLY written to
+    /// the first-class `world_facts` table and a (holder='gm', knows_true) KnowledgeEdge is
+    /// auto-derived so the committed fact lands in gm_truth_view (世界里发生了 = GM 确知，但玩家
+    /// 未知——绝不写 player_party 边, §13/§24-#8). Flag OFF == baseline (only memory_facts).
+    WorldFact {
+        memory_fact: MemoryFact,
+        world_fact: WorldFactRow,
+        /// Truth-aware GM knowledge-edge state to auto-derive on commit (Shadow/Enforce only):
+        /// `Some("knows_true")` for a True fact, `Some("believes_false")` for False/Lie, `None`
+        /// for rumor/subjective/unknown/unclassified (no auto edge). Computed purely in planning.
+        gm_edge_state: Option<&'static str>,
+    },
     /// Existing relationship-triple fact, committed as-is.
     LegacyFact(MemoryFact),
     /// player_party learned a fact as true → reveal path (event + knowledge edge).
@@ -213,7 +284,8 @@ impl CommitAction {
     /// Identity ref recorded in the audit outcome — never fact prose.
     fn fact_ref(&self) -> Option<String> {
         match self {
-            CommitAction::WorldFact(f) | CommitAction::LegacyFact(f) => Some(f.fact_id.clone()),
+            CommitAction::WorldFact { memory_fact, .. } => Some(memory_fact.fact_id.clone()),
+            CommitAction::LegacyFact(f) => Some(f.fact_id.clone()),
             CommitAction::PlayerLearned { fact_id, .. }
             | CommitAction::PlayerPartyEdge { fact_id, .. }
             | CommitAction::NpcLearned { fact_id, .. }
@@ -229,7 +301,10 @@ impl CommitAction {
 
     fn durable_path(&self) -> &'static str {
         match self {
-            CommitAction::WorldFact(_) => "memory_facts.upsert(world_fact)",
+            // Baseline always-on durable path (memory_facts). The flag-gated additive
+            // world_facts identity write is reflected in execution traces, not this static
+            // path, so OFF == baseline audit shape.
+            CommitAction::WorldFact { .. } => "memory_facts.upsert(world_fact)",
             CommitAction::LegacyFact(_) => "memory_facts.upsert(legacy_triple)",
             CommitAction::PlayerLearned { .. } => "record_revealed_fact(player_party,knows_true)",
             CommitAction::PlayerPartyEdge { .. } => "knowledge_edges(player_party)",
@@ -322,13 +397,26 @@ fn plan_action(
 ) -> Result<CommitAction, String> {
     Ok(match p {
         MemoryExtractionProposal::WorldFact(c) => {
-            let now = chrono::Utc::now();
+            // P3 dual-write plan (behavior-preserving): build BOTH the baseline `memory_facts`
+            // row (always written — keeps retrieve_memory recall byte-equal to baseline) AND
+            // the first-class `world_facts` identity row (additionally written only when
+            // TRPG_KNOWLEDGE_KERNEL is ON). fact_id / source_event_ids / turn_id all transparent;
+            // default summary = subject+predicate+object; default confidence = neutral 0.5
+            // (verbatim baseline). The commit context is session-authoritative.
             let summary = if c.summary.is_empty() {
                 format!("{} {} {}", c.subject, c.predicate, c.object)
             } else {
                 c.summary.clone()
             };
-            CommitAction::WorldFact(MemoryFact {
+            let confidence = c
+                .confidence
+                .map(|v| v as f32)
+                .unwrap_or(WORLD_FACT_DEFAULT_CONFIDENCE);
+            let turn_id = c.turn_id.clone().or_else(|| Some(ctx.turn_id.to_string()));
+            let now = chrono::Utc::now();
+            // Baseline memory_facts row — byte-for-byte the pre-P3 shape (GmOnly, session scope,
+            // tags incl. "world_fact", importance 1, object as JSON string).
+            let memory_fact = MemoryFact {
                 fact_id: c.fact_id.clone(),
                 session_id: ctx.session_id.to_string(),
                 scope: Scope {
@@ -339,19 +427,34 @@ fn plan_action(
                 subject: c.subject.clone(),
                 predicate: c.predicate.clone(),
                 object: Value::String(c.object.clone()),
-                summary,
+                summary: summary.clone(),
                 status: MemoryStatus::Active,
-                confidence: c
-                    .confidence
-                    .map(|v| v as f32)
-                    .unwrap_or(WORLD_FACT_DEFAULT_CONFIDENCE),
+                confidence,
                 source_event_ids: c.source_event_ids.clone(),
                 tags: vec!["memory".into(), "proposal".into(), "world_fact".into()],
                 importance: 1,
-                turn_id: c.turn_id.clone().or_else(|| Some(ctx.turn_id.to_string())),
+                turn_id: turn_id.clone(),
                 created_at: now,
                 updated_at: now,
-            })
+            };
+            // First-class world_facts identity row (additive, flag-gated at execution).
+            let world_fact = WorldFactRow {
+                fact_id: c.fact_id.clone(),
+                session_id: ctx.session_id.to_string(),
+                subject: c.subject.clone(),
+                predicate: c.predicate.clone(),
+                object: c.object.clone(),
+                summary,
+                truth_status: c.truth_status.map(|t| t.as_token().to_string()),
+                source_event_ids: c.source_event_ids.clone(),
+                turn_id,
+                confidence: Some(confidence),
+            };
+            CommitAction::WorldFact {
+                memory_fact,
+                world_fact,
+                gm_edge_state: gm_truth_edge_state(c.truth_status),
+            }
         }
         MemoryExtractionProposal::MemoryFact(c) => {
             // Session-authority guard (same invariant as every other variant): the commit
@@ -501,6 +604,34 @@ enum ExecOutcome {
     Skipped(String),
 }
 
+/// P3 WorldFact↔KnowledgeEdge 引用契约（弱）的 runtime 接线：在写一条引用 `fact_id` 的知识边
+/// 前，查 world_facts 是否已有该事实身份。孤儿引用按默认 [`WorldFactRefStrength::Warn`] 只
+/// warn+trace、**不阻断**提交（历史 player-reveal 边可能引用尚无 world_fact 身份的 fact_id）。
+/// DB 抖动按 fail-soft：查不到当作不存在（warn），绝不因引用契约查询失败而拦提交。返回的
+/// `admits()` 在 Warn 强度下恒 true；seam 的强度参数留待后续阶段回填后翻转为 Enforce。
+async fn warn_if_orphan_world_fact_ref(db: &Db, session_id: &str, fact_id: &str) {
+    // Gated under the knowledge-kernel mode: when Off the world_facts table is not populated,
+    // so every edge would orphan-warn (noise) — and Off must stay byte-equal to baseline (no
+    // extra DB query). Only meaningful once world-fact identities are being written.
+    if !KnowledgeKernelMode::from_env().is_on() {
+        return;
+    }
+    let exists = db
+        .load_world_fact(session_id, fact_id)
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+    let outcome = trpg_model::check_world_fact_ref(
+        fact_id,
+        |_| exists,
+        trpg_model::WorldFactRefStrength::Warn,
+    );
+    if let Some(summary) = outcome.trace_summary() {
+        tracing::warn!(session_id = %session_id, "{summary}");
+    }
+}
+
 /// Execute one planned action through the matching state-owner DB API. Each arm is exactly
 /// one durable call; fail-closed gates (holder identity, evidence) live in those APIs.
 async fn execute_action(
@@ -509,10 +640,69 @@ async fn execute_action(
     action: CommitAction,
 ) -> anyhow::Result<ExecOutcome> {
     match action {
-        CommitAction::WorldFact(fact) | CommitAction::LegacyFact(fact) => {
+        CommitAction::WorldFact {
+            memory_fact,
+            world_fact,
+            gm_edge_state,
+        } => {
+            // Baseline (always): the world fact lands in memory_facts so retrieve_memory recall
+            // is byte-equal to baseline (no recall regression — codex F6). This is the ONLY
+            // durable write when the knowledge kernel is Off → Off == baseline.
+            db.upsert_memory_fact(&memory_fact).await?;
+            let mode = KnowledgeKernelMode::from_env();
+            if mode.is_on() {
+                // Additive: first-class world_facts identity row. Best-effort in Shadow (warn),
+                // propagated in Enforce. Never rolls back the baseline memory_facts row.
+                if let Err(e) = db.upsert_world_fact(&world_fact).await {
+                    if mode.is_enforce() {
+                        return Err(e);
+                    }
+                    tracing::warn!(
+                        fact_id = %world_fact.fact_id,
+                        error = %e,
+                        "knowledge kernel (shadow): world_facts identity upsert failed (advisory)"
+                    );
+                }
+                // Truth-aware GM knowledge edge: derived ONLY when the proposition's truth axis
+                // is decided (knows_true for True; believes_false for False/Lie). A True fact's
+                // edge enters gm_truth_view (GM 确知，玩家未知；绝不写 player_party 边 §13/§24-#8);
+                // rumors/lies/unknown get no auto-truth edge (gm_edge_state == None).
+                if let Some(state) = gm_edge_state {
+                    if let Err(e) = db
+                        .upsert_knowledge_edge(KnowledgeEdgeInput {
+                            session_id: ctx.session_id,
+                            holder_kind: "gm",
+                            holder_id: "",
+                            fact_id: &world_fact.fact_id,
+                            knowledge_state: state,
+                            confidence: world_fact.confidence.map(|v| v as f64),
+                            learned_at_turn_id: world_fact.turn_id.as_deref(),
+                            disclosure_policy: None,
+                            source_event_id: world_fact
+                                .source_event_ids
+                                .first()
+                                .map(String::as_str),
+                            reason: Some("world_fact_committed:gm_truth"),
+                        })
+                        .await
+                    {
+                        if mode.is_enforce() {
+                            return Err(e);
+                        }
+                        tracing::warn!(
+                            fact_id = %world_fact.fact_id,
+                            error = %e,
+                            "knowledge kernel (shadow): GM truth edge derive failed (advisory)"
+                        );
+                    }
+                }
+            }
+        }
+        CommitAction::LegacyFact(fact) => {
             db.upsert_memory_fact(&fact).await?;
         }
         CommitAction::PlayerLearned { fact_id, reason } => {
+            warn_if_orphan_world_fact_ref(db, ctx.session_id, &fact_id).await;
             db.record_revealed_fact(ctx.session_id, ctx.turn_id, &fact_id, reason.as_deref())
                 .await?;
         }
@@ -521,6 +711,7 @@ async fn execute_action(
             state,
             reason,
         } => {
+            warn_if_orphan_world_fact_ref(db, ctx.session_id, &fact_id).await;
             db.upsert_knowledge_edge_player_party(
                 ctx.session_id,
                 ctx.turn_id,
@@ -535,6 +726,7 @@ async fn execute_action(
             fact_id,
             reason,
         } => {
+            warn_if_orphan_world_fact_ref(db, ctx.session_id, &fact_id).await;
             db.record_npc_learned_fact(
                 ctx.session_id,
                 ctx.turn_id,
@@ -554,6 +746,7 @@ async fn execute_action(
             source_event_id,
             reason,
         } => {
+            warn_if_orphan_world_fact_ref(db, ctx.session_id, &fact_id).await;
             db.upsert_knowledge_edge(KnowledgeEdgeInput {
                 session_id: ctx.session_id,
                 holder_kind,
@@ -775,7 +968,10 @@ mod tests {
     }
 
     #[test]
-    fn world_fact_plans_a_memory_fact_write() {
+    fn world_fact_plans_dual_write() {
+        // P3 dual-write: a world_fact proposal plans BOTH a baseline memory_facts row (always
+        // written, recall preserved) AND a first-class world_facts identity row (flag-gated at
+        // execution). durable_path stays the baseline memory_facts path → OFF == baseline audit.
         let plans = plans_of(json!({"proposals": [{
             "proposal_kind": "world_fact",
             "fact_id": "f_world_1",
@@ -783,16 +979,143 @@ mod tests {
             "source_event_ids": ["ev1"]
         }]}));
         assert_eq!(plans.len(), 1);
+        assert_eq!(
+            plans[0].action.durable_path(),
+            "memory_facts.upsert(world_fact)",
+            "baseline durable path stays memory_facts (recall preserved); world_facts is additive"
+        );
         match &plans[0].action {
-            CommitAction::WorldFact(fact) => {
-                assert_eq!(fact.fact_id, "f_world_1");
-                assert_eq!(fact.session_id, "sess_commit");
-                assert_eq!(fact.scope.scope_type, ScopeType::Session);
-                assert_eq!(fact.object, Value::String("letter".into()));
-                assert!(fact.tags.contains(&"world_fact".to_string()));
-                assert_eq!(fact.confidence, WORLD_FACT_DEFAULT_CONFIDENCE);
+            CommitAction::WorldFact {
+                memory_fact,
+                world_fact,
+                gm_edge_state,
+            } => {
+                // No truth_status on this proposal → no auto GM edge (fail-closed default).
+                assert_eq!(*gm_edge_state, None);
+                // Baseline memory_facts row: byte-equal pre-P3 shape (GmOnly, session scope,
+                // world_fact tag, object as JSON string, neutral confidence).
+                assert_eq!(memory_fact.fact_id, "f_world_1");
+                assert_eq!(memory_fact.session_id, "sess_commit");
+                assert_eq!(memory_fact.scope.scope_type, ScopeType::Session);
+                assert_eq!(memory_fact.visibility, Visibility::GmOnly);
+                assert_eq!(memory_fact.object, Value::String("letter".into()));
+                assert!(memory_fact.tags.contains(&"world_fact".to_string()));
+                assert_eq!(memory_fact.confidence, WORLD_FACT_DEFAULT_CONFIDENCE);
+                assert_eq!(memory_fact.summary, "raul wrote letter");
+                // First-class world_facts identity row: same identity, flat object string.
+                assert_eq!(world_fact.fact_id, "f_world_1");
+                assert_eq!(world_fact.subject, "raul");
+                assert_eq!(world_fact.predicate, "wrote");
+                assert_eq!(world_fact.object, "letter");
+                assert_eq!(world_fact.summary, "raul wrote letter");
+                assert_eq!(world_fact.confidence, Some(WORLD_FACT_DEFAULT_CONFIDENCE));
+                assert_eq!(world_fact.turn_id.as_deref(), Some("turn_commit"));
             }
             other => panic!("expected WorldFact action, got {}", other.durable_path()),
+        }
+    }
+
+    /// committed_ref byte-equivalence (dry-run guard): the audit `fact_ref` is the original
+    /// fact_id (transparent), and both planned rows carry source_event_ids / turn_id through —
+    /// dual-write does not change the identity contract.
+    #[test]
+    fn world_fact_dual_write_committed_ref_byte_equivalent() {
+        let plans = plans_of(json!({"proposals": [{
+            "proposal_kind": "world_fact",
+            "fact_id": "f_world_ref",
+            "subject": "mira", "predicate": "hides", "object": "dagger",
+            "source_event_ids": ["ev_a", "ev_b"],
+            "turn_id": "turn_origin"
+        }]}));
+        let action = &plans[0].action;
+        // committed_ref (audit fact_ref) = original fact_id, byte-for-byte.
+        assert_eq!(action.fact_ref().as_deref(), Some("f_world_ref"));
+        match action {
+            CommitAction::WorldFact {
+                memory_fact,
+                world_fact,
+                ..
+            } => {
+                assert_eq!(memory_fact.source_event_ids, vec!["ev_a", "ev_b"]);
+                assert_eq!(world_fact.source_event_ids, vec!["ev_a", "ev_b"]);
+                // explicit turn_id passes through (not overwritten by ctx.turn_id) in both rows.
+                assert_eq!(memory_fact.turn_id.as_deref(), Some("turn_origin"));
+                assert_eq!(world_fact.turn_id.as_deref(), Some("turn_origin"));
+            }
+            other => panic!("expected WorldFact, got {}", other.durable_path()),
+        }
+    }
+
+    #[test]
+    fn gm_truth_edge_state_is_truth_aware_and_fail_closed() {
+        // True → knows_true (enters gm_truth_view as confirmed truth).
+        assert_eq!(
+            gm_truth_edge_state(Some(FactTruthStatus::True)),
+            Some("knows_true")
+        );
+        // False / Lie → believes_false (GM knows it's false; NOT in gm_truth_view).
+        assert_eq!(
+            gm_truth_edge_state(Some(FactTruthStatus::False)),
+            Some("believes_false")
+        );
+        assert_eq!(
+            gm_truth_edge_state(Some(FactTruthStatus::Lie)),
+            Some("believes_false")
+        );
+        // Rumor / Subjective / Unknown / unclassified → NO auto edge (fail-closed): rumors and
+        // lies must never enter gm_truth_view as confirmed truth (codex P3.4).
+        for t in [
+            Some(FactTruthStatus::Rumor),
+            Some(FactTruthStatus::Subjective),
+            Some(FactTruthStatus::Unknown),
+            None,
+        ] {
+            assert_eq!(
+                gm_truth_edge_state(t),
+                None,
+                "{t:?} must not auto-derive a GM truth edge"
+            );
+        }
+    }
+
+    #[test]
+    fn world_fact_with_true_status_plans_gm_knows_true_edge() {
+        let plans = plans_of(json!({"proposals": [{
+            "proposal_kind": "world_fact",
+            "fact_id": "f_true_1",
+            "subject": "gate", "predicate": "is", "object": "open",
+            "truth_status": "true",
+            "source_event_ids": ["ev1"]
+        }]}));
+        match &plans[0].action {
+            CommitAction::WorldFact { gm_edge_state, .. } => {
+                assert_eq!(*gm_edge_state, Some("knows_true"));
+            }
+            other => panic!("expected WorldFact, got {}", other.durable_path()),
+        }
+    }
+
+    #[test]
+    fn knowledge_kernel_mode_parses_tristate() {
+        // Pure parse — no env mutation (env-race-free).
+        for (val, expect_on, expect_enforce) in [
+            ("", false, false),
+            ("0", false, false),
+            ("off", false, false),
+            ("false", false, false),
+            ("  OFF  ", false, false),
+            ("1", true, false),
+            ("true", true, false),
+            ("on", true, false),
+            ("shadow", true, false),
+            ("SHADOW", true, false),
+            ("enforce", true, true),
+            ("  Enforce ", true, true),
+            ("garbage", false, false),
+        ] {
+            let mode = KnowledgeKernelMode::parse(val);
+            assert_eq!(mode.is_on(), expect_on, "is_on for {val:?}");
+            assert_eq!(mode.is_enforce(), expect_enforce, "is_enforce for {val:?}");
         }
     }
 
@@ -1019,7 +1342,10 @@ mod tests {
         assert_eq!(ev.data["target_id"], rel.target.target_id());
         // 派生 stance/desire 必须随 data 写穿，供下游读账本即得最新派生态。
         assert_eq!(ev.data["new_interaction_desire"], rel.interaction_desire);
-        assert!(ev.data["delta"]["debt"].as_i64().unwrap() > 0, "help() 抬升 debt");
+        assert!(
+            ev.data["delta"]["debt"].as_i64().unwrap() > 0,
+            "help() 抬升 debt"
+        );
         assert_eq!(ev.data["evidence_event_ids"][0], "ev_a");
 
         // 同证据集 ⇒ 同 event_id（幂等键稳定）；证据集变化 ⇒ event_id 变化（不同变更不撞键）。

@@ -57,6 +57,7 @@ mod memory_proposal {
         // regardless of ON DELETE behavior. Scoped strictly to the test session.
         for sql in [
             "delete from memory_facts where session_id=$1",
+            "delete from world_facts where session_id=$1",
             "delete from knowledge_edges where session_id=$1",
             "delete from domain_events where session_id=$1",
             "delete from npc_relationships where session_id=$1",
@@ -116,6 +117,104 @@ mod memory_proposal {
         assert_eq!(subject, "raul");
         assert_eq!(predicate, "wrote");
 
+        // Knowledge kernel defaults OFF → baseline: NO world_facts identity row, NO GM truth
+        // edge. (Off == baseline; the additive layered-runtime state is gated on the flag.)
+        let wf_count: i64 =
+            sqlx::query_scalar("select count(*) from world_facts where session_id=$1")
+                .bind(&session)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            wf_count, 0,
+            "OFF must not write the additive world_facts row"
+        );
+        assert!(
+            db.gm_truth_view(&session).await.unwrap().is_empty(),
+            "OFF must not derive a GM truth edge"
+        );
+
+        purge(&db, &session).await;
+    }
+
+    /// P3 ON-path (shadow) live behavior assertion (§24-#8): with TRPG_KNOWLEDGE_KERNEL=shadow,
+    /// committing a `truth_status=true` world fact (a) keeps the baseline `memory_facts` row
+    /// (recall preserved), (b) ALSO writes the first-class `world_facts` identity row, (c)
+    /// derives a (gm, knows_true) edge so the fact enters `gm_truth_view`, and (d) does NOT
+    /// reveal it to the player (player_knowledge_view stays empty — GM 确知，玩家未知).
+    /// Env is mutated only while holding DB_SERIAL (all DB tests in this binary serialize on
+    /// it), then restored — no env race. This is the REAL ON-path probe the loop requires
+    /// (not OFF==baseline). SKIP when no DB.
+    #[tokio::test]
+    async fn commit_world_fact_shadow_mode_dual_writes_and_derives_gm_truth() {
+        let session = format!("sess_mpc_{}", uuid::Uuid::new_v4().simple());
+        let Some((db, _guard)) = setup(&session).await else {
+            return;
+        };
+        // Guarded by DB_SERIAL (held via _guard): safe to set/restore the process-global flag.
+        let prev = std::env::var("TRPG_KNOWLEDGE_KERNEL").ok();
+        std::env::set_var("TRPG_KNOWLEDGE_KERNEL", "shadow");
+
+        let ctx = CommitContext {
+            session_id: &session,
+            turn_id: "turn1",
+        };
+        let proposals = try_proposals_from_json(&json!({"proposals": [{
+            "proposal_kind": "world_fact",
+            "fact_id": "f_world_shadow",
+            "subject": "gate", "predicate": "is", "object": "open",
+            "truth_status": "true", "confidence": 0.9,
+            "source_event_ids": ["ev_s1"]
+        }]}))
+        .expect("valid true world fact proposal");
+
+        let report = review_and_commit_proposals(&db, &ctx, &proposals)
+            .await
+            .unwrap();
+        assert_eq!(report.committed(), 1, "world fact committed");
+
+        // (a) baseline memory_facts row present (recall preserved).
+        let mf: i64 = sqlx::query_scalar(
+            "select count(*) from memory_facts where session_id=$1 and fact_id='f_world_shadow'",
+        )
+        .bind(&session)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            mf, 1,
+            "baseline memory_facts row must still be written (recall)"
+        );
+
+        // (b) first-class world_facts identity row present (additive ON path).
+        let (subj, truth): (String, Option<String>) = sqlx::query_as(
+            "select subject, truth_status from world_facts where session_id=$1 and fact_id=$2",
+        )
+        .bind(&session)
+        .bind("f_world_shadow")
+        .fetch_one(&db.pool)
+        .await
+        .expect("world_facts identity row persisted under shadow mode");
+        assert_eq!(subj, "gate");
+        assert_eq!(truth.as_deref(), Some("true"));
+
+        // (c) GM truth edge derived → fact enters gm_truth_view.
+        let gm = db.gm_truth_view(&session).await.unwrap();
+        assert!(
+            gm.contains(&"f_world_shadow".to_string()),
+            "true world fact must enter gm_truth_view (GM knows), got {gm:?}"
+        );
+        // (d) player does NOT learn it (§24-#8: PlayerLearnedFact only when player hears).
+        let player = db.player_knowledge_view(&session).await.unwrap();
+        assert!(
+            !player.contains(&"f_world_shadow".to_string()),
+            "GM truth must NOT auto-reveal to player, got {player:?}"
+        );
+
+        match prev {
+            Some(v) => std::env::set_var("TRPG_KNOWLEDGE_KERNEL", v),
+            None => std::env::remove_var("TRPG_KNOWLEDGE_KERNEL"),
+        }
         purge(&db, &session).await;
     }
 

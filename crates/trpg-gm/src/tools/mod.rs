@@ -622,14 +622,14 @@ mod schema_stability_tests {
     }
 
     fn temp_data_dir_with_manifest(mode: &str, manifest_body: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "schema_mode_test_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .subsec_nanos()
-        ));
+        // 唯一化 temp dir 名:pid + 单调原子计数器(test-only,零行为)。原先用
+        // pid+subsec_nanos,两个并行 schema 测试可在同一纳秒槽撞到同名目录、互删对方
+        // manifest → arch_gates step7 间歇 `EOF parsing ... manifest` panic(已知 flake,
+        // P0 起就存在)。AtomicU64 计数器保证进程内每次调用得到独一无二的路径,根除竞态。
+        static TEMP_DIR_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = TEMP_DIR_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("schema_mode_test_{}_{}", std::process::id(), seq));
         let mode_dir = dir.join("agent/gm_skill/modes").join(mode);
         fs::create_dir_all(&mode_dir).unwrap();
         fs::write(mode_dir.join("manifest.json"), manifest_body).unwrap();

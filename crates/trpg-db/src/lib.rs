@@ -35,6 +35,25 @@ pub struct KnowledgeEdgeInput<'a> {
     pub reason: Option<&'a str>,
 }
 
+/// 一条 durable **world fact** 行（P3 WorldFact 一等化）。列同 `WorldFactCandidate`
+/// 字段（fact_id 身份 + subject/predicate/object/summary + truth_status 命题真假轴 +
+/// 证据 source_event_ids + turn_id provenance + confidence）。owned 结构，便于 runtime
+/// 提交路径透传，绝不与 `memory_facts`（记忆三元组）/`knowledge_edges`（谁知道）混用。
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorldFactRow {
+    pub fact_id: String,
+    pub session_id: String,
+    pub subject: String,
+    pub predicate: String,
+    pub object: String,
+    pub summary: String,
+    /// 命题自身真假分类（`FactTruthStatus::as_token`）；None = 未标（列存 NULL）。
+    pub truth_status: Option<String>,
+    pub source_event_ids: Vec<String>,
+    pub turn_id: Option<String>,
+    pub confidence: Option<f32>,
+}
+
 impl Db {
     pub async fn connect(database_url: &str) -> Result<Self> {
         let pool = PgPool::connect(database_url)
@@ -84,6 +103,12 @@ impl Db {
             include_str!("../../../migrations/0035_npc_relationships.sql"),
             include_str!("../../../migrations/0036_npc_profiles.sql"),
             include_str!("../../../migrations/0037_knowledge_edges_pc_faction_holders.sql"),
+            // 补接预存在却漏接的 0038（memory_facts.truth_status 加性列）——文件早已落盘但从未
+            // 进数组（P3 前缺口）。追加到数组 TAIL，不改动既有迁移顺序/内容（幂等 add column
+            // if not exists，重放安全）。
+            include_str!("../../../migrations/0038_memory_fact_truth_status.sql"),
+            // 0039 world_facts 表（WorldFact 一等化，P3）。幂等 create table if not exists。
+            include_str!("../../../migrations/0039_world_facts.sql"),
         ];
         // 在单一事务内先取事务级顾问锁，串行化所有并发/跨进程 migrate() 调用。
         // 0033 等迁移用 drop-then-add 重建命名 CHECK 约束（非幂等的两段式 DDL），
@@ -1472,6 +1497,79 @@ impl Db {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// P3 WorldFact 一等化：upsert 一条 durable world fact（`world_facts` 表）。与
+    /// `upsert_memory_fact` 同风格（on conflict (fact_id) do update），但落独立的
+    /// world_facts 表（世界事实身份源）而非 memory_facts（记忆三元组）。幂等可重放。
+    pub async fn upsert_world_fact(&self, fact: &WorldFactRow) -> Result<()> {
+        let now = Utc::now();
+        sqlx::query(
+            r#"
+            insert into world_facts
+              (fact_id, session_id, subject, predicate, object, summary, truth_status,
+               source_event_ids, turn_id, confidence, created_at, updated_at)
+            values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11)
+            on conflict (fact_id) do update set
+              session_id = excluded.session_id,
+              subject = excluded.subject,
+              predicate = excluded.predicate,
+              object = excluded.object,
+              summary = excluded.summary,
+              truth_status = excluded.truth_status,
+              source_event_ids = excluded.source_event_ids,
+              turn_id = excluded.turn_id,
+              confidence = excluded.confidence,
+              updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(&fact.fact_id)
+        .bind(&fact.session_id)
+        .bind(&fact.subject)
+        .bind(&fact.predicate)
+        .bind(&fact.object)
+        .bind(&fact.summary)
+        .bind(&fact.truth_status)
+        .bind(&fact.source_event_ids)
+        .bind(&fact.turn_id)
+        .bind(fact.confidence)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// P3 WorldFact 一等化：按 (session_id, fact_id) 读一条 world fact（不存在 → None）。
+    /// WorldFact↔KnowledgeEdge 引用契约（弱）的查存在性用。
+    pub async fn load_world_fact(
+        &self,
+        session_id: &str,
+        fact_id: &str,
+    ) -> Result<Option<WorldFactRow>> {
+        let row = sqlx::query(
+            r#"
+            select fact_id, session_id, subject, predicate, object, summary, truth_status,
+                   source_event_ids, turn_id, confidence
+            from world_facts
+            where session_id = $1 and fact_id = $2
+            "#,
+        )
+        .bind(session_id)
+        .bind(fact_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| WorldFactRow {
+            fact_id: r.get("fact_id"),
+            session_id: r.get("session_id"),
+            subject: r.get("subject"),
+            predicate: r.get("predicate"),
+            object: r.get("object"),
+            summary: r.get("summary"),
+            truth_status: r.get("truth_status"),
+            source_event_ids: r.get("source_event_ids"),
+            turn_id: r.get("turn_id"),
+            confidence: r.get("confidence"),
+        }))
     }
 
     pub async fn upsert_memory_snapshot(&self, snapshot: &MemorySnapshot) -> Result<()> {

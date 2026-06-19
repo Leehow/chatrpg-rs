@@ -254,6 +254,82 @@ impl KnowledgeUpdateCandidate {
     }
 }
 
+/// P3 WorldFact↔KnowledgeEdge 引用契约的**强度**（架构师拍板：本阶段默认 [`Warn`]）。
+///
+/// 一个 [`KnowledgeUpdateCandidate`] 用 `fact_id` 引用一个世界事实身份。本阶段该引用契约
+/// 为 **WEAK**：孤儿边（`fact_id` 查无 world_fact 身份）只 warn+trace、不阻断提交——历史
+/// player-reveal 边可能引用尚无 world_fact 身份的 fact_id。seam 可被参数化为 [`Enforce`]
+/// （fail-closed 拒绝孤儿边），供后续阶段回填存量数据后翻转，无需改调用点结构。
+///
+/// [`Warn`]: WorldFactRefStrength::Warn
+/// [`Enforce`]: WorldFactRefStrength::Enforce
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WorldFactRefStrength {
+    /// 弱：孤儿边只 warn（不阻断）。本阶段默认。
+    #[default]
+    Warn,
+    /// 强：孤儿边 fail-closed 拒绝（留待存量回填后启用）。
+    Enforce,
+}
+
+/// 一次 WorldFact↔KnowledgeEdge 引用契约校验的结果（纯数据，无 IO）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorldFactRefOutcome {
+    /// 引用可解析（world_fact 身份存在）→ 放行。
+    Resolved,
+    /// 孤儿引用（world_fact 身份缺失）但强度为 [`WorldFactRefStrength::Warn`] → 放行 + 警告。
+    /// 携带稳定的 `fact_id`（非事实正文）供 trace。
+    OrphanWarned { fact_id: String },
+    /// 孤儿引用且强度为 [`WorldFactRefStrength::Enforce`] → 阻断（fail-closed）。
+    OrphanBlocked { fact_id: String },
+}
+
+impl WorldFactRefOutcome {
+    /// 该结果是否放行提交（`Resolved` / `OrphanWarned` 放行；`OrphanBlocked` 阻断）。
+    pub fn admits(&self) -> bool {
+        !matches!(self, WorldFactRefOutcome::OrphanBlocked { .. })
+    }
+
+    /// secret-safe trace 摘要：只露稳定 fact_id，绝不夹事实正文。
+    pub fn trace_summary(&self) -> Option<String> {
+        match self {
+            WorldFactRefOutcome::Resolved => None,
+            WorldFactRefOutcome::OrphanWarned { fact_id } => {
+                Some(format!("world_fact_ref orphan (warn): {fact_id}"))
+            }
+            WorldFactRefOutcome::OrphanBlocked { fact_id } => {
+                Some(format!("world_fact_ref orphan (blocked): {fact_id}"))
+            }
+        }
+    }
+}
+
+/// 纯校验 seam（无 IO）：判定一个 KnowledgeUpdate 的 `fact_id` 是否指向一个**已知**世界事实
+/// 身份。`fact_exists` 由调用方注入（runtime 查 world_facts；离线/单测可注入 closure），
+/// 使本函数纯净可测、零 DB 依赖。强度 [`WorldFactRefStrength`] 决定孤儿引用是 warn 还是阻断。
+///
+/// 本阶段调用点（runtime commit）以默认 [`WorldFactRefStrength::Warn`] 调用：孤儿边放行 +
+/// trace，绝不阻断（呼应 must_not_break：历史 player-reveal 边可能引用尚无 world_fact 身份的
+/// fact_id）。绝不绕过 TC-KNOW-00 actor identity（本 seam 只看 fact_id，不发明 holder）。
+pub fn check_world_fact_ref(
+    fact_id: &str,
+    fact_exists: impl FnOnce(&str) -> bool,
+    strength: WorldFactRefStrength,
+) -> WorldFactRefOutcome {
+    let fact_id = fact_id.trim();
+    if fact_exists(fact_id) {
+        return WorldFactRefOutcome::Resolved;
+    }
+    match strength {
+        WorldFactRefStrength::Warn => WorldFactRefOutcome::OrphanWarned {
+            fact_id: fact_id.to_string(),
+        },
+        WorldFactRefStrength::Enforce => WorldFactRefOutcome::OrphanBlocked {
+            fact_id: fact_id.to_string(),
+        },
+    }
+}
+
 /// A candidate **NPC relationship delta** (bounded, evidence-backed). Wraps the model's
 /// [`NpcRelationshipDelta`] so the TC-NPC-02 evidence gate and bounded clamp are reused
 /// verbatim. Validation checks identity + evidence but DOES NOT apply the delta.
@@ -356,5 +432,48 @@ impl MemoryExtractionProposal {
             MemoryExtractionProposal::NpcRelationshipDelta(c) => c.delta.evidence_event_ids.clone(),
             MemoryExtractionProposal::MemoryFact(c) => c.fact.source_event_ids.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod world_fact_ref_tests {
+    use super::*;
+
+    /// 引用可解析（world_fact 身份存在）→ Resolved，放行，无 trace。
+    #[test]
+    fn resolvable_ref_admits_without_warning() {
+        let out = check_world_fact_ref("f1", |id| id == "f1", WorldFactRefStrength::Warn);
+        assert_eq!(out, WorldFactRefOutcome::Resolved);
+        assert!(out.admits());
+        assert!(out.trace_summary().is_none());
+    }
+
+    /// 孤儿引用 + 默认 Warn 强度 → OrphanWarned：仍放行（不阻断）但产 secret-safe trace。
+    #[test]
+    fn orphan_ref_warns_but_admits_by_default() {
+        let out = check_world_fact_ref("f_orphan", |_| false, WorldFactRefStrength::default());
+        assert_eq!(
+            out,
+            WorldFactRefOutcome::OrphanWarned {
+                fact_id: "f_orphan".into()
+            }
+        );
+        assert!(out.admits(), "弱契约：孤儿边放行不阻断");
+        let summary = out.trace_summary().expect("孤儿边须有 trace");
+        assert!(summary.contains("f_orphan"));
+        assert!(summary.contains("warn"));
+    }
+
+    /// 孤儿引用 + Enforce 强度 → OrphanBlocked：fail-closed 阻断（供后续阶段回填后启用）。
+    #[test]
+    fn orphan_ref_blocked_under_enforce() {
+        let out = check_world_fact_ref("f_orphan", |_| false, WorldFactRefStrength::Enforce);
+        assert_eq!(
+            out,
+            WorldFactRefOutcome::OrphanBlocked {
+                fact_id: "f_orphan".into()
+            }
+        );
+        assert!(!out.admits(), "强契约：孤儿边 fail-closed 阻断");
     }
 }
