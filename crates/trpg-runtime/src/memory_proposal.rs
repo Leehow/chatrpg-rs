@@ -574,7 +574,7 @@ async fn execute_action(
             target,
             delta,
         } => {
-            crate::npc_relationship::apply_npc_relationship_delta(
+            let next = crate::npc_relationship::apply_npc_relationship_delta(
                 db,
                 &session_id,
                 &npc_id,
@@ -582,10 +582,67 @@ async fn execute_action(
                 &delta,
             )
             .await?;
+            // 设计3 §12 CommitCritical：关系提交 write-through —— 落 RelationshipChanged 领域事件
+            // （带 delta 摘要 + 派生 stance/desire），与 PlayerLearned/NpcLearned 的事件账本对齐。
+            // 先写穿 durable 关系（上一步），再 append 事件账本（幂等 per 证据集，绝不阻断提交）。
+            append_relationship_changed_event(db, ctx, &next, &delta).await?;
         }
         CommitAction::Skip { reason } => return Ok(ExecOutcome::Skipped(reason)),
     }
     Ok(ExecOutcome::Done)
+}
+
+/// 设计3 §12：把一次已落库的关系变更 append 成 [`DomainEventKind::RelationshipChanged`] 事件账本。
+///
+/// 与 [`Db::record_npc_learned_fact`] 的 write-through 同口径：确定性幂等 `event_id`（按
+/// session/npc/target/turn + 证据集 join），data 带 npc_id / target / 完整 bounded delta 摘要 +
+/// 派生 stance/interaction_desire。证据集驱动幂等键 ⇒ 同证据重提不重复落账（on-conflict-do-nothing）。
+/// 用规范化后（[`apply_npc_relationship_delta`] 返回的 `next`）的 npc_id/target，跨 raw 空白稳定。
+async fn append_relationship_changed_event(
+    db: &Db,
+    ctx: &CommitContext<'_>,
+    next: &trpg_model::NpcRelationship,
+    delta: &NpcRelationshipDelta,
+) -> anyhow::Result<()> {
+    let ev = build_relationship_changed_event(ctx.session_id, ctx.turn_id, next, delta);
+    db.append_domain_event(&ev).await
+}
+
+/// 纯构造：从已落库的关系结果 + delta 造一条 [`DomainEventKind::RelationshipChanged`] 事件
+/// （无 IO，可单测）。确定性幂等 `event_id`（session/npc/target/turn + 证据集 join）；data 带
+/// npc_id / target / 完整 bounded delta + 派生 stance/interaction_desire。
+fn build_relationship_changed_event(
+    session_id: &str,
+    turn_id: &str,
+    next: &trpg_model::NpcRelationship,
+    delta: &NpcRelationshipDelta,
+) -> trpg_model::DomainEvent {
+    let evidence_key = delta.evidence_event_ids.join("-");
+    let event_id = format!(
+        "de_rel_changed_{}_{}_{}_{}_{}_{}",
+        session_id,
+        next.npc_id,
+        next.target.kind_token(),
+        next.target.target_id(),
+        turn_id,
+        evidence_key,
+    );
+    let data = serde_json::json!({
+        "npc_id": next.npc_id,
+        "target_kind": next.target.kind_token(),
+        "target_id": next.target.target_id(),
+        "delta": delta,
+        "new_stance": next.stance,
+        "new_interaction_desire": next.interaction_desire,
+        "evidence_event_ids": delta.evidence_event_ids,
+    });
+    trpg_model::DomainEvent::new(
+        event_id,
+        session_id,
+        turn_id,
+        trpg_model::DomainEventKind::RelationshipChanged,
+        data,
+    )
 }
 
 #[cfg(test)]
@@ -933,5 +990,43 @@ mod tests {
             }
             BatchPlan::Ready(_) => panic!("invalid batch must abort, not be ready"),
         }
+    }
+
+    /// 设计3 §12：关系提交写穿事件的纯构造路径。证明 `build_relationship_changed_event`
+    /// 产出 kind=RelationshipChanged、data 带 npc_id/target/delta + 派生 stance/desire，且
+    /// event_id 对同一证据集确定幂等（on-conflict-do-nothing 去重的前提）。
+    #[test]
+    fn relationship_changed_event_carries_delta_and_is_evidence_idempotent() {
+        use trpg_model::{NpcRelationship, NpcRelationshipTarget};
+
+        let mut rel = NpcRelationship::new(
+            "sess_commit",
+            "npc_raul",
+            NpcRelationshipTarget::Npc("npc_mira".into()),
+        )
+        .expect("valid relationship");
+        let delta = NpcRelationshipDelta::help(vec!["ev_a".into(), "ev_b".into()]);
+        rel.apply_delta(&delta).expect("bounded delta applies");
+
+        let ev = build_relationship_changed_event("sess_commit", "turn_commit", &rel, &delta);
+
+        assert_eq!(ev.kind, trpg_model::DomainEventKind::RelationshipChanged);
+        assert_eq!(ev.session_id, "sess_commit");
+        assert_eq!(ev.turn_id, "turn_commit");
+        // 写穿用规范化后的 npc_id/target（跨 raw 空白稳定），与 build fn 内口径一致。
+        assert_eq!(ev.data["npc_id"], rel.npc_id);
+        assert_eq!(ev.data["target_kind"], "npc");
+        assert_eq!(ev.data["target_id"], rel.target.target_id());
+        // 派生 stance/desire 必须随 data 写穿，供下游读账本即得最新派生态。
+        assert_eq!(ev.data["new_interaction_desire"], rel.interaction_desire);
+        assert!(ev.data["delta"]["debt"].as_i64().unwrap() > 0, "help() 抬升 debt");
+        assert_eq!(ev.data["evidence_event_ids"][0], "ev_a");
+
+        // 同证据集 ⇒ 同 event_id（幂等键稳定）；证据集变化 ⇒ event_id 变化（不同变更不撞键）。
+        let ev_same = build_relationship_changed_event("sess_commit", "turn_commit", &rel, &delta);
+        assert_eq!(ev.event_id, ev_same.event_id, "同证据集 event_id 确定幂等");
+        let delta2 = NpcRelationshipDelta::help(vec!["ev_c".into()]);
+        let ev_diff = build_relationship_changed_event("sess_commit", "turn_commit", &rel, &delta2);
+        assert_ne!(ev.event_id, ev_diff.event_id, "不同证据集 ⇒ 不同 event_id");
     }
 }

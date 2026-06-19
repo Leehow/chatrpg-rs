@@ -59,6 +59,11 @@ pub enum DomainEventKind {
     /// 某条剧透事实（按 entity_id/node_id 作 fact_id）被揭示——revealed-facts 账本
     /// 落账即记，spoiler_guard 据此放行该实体的 secret_terms（幂等 per-session+fact）。
     FactRevealed,
+    /// 设计3 §12 CommitCritical：关系提交路径（`CommitAction::Relationship`）写穿的领域事件——
+    /// 某 NPC 对某 target 的结构化关系发生 bounded 变更。补齐既有 PlayerLearnedFact /
+    /// NpcLearnedFact 的 write-through 缺口（关系提交此前是裸表 upsert、无事件账本）。data 带
+    /// npc_id / target / delta 摘要 + 派生 stance/desire。幂等 per 证据集（on-conflict-do-nothing）。
+    RelationshipChanged,
 }
 
 impl DomainEventKind {
@@ -81,6 +86,7 @@ impl DomainEventKind {
             DomainEventKind::NpcLearnedFact => "NpcLearnedFact",
             DomainEventKind::ClientDisconnected => "ClientDisconnected",
             DomainEventKind::FactRevealed => "FactRevealed",
+            DomainEventKind::RelationshipChanged => "RelationshipChanged",
         }
     }
 
@@ -101,6 +107,7 @@ impl DomainEventKind {
             "NpcLearnedFact" => DomainEventKind::NpcLearnedFact,
             "ClientDisconnected" => DomainEventKind::ClientDisconnected,
             "FactRevealed" => DomainEventKind::FactRevealed,
+            "RelationshipChanged" => DomainEventKind::RelationshipChanged,
             _ => DomainEventKind::TurnStarted,
         }
     }
@@ -297,6 +304,31 @@ mod tests {
         assert_ne!(
             DomainEventKind::NpcLearnedFact,
             DomainEventKind::PlayerLearnedFact
+        );
+    }
+
+    #[test]
+    fn relationship_changed_kind_token_and_serde_roundtrip() {
+        // 设计3 §12：关系变更写穿事件。token 稳定契约 + serde 闭环 + 与既有 variant 区分。
+        let k = DomainEventKind::RelationshipChanged;
+        assert_eq!(k.as_str(), "RelationshipChanged");
+        assert_eq!(DomainEventKind::from_str_token("RelationshipChanged"), k);
+        let v = serde_json::to_value(k).unwrap();
+        assert_eq!(
+            v.as_str(),
+            Some("RelationshipChanged"),
+            "serde token 必与 as_str 一致"
+        );
+        let back: DomainEventKind = serde_json::from_value(v).unwrap();
+        assert_eq!(back, k);
+        // 与既有事件种类互不相等。
+        assert_ne!(
+            DomainEventKind::RelationshipChanged,
+            DomainEventKind::PlayerLearnedFact
+        );
+        assert_ne!(
+            DomainEventKind::RelationshipChanged,
+            DomainEventKind::NpcLearnedFact
         );
     }
 
