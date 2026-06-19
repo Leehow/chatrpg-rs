@@ -662,12 +662,18 @@ impl GmLoop {
     /// 之间**检查它，一旦 fire 就放弃在途生成（drop stream 即停 relay，不再续烧 token）、
     /// `break 'rounds`、并跳过「轮耗尽逼散文」那一轮。`cancel=None`（CLI/测试）⇒ 取消等待
     /// 分支永久 pending ⇒ 退化为裸 `stream.next().await`，非取消路径逐字节零行为变更。
+    /// `stream_prose`：是否把 adjudicator 的 ContentDelta 实时发给玩家(经 tx)。
+    /// - `true`(默认/OFF 路径)= 逐字节现行行为:三处 ContentDelta 直发点 + drain 都 tx.send。
+    /// - `false`(P1 TRPG_NARRATOR_SPLIT ON 的 buffer 模式)= adjudicator prose 只
+    ///   push_str 进 visible_text,**不** tx.send(留给 Narrator 投影后再流出);AwaitingPlayerRoll
+    ///   早退与桌面骰 prompt_public 行为完全不受影响(它们是确定性文本、不经 Narrator)。
     pub(crate) async fn run_agent_loop(
         &mut self,
         ctx: &mut TurnContext,
         input: &GmTurnInput<'_>,
         tx: &tokio::sync::mpsc::Sender<crate::turn_event::TurnEvent>,
         cancel: Option<&CancellationToken>,
+        stream_prose: bool,
     ) -> crate::execute::AgentSignal {
         use crate::turn_event::TurnEvent;
         let messages = ctx
@@ -797,7 +803,11 @@ impl GmLoop {
                             if !blocked {
                                 let safe = redactor.push(&delta);
                                 if !safe.is_empty() {
-                                    let _ = tx.send(TurnEvent::Delta(safe.clone())).await;
+                                    // buffer 模式(stream_prose=false)：只累积进 visible_text,
+                                    // 不直发玩家——adjudicator prose 留给 Narrator 投影后再流出。
+                                    if stream_prose {
+                                        let _ = tx.send(TurnEvent::Delta(safe.clone())).await;
+                                    }
                                     visible_text.push_str(&safe);
                                 }
                             }
@@ -850,19 +860,28 @@ impl GmLoop {
                                         blocked,
                                         tx,
                                         &mut visible_text,
+                                        stream_prose,
                                     )
                                     .await;
                                     awaiting = Some(gate);
                                     break 'rounds;
                                 }
                             }
-                            drain_redactor_tx(&mut redactor, blocked, tx, &mut visible_text).await;
+                            drain_redactor_tx(
+                                &mut redactor,
+                                blocked,
+                                tx,
+                                &mut visible_text,
+                                stream_prose,
+                            )
+                            .await;
                             redactor = RedactingBuffer::new(ledger.private_roll_tokens());
                         }
                         StreamEvent::Done { .. } => {}
                     }
                 }
-                drain_redactor_tx(&mut redactor, blocked, tx, &mut visible_text).await;
+                drain_redactor_tx(&mut redactor, blocked, tx, &mut visible_text, stream_prose)
+                    .await;
                 // P1-3 follow-up：流分块间 select 命中取消 ⇒ 放弃整个 agent loop（不续轮、不逼散文）。
                 if cancelled {
                     break 'rounds;
@@ -912,7 +931,9 @@ impl GmLoop {
                         if let StreamEvent::ContentDelta(delta) = event {
                             let safe = redactor.push(&delta);
                             if !safe.is_empty() {
-                                let _ = tx.send(TurnEvent::Delta(safe.clone())).await;
+                                if stream_prose {
+                                    let _ = tx.send(TurnEvent::Delta(safe.clone())).await;
+                                }
                                 visible_text.push_str(&safe);
                             }
                         }
@@ -921,7 +942,9 @@ impl GmLoop {
                     if !cancelled {
                         let rest = redactor.finish();
                         if !rest.is_empty() {
-                            let _ = tx.send(TurnEvent::Delta(rest.clone())).await;
+                            if stream_prose {
+                                let _ = tx.send(TurnEvent::Delta(rest.clone())).await;
+                            }
                             visible_text.push_str(&rest);
                         }
                     }
@@ -931,6 +954,111 @@ impl GmLoop {
         }
         ctx.visible_text = visible_text;
         crate::execute::AgentSignal::Narration
+    }
+
+    /// P1 Narrator 阶段（TRPG_NARRATOR_SPLIT ON）：从本回合 ctx 投影 NarrationPacket，
+    /// 调无工具 Narrator 产玩家散文经 tx 流出，回写 ctx.visible_text（assistant_output 单一
+    /// 事实源，供 verify/finalize/记忆）。仅 Narration 终态调用（AwaitingPlayerRoll 走桌面骰
+    /// prompt_public，不经 Narrator）。fail-soft：Narrator 失败/空 → 回退直发 adjudicator prose
+    /// （= OFF 基线行为，无新增泄漏），绝不让回合空白。
+    pub(crate) async fn run_narrator_phase(
+        &self,
+        ctx: &mut TurnContext,
+        input: &GmTurnInput<'_>,
+        tx: &tokio::sync::mpsc::Sender<crate::turn_event::TurnEvent>,
+        cancel: Option<&CancellationToken>,
+    ) {
+        // buffer 模式下，adjudicator 自由文本已（私骰已 redact）累积在 ctx.visible_text。
+        let adjudicator_prose = ctx.visible_text.clone();
+        let adj = crate::packet::AdjudicationPacket::project(
+            input.user_input,
+            ctx.ledger.snapshot(),
+            &ctx.resolved_gate_facts,
+            &adjudicator_prose,
+            None,
+        );
+        // StyleProfile：P1 用中性默认（空串 → NarrationPacket 内置默认）；不灌入完整 gm_skill
+        // （可能含规则原文）。forbidden_reveals P1 为空（P2/P3 收窄）。
+        let narration = crate::packet::NarrationPacket::project(&adj, "", &[]);
+        let private_tokens = ctx.ledger.private_roll_tokens();
+        let narrated = self
+            .run_narrator(&narration, &private_tokens, tx, cancel)
+            .await;
+        match narrated {
+            Some(text) if !text.trim().is_empty() => {
+                ctx.visible_text = text; // Narrator 输出 = 玩家可见单一事实源
+            }
+            _ => {
+                tracing::warn!(
+                    turn_id = %input.request.turn_id,
+                    "narrator produced no output; fail-soft to adjudicator prose"
+                );
+                if !adjudicator_prose.trim().is_empty() {
+                    let _ = tx
+                        .send(crate::turn_event::TurnEvent::Delta(
+                            adjudicator_prose.clone(),
+                        ))
+                        .await;
+                }
+                ctx.visible_text = adjudicator_prose;
+            }
+        }
+    }
+
+    /// 无工具 Narrator：用最小 narrator system prompt + NarrationPacket 流式产玩家散文。
+    /// 空 tools schema + ToolChoice::None（§19-#5：Narrator 物理上无 mutation 工具）；
+    /// 沿用 RedactingBuffer 防私骰泄漏；cancel 沿用 run_agent_loop 同款处理。
+    /// 返回 None 表 LLM 失败（交调用方 fail-soft）。
+    pub(crate) async fn run_narrator(
+        &self,
+        packet: &crate::packet::NarrationPacket,
+        private_tokens: &[String],
+        tx: &tokio::sync::mpsc::Sender<crate::turn_event::TurnEvent>,
+        cancel: Option<&CancellationToken>,
+    ) -> Option<String> {
+        let messages = build_narrator_messages(packet);
+        let mut stream = match self
+            .llm
+            .stream_chat_with_tools(messages, vec![], ToolChoice::None)
+            .await
+        {
+            Ok(s) => s,
+            Err(err) => {
+                tracing::warn!(error = %err, "narrator stream failed");
+                return None;
+            }
+        };
+        let mut visible_text = String::new();
+        let mut redactor = RedactingBuffer::new(private_tokens.to_vec());
+        let mut cancelled = false;
+        while let Some(event) = next_stream_event(&mut stream, cancel, &mut cancelled).await {
+            let event = match event {
+                Ok(e) => e,
+                Err(err) => {
+                    tracing::warn!(error = %err, "narrator stream event error");
+                    break;
+                }
+            };
+            if let StreamEvent::ContentDelta(delta) = event {
+                let safe = redactor.push(&delta);
+                if !safe.is_empty() {
+                    let _ = tx
+                        .send(crate::turn_event::TurnEvent::Delta(safe.clone()))
+                        .await;
+                    visible_text.push_str(&safe);
+                }
+            }
+        }
+        if !cancelled {
+            let rest = redactor.finish();
+            if !rest.is_empty() {
+                let _ = tx
+                    .send(crate::turn_event::TurnEvent::Delta(rest.clone()))
+                    .await;
+                visible_text.push_str(&rest);
+            }
+        }
+        Some(visible_text)
     }
 
     /// PhaseId::RecordPlayerAction — world event PlayerAction（spec §4 头部第 1）。
@@ -1665,7 +1793,11 @@ impl GmLoop {
         // 知识一致性（既有）+ 行为一致性（设计3 §13-P3，新增 advisory）同口径折叠返回。
         // 行为检查与知识检查共用已载入的 `npcs`（纯加性：不新增 DB 读、不改既有知识 findings）。
         let mut findings = npc_consistency_findings(visible_text, &npcs, secret_terms, existing);
-        findings.extend(npc_behavior_consistency_findings(visible_text, &npcs, existing));
+        findings.extend(npc_behavior_consistency_findings(
+            visible_text,
+            &npcs,
+            existing,
+        ));
         findings
     }
 
@@ -1987,19 +2119,72 @@ where
 
 /// run_agent_loop 私骰尾窗排空：经 mpsc 发 Delta（与 drain_redactor 同语义，
 /// 但走 tx.send 而非 on_delta；被门轮 blocked 丢弃）。
+/// 构造无工具 Narrator 的最小请求消息（system 风格契约 + user 机械事实）。
+/// 只含玩家可感知机械事实摘要 + player_input，无规则原文 / 无 schema / 无 GM 内部推理。
+fn build_narrator_messages(packet: &crate::packet::NarrationPacket) -> Vec<serde_json::Value> {
+    let mut facts = String::new();
+    for f in &packet.what_happened {
+        facts.push_str("- ");
+        facts.push_str(f);
+        facts.push('\n');
+    }
+    for c in &packet.what_changed {
+        facts.push_str("- ");
+        facts.push_str(c);
+        facts.push('\n');
+    }
+    let perceivable = packet.player_perceivable_facts.join("；");
+    let forbidden = packet.forbidden_reveals.join("；");
+    let system = format!(
+        "你是 TRPG 叙事者(Narrator)。把已发生的机械事实写成玩家可见的连贯散文。\n\
+         风格：{}\n\
+         铁律：只叙述下方机械事实与玩家可感知信息；绝不发明未列出的检定/伤害/资源/状态；\n\
+         不输出规则原文、工具 JSON、GM 内部推理；不揭示下方“禁止揭示”项。\n\
+         禁止揭示：{}",
+        packet.style_profile,
+        if forbidden.is_empty() {
+            "（无）"
+        } else {
+            forbidden.as_str()
+        }
+    );
+    let user = format!(
+        "玩家输入：{}\n\n本回合机械事实：\n{}玩家可感知：{}\n\n请据此写一段连贯散文。",
+        packet.player_input,
+        if facts.is_empty() {
+            "（无机械变化）\n".to_string()
+        } else {
+            facts
+        },
+        if perceivable.is_empty() {
+            "（无）"
+        } else {
+            perceivable.as_str()
+        },
+    );
+    vec![
+        serde_json::json!({"role": "system", "content": system}),
+        serde_json::json!({"role": "user", "content": user}),
+    ]
+}
+
 async fn drain_redactor_tx(
     redactor: &mut RedactingBuffer,
     blocked: bool,
     tx: &tokio::sync::mpsc::Sender<crate::turn_event::TurnEvent>,
     visible_text: &mut String,
+    stream_prose: bool,
 ) {
     let rest = redactor.finish();
     if blocked || rest.is_empty() {
         return;
     }
-    let _ = tx
-        .send(crate::turn_event::TurnEvent::Delta(rest.clone()))
-        .await;
+    // buffer 模式：只累积进 visible_text,不直发(同 run_agent_loop 三处直发点)。
+    if stream_prose {
+        let _ = tx
+            .send(crate::turn_event::TurnEvent::Delta(rest.clone()))
+            .await;
+    }
     visible_text.push_str(&rest);
 }
 

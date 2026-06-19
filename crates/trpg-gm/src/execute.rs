@@ -210,10 +210,17 @@ async fn run_pipeline(
 
         // —— 2. AgentLoop body：产 Delta / AwaitingPlayerRoll 经 tx，返回终态信号 ——
         phases_run.push(format!("{:?}", PhaseId::AgentLoop));
+        // P1 TRPG_NARRATOR_SPLIT：默认 OFF。读一次 env flag。
+        // OFF ⇒ stream_prose=true（逐字节现行直发行为，与基线结构等价）；
+        // ON  ⇒ stream_prose=false（buffer 模式：adjudicator prose 累进 ctx.visible_text
+        //        但不直发；之后跑 Narrator phase 投影 NarrationPacket 流玩家散文）。
+        let narrator_split = std::env::var("TRPG_NARRATOR_SPLIT")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
         // P1-3 follow-up：把取消令牌穿进 agent loop——客户端在状态变更前断开时 driver fire 它，
         // run_agent_loop 在 LLM 流边界 break、放弃在途生成（不再续烧 token）。
         signal = gm
-            .run_agent_loop(&mut ctx, &input, tx, req.cancel.as_ref())
+            .run_agent_loop(&mut ctx, &input, tx, req.cancel.as_ref(), !narrator_split)
             .await;
 
         // P1-3 follow-up：令牌已 fire ⇒ run_agent_loop 已放弃在途生成。此处同样短路尾段——
@@ -227,6 +234,17 @@ async fn run_pipeline(
                 "turn cancelled (client disconnected before state mutation); skipping tail phases — no partial persisted"
             );
             return;
+        }
+
+        // —— 2b. P1 Narrator phase（TRPG_NARRATOR_SPLIT ON 且 Narration 终态）——
+        // 仅 Narration 终态跑：AwaitingPlayerRoll（桌面骰 prompt_public）走确定性文本、
+        // 已在 agent loop 内流出，不经 Narrator（ON/OFF 行为一致）。run_narrator_phase 内
+        // 自带 fail-soft：Narrator 失败/空 → 回退直发 buffer 的 adjudicator prose（= OFF 基线，
+        // 无新增泄漏、绝不空白）。cancel 已在上方短路；此处仅未取消路径进入。
+        if narrator_split && signal == AgentSignal::Narration {
+            phases_run.push("Narrator".to_string());
+            gm.run_narrator_phase(&mut ctx, &input, tx, req.cancel.as_ref())
+                .await;
         }
 
         // —— 3a. CRITICAL 尾段（同步，TurnComplete 前 await）——
