@@ -1,12 +1,13 @@
 version: 1
-work_id: knowledge-runtime-p0
+work_id: design3-completion
 run_policy: continuous_until_terminal
 acceptance_ledger: docs/team-lead/AcceptanceLedger.md
 
 integration:
-  branch: codex/knowledge-runtime-p0-integration
-  worktree: .worktrees/knowledge-runtime-p0/integration
-  head: 2f57e99
+  branch: codex/design3-completion-integration
+  worktree: .worktrees/design3-completion/integration
+  # Last code-bearing integration head; a later bookkeeping commit may record this terminal state.
+  head: 53c3a04
   state: green
 
 wip:
@@ -16,318 +17,112 @@ wip:
   verification_wip_max: 2
 
 tasks:
-  - id: integrate-model-source-primitives
-    kind: integration
-    state: verified
-    commits:
-      - de97b05f31e746e0a1206e3198951e75cc84a960
-    integration_sha: 0643020b03419209cab5afe8998746042bba97eb
-    depends_on: []
-    write_set: []
-    hotspot_leases: [crate-facades]
-    validation_profile: model-plus-downstream-check
-
-  - id: integrate-model-visibility-primitives
-    kind: integration
-    state: verified
-    commits:
-      - d32ccac488dafc84d4bf233ffd8f969613c3643a
-    integration_sha: 1a7bbceb4b9a7d87be035c8727262761ccbb0ffc
-    depends_on: [integrate-model-source-primitives]
-    write_set: []
-    hotspot_leases: [crate-facades]
-    validation_profile: model-plus-downstream-check
-
-  - id: model-block-scope-context-split
+  - id: spoiler-duplicate-fix
     kind: implementation
     state: verified
-    depends_on: [integrate-model-visibility-primitives]
-    commit_sha: 87ddb45b4b41d549cada88f117fc6ee8a6705902
-    integration_sha: 8ffa63b1e74f8066b61125c693663d3e1e85c648
-    read_set:
-      - crates/trpg-model/src/lib.rs
+    external_worker: design3-spoiler-duplicate-fix-20260619-001
+    branch: claude/design3-completion/spoiler-duplicate-fix
+    base_sha: 114bc58a07ad89aac61977345036fcf0af70274c
+    commit_sha: d918383bf9e310503550593ceeb4243854e0fd1b
+    integration_sha: 9872b7e
+    depends_on: []
     write_set:
-      - crates/trpg-model/src/lib.rs
-      - crates/trpg-model/src/block.rs
-      - crates/trpg-model/src/scope.rs
-      - crates/trpg-model/src/context_block.rs
-    hotspot_leases: [crate-facades]
-    validation_profile: trpg-model-contract
-
-  - id: integrate-knowledge-p0a-reveal-tool
-    kind: integration
-    state: verified
-    depends_on: [model-block-scope-context-split]
-    commits:
-      - 8f71f44
-      - caffc40
-      - 7d18c87
-    integration_shas:
-      - 371c9df
-      - 53476da
-      - 43175a2
-    write_set:
-      - crates/trpg-gm/src/tools/**
-      - crates/trpg-gm/tests/live_reveal_fact_tool.rs
       - crates/trpg-runtime/src/spoiler_guard.rs
-    hotspot_leases: []
-    validation_profile: reveal-tool-runtime
+    hotspot_leases: [runtime-spoiler-guard]
+    validation_profile: runtime-spoiler-lib
 
-  - id: integrate-knowledge-p0b-edge-projection
-    kind: integration
+  - id: relationship-proposal-commit
+    kind: implementation
     state: verified
-    depends_on: [integrate-knowledge-p0a-reveal-tool]
-    commits:
-      - 1644db5
-      - ed672ef
-      - 0ca176f
-      - 55e9461
-    integration_shas:
-      - d973ad2
-      - 5b863f2
-      - ed9c671
-      - 24e0ccc
+    external_worker: design3-proposal-commit-20260619-001
+    branch: claude/design3-completion/proposal-commit
+    base_sha: 114bc58a07ad89aac61977345036fcf0af70274c
+    commit_sha: c04fb4bcce4330028f4692c3c4626519c570e75c
+    integration_sha: cb77cd1
+    depends_on: [spoiler-duplicate-fix]
     write_set:
-      - crates/trpg-model/src/knowledge.rs
-      - crates/trpg-model/src/lib.rs
-      - crates/trpg-db/src/lib.rs
-      - crates/trpg-db/tests/live_knowledge_edges.rs
-      - crates/trpg-db/tests/live_revealed_facts.rs
-      - crates/trpg-runtime/src/knowledge_projection.rs
       - crates/trpg-runtime/src/lib.rs
-      - crates/trpg-runtime/src/scene_need_resolver.rs
-      - crates/trpg-runtime/tests/live_knowledge_projection.rs
-      - migrations/0032_knowledge_edges.sql
-    hotspot_leases: [crate-facades, migrations]
-    validation_profile: knowledge-db-runtime
+      - crates/trpg-runtime/tests/live_relationship_facts.rs
+    hotspot_leases: [runtime-facade, memory-proposal-commit]
+    validation_profile: runtime-proposal-live
 
-  - id: integrate-knowledge-p1-gate
-    kind: integration
-    state: verified
-    depends_on: [integrate-knowledge-p0b-edge-projection]
-    commits:
-      - eb77199
-    integration_sha: 87d551efd7e85a39d11850640cd05995a45145b2
-    write_set:
-      - docs/superpowers/specs/2026-06-17-npc-holder-identity-gate.md
-    hotspot_leases: []
-    validation_profile: docs-gate
-
-  - id: db-knowledge-repositories
+  - id: plugin-proposal-contract
     kind: implementation
     state: verified
-    depends_on: [integrate-knowledge-p0b-edge-projection]
-    superseded_by: integrate-knowledge-p0b-edge-projection
-    read_set:
-      - crates/trpg-model/src/knowledge/**
-    write_set:
-      - crates/trpg-db/src/repos/knowledge/**
-      - crates/trpg-db/src/projectors/knowledge/**
-    hotspot_leases: []
-    validation_profile: knowledge-db
-
-  - id: runtime-knowledge-boundary
-    kind: implementation
-    state: verified
-    depends_on: [integrate-knowledge-p0b-edge-projection]
-    superseded_by: integrate-knowledge-p0b-edge-projection
-    read_set:
-      - crates/trpg-model/src/knowledge/**
-    write_set:
-      - crates/trpg-runtime/src/knowledge/**
-      - crates/trpg-runtime/src/context/knowledge_projection.rs
-    hotspot_leases: []
-    validation_profile: runtime-knowledge
-
-  - id: journey-prelude-character-session
-    kind: implementation
-    state: verified
-    commit_sha: 730aa19606be175c0858b926313e809c5d88ce8a
-    integration_sha: 1ae0b1f
+    external_worker: design3-plugin-proposals-20260619-001
+    branch: claude/design3-completion/plugin-proposals
+    base_sha: 114bc58a07ad89aac61977345036fcf0af70274c
+    commit_sha: 189a3fdcd2f0bfc04edb301bb218a0a98b7c2593
+    integration_sha: 655aa0e
     depends_on: []
-    read_set:
-      - crates/trpg-cli/**
-      - crates/trpg-api/**
-    write_set:
-      - crates/trpg-harness/**
-      - harness/scenarios/prelude/**
-    hotspot_leases: []
-    validation_profile: journey-prelude
-
-  - id: no-spoiler-adversarial-spec
-    kind: verification
-    state: verified
-    commit_sha: 9981fa6447926899d66323713d478b3963aa9f5b
-    integration_sha: e37f83a
-    depends_on: []
-    read_set:
-      - crates/trpg-runtime/src/spoiler_guard.rs
-      - crates/trpg-gm/src/plugin/**
     write_set:
       - crates/trpg-gm/src/plugin/builtin_no_spoiler.rs
-      - crates/trpg-gm/src/plugin/mod.rs
-      - crates/trpg-gm/src/plugin/spoiler_source.rs
+      - crates/trpg-gm/src/plugin/host.rs
       - crates/trpg-gm/src/plugin/types.rs
       - crates/trpg-gm/src/turn_loop.rs
-      - crates/trpg-gm/tests/no_spoiler_production_sources.rs
-      - docs/team-lead/evidence/no_spoiler/**
-    hotspot_leases: []
-    validation_profile: no-spoiler-adversarial
+      - crates/trpg-gm/tests/plugin_proposal_contract.rs
+    hotspot_leases: [gm-plugin-contract, gm-turn-loop]
+    validation_profile: gm-plugin-contract
 
-  - id: npc-foundation-port
+  - id: npc-consistency-verifier-wire
     kind: implementation
     state: verified
-    external_worker: npc-foundation-port-20260619-001
-    commit_sha: 155b68e
-    integration_sha: a0b6cee
-    depends_on: [integrate-knowledge-p1-gate]
-    read_set:
-      - docs/superpowers/specs/2026-06-17-npc-holder-identity-gate.md
-      - crates/trpg-model/src/knowledge.rs
-      - crates/trpg-model/src/lib.rs
+    external_worker: design3-npc-verifier-wire-20260619-001
+    branch: claude/design3-completion/npc-verifier-wire
+    base_sha: 114bc58a07ad89aac61977345036fcf0af70274c
+    commit_sha: 68deb380439bc223bc525c7043e73172574ad05d
+    integration_sha: c55acfe
+    depends_on: [plugin-proposal-contract]
+    write_set:
+      - crates/trpg-gm/src/turn_loop.rs
+      - crates/trpg-gm/tests/npc_behavior_prompt.rs
+    hotspot_leases: [gm-turn-loop, npc-consistency-verifier]
+    validation_profile: gm-npc-verifier
+
+  - id: live-npc-mind-test-fix
+    kind: implementation
+    state: verified
+    external_worker: design3-live-npc-mind-test-fix-20260619-001
+    branch: claude/design3-completion/live-npc-mind-test-fix
+    base_sha: 114bc58a07ad89aac61977345036fcf0af70274c
+    commit_sha: 93d58a251c50b52b1978cb22c20dcf91f80832d8
+    integration_sha: 16f347d
+    depends_on: [spoiler-duplicate-fix]
+    write_set:
+      - crates/trpg-runtime/tests/live_npc_mind_view.rs
+    hotspot_leases: [runtime-live-tests]
+    validation_profile: runtime-live-npc-mind
+
+  - id: pc-faction-durable-holders
+    kind: implementation
+    state: verified
+    external_worker: design3-pc-faction-holders-20260619-001
+    branch: claude/design3-completion/pc-faction-holders
+    base_sha: 114bc58a07ad89aac61977345036fcf0af70274c
+    commit_sha: 8f97e75d0e1380217243af942ebda2c0e5ec0ccd
+    integration_sha: 53c3a04
+    depends_on: [spoiler-duplicate-fix, relationship-proposal-commit]
+    write_set:
+      - migrations/0037_knowledge_edges_pc_faction_holders.sql
       - crates/trpg-db/src/lib.rs
-      - crates/trpg-runtime/src/lib.rs
-    write_set:
-      - crates/trpg-model/src/lib.rs
+      - crates/trpg-db/tests/live_knowledge_edges.rs
       - crates/trpg-model/src/knowledge.rs
-      - crates/trpg-model/src/npc_profile.rs
-      - crates/trpg-model/src/npc_relationship.rs
-      - crates/trpg-model/src/npc_mind.rs
-      - crates/trpg-model/src/npc_behavior.rs
-      - crates/trpg-model/tests/npc_profile.rs
-      - crates/trpg-model/tests/npc_relationship.rs
-      - crates/trpg-model/tests/npc_mind_view.rs
-      - crates/trpg-model/tests/npc_behavior.rs
-      - crates/trpg-db/src/lib.rs
-      - crates/trpg-db/tests/live_npc_relationships.rs
-      - crates/trpg-runtime/src/lib.rs
-      - crates/trpg-runtime/src/npc_profile.rs
-      - crates/trpg-runtime/src/npc_relationship.rs
-      - crates/trpg-runtime/src/npc_mind.rs
-      - crates/trpg-runtime/src/npc_behavior.rs
-      - migrations/0033_npc_relationships.sql
-    hotspot_leases: [crate-facades, migrations]
-    validation_profile: npc-foundation
+      - crates/trpg-runtime/src/memory_proposal.rs
+      - crates/trpg-runtime/tests/memory_proposal_commit.rs
+    hotspot_leases: [knowledge-holder-schema, migrations, memory-proposal-commit]
+    validation_profile: pc-faction-holder-live
 
-  - id: npc-holder-id-runtime-contest
-    kind: implementation
-    state: verified
-    external_worker: npc-holder-id-gate-20260619-001
-    branch: claude/knowledge-runtime-p0/npc-holder-id-gate
-    commit_sha: 388b246
-    integration_sha: cf02ca4
-    depends_on: [npc-foundation-port, integrate-knowledge-p1-gate]
-    read_set:
-      - docs/superpowers/specs/2026-06-17-npc-holder-identity-gate.md
-      - crates/trpg-runtime/src/lib.rs
-      - crates/trpg-combat/src/lib.rs
-      - crates/trpg-combat/src/policy.rs
-      - crates/trpg-gm/src/tools/check.rs
-      - crates/trpg-gm/src/tools/npc.rs
-    write_set:
-      - crates/trpg-runtime/src/lib.rs
-    hotspot_leases: [runtime-npc-identity]
-    validation_profile: npc-holder-id-runtime-contest
-
-  - id: npc-combat-holder-id-gate
-    kind: implementation
-    state: verified
-    external_worker: npc-combat-holder-id-gate-20260619-001
-    branch: claude/knowledge-runtime-p0/npc-combat-holder-id-gate
-    commit_sha: bbaf91b
-    integration_sha: c68d654
-    depends_on: [npc-holder-id-runtime-contest, npc-foundation-port, integrate-knowledge-p1-gate]
-    read_set:
-      - docs/superpowers/specs/2026-06-17-npc-holder-identity-gate.md
-      - crates/trpg-combat/src/lib.rs
-      - crates/trpg-combat/src/policy.rs
-      - crates/trpg-runtime/tests/live_npc_opposed.rs
-      - crates/trpg-object/tests/live_ammo.rs
-      - crates/trpg-mechanics/src/lib.rs
-      - crates/trpg-mechanics/src/direct_effect.rs
-      - crates/trpg-material/src/lib.rs
-      - crates/trpg-contest/src/lib.rs
-    write_set:
-      - crates/trpg-combat/src/lib.rs
-      - crates/trpg-combat/src/policy.rs
-      - crates/trpg-combat/tests/**
-      - crates/trpg-runtime/tests/live_npc_opposed.rs
-    hotspot_leases: [combat-opposition]
-    validation_profile: npc-combat-holder-id-gate
-
-  - id: npc-holder-id-gate
+  - id: design3-completion-terminal
     kind: milestone
     state: verified
-    integration_sha: c68d654
-    depends_on: [npc-holder-id-runtime-contest, npc-combat-holder-id-gate]
-    read_set:
-      - docs/superpowers/specs/2026-06-17-npc-holder-identity-gate.md
+    integration_sha: 53c3a04
+    depends_on:
+      - spoiler-duplicate-fix
+      - relationship-proposal-commit
+      - plugin-proposal-contract
+      - npc-consistency-verifier-wire
+      - live-npc-mind-test-fix
+      - pc-faction-durable-holders
     write_set: []
     hotspot_leases: []
-    validation_profile: npc-holder-id-gate
-
-  - id: npc-mind-db-load
-    kind: implementation
-    state: verified
-    external_worker: npc-mind-db-load-20260619-001
-    branch: claude/knowledge-runtime-p0/npc-mind-db-load
-    base_sha: c68d654
-    commits:
-      - c29e5a9
-      - a555b1a
-    integration_shas:
-      - f93a823
-      - b1b39d6
-    depends_on: [npc-holder-id-gate, npc-foundation-port]
-    read_set:
-      - crates/trpg-model/src/knowledge.rs
-      - crates/trpg-model/src/npc_mind.rs
-      - crates/trpg-runtime/src/npc_mind.rs
-      - crates/trpg-runtime/src/npc_behavior.rs
-      - crates/trpg-db/src/lib.rs
-    write_set:
-      - crates/trpg-model/src/knowledge.rs
-      - crates/trpg-db/src/lib.rs
-      - crates/trpg-db/tests/live_npc_mind_view.rs
-      - crates/trpg-runtime/src/lib.rs
-      - crates/trpg-runtime/src/npc_mind.rs
-      - crates/trpg-runtime/src/npc_behavior.rs
-      - crates/trpg-runtime/tests/live_npc_mind_view.rs
-      - migrations/**
-    hotspot_leases: [knowledge-holder-schema, migrations, runtime-npc-identity]
-    validation_profile: npc-mind-db-load
-
-  - id: npc-connected-journey
-    kind: implementation
-    state: verified
-    external_worker: npc-connected-journey-mechanical-20260619-003
-    revision_worker: npc-connected-journey-revision-20260619-004
-    branch: claude/knowledge-runtime-p0/npc-connected-journey
-    base_sha: b1b39d6
-    commit_sha: c988072
-    integration_sha: 2f57e99
-    depends_on: [npc-mind-db-load, journey-prelude-character-session]
-    read_set:
-      - crates/trpg-runtime/src/npc_*.rs
-      - crates/trpg-db/src/lib.rs
-      - crates/trpg-harness/**
-    write_set:
-      - crates/trpg-harness/**
-      - harness/scenarios/**
-      - crates/trpg-gm/src/**
-    hotspot_leases: [journey-harness]
-    validation_profile: npc-connected-journey
-
-  - id: npc-vertical-slice
-    kind: milestone
-    state: verified
-    integration_sha: 2f57e99
-    depends_on: [npc-foundation-port, npc-holder-id-gate, npc-mind-db-load, npc-connected-journey]
-    read_set:
-      - crates/trpg-model/src/npc/**
-      - crates/trpg-runtime/src/npc/**
-    write_set:
-      - crates/trpg-runtime/src/npc/**
-      - crates/trpg-gm/src/npc/**
-    hotspot_leases: []
-    validation_profile: npc-connected-journey
+    validation_profile: design3-completion-smoke
