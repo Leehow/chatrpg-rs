@@ -27,10 +27,16 @@
 //! The block carries only ids / enum tokens / short structural strings (the renderer owns
 //! that content-safety guard — it is a GM-tail string that bypasses the ContextFilter).
 //!
-//! ## StoryState / rejected — pending P5.5
-//! Persistence (`load_story_state`) is P5.5. Until then `StoryState::default()` (empty) and
-//! `rejected_thread_ids = []` are used, so the pure core takes its `fallback`/empty-story
-//! path. P5.5 will swap in the loaded state + rejected ids here without touching the wiring.
+//! ## StoryState / rejected — P5.5 wired
+//! `prepare_director_brief` now loads the persisted [`StoryState`] via
+//! [`Db::load_story_state`] (fail-soft: an absent row OR a deserialize error ⇒ `None` ⇒
+//! `StoryState::default()`, so the pure core still takes its `fallback`/empty-story path and
+//! the turn never panics). `rejected_thread_ids` is derived from the loaded story's
+//! `player_interests` where `rejected == true` (§二十四-#13 selector now reads REAL persisted
+//! rejection). The pure `build_director_block` core stays DB-free — it receives the resolved
+//! `&StoryState` + `&[rejected]` as arguments, so the wiring proof stays testable without a
+//! live Postgres. Director only proposes; the runtime-owned commit path is
+//! [`apply_story_proposals`] (设计4补充 §二-④).
 
 use trpg_db::Db;
 use trpg_director::{
@@ -67,45 +73,90 @@ pub async fn prepare_director_brief(
     let gm_truth: Option<Vec<String>> = db.gm_truth_view(session_id).await.ok();
     let player_known: Option<Vec<String>> = db.player_knowledge_view(session_id).await.ok();
 
+    // P5.5: load the persisted StoryState (fail-soft). `Err`/parse-failure ⇒ `None` (handled
+    // inside `load_story_state`), absent row ⇒ `Ok(None)`; either way `unwrap_or_default()`
+    // yields the empty story so the pure core takes its fallback path and never panics.
+    let story = db
+        .load_story_state(session_id)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    // §二十四-#13: rejected threads come from the REAL persisted player-interest signals.
+    let rejected: Vec<String> = rejected_thread_ids(&story);
+
     build_director_block(
         mode,
         candidates,
+        &story,
         gm_truth.as_deref(),
         player_known.as_deref(),
+        &rejected,
         acting_actor_id,
     )
 }
 
+/// Derive the §24-#13 rejected-thread id set from a loaded [`StoryState`]: every
+/// `player_interests` signal flagged `rejected` contributes its `thread_id`. Pure + DB-free so
+/// the selector reads exactly the persisted rejection (empty ids are dropped — an
+/// un-addressable rejection can never gate a thread). Deduped, order-stable.
+pub fn rejected_thread_ids(story: &StoryState) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for s in &story.player_interests {
+        if s.rejected && !s.thread_id.is_empty() && !out.contains(&s.thread_id) {
+            out.push(s.thread_id.clone());
+        }
+    }
+    out
+}
+
+/// Runtime-owned commit path (设计4补充 §二-④): persist a Director-produced [`StoryState`]
+/// delta. The Director core only PROPOSES a story snapshot; only the runtime (System Kernel)
+/// commits it. Minimal by design — `validated()` fail-closes a corrupt proposal before the
+/// idempotent upsert (same packet replay ⇒ same single row). Returns the DB error untouched
+/// so the caller's turn-commit path decides fatality (story persistence is non-blocking).
+pub async fn apply_story_proposals(
+    db: &Db,
+    session_id: &str,
+    proposed: StoryState,
+    updated_turn: &str,
+) -> Result<(), anyhow::Error> {
+    let story = proposed.validated();
+    db.upsert_story_state(session_id, &story, updated_turn).await
+}
+
 /// Pure (DB-free) core of [`prepare_director_brief`]: given the resolved knowledge `Option`s,
-/// run the pure Director selection and render the GM-tail block. `Disabled` ⇒ `None`.
+/// the loaded `story`, and the derived `rejected` thread ids, run the pure Director selection
+/// and render the GM-tail block. `Disabled` ⇒ `None`.
 ///
-/// StoryState persistence is P5.5; until then `StoryState::default()` (empty story) drives
-/// the fallback path and `rejected_thread_ids`/spotlights are empty.
+/// P5.5: `story` + `rejected` are now the REAL persisted state (resolved by the async caller).
+/// An empty/default story (the fail-soft fallback) still drives the empty-story path here, so
+/// the proof stays identical when persistence yields nothing.
 pub fn build_director_block(
     mode: DirectorMode,
     candidates: &[WorldReactionCandidate],
+    story: &StoryState,
     gm_truth: Option<&[String]>,
     player_known: Option<&[String]>,
+    rejected: &[String],
     acting_actor_id: &str,
 ) -> Option<String> {
     if mode == DirectorMode::Disabled {
         return None;
     }
-    // StoryState persistence is P5.5; until then the empty story drives the fallback path.
-    let story = StoryState::default();
-    // No persisted rejected threads yet (P5.5). Empty ⇒ no anti-railroad penalties applied.
-    let rejected: Vec<String> = Vec::new();
-    // Spotlight roster persistence is P5.5; empty roster ⇒ `pick_spotlight_target` → None.
+    // Spotlight roster persistence is out of P5.5 scope; empty roster ⇒ `pick_spotlight_target`
+    // → None (the spotlight model lives in a separate store; story_state holds the narrative
+    // channels only).
     let spotlights: Vec<SpotlightState> = Vec::new();
 
     let plan = build_director_brief_packet(
         mode,
         candidates,
-        &story,
+        story,
         player_known,
         gm_truth,
         &spotlights,
-        &rejected,
+        rejected,
         acting_actor_id,
     );
 
@@ -146,8 +197,10 @@ mod tests {
         let block = build_director_block(
             DirectorMode::Disabled,
             &[cand("npc_a", vec!["e1"])],
+            &StoryState::default(),
             Some(&["truth".into()]),
             Some(&[]),
+            &[],
             "pc_1",
         );
         assert!(block.is_none(), "Disabled must produce no packet block");
@@ -159,8 +212,10 @@ mod tests {
         let block = build_director_block(
             DirectorMode::OnDemand,
             &[cand("npc_a", vec!["e1"])],
+            &StoryState::default(),
             None,
             None,
+            &[],
             "pc_1",
         )
         .expect("ON mode with a candidate must yield a block");
@@ -176,8 +231,10 @@ mod tests {
         let block = build_director_block(
             DirectorMode::OnDemand,
             &[cand("npc_a", vec!["e1"])],
+            &StoryState::default(),
             Some(&["fact_secret".into()]),
             None, // player_known read "failed"
+            &[],
             "pc_1",
         )
         .expect("ON mode yields a block");
@@ -194,12 +251,59 @@ mod tests {
         let block = build_director_block(
             DirectorMode::OnDemand,
             &[cand("npc_a", vec!["e1"])],
+            &StoryState::default(),
             Some(&["fact_known".into(), "fact_secret".into()]),
             Some(&["fact_known".into()]),
+            &[],
             "pc_1",
         )
         .expect("ON mode yields a block");
         assert!(block.contains("reveal_candidate_fact_ids: fact_secret"));
         assert!(!block.contains("fact_known"));
+    }
+
+    // P5.5: rejected_thread_ids reads ONLY the persisted player_interests flagged rejected,
+    // drops empty ids, and dedups — the §24-#13 selector input now mirrors real persistence.
+    #[test]
+    fn rejected_thread_ids_reads_persisted_rejection() {
+        use trpg_model::PlayerInterestSignal;
+        let story = StoryState {
+            player_interests: vec![
+                PlayerInterestSignal {
+                    thread_id: "thr_rejected".into(),
+                    rejected: true,
+                    ..Default::default()
+                },
+                PlayerInterestSignal {
+                    thread_id: "thr_engaged".into(),
+                    rejected: false,
+                    ..Default::default()
+                },
+                // duplicate rejection + an empty id ⇒ both must not leak into the output.
+                PlayerInterestSignal {
+                    thread_id: "thr_rejected".into(),
+                    rejected: true,
+                    ..Default::default()
+                },
+                PlayerInterestSignal {
+                    thread_id: String::new(),
+                    rejected: true,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let got = rejected_thread_ids(&story);
+        assert_eq!(
+            got,
+            vec!["thr_rejected".to_string()],
+            "only non-empty, deduped rejected thread ids survive"
+        );
+    }
+
+    // P5.5: an empty/default story yields no rejected ids (the fail-soft fallback input).
+    #[test]
+    fn rejected_thread_ids_empty_for_default_story() {
+        assert!(rejected_thread_ids(&StoryState::default()).is_empty());
     }
 }

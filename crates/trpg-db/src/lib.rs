@@ -109,6 +109,9 @@ impl Db {
             include_str!("../../../migrations/0038_memory_fact_truth_status.sql"),
             // 0039 world_facts 表（WorldFact 一等化，P3）。幂等 create table if not exists。
             include_str!("../../../migrations/0039_world_facts.sql"),
+            // 0040 story_state 表（StoryState 持久化，P5.5）。幂等 create table if not exists +
+            // upsert on conflict(session_id)。纯加性，非破坏性迁移，无 hard-stop。
+            include_str!("../../../migrations/0040_story_state.sql"),
         ];
         // 在单一事务内先取事务级顾问锁，串行化所有并发/跨进程 migrate() 调用。
         // 0033 等迁移用 drop-then-add 重建命名 CHECK 约束（非幂等的两段式 DDL），
@@ -1570,6 +1573,67 @@ impl Db {
             turn_id: r.get("turn_id"),
             confidence: r.get("confidence"),
         }))
+    }
+
+    /// P5.5 StoryState 持久化：读该 session 的 story 快照（`story_state` 表，单行/会话）。
+    /// 失败软（fail-soft）：行缺失 ⇒ Ok(None)；state_json 反序列化失败 ⇒ log warn + Ok(None)，
+    /// 让 Director 回落到空 story（fallback 路径），永不 panic、永不阻断回合。镜像
+    /// `load_world_fact` 的 fetch_optional 风格，但解析错误降级为 None 而非 `?`-向上传播。
+    pub async fn load_story_state(&self, session_id: &str) -> Result<Option<StoryState>> {
+        let row = sqlx::query(
+            r#"
+            select state_json
+            from story_state
+            where session_id = $1
+            "#,
+        )
+        .bind(session_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let value: serde_json::Value = row.get("state_json");
+        match serde_json::from_value::<StoryState>(value) {
+            Ok(state) => Ok(Some(state)),
+            Err(e) => {
+                // 损坏 / 不兼容的 blob 绝不 panic：log + None ⇒ Director 走空 story fallback。
+                tracing::warn!(
+                    error = %e,
+                    session_id = %session_id,
+                    "load_story_state: state_json deserialize failed; falling back to empty story"
+                );
+                Ok(None)
+            }
+        }
+    }
+
+    /// P5.5 StoryState 持久化：runtime 提交一盘 StoryState 快照（幂等 upsert by session_id）。
+    /// 同一 packet 重放 ⇒ 同一行（on conflict (session_id) do update）。`updated_turn` 仅作
+    /// provenance（哪一回合写入），不参与冲突键。Director core 不调用此方法——只有 runtime
+    /// (System Kernel) 才提交（设计4补充 §二-④：Director 提议、runtime 提交）。
+    pub async fn upsert_story_state(
+        &self,
+        session_id: &str,
+        story: &StoryState,
+        updated_turn: &str,
+    ) -> Result<()> {
+        let state_json = serde_json::to_value(story)?;
+        sqlx::query(
+            r#"
+            insert into story_state (session_id, state_json, updated_turn)
+            values ($1, $2, $3)
+            on conflict (session_id) do update set
+              state_json = excluded.state_json,
+              updated_turn = excluded.updated_turn
+            "#,
+        )
+        .bind(session_id)
+        .bind(state_json)
+        .bind(updated_turn)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     pub async fn upsert_memory_snapshot(&self, snapshot: &MemorySnapshot) -> Result<()> {
