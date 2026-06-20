@@ -2212,8 +2212,16 @@ impl GmLoop {
         // 显式门(buffered_narration 已蕴含,但显式更清晰),且 OFF(任一 flag 关)恒不进 ⇒ 字节等价。
         let gate_block = ctx.presentation_gate.is_block();
         let omitted_repair = narrator_split_enabled() && outcome.omitted_visible_repair;
-        if presentation_gate_enabled() && buffered_narration && (gate_block || omitted_repair) {
-            self.run_presentation_repair_ladder(ctx, input, tx, cancel, omitted_repair)
+        // A3-HARDEN(§6 大考)：机器上下文回显 / 原始 JSON dump 旁路信号。**严格 ON-only**——
+        // 谓词仅在 narrator_split_enabled() 时**才计算**(codex 审：避免 OFF 路径"算了但不生效"，
+        // 使 OFF 真正不消费该谓词)，且白名单(BLOCKING_KINDS)纹丝不动 ⇒ OFF 字节等价。
+        let echo_repair =
+            narrator_split_enabled() && narration_is_machine_context_echo(&ctx.visible_text);
+        if presentation_gate_enabled()
+            && buffered_narration
+            && (gate_block || omitted_repair || echo_repair)
+        {
+            self.run_presentation_repair_ladder(ctx, input, tx, cancel, omitted_repair, echo_repair)
                 .await;
         }
     }
@@ -2231,14 +2239,27 @@ impl GmLoop {
         // A3(§6 大考)：本次阶梯是否为 OmittedVisibleResult 旁路触发。为 true 时,recheck 除
         // gate.is_block() 外还须**已不再漏报可见结果**才采纳重生稿,否则落确定性兜底(收敛保证)。
         include_omitted_repair: bool,
+        // A3-HARDEN(§6 大考)：本次阶梯是否为机器上下文回显 / 原始 JSON dump 旁路触发。为 true 时,
+        // recheck 还须确认重生稿**不再是机器回显**才采纳,否则落确定性兜底(收敛保证)。
+        include_echo_repair: bool,
     ) {
         // 收窄 forbidden_reveals：把触发 Block 的 finding detail 作为禁揭示约束喂回 Narrator。
-        let forbidden: Vec<String> = match &ctx.presentation_gate {
+        let mut forbidden: Vec<String> = match &ctx.presentation_gate {
             crate::presentation_gate::PresentationGate::Block(findings) => {
                 findings.iter().map(|f| f.detail.clone()).collect()
             }
             crate::presentation_gate::PresentationGate::Allow => Vec::new(),
         };
+        // A3-HARDEN(codex 审折入)：echo 旁路重生时,Block findings 通常为空 ⇒ forbidden 为空 ⇒
+        // 模型可能复读同款 JSON。注入一条**通用格式约束**(不含原始 dump 正文,只约束输出形态),
+        // 让重生稿写散文而非回吐机器对象。来源为引擎常量 ⇒ 不新增任何泄漏面。
+        if include_echo_repair {
+            forbidden.push(
+                "只用自然语言散文叙述本回合结果，绝不输出工具/机器 JSON、字段名或花括号机器对象，\
+                 不得逐字复述「已确认结果」账本块。"
+                    .to_string(),
+            );
+        }
         // (1) 重生一次：从本回合 ledger/ctx 投影 NarrationPacket（带收窄 forbidden_reveals）→ Narrator。
         let adj = crate::packet::AdjudicationPacket::project(
             input.user_input,
@@ -2272,7 +2293,10 @@ impl GmLoop {
                 // A3：旁路触发时,recheck 还须确认重生稿不再漏报可见结果(白名单不管 OmittedVisible,
                 // 故必须显式查 recheck.omitted_visible_repair),否则不采纳 ⇒ 落确定性兜底(收敛)。
                 let still_omitted = include_omitted_repair && recheck.omitted_visible_repair;
-                if !recheck.gate.is_block() && !still_omitted {
+                // A3-HARDEN：echo 旁路触发时,重生稿若仍是机器回显则不采纳 ⇒ 落确定性兜底(收敛保证)。
+                let still_echo =
+                    include_echo_repair && narration_is_machine_context_echo(&text);
+                if !recheck.gate.is_block() && !still_omitted && !still_echo {
                     ctx.presentation_gate = recheck.gate;
                     ctx.visible_text = text;
                     return;
@@ -2732,6 +2756,56 @@ pub(crate) fn omitted_visible_result_needs_repair(
     })
 }
 
+/// A3-HARDEN(§6 大考)：玩家可见念白是否为**机器上下文回显 / 原始 JSON dump**——即模型把注入的
+/// 「本回合已确认结果」机器账本块(含原始 `check_<id>` 记录 JSON)逐字回吐为念白，而非据此生成散文。
+/// 这是 split Narrator ON 路径上 ~1/13 turn 的 A3 严重缺口(玩家看到原始机器 JSON 而非念白)。
+///
+/// **保守谓词，绝不误杀正常念白**(codex 设计审折入)。判据 = **机器对象字段键** 与 **花括号机器对象**
+/// 共现且占主导，而**非**单看 header 或单看 `{`：
+/// - 确定性兜底模板(`deterministic_committed_facts_narration`)也以「根据本回合已确认的结果」开头，
+///   且 `compact_value` 可能把 object outcome 渲染成 `{...}`——故 **header / 裸 `{` 都不能单独触发**，
+///   否则会误杀兜底导致不收敛。兜底**绝不含**原始 `"check_id"`/`"roll_id"`/`"effect_id"` 记录字段键。
+/// - 正常含 roll 值的散文(`[roll]侦查成功（44/60）[/roll]`)无 `{}`、无机器字段键 ⇒ 永不触发。
+///   故意**不**把 `[`/`]` 计入结构密度——`[roll]` 标签会贡献方括号(codex 指出)。
+///
+/// 触发条件(全为机器 dump 的强信号，任一组合命中即 true)：
+/// (A) 含 ≥1 个原始机器记录字段键 (`"check_id"`/`"roll_id"`/`"effect_id"`/`"impact_id"`/`"outcome"`)
+///     **且** 花括号对 `{`+`}` ≥ `MIN_BRACES`(=4，≥2 个完整机器对象)；
+/// (B) 注入块 header「根据本回合已确认的结果」与 ≥1 个原始机器记录字段键(非裸 `{`)共现——
+///     即"回显了带原始字段键的注入账本"。
+const MACHINE_ECHO_FIELD_KEYS: [&str; 5] = [
+    "\"check_id\"",
+    "\"roll_id\"",
+    "\"effect_id\"",
+    "\"impact_id\"",
+    "\"outcome\"",
+];
+const MACHINE_ECHO_HEADER: &str = "根据本回合已确认的结果";
+const MACHINE_ECHO_MIN_BRACES: usize = 4;
+
+pub(crate) fn narration_is_machine_context_echo(visible_text: &str) -> bool {
+    let s = visible_text;
+    if s.len() < 64 {
+        // 太短不可能是注入账本回显；保守不触发(原始 dump ~2057 chars)。
+        return false;
+    }
+    let field_key_hits = MACHINE_ECHO_FIELD_KEYS
+        .iter()
+        .filter(|k| s.contains(**k))
+        .count();
+    if field_key_hits == 0 {
+        // 无任何原始机器字段键 ⇒ 既非 dump，也不会误杀兜底/散文。
+        return false;
+    }
+    let braces = s.matches('{').count() + s.matches('}').count();
+    // (B) header + 原始字段键共现：注入账本被原样回吐。
+    if s.contains(MACHINE_ECHO_HEADER) {
+        return true;
+    }
+    // (A) 多个完整机器对象 + 原始字段键：原始 JSON dump 形状(无 header 也算)。
+    braces >= MACHINE_ECHO_MIN_BRACES
+}
+
 /// P6.7：reveal_fact 提名门控开关（默认 OFF = 字节级基线）。ON ⇒ reveal_fact 不再
 /// 即时落库，而是提名到 ctx.nominated_reveals，由 PresentationCommit 边界在终审
 /// Allow 后统一提交；OFF ⇒ reveal_fact 即时落库（F13 与今日行为逐字节等价）。
@@ -2749,19 +2823,76 @@ pub(crate) fn deterministic_committed_facts_narration(
 ) -> String {
     let mut lines: Vec<String> = Vec::new();
     for happened in &packet.what_happened {
-        lines.push(format!("· {happened}"));
+        lines.push(format!("· {}", strip_machine_json_objects(happened)));
     }
     for changed in &packet.what_changed {
-        lines.push(format!("· {changed}"));
+        lines.push(format!("· {}", strip_machine_json_objects(changed)));
     }
     for fact in &packet.player_perceivable_facts {
-        lines.push(format!("· {fact}"));
+        lines.push(format!("· {}", strip_machine_json_objects(fact)));
     }
     if lines.is_empty() {
         "（本回合按已落账的机械结果继续；无新增可公开的机械事实。）".to_string()
     } else {
         format!("根据本回合已确认的结果：\n{}", lines.join("\n"))
     }
+}
+
+/// A3-HARDEN(§6 大考, codex ④ 审折入)：把一条机械事实摘要里的**原始 JSON 对象正文**(`{...}`)
+/// 抹成一个人类可读的占位标记，**保留**前缀 ledger token(如 `check c_fire:` / `effect e_dmg`)。
+///
+/// 必要性：`compact_value(&result.outcome)` 会把真实 check outcome(含 `"check_id"` 等原始记录字段键)
+/// 原样塞进 `what_happened`(packet.rs)。若兜底直接拼这段,**兜底自身**就满足 machine-echo 谓词的
+/// header + 字段键条件 ⇒ 修复阶梯的收敛终点反被守卫判为机器回显(自相矛盾)。抹掉 JSON 正文后,
+/// 兜底是纯人话 + ledger token,**确定**不含 `{}`/原始字段键 ⇒ 谓词必放过 ⇒ bounded retry=1 后
+/// 真正收敛,且兜底 saved 文本绝不含原始机器 JSON(正是 A3 的本意)。
+///
+/// **JSON-string-aware 平衡括号扫描**(codex ④ P1 折入)：括号深度计数**跳过**字符串字面量内部的
+/// `{`/`}`(并处理 `\"` 转义),否则 `{"note":"}"}` 里字符串中的 `}` 会提前把 depth 降到 0、泄漏后续
+/// object 正文。逐字节确定性、不依赖完整 JSON parser(容忍非 JSON 残文,只做对象正文剔除)。
+fn strip_machine_json_objects(s: &str) -> String {
+    if !s.contains('{') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut depth: usize = 0;
+    let mut replaced_here = false;
+    let mut in_string = false; // 是否处于 JSON 字符串字面量内部(仅 depth>0 时有意义)
+    let mut escaped = false; // 上一字符是否为字符串内的 `\`
+    for ch in s.chars() {
+        if depth > 0 && in_string {
+            // 字符串内部：吞掉所有字符(包含其中的 `{`/`}`)，只跟踪转义与闭引号。
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '{' => {
+                if depth == 0 && !replaced_here {
+                    out.push_str("（机械结果）");
+                    replaced_here = true;
+                }
+                depth += 1;
+            }
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    replaced_here = false;
+                }
+            }
+            '"' if depth > 0 => {
+                in_string = true;
+            }
+            _ if depth == 0 => out.push(ch),
+            _ => {}
+        }
+    }
+    out
 }
 
 /// P2：verify_after_stream 的产物——既有 plugin trace 记录 + 本回合 PresentationGate 判定。

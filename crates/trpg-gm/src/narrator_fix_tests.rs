@@ -213,3 +213,187 @@ fn a3_narrator_messages_force_restate_what_changed() {
         "system 必须命令逐条复述机械结果，实得：{system}"
     );
 }
+
+// ───────── A3-HARDEN: 机器上下文回显 / 原始 JSON dump ON-only 守卫 ─────────
+
+/// t02 形态原始 dump：header「根据本回合已确认的结果」+ 原始 `check_<id>{...JSON...}` 记录。
+/// 复刻 coc_campaign_final.md:23 的 ~2057 char dump 形状。
+fn t02_machine_echo_dump() -> String {
+    let mut s = String::from("根据本回合已确认的结果：· check check_7c3");
+    for _ in 0..5 {
+        s.push_str(
+            "{\"check_id\":\"check_7c3a1f\",\"skill\":\"Spot Hidden\",\"roll\":22,\
+             \"target\":60,\"outcome\":\"strong_success\",\"margin\":38}",
+        );
+    }
+    s.push_str("· check check_f41");
+    for _ in 0..5 {
+        s.push_str(
+            "{\"check_id\":\"check_f41b2\",\"skill\":\"Psychology\",\"roll\":46,\
+             \"target\":50,\"outcome\":\"success\"}",
+        );
+    }
+    s
+}
+
+/// A3-HARDEN (a)：机器上下文回显 / 原始 JSON dump ⇒ 守卫 **FIRES**。
+#[test]
+fn a3harden_predicate_fires_on_machine_context_echo_dump() {
+    let dump = t02_machine_echo_dump();
+    assert!(
+        narration_is_machine_context_echo(&dump),
+        "t02 形态原始 JSON dump 必须触发机器回显守卫，长度={}",
+        dump.len()
+    );
+}
+
+/// A3-HARDEN (a')：header + 原始字段键共现(支线 B)即触发，即便花括号不足 4。
+#[test]
+fn a3harden_predicate_fires_on_header_plus_field_key() {
+    // 一段含 header 与单个原始 `"check_id"` 字段键的回显(brace 仅 2，仍触发)。
+    let echo = format!(
+        "根据本回合已确认的结果：{}· check check_7c3{{\"check_id\":\"check_7c3a1f\",\"outcome\":\"strong_success\"}}",
+        "玩家可见的机械结果账本被原样回吐，没有任何散文叙述，"
+    );
+    assert!(
+        narration_is_machine_context_echo(&echo),
+        "header + 原始字段键共现必须触发(支线 B)，实得 len={}",
+        echo.len()
+    );
+}
+
+/// A3-HARDEN (b)：正常含 roll 值 + `[roll]` 标签的散文 ⇒ 守卫 **不** FIRES(零误杀)。
+/// 复刻 P1/P2/P3 探针念白(coc_a3_turn2_investigation.md)。
+#[test]
+fn a3harden_predicate_ignores_legit_prose_with_roll_tags() {
+    let prose = "你绕着加油站走了一圈，记者的直觉让你在油泵旁停下。\
+        [roll]侦查成功（44/60）。[/roll]那辆灰色轿车的后视镜微微调整了角度——有人在车里盯着你。\
+        你压低帽檐，心跳加快，[roll]心理学检定成功（46/50）。[/roll]对方在伪装平静，但指节发白。\
+        你假装系鞋带，用余光记下车牌的前两位，然后若无其事地走回自己的车边。";
+    assert!(
+        !narration_is_machine_context_echo(prose),
+        "含 [roll] 标签与括号 roll 值的正常散文绝不得触发(无 {{}}、无原始字段键)，len={}",
+        prose.len()
+    );
+}
+
+/// A3-HARDEN (c)：确定性兜底模板(收敛终点) ⇒ 守卫 **不** FIRES ⇒ 阶梯确定性收敛、不死循环。
+/// 兜底也以「根据本回合已确认的结果」开头；codex ④ 审指出真实 `result.outcome` JSON **含**
+/// `"check_id"` 等原始记录字段键(经 compact_value 原样进 what_happened)，故兜底必须先经
+/// `strip_machine_json_objects` 抹掉 JSON 正文，否则兜底自身满足 header+字段键 ⇒ 反被守卫判机器回显。
+#[test]
+fn a3harden_predicate_ignores_deterministic_fallback_converges() {
+    // **真实形状**：what_happened 里嵌真实 outcome JSON(含 "check_id"/"outcome" 原始字段键，
+    // 复刻 trpg-contest::resolve_outcome 的 json! 输出)。验证兜底经 strip 后既无 {} 也无字段键，
+    // ⇒ 守卫放过 ⇒ 收敛终点 honest(玩家最终所见绝不含原始机器 JSON)。
+    let packet = NarrationPacket {
+        player_input: "我开火".to_string(),
+        what_happened: vec![
+            "check c_fire: {\"check_id\":\"c_fire\",\"outcome\":\"success\",\"total\":44,\"target\":60}"
+                .to_string(),
+            "check c_spot: {\"check_id\":\"c_spot\",\"outcome\":\"strong_success\",\"total\":22}"
+                .to_string(),
+        ],
+        what_changed: vec![
+            "effect e_dmg (damage)".to_string(),
+            "pc.ammo subtract 1".to_string(),
+        ],
+        ..Default::default()
+    };
+    let fallback = deterministic_committed_facts_narration(&packet);
+    assert!(fallback.contains("根据本回合已确认的结果"), "兜底含 header");
+    // 兜底经 strip 后绝无原始 JSON 正文/字段键(否则收敛终点自相矛盾)。
+    assert!(!fallback.contains('{'), "兜底必须已抹掉 JSON 正文，实得：{fallback}");
+    assert!(!fallback.contains("\"check_id\""), "兜底不得含原始字段键");
+    // ledger token(check id / effect id / 资源名)仍被保留 ⇒ 仍是可对账的人话摘要。
+    assert!(fallback.contains("c_fire") && fallback.contains("c_spot"), "保留 check ledger token");
+    assert!(fallback.contains("e_dmg") && fallback.contains("ammo"), "保留 effect/资源 token");
+    assert!(
+        !narration_is_machine_context_echo(&fallback),
+        "确定性兜底(经 strip)绝不得触发守卫，否则不收敛；实得：{fallback}"
+    );
+}
+
+/// A3-HARDEN (c')：strip_machine_json_objects 抹掉 `{...}` 正文但保留前缀 ledger token，
+/// 且抹后串绝不含 `{`/原始字段键(收敛终点 honest 的直接单测)。
+#[test]
+fn a3harden_strip_machine_json_keeps_token_drops_json() {
+    let line = "check c_fire: {\"check_id\":\"c_fire\",\"outcome\":\"success\"}";
+    let stripped = strip_machine_json_objects(line);
+    assert!(stripped.starts_with("check c_fire:"), "保留 ledger 前缀，实得：{stripped}");
+    assert!(!stripped.contains('{'), "抹掉花括号");
+    assert!(!stripped.contains("\"check_id\""), "抹掉原始字段键");
+    // 无花括号的行原样返回。
+    assert_eq!(
+        strip_machine_json_objects("effect e_dmg (damage)"),
+        "effect e_dmg (damage)"
+    );
+}
+
+/// A3-HARDEN (c''')：JSON 字符串字面量内部的 `}`(及 `\"` 转义)不得提前关深度而泄漏后续 object 正文
+/// (codex ④ P1)。strip 后必无 `{`/`}`/原始字段键残留。
+#[test]
+fn a3harden_strip_handles_brace_inside_json_string() {
+    // 字符串值里含 `}`：朴素括号计数会在此提前归零、泄漏 `,"outcome":"success"}`。
+    let tricky = "check c: {\"check_id\":\"c\",\"note\":\"a}b\",\"outcome\":\"success\"}";
+    let stripped = strip_machine_json_objects(tricky);
+    assert!(stripped.starts_with("check c:"), "保留前缀，实得：{stripped}");
+    assert!(!stripped.contains('{'), "无残留 {{，实得：{stripped}");
+    assert!(!stripped.contains('}'), "无残留 }}，实得：{stripped}");
+    assert!(!stripped.contains("\"outcome\""), "字符串内 }} 不得泄漏后续字段，实得：{stripped}");
+    // 含转义引号 `\"` 的字符串值同样不破坏扫描。
+    let esc = "check c: {\"label\":\"he said \\\"hi}\\\"\",\"check_id\":\"c\"}";
+    let s2 = strip_machine_json_objects(esc);
+    assert!(!s2.contains('{') && !s2.contains("\"check_id\""), "转义引号场景无泄漏，实得：{s2}");
+}
+
+/// A3-HARDEN (d)：**ON-only gating 组合**断言——`echo_repair` 的真值 = `narrator_split_enabled()
+/// && narration_is_machine_context_echo(text)`(phase_verify_after_stream 的精确表达式)。验证：
+/// split OFF ⇒ echo_repair 恒 false(谓词被短路、OFF 字节等价)；split ON + dump ⇒ echo_repair true
+/// (ON 路径真正消费守卫)。用进程级 env，故 serial 串行 + 即时还原，避免与并发测试竞争。
+#[test]
+fn a3harden_on_only_gating_composition() {
+    use std::sync::{Mutex, OnceLock};
+    static ENV_GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+    let _g = ENV_GUARD.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|p| p.into_inner());
+
+    let dump = t02_machine_echo_dump();
+    let prior = std::env::var("TRPG_NARRATOR_SPLIT").ok();
+
+    // split OFF ⇒ 短路：echo_repair 恒 false(即便文本是 dump)。
+    std::env::remove_var("TRPG_NARRATOR_SPLIT");
+    let echo_repair_off = narrator_split_enabled() && narration_is_machine_context_echo(&dump);
+    assert!(!echo_repair_off, "split OFF ⇒ echo_repair 必 false(OFF 字节等价、谓词不消费)");
+
+    // split ON + dump ⇒ echo_repair true(ON 路径真正吃守卫)。
+    std::env::set_var("TRPG_NARRATOR_SPLIT", "1");
+    let echo_repair_on = narrator_split_enabled() && narration_is_machine_context_echo(&dump);
+    // split ON + 正常散文 ⇒ 仍 false(不误杀)。
+    let prose = "你环顾四周，记者的直觉让你警觉起来，但什么也没发现异常。".repeat(3);
+    let echo_repair_on_prose = narrator_split_enabled() && narration_is_machine_context_echo(&prose);
+
+    // 还原 env。
+    match prior {
+        Some(v) => std::env::set_var("TRPG_NARRATOR_SPLIT", v),
+        None => std::env::remove_var("TRPG_NARRATOR_SPLIT"),
+    }
+
+    assert!(echo_repair_on, "split ON + dump ⇒ echo_repair 必 true(ON 路径触发守卫)");
+    assert!(!echo_repair_on_prose, "split ON + 正常散文 ⇒ echo_repair 必 false(不误杀)");
+}
+
+/// A3-HARDEN (b')：短文本 / 普通念白绝不触发(保守：原始 dump ~2057 chars，<64 直接放过)。
+#[test]
+fn a3harden_predicate_ignores_short_and_plain_text() {
+    assert!(!narration_is_machine_context_echo(""), "空文本不触发");
+    assert!(
+        !narration_is_machine_context_echo("你成功了。"),
+        "短念白不触发"
+    );
+    // 长但纯散文、无字段键：不触发。
+    let long_prose = "你".repeat(200);
+    assert!(
+        !narration_is_machine_context_echo(&long_prose),
+        "长但无原始字段键的散文不触发"
+    );
+}
