@@ -1946,7 +1946,16 @@ impl RuntimeEngine {
         contract: &CheckContract,
         input: &str,
     ) -> Result<CheckResultRecord> {
-        let normalized = normalize_contract_for_system_roll(contract);
+        let mut normalized = normalize_contract_for_system_roll(contract);
+        // Symmetry with the system-roll paths (execute_agent_roll /
+        // execute_system_roll_bundle): bind the ruleset kernel's data-driven
+        // defaults BEFORE rolling so a player-input check and a system-rolled check
+        // resolve through the same target/dice binding. The binding is a no-op when
+        // the contract is already source-backed, and (post-B1) never degrades a
+        // usable provisional StaticNumber to `provisional` when the kernel has no
+        // replacement — so this is additive, not a regression.
+        self.apply_kernel_defaults_if_unsourced(&mut normalized)
+            .await;
         if Self::contract_missing_source_backed_parameters(&normalized) {
             let blocked = self.blocked_missing_source_check_result(
                 session_id,
@@ -2009,18 +2018,8 @@ impl RuntimeEngine {
         {
             c.dice_expression = d;
         }
-        let provisional_target = matches!(&c.target, CheckTargetModel::UnknownUntilLookup)
-            || matches!(&c.target, CheckTargetModel::StaticNumber { label, .. } if {
-                let l = label.to_ascii_lowercase();
-                l.contains("suggested") || l.contains("provisional") || l.contains("until") || l.contains("default")
-            });
-        if provisional_target {
-            // count_faces/meet_or_beat give a concrete CheckTargetModel; roll_under
-            // (and not-yet-typed kernels) give None → clear to UnknownUntilLookup so
-            // the contest kernel resolves it (e.g. PercentileRollUnder for d100), not
-            // a stale roll-high static target.
-            c.target = target_model_from_dice_core(&kernel.dice_core)
-                .unwrap_or(CheckTargetModel::UnknownUntilLookup);
+        if let Some(bound) = kernel_default_target_binding(&c.target, &kernel.dice_core) {
+            c.target = bound;
         }
         if !kernel.source_refs.is_empty() {
             c.source_refs = kernel.source_refs.clone();
@@ -4577,6 +4576,116 @@ mod tech_option_binding_tests {
     }
 }
 
+#[cfg(test)]
+mod b1_kernel_default_target_binding_tests {
+    //! §6 exam B1 regression (pure / deterministic, no DB): the kernel-default
+    //! target-binding gate must (1) PRESERVE a usable provisional StaticNumber DV
+    //! when the kernel offers no replacement (meet_or_beat with NO static
+    //! target_number — Cyberpunk RED's GM-set-DV shape), and (2) bind / replace
+    //! symmetrically for roll_under, pool, and static-target kernels. Because the
+    //! gate is pure (`kernel_default_target_binding`) and both the player-input
+    //! path (`resolve_check_with_input`) and the system-roll paths
+    //! (`execute_agent_roll` / `execute_system_roll_bundle`) feed the SAME contract
+    //! target through the SAME `apply_kernel_defaults_if_unsourced`, asserting the
+    //! gate output here proves both paths bind identically (symmetry).
+    use super::*;
+    use serde_json::json;
+
+    fn prov(value: i32) -> CheckTargetModel {
+        CheckTargetModel::StaticNumber {
+            value,
+            label: "GM suggested provisional DV".into(),
+        }
+    }
+
+    // —— B1 CORE: a meet_or_beat kernel with NO static target_number (Cyberpunk
+    // RED: DV is per-situation, not table-wide) must NOT strand a usable
+    // provisional StaticNumber. The gate returns None → caller keeps the DV.
+    #[test]
+    fn meet_or_beat_without_target_number_preserves_provisional_static() {
+        let dice_core = json!({ "dice": "1d10", "compare": "meet_or_beat" });
+        let binding = kernel_default_target_binding(&prov(13), &dice_core);
+        assert!(
+            binding.is_none(),
+            "kernel offers no replacement → must KEEP the provisional DV, got {binding:?}"
+        );
+    }
+
+    // —— SYMMETRY proof: an UnknownUntilLookup target under the SAME no-tnum
+    // meet_or_beat kernel stays Unknown (kernel has nothing to bind), so a check
+    // that arrives unknown and one that arrives with a usable provisional DV are
+    // both handled without inventing a stale roll-high static target.
+    #[test]
+    fn meet_or_beat_without_target_number_keeps_unknown_unknown() {
+        let dice_core = json!({ "dice": "1d10", "compare": "meet_or_beat" });
+        let binding =
+            kernel_default_target_binding(&CheckTargetModel::UnknownUntilLookup, &dice_core);
+        assert!(
+            matches!(binding, Some(CheckTargetModel::UnknownUntilLookup)),
+            "unknown stays unknown (contest kernel resolves it), got {binding:?}"
+        );
+    }
+
+    // —— roll_under kernel: the per-actor percentile model resolves an Unknown
+    // target from the sheet (kernel_can_replace via compare==roll_under), so a
+    // stale roll-HIGH provisional StaticNumber MUST be replaced (cleared to
+    // Unknown) to avoid mis-resolving under a roll-under contest.
+    #[test]
+    fn roll_under_replaces_provisional_static_with_unknown() {
+        let dice_core = json!({ "dice": "1d100", "compare": "roll_under" });
+        let binding = kernel_default_target_binding(&prov(60), &dice_core);
+        assert!(
+            matches!(binding, Some(CheckTargetModel::UnknownUntilLookup)),
+            "roll_under must clear a stale roll-high static DV to Unknown, got {binding:?}"
+        );
+    }
+
+    // —— meet_or_beat WITH a static target_number: the kernel yields a concrete
+    // StaticNumber, so a provisional DV is replaced by the kernel target.
+    #[test]
+    fn meet_or_beat_with_target_number_replaces_provisional() {
+        let dice_core = json!({ "dice": "1d20", "compare": "meet_or_beat", "target_number": 15 });
+        match kernel_default_target_binding(&prov(13), &dice_core) {
+            Some(CheckTargetModel::StaticNumber { value, .. }) => assert_eq!(
+                value, 15,
+                "kernel's static target_number must win over a provisional DV"
+            ),
+            other => panic!("expected kernel StaticNumber(15), got {other:?}"),
+        }
+    }
+
+    // —— A non-provisional, already-concrete sourced target is NEVER touched
+    // (no "suggested/provisional/until/default" label) — proves the gate only
+    // rebinds provisional / unknown targets, so already-bound checks are no-ops.
+    #[test]
+    fn concrete_nonprovisional_static_is_left_untouched() {
+        let dice_core = json!({ "dice": "1d10", "compare": "meet_or_beat", "target_number": 15 });
+        let bound = CheckTargetModel::StaticNumber {
+            value: 7,
+            label: "bound DV".into(),
+        };
+        let binding = kernel_default_target_binding(&bound, &dice_core);
+        assert!(
+            binding.is_none(),
+            "a concrete sourced DV must be left untouched, got {binding:?}"
+        );
+    }
+
+    // —— pool kernel (count_faces): yields a concrete DicePoolCount, replacing a
+    // provisional static DV (another arm of kernel_can_replace).
+    #[test]
+    fn count_faces_replaces_provisional_with_pool_count() {
+        let dice_core = json!({ "dice": "6d4", "compare": "count_faces", "compare_to": "3" });
+        assert!(
+            matches!(
+                kernel_default_target_binding(&prov(13), &dice_core),
+                Some(CheckTargetModel::DicePoolCount { .. })
+            ),
+            "count_faces must replace provisional DV with a dice-pool target"
+        );
+    }
+}
+
 fn looks_like_gate_help_or_question(input: &str) -> bool {
     let lower = input.to_lowercase();
     let terms = [
@@ -4793,6 +4902,52 @@ pub fn wants_system_roll(input: &str) -> bool {
 // 桌面骰权政策谓词的单一事实源在 trpg_model::table_dice_policy;此处再导出
 // 以保持 trpg_runtime::system_rolls_visible_policy() 既有公共路径(trpg-gm 在用)。
 pub use trpg_model::system_rolls_visible_policy;
+
+/// B1: decide how a kernel's parsed core mechanic rebinds a check's target when
+/// the check is NOT already source-backed. Returns `Some(new_target)` when the
+/// target should be replaced, or `None` to keep the existing target untouched.
+///
+/// Pure / data-driven (keys only on the kernel's typed `compare`/`target_number`
+/// and the current target's provisional label — never on a ruleset_id/module_id
+/// name; constitution §二-⑪). Extracted so the gate is deterministically unit
+/// testable without a live DB.
+///
+/// The kernel can replace the target only when it (a) yields a concrete typed
+/// target model from dice_core (count_faces pool / meet_or_beat WITH a static
+/// target_number), or (b) is roll_under — whose per-actor percentile model
+/// resolves an UnknownUntilLookup target directly from the actor sheet (no static
+/// number needed). For a meet_or_beat kernel that declares NO static
+/// target_number (e.g. GM-set-DV systems like Cyberpunk RED where the DV is
+/// per-situation, not table-wide), the kernel offers NOTHING, so clearing a
+/// usable provisional StaticNumber would only strand the check at `provisional`.
+/// In that case keep the existing target.
+fn kernel_default_target_binding(
+    current: &CheckTargetModel,
+    dice_core: &serde_json::Value,
+) -> Option<CheckTargetModel> {
+    let already_unknown = matches!(current, CheckTargetModel::UnknownUntilLookup);
+    let provisional_static = matches!(current, CheckTargetModel::StaticNumber { label, .. } if {
+        let l = label.to_ascii_lowercase();
+        l.contains("suggested") || l.contains("provisional") || l.contains("until") || l.contains("default")
+    });
+    let kernel_target = target_model_from_dice_core(dice_core);
+    let compare = dice_core.get("compare").and_then(|v| v.as_str());
+    let kernel_can_replace = kernel_target.is_some() || compare == Some("roll_under");
+    if already_unknown {
+        // Unknown carries no usable target to preserve: adopt whatever the kernel
+        // offers (Some → concrete model; None → stay Unknown for the contest
+        // kernel / percentile path). Unchanged from prior behavior.
+        Some(kernel_target.unwrap_or(CheckTargetModel::UnknownUntilLookup))
+    } else if provisional_static && kernel_can_replace {
+        // A stale roll-high StaticNumber would mis-resolve under a roll_under /
+        // pool kernel — replace it with the kernel-derived model.
+        Some(kernel_target.unwrap_or(CheckTargetModel::UnknownUntilLookup))
+    } else {
+        // Keep the usable provisional StaticNumber (kernel has no replacement),
+        // or keep any already-concrete sourced target.
+        None
+    }
+}
 
 pub fn normalize_contract_for_system_roll(contract: &CheckContract) -> CheckContract {
     if !system_rolls_visible_policy() {
