@@ -12,6 +12,7 @@ fn sample_profile() -> NpcProfile {
         actor_id: "npc_lars".into(),
         name: "拉斯".into(),
         role: Some("加油站老板".into()),
+        persona_description: Some("加油站的老板，白天守在棚下。".into()),
         archetype: Some("taciturn_veteran".into()),
         personality_traits: vec!["寡言".into(), "警惕".into()],
         values: vec!["忠诚".into()],

@@ -129,6 +129,13 @@ pub struct NpcProfile {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    /// Verbatim, source-grounded persona prose (the module entity's free `body`
+    /// description), NOT a synthesized structured field. Carries no GM-only secret
+    /// text: when materialized from a spoiler-flagged entity, secret_terms are
+    /// redacted before this is set (MAT.M8). Flows through `safe_view`, so it can
+    /// ground an NPC's voice without inventing traits. `None` = no source prose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona_description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archetype: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -161,6 +168,10 @@ pub struct NpcProfileSafeView {
     pub actor_id: String,
     pub name: String,
     pub role: Option<String>,
+    /// Verbatim source persona prose (see [`NpcProfile::persona_description`]).
+    /// Player/prompt-safe: secret_terms were redacted at materialization time, and
+    /// this carries no GM-only secret channel.
+    pub persona_description: Option<String>,
     pub archetype: Option<String>,
     pub personality_traits: Vec<String>,
     pub values: Vec<String>,
@@ -182,6 +193,7 @@ impl NpcProfile {
             actor_id: self.actor_id.clone(),
             name: self.name.clone(),
             role: self.role.clone(),
+            persona_description: self.persona_description.clone(),
             archetype: self.archetype.clone(),
             personality_traits: self.personality_traits.clone(),
             values: self.values.clone(),
@@ -269,6 +281,42 @@ mod tests {
         let block = style.to_prompt_block();
         assert!(block.contains("wry"));
         assert!(!block.contains("Formality"), "blank field must be omitted");
+    }
+
+    #[test]
+    fn persona_description_flows_into_safe_view() {
+        // MAT.M8: the verbatim source persona prose reaches the player/prompt-safe view
+        // so an active NPC's voice can be grounded in source content.
+        let profile = NpcProfile {
+            actor_id: "npc_russ".into(),
+            name: "拉斯".into(),
+            persona_description: Some("白天通常待在埃索加油站的三人之一。".into()),
+            ..Default::default()
+        };
+        let safe = profile.safe_view();
+        assert_eq!(
+            safe.persona_description.as_deref(),
+            Some("白天通常待在埃索加油站的三人之一。")
+        );
+    }
+
+    #[test]
+    fn absent_persona_description_round_trips_and_is_omitted() {
+        // OFF/baseline shape: a name-only profile carries no persona prose and serializes
+        // without the field (byte-stable with pre-M8 thin profiles).
+        let profile = NpcProfile {
+            actor_id: "npc_min".into(),
+            name: "Min".into(),
+            ..Default::default()
+        };
+        assert!(profile.persona_description.is_none());
+        let json = serde_json::to_string(&profile).unwrap();
+        assert!(
+            !json.contains("persona_description"),
+            "absent field must be omitted: {json}"
+        );
+        let back: NpcProfile = serde_json::from_str(&json).unwrap();
+        assert_eq!(profile, back);
     }
 
     #[test]

@@ -107,6 +107,11 @@ pub struct NpcBehaviorPlan {
 
     pub preferred_actions: Vec<String>,
     pub forbidden_actions: Vec<String>,
+    /// Verbatim, source-grounded persona prose (MAT.M8). Lifted from the persona
+    /// safe-view's `persona_description`; carries no GM-only secret text (secret_terms
+    /// were redacted at materialization). `None` when the profile has no source body —
+    /// then the guidance block omits the persona line (byte-stable pre-M8 baseline).
+    pub persona_description: Option<String>,
     /// Persona speech-style prompt block (carries no secret content).
     pub speech_style_prompt: String,
     /// One-line narration guidance summarizing posture.
@@ -193,6 +198,13 @@ impl NpcBehaviorPlan {
             facts_will_withhold,
             preferred_actions,
             forbidden_actions,
+            persona_description: view
+                .persona
+                .persona_description
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
             source_event_ids: ctx.source_event_ids.clone(),
         }
     }
@@ -240,6 +252,16 @@ impl NpcBehaviorPlan {
         let mut lines: Vec<String> = Vec::new();
         lines.push(format!("[npc_behavior_guidance npc={}]", self.npc_id));
         lines.push(self.dialogue_guidance.clone());
+        // MAT.M8: source-grounded persona prose so the NPC has real, voiceable substance
+        // (was empty pre-M8 → the no-invention guard kept the NPC silent). Verbatim source
+        // body, secret_terms already redacted; `None` → omitted (byte-stable baseline).
+        if let Some(desc) = self
+            .persona_description
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
+            lines.push(format!("Persona (source): {desc}"));
+        }
         lines.push(format!(
             "Stance toward focus: {stance} (interaction desire {}); emotional state {emotion}.",
             self.interaction_desire

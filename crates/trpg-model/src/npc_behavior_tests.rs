@@ -91,6 +91,69 @@ fn source_event_ids_pass_through_as_provenance() {
     let plan = NpcBehaviorPlan::derive(&view(rel(0, 0, 0), &entries), &ctx);
     assert_eq!(plan.source_event_ids, vec!["evt_1", "evt_2"]);
 }
+// ===== MAT.M8: source-grounded persona prose reaches the guidance block =====
+
+fn profile_with_body(desc: Option<&str>) -> NpcProfile {
+    NpcProfile {
+        actor_id: "npc_lars".into(),
+        name: "Lars".into(),
+        persona_description: desc.map(str::to_string),
+        ..Default::default()
+    }
+}
+
+fn view_with(profile: &NpcProfile, rel: NpcRelationship) -> NpcMindView {
+    NpcMindView::build("s", "npc_lars", profile, &[rel], &[]).unwrap()
+}
+
+#[test]
+fn persona_description_surfaces_in_guidance_block() {
+    // TDD #3: a body-carrying profile yields NON-empty persona guidance (the thing that
+    // was empty before M8 — the no-invention guard kept such NPCs silent).
+    let p = profile_with_body(Some("白天通常待在埃索加油站的三人之一。"));
+    let plan = NpcBehaviorPlan::derive(&view_with(&p, rel(0, 0, 0)), &NpcBehaviorContext::default());
+    assert_eq!(
+        plan.persona_description.as_deref(),
+        Some("白天通常待在埃索加油站的三人之一。")
+    );
+    let block = plan.to_guidance_block();
+    assert!(
+        block.contains("白天通常待在埃索加油站的三人之一。"),
+        "guidance block must carry the source persona prose: {block}"
+    );
+}
+
+#[test]
+fn absent_persona_description_omits_line_baseline() {
+    // A profile with no source body produces no persona line — byte-stable pre-M8 baseline.
+    let p = profile_with_body(None);
+    let plan = NpcBehaviorPlan::derive(&view_with(&p, rel(0, 0, 0)), &NpcBehaviorContext::default());
+    assert!(plan.persona_description.is_none());
+    assert!(
+        !plan.to_guidance_block().contains("Persona (source)"),
+        "no persona line when there is no source body"
+    );
+}
+
+#[test]
+fn persona_description_does_not_enter_knowledge_basis() {
+    // M4 invariant: persona prose is descriptive, not a fact channel. The World
+    // reaction candidate's knowledge_basis stays sourced ONLY from facts_can_reveal.
+    let p = profile_with_body(Some("一些人设散文。"));
+    let entries = vec![NpcKnowledgeEntry {
+        fact_id: "k1".into(),
+        state: KnowledgeState::KnowsTrue,
+    }];
+    let view = NpcMindView::build("s", "npc_lars", &p, &[rel(0, 0, 0)], &entries).unwrap();
+    let plan = NpcBehaviorPlan::derive(&view, &NpcBehaviorContext::default());
+    let candidate = plan.to_reaction_candidate();
+    assert_eq!(candidate.knowledge_basis, plan.facts_can_reveal);
+    assert!(!candidate
+        .knowledge_basis
+        .iter()
+        .any(|b| b.contains("人设散文")));
+}
+
 // P4.3 `to_reaction_candidate` projection tests (incl. the §24-#4 withheld-fact
 // leak guard) live in the sibling integration test `tests/reaction_candidate.rs`
 // to keep this file lean (it predates the ≤400-line budget).

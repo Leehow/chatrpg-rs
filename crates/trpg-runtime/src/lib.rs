@@ -415,26 +415,38 @@ impl RuntimeEngine {
             return;
         };
         for npc_id in active_npc_ids {
-            // Only materialize when no durable profile exists yet (idempotent, additive).
-            match self.db.load_npc_profile(session_id, npc_id).await {
-                Ok(Some(_)) => continue,
-                Ok(None) => {}
+            // M2/M8 idempotency: a fresh NPC gets a new profile; a PRE-M8 thin profile
+            // (no persona_description) is UPGRADED in place to carry the source body prose
+            // so existing sessions can finally speak. A profile that already carries persona
+            // prose is left untouched (no double-write). fail-soft on any DB miss.
+            let existing = match self.db.load_npc_profile(session_id, npc_id).await {
+                Ok(opt) => opt,
                 Err(err) => {
                     tracing::warn!(error = %err, npc_id = %npc_id, "M2: profile load failed; skipping");
                     continue;
                 }
+            };
+            if existing
+                .as_ref()
+                .is_some_and(|p| p.persona_description.is_some())
+            {
+                continue; // already thickened — idempotent no-op
             }
             let Some(entry) =
                 npc_profile_materialize::find_module_npc(&module.module_graph.npcs, npc_id)
             else {
                 continue;
             };
-            let Some(profile) =
-                npc_profile_materialize::thin_profile_from_module_npc(npc_id, entry)
+            let Some(fresh) = npc_profile_materialize::thin_profile_from_module_npc(npc_id, entry)
             else {
                 continue;
             };
-            if let Err(err) = self.db.upsert_npc_profile(session_id, &profile).await {
+            // Existing thin profile with no source body to add → nothing changed; skip the
+            // redundant write (keep DB-write count minimal, byte-stable when no upgrade).
+            if existing.is_some() && fresh.persona_description.is_none() {
+                continue;
+            }
+            if let Err(err) = self.db.upsert_npc_profile(session_id, &fresh).await {
                 tracing::warn!(error = %err, npc_id = %npc_id, "M2: thin profile upsert failed (fail-soft)");
             }
         }
