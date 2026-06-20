@@ -121,6 +121,8 @@ mod spoiler_guard;
 mod npc_activation;
 use npc_activation::apply_npc_activation;
 
+mod npc_profile_materialize;
+
 mod context_blocks;
 
 mod spotlight_roster;
@@ -387,6 +389,48 @@ impl RuntimeEngine {
             .await
     }
 
+    /// MAT.M2: lazily upsert a thin source-backed `npc_profile` for each active NPC
+    /// that lacks a durable profile, so `build_npc_behavior_guidance` treats it as a
+    /// live responder. Source-present fields only (no fabrication). fail-soft: any
+    /// load/build/upsert miss is skipped (warn), never aborts the turn. Caller gates
+    /// on `Enforce` (this method assumes it is only called when active).
+    async fn materialize_active_npc_profiles(
+        &self,
+        session_id: &str,
+        active_npc_ids: &[String],
+        modules: &[trpg_model::ModuleBundle],
+        module_id: Option<&str>,
+    ) {
+        let Some(module_id) = module_id else { return };
+        let Some(module) = modules.iter().find(|m| m.module_id == module_id) else {
+            return;
+        };
+        for npc_id in active_npc_ids {
+            // Only materialize when no durable profile exists yet (idempotent, additive).
+            match self.db.load_npc_profile(session_id, npc_id).await {
+                Ok(Some(_)) => continue,
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::warn!(error = %err, npc_id = %npc_id, "M2: profile load failed; skipping");
+                    continue;
+                }
+            }
+            let Some(entry) =
+                npc_profile_materialize::find_module_npc(&module.module_graph.npcs, npc_id)
+            else {
+                continue;
+            };
+            let Some(profile) =
+                npc_profile_materialize::thin_profile_from_module_npc(npc_id, entry)
+            else {
+                continue;
+            };
+            if let Err(err) = self.db.upsert_npc_profile(session_id, &profile).await {
+                tracing::warn!(error = %err, npc_id = %npc_id, "M2: thin profile upsert failed (fail-soft)");
+            }
+        }
+    }
+
     pub async fn prepare_turn_context(
         &self,
         request: &ContextRequest,
@@ -453,16 +497,31 @@ impl RuntimeEngine {
         // (caller-supplied active_npc_ids preserved unchanged, s17 correction); Enforce =
         // derive-when-empty from the current scene (stable-dedup, fail-closed). Must run
         // BEFORE `let state = &state_owned;` so world_state_block sees the derived set.
+        let mat_mode = MaterializationAffordanceMode::from_env();
+        let mat_module_id = request
+            .module_id
+            .as_deref()
+            .or(state_owned.module_id.as_deref())
+            .map(str::to_string);
         apply_npc_activation(
             &mut state_owned.active_npc_ids,
             &project.modules,
-            request
-                .module_id
-                .as_deref()
-                .or(state_owned.module_id.as_deref()),
+            mat_module_id.as_deref(),
             state_owned.scene_id.as_deref(),
-            MaterializationAffordanceMode::from_env(),
+            mat_mode,
         );
+        // MAT.M2 axis-1: ensure each newly-active NPC has a durable, thin, source-backed
+        // npc_profile so build_npc_behavior_guidance (turn_loop) does not skip it. Enforce
+        // only; OFF/Shadow == baseline no-op (no DB writes).
+        if mat_mode.is_enforce() {
+            self.materialize_active_npc_profiles(
+                &request.session_id,
+                &state_owned.active_npc_ids,
+                &project.modules,
+                mat_module_id.as_deref(),
+            )
+            .await;
+        }
         let state = &state_owned;
         let mut bundle_ids = Vec::new();
         for ruleset in &project.rulesets {
