@@ -118,6 +118,9 @@ pub use memory_proposal::{
 
 mod spoiler_guard;
 
+mod npc_activation;
+use npc_activation::apply_npc_activation;
+
 mod context_blocks;
 
 mod spotlight_roster;
@@ -429,7 +432,6 @@ impl RuntimeEngine {
                 loaded,
             );
         }
-        let state = &state_owned;
         let _ = InteractionLifecycleKernel::new(self.db.clone())
             .reconcile_session(&request.session_id)
             .await;
@@ -446,6 +448,22 @@ impl RuntimeEngine {
                     anyhow!("no parsed project bundle found; run parse-all first")
                 })?,
             };
+        // MAT.M1 axis-1: per-turn NPC activation derivation from scene.referenced_npc_ids
+        // (DP-2 hybrid). Gated by MaterializationAffordanceMode: Off/Shadow = strict no-op
+        // (caller-supplied active_npc_ids preserved unchanged, s17 correction); Enforce =
+        // derive-when-empty from the current scene (stable-dedup, fail-closed). Must run
+        // BEFORE `let state = &state_owned;` so world_state_block sees the derived set.
+        apply_npc_activation(
+            &mut state_owned.active_npc_ids,
+            &project.modules,
+            request
+                .module_id
+                .as_deref()
+                .or(state_owned.module_id.as_deref()),
+            state_owned.scene_id.as_deref(),
+            MaterializationAffordanceMode::from_env(),
+        );
+        let state = &state_owned;
         let mut bundle_ids = Vec::new();
         for ruleset in &project.rulesets {
             if ruleset.ruleset_id == request.ruleset_id {
