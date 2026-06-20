@@ -27,7 +27,9 @@ use trpg_time::WorldTimeService;
 use uuid::Uuid;
 
 mod chargen;
-pub use chargen::{generate_starter_character, materialize_actor_params, CreatedCharacter};
+pub use chargen::{
+    apply_chargen_formulas, generate_starter_character, materialize_actor_params, CreatedCharacter,
+};
 
 pub mod entry_gate;
 pub use entry_gate::{actor_params_playable, evaluate_entry_gate, EntryGate, EntryGateBlock};

@@ -293,6 +293,14 @@ pub struct CompileCtx<'a> {
     /// The game's enumerated skill names (from the reader's option catalogs), so
     /// the compiler can check which skills have a characteristic-derived base.
     pub skill_names: Vec<String>,
+    /// The kernel's `dice_core.pool_scaling_parameter`, if it declares one. When
+    /// set, a deterministic post-pass compiles a categorical CHOICE into this
+    /// numeric param (e.g. `competency` -> `competency_rank`) so the param-driven
+    /// dice pool can size from the sheet. None / no matching choice -> no-op.
+    pub pool_scaling_parameter: Option<String>,
+    /// The reader's character option catalogs (the ordinal data source for the
+    /// pool-scaling rank compile). Empty value -> the post-pass is a no-op.
+    pub option_catalogs: Value,
 }
 
 const COMPILE_SYS: &str = r#"You COMPILE a tabletop RPG's character-creation math into machine-evaluable records for a deterministic evaluator. You are given the game's prose chargen formulas (already located) and tools to read pages. Produce ONE array `derived_values` of §4 records — nothing else.
@@ -428,6 +436,26 @@ pub async fn compile_chargen_formulas(
         gaps.push("chargen compiler produced nothing; kept prose derived_values".into());
     } else {
         template.derived_values = compiled;
+    }
+    // POOL-SCALING (Q-2 data gap): when the kernel NAMES a `pool_scaling_parameter`
+    // (e.g. `competency_rank`) that the LLM compile did not produce, deterministically
+    // compile it from a categorical CHOICE field's enumerated-option ORDINAL so the
+    // param-driven dice pool can size from the sheet. Generic + data-driven; no-op when
+    // the kernel declares no param or no matching choice/catalog exists.
+    if let Some(param) = ctx.pool_scaling_parameter.as_deref() {
+        if let Some(rec) =
+            super::pool_scaling::pool_scaling_choice_record(param, template, &ctx.option_catalogs)
+        {
+            let (mut dvs, mut g) = finalize_compiled(vec![rec], template);
+            gaps.append(&mut g);
+            if let Some(dv) = dvs.pop() {
+                gaps.push(format!(
+                    "pool-scaling param `{param}` compiled from a categorical choice ordinal (status={:?})",
+                    dv.status
+                ));
+                template.derived_values.push(dv);
+            }
+        }
     }
     let added = ensure_categorical_input_fields(template);
     if !added.is_empty() {
