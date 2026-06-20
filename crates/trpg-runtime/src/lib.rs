@@ -907,6 +907,18 @@ impl RuntimeEngine {
                 mat_module_id.as_deref(),
                 state.scene_id.as_deref(),
             );
+            // A1 (G-1): anthology/spine 类模组的 `graph.scenes` 为空、当前是 synthetic
+            // `spine:` 入口 ⇒ 图谱无场景节点 ⇒ 上面收集恒空 ⇒ Triangle 等开场退化成泛化叙事。
+            // 回退:从 prep packet 的 `current_session_packet` 抽**非秘密**进场 establishing 素材,
+            // 让 anthology 开场也有具名模组质感。fail-soft:任何错误/无 packet ⇒ 维持空。
+            if compiled.scene_establishing.is_empty() {
+                if let Some(mid) = mat_module_id.as_deref() {
+                    if let Ok(Some(csp)) = self.db.load_module_prep_packet_session(mid).await {
+                        compiled.scene_establishing =
+                            scene_establishing::prep_packet_establishing(&csp);
+                    }
+                }
+            }
         }
         for block in compiled
             .prefix_blocks

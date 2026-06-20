@@ -110,11 +110,38 @@ impl NeedResolver for SceneNeedResolver {
         .unwrap_or_default();
         let (guarded_node, guarded_npcs) = guard_scene(node, &graph.npcs, &revealed);
         let blocks = resolve_scene_blocks(module_id, &guarded_node, &guarded_npcs, &graph.scenes);
+        // A1 (G-1): emit a real SourceRef for the bound scene node so the need-binding trace
+        // shows genuine grounding (page/anchor) instead of an empty `Partial`/0-source_refs
+        // signal. Pure observability (source_refs只进 NeedResolutionTrace),不改 blocks/叙事。
+        let source_refs = scene_source_refs(module_id, node);
         Ok(NeedOutcome {
             blocks,
-            source_refs: vec![],
+            source_refs,
         })
     }
+}
+
+/// 从已选中的场景节点构造来源引用(grounding):module 作 source_id、page_start 作页码、
+/// node_id 作 anchor、title 作 section_path。空字段省略,纯函数。
+pub(crate) fn scene_source_refs(
+    module_id: &str,
+    node: &ScenarioNode,
+) -> Vec<trpg_model::SourceRef> {
+    let section_path = if node.title.trim().is_empty() {
+        vec![]
+    } else {
+        vec![node.title.clone()]
+    };
+    vec![trpg_model::SourceRef {
+        source_id: module_id.to_string(),
+        page: node.page_start,
+        anchor_id: Some(node.node_id.clone()),
+        section_path,
+        char_start: None,
+        char_end: None,
+        text_hash: None,
+        note: Some("scene_need".to_string()),
+    }]
 }
 
 #[cfg(test)]
@@ -216,6 +243,20 @@ mod tests {
         // 无 scene_id → 回退首个 DeepExtracted
         let no_sid = pick_scene_node(&g, None);
         assert_eq!(no_sid.map(|n| n.node_id.as_str()), Some("entry"));
+    }
+
+    #[test]
+    fn scene_source_refs_grounds_node_page_and_anchor() {
+        let mut n = ScenarioNode::default();
+        n.node_id = "scene_017_welcome_to_abattoir".into();
+        n.title = "欢迎来到阿巴托尔".into();
+        n.page_start = Some(42);
+        let refs = scene_source_refs("call_of_cthulhu_7e.document", &n);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].source_id, "call_of_cthulhu_7e.document");
+        assert_eq!(refs[0].page, Some(42));
+        assert_eq!(refs[0].anchor_id.as_deref(), Some("scene_017_welcome_to_abattoir"));
+        assert_eq!(refs[0].section_path, vec!["欢迎来到阿巴托尔".to_string()]);
     }
 
     #[test]
