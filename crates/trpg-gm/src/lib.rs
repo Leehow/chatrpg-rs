@@ -15,14 +15,14 @@ pub mod ports;
 pub mod presentation_gate;
 pub(crate) mod presentation_markup;
 pub mod prompts;
-pub(crate) mod turn_document;
-pub(crate) mod turn_markup_parser;
 pub mod scene_policy;
 pub mod stimulus;
 pub mod stream;
 pub mod tools;
+pub(crate) mod turn_document;
 pub mod turn_event;
 pub mod turn_loop;
+pub(crate) mod turn_markup_parser;
 pub mod turn_plan;
 pub(crate) mod turn_trace;
 
