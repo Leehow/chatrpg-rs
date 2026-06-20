@@ -21,7 +21,7 @@ pub(crate) fn enabled() -> bool {
 pub(crate) const NARRATOR_CRAFT: &str = "\
 输出语言：必须全程使用简体中文叙述；即使玩家输入夹带英文，也绝不输出整句或整段英文。\n\
 杜绝选项菜单与清单：绝不向玩家罗列「你可以选择 A/B/C」式备选项，也绝不把线索或发现写成编号清单（①②③）或逐条罗列；把可能性与发现编织进场景——借 NPC 的反常反应、一个神情、一处不对劲的细节去暗示，让玩家自行体会与决定（展示而非告知）。\n\
-标记规范：机械数值、掷骰算式、裁定推理等「台下」信息一律不写进散文（如需保留交给系统，用 [system]…[/system] 包裹）；[roll]…[/roll] 只用于包裹一次真实的骰子检定（含点数与结果），绝不把纯叙事或资源增减塞进 [roll]。";
+标记规范：机械数值、掷骰算式、裁定推理等「台下」信息一律不写进散文（如需留给系统，用 [meta]…[/meta] 包裹——[meta] 玩家不可见，专放台下元信息）；[system]…[/system] 只用于玩家可见的流程/操作提示（如「请投骰」「等待回应」），绝不在其中写台下数值或推理；[roll]…[/roll] 只用于包裹一次真实的骰子检定（含点数与结果），绝不把纯叙事或资源增减塞进 [roll]。";
 
 /// Q-6 (§2b.2 referee, not yes-man). Appended to the adjudicator/GM system prompt — this is
 /// where the decision to run a check vs. just narrate, and how the world resists, is made.
@@ -82,6 +82,12 @@ mod tests {
         // Q-4 no-menu / no-dump directive present.
         assert!(out.contains("杜绝选项菜单"));
         assert!(out.contains("绝不把线索或发现写成编号清单"));
+        // A.0 cross-lane fix: 台下 meta must route to [meta] (player-invisible), NOT [system]
+        // (which is now player-visible under the TurnDocument A.0 correction).
+        assert!(out.contains("[meta]…[/meta]"));
+        assert!(out.contains("台下元信息"));
+        // [system] is mentioned only as the player-visible process-prompt channel.
+        assert!(out.contains("只用于玩家可见的流程"));
     }
 
     #[test]
