@@ -1125,6 +1125,22 @@ impl GmLoop {
                 ctx.visible_text = adjudicator_prose;
             }
         }
+        // Q-5/Q-7 (§2a.2/§2b.3): strip player-visible markup from the persisted narration
+        // when TRPG_GM_CRAFT ON; OFF ⇒ untouched (byte-equal baseline). [system]→audit,
+        // [hide]→canon, empty [roll] unwrapped (inner prose kept).
+        if crate::gm_craft::enabled() {
+            let stripped = crate::presentation_markup::strip_player_markup(&ctx.visible_text);
+            if stripped.changed(&ctx.visible_text) {
+                tracing::debug!(
+                    turn_id = %input.request.turn_id,
+                    system_blocks = stripped.system_blocks.len(),
+                    hide_blocks = stripped.hide_blocks.len(),
+                    empty_rolls = stripped.empty_rolls_unwrapped,
+                    "gm_craft markup stripped from player narration"
+                );
+                ctx.visible_text = stripped.player_text;
+            }
+        }
     }
 
     /// 无工具 Narrator：用最小 narrator system prompt + NarrationPacket 流式产玩家散文。

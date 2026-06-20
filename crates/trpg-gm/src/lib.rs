@@ -13,6 +13,7 @@ pub mod plugin;
 pub mod plugins;
 pub mod ports;
 pub mod presentation_gate;
+pub(crate) mod presentation_markup;
 pub mod prompts;
 pub mod scene_policy;
 pub mod stimulus;
