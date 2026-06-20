@@ -136,6 +136,7 @@ pub use met_engaged::{
 };
 
 mod npc_profile_materialize;
+mod npc_testimony;
 
 mod context_blocks;
 
@@ -841,6 +842,34 @@ impl RuntimeEngine {
                         ));
                     }
                 }
+            }
+        }
+
+        // MAT.M9b / DP-A: authored NPC & scene knowledge SURFACE. The architect (Q3 DP-A)
+        // widened the 4b admissible synthesis source from the empty structured
+        // facts_can_reveal field to the module's GENUINELY SOURCE-PRESENT prose — the current
+        // scene's read_aloud/gm_notes + each active NPC's body (spoiler-redacted). Under
+        // Enforce, surface it as a GmOnly, source-backed steering block so present NPCs have
+        // concrete authored material to TESTIFY from when the player engages + earns it via a
+        // successful check (closing the M8 residual: narrator stopped at "willing to say more"
+        // without emitting substantive testimony — the case facts live in scene/body prose).
+        // Source-anchored (verbatim module prose, no invention); player-invisible (GmOnly);
+        // disclosure still flows the existing reveal + presentation gate. Off/Shadow == baseline
+        // (no block) → byte-equal. Pure read of the already-loaded project.modules snapshot.
+        if mat_mode.is_enforce() {
+            if let Some(text) = npc_testimony::module_testimony_surface_text(
+                &project.modules,
+                mat_module_id.as_deref(),
+                state.scene_id.as_deref(),
+                &state.active_npc_ids,
+            ) {
+                blocks.push(dynamic_text_block(
+                    "runtime.mat.npc_testimony",
+                    BlockKind::NpcStatic,
+                    "Authored NPC & Scene Knowledge",
+                    &text,
+                    vec!["materialization", "npc_testimony", "gm_only"],
+                ));
             }
         }
 
