@@ -88,6 +88,7 @@ fn scene_facts_from_module_config() {
         module_config: Some(&cfg),
         participants: &[],
         prior_spotlights: &[],
+        leverage_npc_ids: None,
     };
     let brief = build_brief(input, None, GuidanceLevel::AskGoal);
     assert!(
@@ -113,6 +114,7 @@ fn no_module_config_returns_generic_brief() {
         module_config: None,
         participants: &[],
         prior_spotlights: &[],
+        leverage_npc_ids: None,
     };
     let brief = build_brief(input, None, GuidanceLevel::AskGoal);
     assert!(
@@ -159,6 +161,7 @@ fn npc_advice_from_module_config() {
         module_config: Some(&cfg),
         participants: &[],
         prior_spotlights: &[],
+        leverage_npc_ids: None,
     };
     let advice = biased_npc_advice(input);
     assert_eq!(advice.len(), 1);
@@ -180,6 +183,7 @@ fn homecoming_data_matches_legacy_hardcode() {
         module_config: Some(&cfg),
         participants: &[],
         prior_spotlights: &[],
+        leverage_npc_ids: None,
     };
     let brief = build_brief(input, None, GuidanceLevel::AskGoal);
 
@@ -292,4 +296,89 @@ fn override_json_file_matches_legacy_baseline() {
         legacy_homecoming_director_config(),
         "on-disk override must match the legacy is_homecoming baseline"
     );
+}
+
+// ===== MAT.M4 (§7-#6): present vs met/engaged — Director leverage gate =====
+
+fn state_with_active(active: &[&str]) -> RuntimeState {
+    RuntimeState {
+        ruleset_id: "generic".into(),
+        active_npc_ids: active.iter().map(|s| s.to_string()).collect(),
+        ..Default::default()
+    }
+}
+
+fn input_with<'a>(
+    req: &'a ContextRequest,
+    state: &'a RuntimeState,
+    compiled: &'a CompiledContext,
+    leverage: Option<&'a [String]>,
+) -> DirectorInput<'a> {
+    DirectorInput {
+        request: req,
+        state,
+        compiled,
+        user_input: "look around",
+        conflict: None,
+        module_config: None,
+        participants: &[],
+        prior_spotlights: &[],
+        leverage_npc_ids: leverage,
+    }
+}
+
+// TDD #2: an active-but-UN-MET NPC is NOT used as proactive Director leverage; a MET one is.
+#[test]
+fn m4_director_leverage_excludes_unmet_npc_when_gated() {
+    let req = minimal_request();
+    let state = state_with_active(&["npc_met", "npc_unmet"]);
+    let compiled = compiled();
+    // Enforce path: runtime supplies only the met subset as leverage.
+    let met: Vec<String> = vec!["npc_met".to_string()];
+    let input = input_with(&req, &state, &compiled, Some(&met));
+    let facts = base_visible_facts(input, None);
+    let active_fact = facts
+        .iter()
+        .find(|f| f.text.contains("当前活跃 NPC"))
+        .expect("active-NPC visible fact present");
+    assert!(
+        active_fact.text.contains("npc_met"),
+        "MET NPC may be proactive leverage"
+    );
+    assert!(
+        !active_fact.text.contains("npc_unmet"),
+        "un-met NPC must NOT be pushed as proactive Director leverage (rule 6)"
+    );
+}
+
+// TDD #3: None (Off/Shadow baseline) uses the FULL active set exactly as before.
+#[test]
+fn m4_director_leverage_none_is_baseline_full_active_set() {
+    let req = minimal_request();
+    let state = state_with_active(&["npc_met", "npc_unmet"]);
+    let compiled = compiled();
+    let input = input_with(&req, &state, &compiled, None);
+    let facts = base_visible_facts(input, None);
+    let active_fact = facts
+        .iter()
+        .find(|f| f.text.contains("当前活跃 NPC"))
+        .expect("active-NPC visible fact present");
+    // Byte-identical baseline: both ids appear, order preserved (= state.active_npc_ids).
+    assert!(active_fact.text.contains("npc_met, npc_unmet"));
+}
+
+// All-met gated set behaves identically to baseline (no exclusion when everyone is met).
+#[test]
+fn m4_all_met_leverage_matches_full_active_set() {
+    let req = minimal_request();
+    let state = state_with_active(&["npc_a", "npc_b"]);
+    let compiled = compiled();
+    let full: Vec<String> = vec!["npc_a".to_string(), "npc_b".to_string()];
+    let input = input_with(&req, &state, &compiled, Some(&full));
+    let facts = base_visible_facts(input, None);
+    let active_fact = facts
+        .iter()
+        .find(|f| f.text.contains("当前活跃 NPC"))
+        .expect("active-NPC visible fact present");
+    assert!(active_fact.text.contains("npc_a, npc_b"));
 }

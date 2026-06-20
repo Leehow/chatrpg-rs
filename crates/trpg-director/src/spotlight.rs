@@ -145,6 +145,7 @@ mod tests {
             module_config: None,
             participants: parts,
             prior_spotlights: prior,
+            leverage_npc_ids: None,
         }
     }
 

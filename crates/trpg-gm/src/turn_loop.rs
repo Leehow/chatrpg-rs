@@ -1743,7 +1743,25 @@ impl GmLoop {
         // The GM-context guidance bytes render from the retained (lossless) plans via the
         // SAME `to_guidance_block` method as before — provably byte-identical (locked by
         // `render_is_byte_identical_to_legacy_join`).
-        trpg_runtime::world::render_world_reaction_block(&plans)
+        let base_block = trpg_runtime::world::render_world_reaction_block(&plans);
+        // MAT.M4 (§7-#6): present vs met/engaged gate. Under Enforce, an active NPC the
+        // player has NOT yet met/engaged (its id not in the player-exposed set) may react
+        // but must NOT volunteer un-met content / initiate un-provoked reveals (rule 6).
+        // We append a prompt-safe reactive-only constraint naming the un-met ids. The
+        // secret gate is untouched: knowledge_basis already comes only from
+        // facts_can_reveal. Off/Shadow ⇒ inert gate ⇒ byte-identical baseline (no append).
+        let mode = trpg_model::MaterializationAffordanceMode::from_env();
+        if !mode.is_enforce() {
+            return base_block; // 字节级基线：Off/Shadow 不收紧主动开口。
+        }
+        let exposed = self
+            .engine
+            .db
+            .list_surfaced_entities(session_id)
+            .await
+            .unwrap_or_default();
+        let gate = trpg_runtime::derive_met_engaged_gate(active, &exposed, mode);
+        trpg_runtime::restrict_unmet_npc_guidance(base_block, &gate)
     }
 
     /// 流后校验（spec §4 第 5 步）：NarrationVerifier 对账已流出全文 → 勘误记忆

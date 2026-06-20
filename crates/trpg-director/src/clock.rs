@@ -102,6 +102,7 @@ mod tests {
             module_config: None,
             participants: &[],
             prior_spotlights: &[],
+            leverage_npc_ids: None,
         }
     }
 

@@ -51,6 +51,14 @@ pub struct DirectorInput<'a> {
     /// runtime loads before the turn. Used to carry and increment
     /// `spotlight_count` / `last_spotlight_turn` across turns. Empty on turn one.
     pub prior_spotlights: &'a [SpotlightState],
+    /// MAT.M4 (§7-#6): the subset of active NPCs the player has already met/engaged,
+    /// hence eligible to be used as PROACTIVE Director leverage (written into the
+    /// active-NPC visible-fact suggestion). `None` ⇒ no presence gate (materialization
+    /// Off/Shadow): the director uses `state.active_npc_ids` exactly as before
+    /// (byte-identical baseline). `Some(ids)` ⇒ only these (met) NPCs are leveraged;
+    /// present-but-un-met NPCs are NOT pushed as proactive leverage (they still react
+    /// via the World path, which this field does not touch).
+    pub leverage_npc_ids: Option<&'a [String]>,
 }
 
 impl<'a> DirectorInput<'a> {
@@ -643,12 +651,20 @@ fn base_visible_facts(input: DirectorInput<'_>, frame: Option<&StateFrame>) -> V
             confidence: RulingConfidence::High,
         });
     }
-    if !input.state.active_npc_ids.is_empty() {
+    // MAT.M4 (§7-#6): present vs met/engaged. `leverage_npc_ids = Some(met)` (materialization
+    // Enforce) restricts the proactive Director leverage to NPCs the player has already
+    // met/engaged — a present-but-un-met NPC is NOT pushed here as leverage (rule 6: no
+    // climax-chasing; it still reacts via the World path). `None` ⇒ baseline: use the full
+    // active set exactly as before (byte-identical).
+    let leverage: &[String] = input
+        .leverage_npc_ids
+        .unwrap_or(input.state.active_npc_ids.as_slice());
+    if !leverage.is_empty() {
         facts.push(VisibleFact {
             fact_id: id("fact"),
             text: format!(
                 "当前活跃 NPC：{}。NPC 的提示必须带有立场和偏见，不能当作官方攻略。",
-                input.state.active_npc_ids.join(", ")
+                leverage.join(", ")
             ),
             source_refs: vec![],
             confidence: RulingConfidence::Medium,

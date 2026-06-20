@@ -1918,3 +1918,77 @@ fn clue_affordance_same_turn_surface_and_learn_is_idempotent() {
     }
     assert_eq!(noms.len(), 1, "同 fact 跨多次命中只提名一次（幂等去重，不双计）");
 }
+
+// ==================== MAT.M4 present vs met/engaged 剧透闸（§7-#6）====================
+// 纯派生（present→met/unmet、Director 杠杆口径、guidance 反应式约束）在
+// trpg_runtime::met_engaged 全量单测；Director 杠杆门在 trpg_director dehardcode_tests。
+// 这里测 gm 侧两件「通道 + 不变量」事：(#1) un-met NPC 的 withheld secret 绝不进
+// knowledge_basis（= facts_can_reveal）且绝不自动揭示——M4 约束只追加 prompt 文本、绝不
+// 触碰 secret 门；(#3) Off/Shadow 下 guidance 不被追加约束（字节级基线）。
+
+/// MAT.M4 #1：active-but-UN-MET NPC 的 withheld secret 永不进 knowledge_basis、永不自动揭示。
+/// secret 门（facts_can_reveal vs facts_will_withhold）由既有 viewer_behavior_context 派生；
+/// M4 的反应式约束（restrict_unmet_npc_guidance）只在 prompt 块尾追加文本，**绝不**把任何
+/// withheld id 搬进 facts_can_reveal / knowledge_basis。DB-free。
+#[test]
+fn m4_unmet_npc_withheld_secret_never_enters_knowledge_basis() {
+    use trpg_model::MaterializationAffordanceMode::Enforce;
+    use trpg_model::{KnowledgeState, NpcKnowledgeEntry, NpcProfile, NpcRelationship,
+        NpcRelationshipTarget, NpcMindView};
+    use trpg_runtime::world::render_world_reaction_block;
+    use trpg_runtime::{derive_met_engaged_gate, restrict_unmet_npc_guidance,
+        viewer_behavior_context, derive_npc_behavior_plan};
+
+    // NPC 知道一条真 fact，玩家方未知 → withheld secret（既有 v1 保守门）。
+    let profile = NpcProfile { actor_id: "npc_unmet".into(), name: "Stranger".into(), ..Default::default() };
+    let rel = NpcRelationship::new("s", "npc_unmet", NpcRelationshipTarget::PlayerParty).unwrap();
+    let entries = vec![NpcKnowledgeEntry { fact_id: "secret_culprit".into(), state: KnowledgeState::KnowsTrue }];
+    let view = NpcMindView::build("s", "npc_unmet", &profile, &[rel], &entries).unwrap();
+    let ctx = viewer_behavior_context(&view, &[]); // 玩家方空知集 ⇒ 全 withheld
+    let plan = derive_npc_behavior_plan(&view, &ctx);
+
+    // secret 门不变量：withheld 含 secret，可揭集与 knowledge_basis 都不含它。
+    assert!(plan.facts_will_withhold.iter().any(|f| f == "secret_culprit"));
+    assert!(!plan.facts_can_reveal.iter().any(|f| f == "secret_culprit"));
+    let cand = plan.to_reaction_candidate();
+    assert!(!cand.knowledge_basis.iter().any(|f| f == "secret_culprit"),
+        "knowledge_basis 仅源自 facts_can_reveal，withheld secret 绝不进");
+
+    // M4 反应式约束追加后，仍不得把 secret 搬进可揭集：约束只提 NPC id，不提任何 fact id。
+    let base = render_world_reaction_block(&[plan.clone()]);
+    let active = vec!["npc_unmet".to_string()];
+    let gate = derive_met_engaged_gate(&active, &[], Enforce); // 未暴露 ⇒ un-met
+    let gated = restrict_unmet_npc_guidance(base, &gate).unwrap();
+    assert!(gated.contains("[npc_presence_gate]"), "un-met ⇒ 追加反应式约束");
+    assert!(gated.contains("npc_unmet"), "约束点名 un-met NPC id");
+    // M4 追加的 [npc_presence_gate] 段本身只提 NPC id，绝不含任何 withheld secret fact id。
+    let added = gated
+        .split("[npc_presence_gate]")
+        .nth(1)
+        .expect("presence gate block present");
+    assert!(!added.contains("secret_culprit"),
+        "M4 约束段绝不泄露 / 提升 withheld secret（只提 NPC id，不触碰 secret 门）");
+    // 既有块仍以「Withhold fact ids」正确呈现 withheld id（指示 NPC 隐瞒，非揭示），
+    // 且它从未出现在可揭集 / knowledge_basis（上方已断言）——secret 门保持不变。
+    assert!(gated.contains("Withhold fact ids: secret_culprit"));
+}
+
+/// MAT.M4 #3：Off / Shadow ⇒ guidance 不被追加约束（字节级基线）。
+#[test]
+fn m4_off_shadow_guidance_is_byte_identical_baseline() {
+    use trpg_model::MaterializationAffordanceMode::{Off, Shadow};
+    use trpg_runtime::{derive_met_engaged_gate, restrict_unmet_npc_guidance};
+
+    let active = vec!["npc_unmet".to_string()];
+    let base = Some("[npc_behavior_guidance npc=npc_unmet]\n…\n[/npc_behavior_guidance]".to_string());
+    for mode in [Off, Shadow] {
+        // 即便玩家从未暴露过该 NPC，Off/Shadow 闸惰性 ⇒ 不追加约束。
+        let gate = derive_met_engaged_gate(&active, &[], mode);
+        assert!(!gate.enforced, "{mode:?}: 闸惰性");
+        assert_eq!(
+            restrict_unmet_npc_guidance(base.clone(), &gate),
+            base,
+            "{mode:?}: guidance 字节不变（无主动开口收紧）"
+        );
+    }
+}

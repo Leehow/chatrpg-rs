@@ -124,6 +124,11 @@ use npc_activation::apply_npc_activation;
 pub mod clue_affordance;
 pub use clue_affordance::{clue_reveal_candidates, ClueRevealCandidate, ResolvedCheck};
 
+pub mod met_engaged;
+pub use met_engaged::{
+    derive_met_engaged_gate, director_leverage_npc_ids, restrict_unmet_npc_guidance, MetEngagedGate,
+};
+
 mod npc_profile_materialize;
 
 mod context_blocks;
@@ -1875,6 +1880,24 @@ impl RuntimeEngine {
             .unwrap_or_default();
         let participants =
             spotlight_roster::build_spotlight_participants(&player_actors, acting_actor_id);
+        // MAT.M4 (§7-#6): present vs met/engaged gate for PROACTIVE Director leverage.
+        // Under materialization Enforce, only NPCs the player has already met/engaged (their
+        // id in the player-exposed set) may be pushed as proactive leverage; present-but-un-met
+        // active NPCs are not (they still react via the World path). Off/Shadow ⇒ `None` ⇒ the
+        // director uses the full active set exactly as before (byte-identical baseline).
+        let mat_mode = MaterializationAffordanceMode::from_env();
+        let leverage_ids: Option<Vec<String>> = if mat_mode.is_enforce() {
+            let exposed = self
+                .db
+                .list_surfaced_entities(&request.session_id)
+                .await
+                .unwrap_or_default();
+            let gate =
+                met_engaged::derive_met_engaged_gate(&state.active_npc_ids, &exposed, mat_mode);
+            Some(met_engaged::director_leverage_npc_ids(&gate))
+        } else {
+            None
+        };
         let result = director.prepare(DirectorInput {
             request,
             state,
@@ -1884,6 +1907,7 @@ impl RuntimeEngine {
             module_config: module_cfg.as_ref(),
             participants: &participants,
             prior_spotlights: &prior_spotlights,
+            leverage_npc_ids: leverage_ids.as_deref(),
         });
         if let Some(brief) = &result.brief {
             self.db.insert_actionable_situation_brief(brief).await.ok();
