@@ -22,6 +22,8 @@ pub mod domain_event;
 pub use domain_event::*;
 pub mod spoiler;
 pub use spoiler::*;
+pub mod materialization_mode;
+pub use materialization_mode::*;
 
 pub const PROJECT_SCHEMA_VERSION: &str = "chatrpg.project_bundle.v1";
 pub const RULE_SCHEMA_VERSION: &str = "chatrpg.rule_bundle.v1";
@@ -5850,6 +5852,10 @@ pub enum MaterialTargetKind {
     DamageProfile,
     ArmorProfile,
     ConditionDefinition,
+    /// Discoverable content: clue body text, NPC persona prose, scene read-aloud.
+    /// Source-present content verifies VerifiedExact via the strict gate.
+    /// Persona-judge synthesized content may be admitted as provisional (4b tier).
+    DiscoverableContent,
     Unknown,
 }
 impl Default for MaterialTargetKind { fn default() -> Self { Self::Unknown } }
@@ -5869,6 +5875,7 @@ impl MaterialTargetKind {
             Self::DamageProfile => "damage_profile",
             Self::ArmorProfile => "armor_profile",
             Self::ConditionDefinition => "condition_definition",
+            Self::DiscoverableContent => "discoverable_content",
             Self::Unknown => "unknown",
         }
     }
@@ -5880,6 +5887,7 @@ impl MaterialTargetKind {
             Self::CheckTarget => RuleBindingTargetKind::CheckContract,
             Self::EffectProfile => RuleBindingTargetKind::EffectContract,
             Self::ConditionDefinition => RuleBindingTargetKind::ConditionDefinition,
+            Self::DiscoverableContent => RuleBindingTargetKind::Unknown,
             Self::Unknown => RuleBindingTargetKind::Unknown,
         }
     }
