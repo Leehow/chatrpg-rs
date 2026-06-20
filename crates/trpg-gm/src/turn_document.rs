@@ -113,6 +113,12 @@ pub(crate) struct TurnDocument {
     pub blocks: Vec<TurnBlock>,
     /// Count of empty `[roll]` wrappers unwrapped to Narration (Q-5 repair).
     pub empty_rolls_unwrapped: usize,
+    /// Count of MALFORMED `[roll]` wrappers unwrapped to Narration (R-1 / Q-5 guard
+    /// extension): a `[roll]` that fired but whose target/difficulty/result is unbound
+    /// ("未定" / "未知" / "目标：?" / "DV?"). Like the empty-roll path, the wrapper is
+    /// dropped and the inner prose is kept as Narration. Downstream (战报 / narrator-phase
+    /// debug trace) asserts this is ZERO under the gated path.
+    pub malformed_rolls_unwrapped: usize,
 }
 
 impl TurnDocument {
