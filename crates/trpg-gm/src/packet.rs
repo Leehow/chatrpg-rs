@@ -186,8 +186,7 @@ impl NarrationPacket {
             // A1(§6 大考)：空 style 默认 persona = **第二人称「你」**。OFF 永不进 split
             // 分支(此默认仅 split Narrator 可达)，故 OFF 字节不变；split Narrator 不读
             // gm_skill markdown(其第二人称源)，由此默认补回沉浸式第二人称视角。
-            "以**第二人称「你」**称呼玩家角色，中性、克制、贴合已发生的机械事实地叙事。"
-                .to_string()
+            "以**第二人称「你」**称呼玩家角色，中性、克制、贴合已发生的机械事实地叙事。".to_string()
         } else {
             style_profile.trim().to_string()
         };

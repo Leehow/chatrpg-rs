@@ -1625,6 +1625,59 @@ fn p37_hooks_relocated_to_commit_boundaries() {
     );
 }
 
+/// Q-7-REVISED 结构断言：run_narrator_phase 在 gm_craft ON 时 **classify-only**，绝不再把
+/// 解析后的 player_text 回写 ctx.visible_text（API 一律发原始全标记，strip 是 UI 层后事）。
+#[test]
+fn q7_narrator_phase_emits_raw_no_strip_overwrite() {
+    let src = include_str!("turn_loop.rs");
+    fn body_between<'a>(src: &'a str, start: &str, next: &str) -> &'a str {
+        let s = src.find(start).unwrap_or_else(|| panic!("missing {start}"));
+        let rest = &src[s..];
+        let e = rest.find(next).unwrap_or(rest.len());
+        &rest[..e]
+    }
+    let narrator = body_between(src, "async fn run_narrator_phase", "async fn run_narrator(");
+    // 仍调用 strip_player_markup 做 audience 分类（trace / 下游战报打标用）。
+    assert!(
+        narrator.contains("strip_player_markup"),
+        "应仍解析分类（classify-only）"
+    );
+    // 但绝不再 `ctx.visible_text = ...player_text`（v2 的 strip 回写已删）。
+    assert!(
+        !narrator.contains("ctx.visible_text = stripped.player_text")
+            && !narrator.contains("ctx.visible_text = classified.player_text"),
+        "Q-7-REVISED：run_narrator_phase 不得再用 player_text 覆盖 visible_text（须发原始全标记）"
+    );
+}
+
+/// Q-3-REINFORCE 结构断言：修复阶梯终端在 gm_craft ON 时走 **强制重述真叙事**，
+/// 而把 deterministic_committed_facts_narration（含「（机械结果）」占位）留作 OFF 基线兜底。
+#[test]
+fn q3_repair_ladder_forces_real_renarration_under_craft() {
+    let src = include_str!("turn_loop.rs");
+    fn body_between<'a>(src: &'a str, start: &str, next: &str) -> &'a str {
+        let s = src.find(start).unwrap_or_else(|| panic!("missing {start}"));
+        let rest = &src[s..];
+        let e = rest.find(next).unwrap_or(rest.len());
+        &rest[..e]
+    }
+    let ladder = body_between(
+        src,
+        "async fn run_presentation_repair_ladder",
+        "async fn resolution_commit_boundary",
+    );
+    // gm_craft 分支存在，且在终端做一次强制 narrate（accept 非空非回显）。
+    assert!(
+        ladder.contains("crate::gm_craft::enabled()") && ladder.contains("强制叙事"),
+        "Q-3-REINFORCE：终端须在 gm_craft ON 时强制真叙事重述"
+    );
+    // 仍保留 deterministic 模板作为 OFF 基线兜底（字节等价）。
+    assert!(
+        ladder.contains("deterministic_committed_facts_narration"),
+        "OFF 基线仍走 deterministic 模板（byte-equal）"
+    );
+}
+
 // ==================== P6 revision: §二十四-#13 per-turn rejection producer→commit ====================
 
 use crate::tools::RejectionNomination;
@@ -1688,7 +1741,13 @@ async fn presentation_commit_drains_rejection_then_persists_for_next_turn_select
         .unwrap();
 
     // BEFORE: nothing is rejected (the selector would pick the stronger thr_b).
-    let before = gm.engine.db.load_story_state(&session).await.unwrap().unwrap();
+    let before = gm
+        .engine
+        .db
+        .load_story_state(&session)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(
         rejected_thread_ids(&before).is_empty(),
         "pre-turn: no rejection ⇒ stronger thr_b is selectable"
@@ -1705,7 +1764,13 @@ async fn presentation_commit_drains_rejection_then_persists_for_next_turn_select
     std::env::remove_var("TRPG_STORY_WRITE_LOOP");
 
     // PERSISTED: the rejection is now durable and is the NEXT turn's selector input.
-    let after = gm.engine.db.load_story_state(&session).await.unwrap().unwrap();
+    let after = gm
+        .engine
+        .db
+        .load_story_state(&session)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
         rejected_thread_ids(&after),
         vec!["thr_b".to_string()],
@@ -1755,8 +1820,17 @@ async fn presentation_commit_rejection_off_is_baseline_no_write() {
     ctx.presentation_gate = PresentationGate::Allow;
     gm.presentation_commit_boundary(&mut ctx, &request).await;
 
-    let after = gm.engine.db.load_story_state(&session).await.unwrap().unwrap();
-    assert_eq!(after, seed, "OFF: story_state byte-identical to seed (no write)");
+    let after = gm
+        .engine
+        .db
+        .load_story_state(&session)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after, seed,
+        "OFF: story_state byte-identical to seed (no write)"
+    );
     assert!(
         rejected_thread_ids(&after).is_empty(),
         "OFF: no rejection persisted"
@@ -1803,7 +1877,13 @@ async fn presentation_commit_rejection_block_drops() {
     gm.presentation_commit_boundary(&mut ctx, &request).await;
     std::env::remove_var("TRPG_STORY_WRITE_LOOP");
 
-    let after = gm.engine.db.load_story_state(&session).await.unwrap().unwrap();
+    let after = gm
+        .engine
+        .db
+        .load_story_state(&session)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(
         rejected_thread_ids(&after).is_empty(),
         "Block ⇒ rejection nomination dropped, nothing persisted"
@@ -1916,7 +1996,11 @@ fn clue_affordance_same_turn_surface_and_learn_is_idempotent() {
             });
         }
     }
-    assert_eq!(noms.len(), 1, "同 fact 跨多次命中只提名一次（幂等去重，不双计）");
+    assert_eq!(
+        noms.len(),
+        1,
+        "同 fact 跨多次命中只提名一次（幂等去重，不双计）"
+    );
 }
 
 // ==================== MAT.M4 present vs met/engaged 剧透闸（§7-#6）====================
@@ -1961,41 +2045,62 @@ fn m7_effective_active_npc_ids_prefers_derived_else_caller() {
 #[test]
 fn m4_unmet_npc_withheld_secret_never_enters_knowledge_basis() {
     use trpg_model::MaterializationAffordanceMode::Enforce;
-    use trpg_model::{KnowledgeState, NpcKnowledgeEntry, NpcProfile, NpcRelationship,
-        NpcRelationshipTarget, NpcMindView};
+    use trpg_model::{
+        KnowledgeState, NpcKnowledgeEntry, NpcMindView, NpcProfile, NpcRelationship,
+        NpcRelationshipTarget,
+    };
     use trpg_runtime::world::render_world_reaction_block;
-    use trpg_runtime::{derive_met_engaged_gate, restrict_unmet_npc_guidance,
-        viewer_behavior_context, derive_npc_behavior_plan};
+    use trpg_runtime::{
+        derive_met_engaged_gate, derive_npc_behavior_plan, restrict_unmet_npc_guidance,
+        viewer_behavior_context,
+    };
 
     // NPC 知道一条真 fact，玩家方未知 → withheld secret（既有 v1 保守门）。
-    let profile = NpcProfile { actor_id: "npc_unmet".into(), name: "Stranger".into(), ..Default::default() };
+    let profile = NpcProfile {
+        actor_id: "npc_unmet".into(),
+        name: "Stranger".into(),
+        ..Default::default()
+    };
     let rel = NpcRelationship::new("s", "npc_unmet", NpcRelationshipTarget::PlayerParty).unwrap();
-    let entries = vec![NpcKnowledgeEntry { fact_id: "secret_culprit".into(), state: KnowledgeState::KnowsTrue }];
+    let entries = vec![NpcKnowledgeEntry {
+        fact_id: "secret_culprit".into(),
+        state: KnowledgeState::KnowsTrue,
+    }];
     let view = NpcMindView::build("s", "npc_unmet", &profile, &[rel], &entries).unwrap();
     let ctx = viewer_behavior_context(&view, &[]); // 玩家方空知集 ⇒ 全 withheld
     let plan = derive_npc_behavior_plan(&view, &ctx);
 
     // secret 门不变量：withheld 含 secret，可揭集与 knowledge_basis 都不含它。
-    assert!(plan.facts_will_withhold.iter().any(|f| f == "secret_culprit"));
+    assert!(plan
+        .facts_will_withhold
+        .iter()
+        .any(|f| f == "secret_culprit"));
     assert!(!plan.facts_can_reveal.iter().any(|f| f == "secret_culprit"));
     let cand = plan.to_reaction_candidate();
-    assert!(!cand.knowledge_basis.iter().any(|f| f == "secret_culprit"),
-        "knowledge_basis 仅源自 facts_can_reveal，withheld secret 绝不进");
+    assert!(
+        !cand.knowledge_basis.iter().any(|f| f == "secret_culprit"),
+        "knowledge_basis 仅源自 facts_can_reveal，withheld secret 绝不进"
+    );
 
     // M4 反应式约束追加后，仍不得把 secret 搬进可揭集：约束只提 NPC id，不提任何 fact id。
     let base = render_world_reaction_block(&[plan.clone()]);
     let active = vec!["npc_unmet".to_string()];
     let gate = derive_met_engaged_gate(&active, &[], Enforce); // 未暴露 ⇒ un-met
     let gated = restrict_unmet_npc_guidance(base, &gate).unwrap();
-    assert!(gated.contains("[npc_presence_gate]"), "un-met ⇒ 追加反应式约束");
+    assert!(
+        gated.contains("[npc_presence_gate]"),
+        "un-met ⇒ 追加反应式约束"
+    );
     assert!(gated.contains("npc_unmet"), "约束点名 un-met NPC id");
     // M4 追加的 [npc_presence_gate] 段本身只提 NPC id，绝不含任何 withheld secret fact id。
     let added = gated
         .split("[npc_presence_gate]")
         .nth(1)
         .expect("presence gate block present");
-    assert!(!added.contains("secret_culprit"),
-        "M4 约束段绝不泄露 / 提升 withheld secret（只提 NPC id，不触碰 secret 门）");
+    assert!(
+        !added.contains("secret_culprit"),
+        "M4 约束段绝不泄露 / 提升 withheld secret（只提 NPC id，不触碰 secret 门）"
+    );
     // 既有块仍以「Withhold fact ids」正确呈现 withheld id（指示 NPC 隐瞒，非揭示），
     // 且它从未出现在可揭集 / knowledge_basis（上方已断言）——secret 门保持不变。
     assert!(gated.contains("Withhold fact ids: secret_culprit"));
@@ -2008,7 +2113,8 @@ fn m4_off_shadow_guidance_is_byte_identical_baseline() {
     use trpg_runtime::{derive_met_engaged_gate, restrict_unmet_npc_guidance};
 
     let active = vec!["npc_unmet".to_string()];
-    let base = Some("[npc_behavior_guidance npc=npc_unmet]\n…\n[/npc_behavior_guidance]".to_string());
+    let base =
+        Some("[npc_behavior_guidance npc=npc_unmet]\n…\n[/npc_behavior_guidance]".to_string());
     for mode in [Off, Shadow] {
         // 即便玩家从未暴露过该 NPC，Off/Shadow 闸惰性 ⇒ 不追加约束。
         let gate = derive_met_engaged_gate(&active, &[], mode);

@@ -21,7 +21,9 @@ pub(crate) fn enabled() -> bool {
 pub(crate) const NARRATOR_CRAFT: &str = "\
 输出语言：必须全程使用简体中文叙述；即使玩家输入夹带英文，也绝不输出整句或整段英文。\n\
 杜绝选项菜单与清单：绝不向玩家罗列「你可以选择 A/B/C」式备选项，也绝不把线索或发现写成编号清单（①②③）或逐条罗列；把可能性与发现编织进场景——借 NPC 的反常反应、一个神情、一处不对劲的细节去暗示，让玩家自行体会与决定（展示而非告知）。\n\
-标记规范：机械数值、掷骰算式、裁定推理等「台下」信息一律不写进散文（如需留给系统，用 [meta]…[/meta] 包裹——[meta] 玩家不可见，专放台下元信息）；[system]…[/system] 只用于玩家可见的流程/操作提示（如「请投骰」「等待回应」），绝不在其中写台下数值或推理；[roll]…[/roll] 只用于包裹一次真实的骰子检定（含点数与结果），绝不把纯叙事或资源增减塞进 [roll]。";
+标记规范：机械数值、掷骰算式、裁定推理等「台下」信息一律不写进散文（如需留给系统，用 [meta]…[/meta] 包裹——[meta] 专放台下元信息）；[system]…[/system] 只用于玩家可见的流程/操作提示（如「请投骰」「等待回应」），绝不在其中写台下数值或推理。\n\
+检定可见化（每次真实检定都必须做）：每当本回合发生一次真实的骰子检定，必须输出一个 [roll]…[/roll] 块，写明骰子算式、目标值/难度与结果（成功/失败/部分成功/大成功/大失败），例如 [roll]侦查 1d100=63 ≤ 65 通常成功[/roll]；[roll] 只包裹这一次真实检定，绝不把纯叙事、资源增减或「没有检定」的内容塞进 [roll]，也绝不输出空的 [roll]。\n\
+检定必有叙事（绝不空壳）：凡有检定发生的回合，[roll] 之外必须另写真实的第二人称中文散文，把这次检定的结果作为故事呈现出来——角色此刻看到/听到/感受到什么、世界如何回应、因果如何推进；严禁只丢一行机械结果或「（机械结果）」之类占位而没有真正的情节叙述。";
 
 /// Q-6 (§2b.2 referee, not yes-man). Appended to the adjudicator/GM system prompt — this is
 /// where the decision to run a check vs. just narrate, and how the world resists, is made.
@@ -88,6 +90,21 @@ mod tests {
         assert!(out.contains("台下元信息"));
         // [system] is mentioned only as the player-visible process-prompt channel.
         assert!(out.contains("只用于玩家可见的流程"));
+    }
+
+    #[test]
+    fn on_mandates_roll_block_and_real_narration_q5_q3() {
+        let out = narrator_system("BASE".to_string(), true);
+        // Q-5-REVISED: a real check MUST emit a [roll] block (dice + target + outcome).
+        assert!(out.contains("检定可见化"));
+        assert!(out.contains("必须输出一个 [roll]"));
+        assert!(out.contains("目标值/难度与结果"));
+        // No empty / non-roll content inside [roll].
+        assert!(out.contains("绝不输出空的 [roll]"));
+        // Q-3-REINFORCE: every check turn must produce real fiction; kill the placeholder stub.
+        assert!(out.contains("检定必有叙事"));
+        assert!(out.contains("（机械结果）"));
+        assert!(out.contains("严禁只丢一行机械结果"));
     }
 
     #[test]

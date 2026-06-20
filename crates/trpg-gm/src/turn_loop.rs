@@ -1125,23 +1125,23 @@ impl GmLoop {
                 ctx.visible_text = adjudicator_prose;
             }
         }
-        // Q-5/Q-7 + protocol A.0: parse the GM wire text into a typed TurnDocument and keep the
-        // deterministic player_text ({narration,dialogue,roll,system,choice}) as the persisted
-        // player-visible narration. TRPG_GM_CRAFT ON only; OFF ⇒ untouched (byte-equal baseline).
-        // A.0 correction: [system] is PLAYER-VISIBLE and KEPT; strip set = {meta,hide}. [meta]→
-        // audit, [hide]→canon Proposal, empty [roll] unwrapped to narration (inner prose kept).
+        // Q-7-REVISED (§6 大考 v3): the API/transport emits ALL [xxx] tags RAW — narration /
+        // dialogue / roll / system / choice / hide / meta. The previous v2 behavior (rebuild
+        // player_text by stripping {meta,hide}) is WRONG: strip/hiding is a UI-LAYER concern for
+        // later, NOT the transport. So `ctx.visible_text` (the single persisted/transported source)
+        // is left RAW. The typed parser still CLASSIFIES audience (kept for an audit trace + for
+        // the downstream 战报/product-evaluator to LABEL each block 玩家可见/隐藏) but does NOT
+        // strip here. TRPG_GM_CRAFT ON only; OFF ⇒ untouched (byte-equal baseline).
         if crate::gm_craft::enabled() {
-            let stripped = crate::presentation_markup::strip_player_markup(&ctx.visible_text);
-            if stripped.changed(&ctx.visible_text) {
-                tracing::debug!(
-                    turn_id = %input.request.turn_id,
-                    meta_blocks = stripped.meta_blocks.len(),
-                    hide_blocks = stripped.hide_blocks.len(),
-                    empty_rolls = stripped.empty_rolls_unwrapped,
-                    "gm_craft typed turn-document: player_text rebuilt (keeps [system], strips meta/hide)"
-                );
-                ctx.visible_text = stripped.player_text;
-            }
+            let classified = crate::presentation_markup::strip_player_markup(&ctx.visible_text);
+            tracing::debug!(
+                turn_id = %input.request.turn_id,
+                meta_blocks = classified.meta_blocks.len(),
+                hide_blocks = classified.hide_blocks.len(),
+                empty_rolls = classified.empty_rolls_unwrapped,
+                "gm_craft typed turn-document: audience classified (emit RAW, no strip at API)"
+            );
+            // NOTE: ctx.visible_text intentionally NOT overwritten — emit raw (Q-7-REVISED).
         }
     }
 
@@ -2317,8 +2317,15 @@ impl GmLoop {
             && buffered_narration
             && (gate_block || omitted_repair || echo_repair)
         {
-            self.run_presentation_repair_ladder(ctx, input, tx, cancel, omitted_repair, echo_repair)
-                .await;
+            self.run_presentation_repair_ladder(
+                ctx,
+                input,
+                tx,
+                cancel,
+                omitted_repair,
+                echo_repair,
+            )
+            .await;
         }
     }
 
@@ -2390,8 +2397,7 @@ impl GmLoop {
                 // 故必须显式查 recheck.omitted_visible_repair),否则不采纳 ⇒ 落确定性兜底(收敛)。
                 let still_omitted = include_omitted_repair && recheck.omitted_visible_repair;
                 // A3-HARDEN：echo 旁路触发时,重生稿若仍是机器回显则不采纳 ⇒ 落确定性兜底(收敛保证)。
-                let still_echo =
-                    include_echo_repair && narration_is_machine_context_echo(&text);
+                let still_echo = include_echo_repair && narration_is_machine_context_echo(&text);
                 if !recheck.gate.is_block() && !still_omitted && !still_echo {
                     ctx.presentation_gate = recheck.gate;
                     ctx.visible_text = text;
@@ -2400,7 +2406,39 @@ impl GmLoop {
                 ctx.presentation_gate = recheck.gate;
             }
         }
-        // (2) 确定性 committed-facts 模板叙事（§18，never blank）。逐条复述可见证据 token ⇒
+        // (2) 终端兜底。
+        // Q-3-REINFORCE(§6 大考 v3): under gm_craft the hollow "（机械结果）" ledger stub is a
+        // BLOCKING defect — a check fired but the turn had ZERO fiction. So instead of the
+        // deterministic machine-fact template, do ONE forced re-narration pass that MUST render the
+        // confirmed mechanical outcome as real second-person fiction, and ACCEPT its non-empty
+        // non-echo output (bounded → still converges: this is the single terminal LLM call, no
+        // re-gate loop). Only a total LLM failure falls to a neutral in-fiction continuation
+        // sentence — NEVER the machine-fact ledger / "（机械结果）" placeholder.
+        // OFF (baseline) keeps the deterministic template byte-for-byte.
+        if crate::gm_craft::enabled() {
+            let mut forced_forbidden = forbidden.clone();
+            forced_forbidden.push(
+                "【强制叙事】本回合的机械结果已经确定；你现在必须用第二人称中文散文，把这个结果\
+                 作为故事情节呈现出来——写明角色此刻看到/听到/感受到什么、世界如何回应、因果如何\
+                 推进。绝不只罗列结果，绝不输出账本块、字段名或花括号机器对象，绝不写「（机械结果）」\
+                 之类占位，绝不留空。"
+                    .to_string(),
+            );
+            let forced_packet =
+                crate::packet::NarrationPacket::project(&adj, "", &forced_forbidden)
+                    .with_scene_context(&player_safe_scene_context(input));
+            let forced = crate::ports::GmLoopNarratorAdapter(&*self)
+                .narrate(&forced_packet, &private_tokens, tx, cancel)
+                .await;
+            ctx.visible_text = match forced {
+                Some(t) if !t.trim().is_empty() && !narration_is_machine_context_echo(&t) => t,
+                // 极端：连强制重述都失败/仍是机器回显 ⇒ 一句中性的「故事继续」散文，绝不落
+                // 机械账本模板,绝不出现「（机械结果）」。这是 LLM 彻底失败时的 infra fail-soft。
+                _ => "你定了定神，眼前的局势仍在推进，你需要决定下一步怎么做。".to_string(),
+            };
+            return;
+        }
+        // (2-baseline) 确定性 committed-facts 模板叙事（§18，never blank）。逐条复述可见证据 token ⇒
         // 必过 OmittedVisibleResult 检查 ⇒ A3 旁路在 bounded retry=1 后**确定性收敛**,不死循环。
         ctx.visible_text = deterministic_committed_facts_narration(&narration);
     }
@@ -2787,7 +2825,14 @@ fn player_safe_scene_context(input: &GmTurnInput<'_>) -> Vec<String> {
             // 取尾部 600 字(最近场景),按字符边界安全截断。
             let trimmed = text.trim();
             let snippet: String = if trimmed.chars().count() > 600 {
-                trimmed.chars().rev().take(600).collect::<Vec<_>>().into_iter().rev().collect()
+                trimmed
+                    .chars()
+                    .rev()
+                    .take(600)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect()
             } else {
                 trimmed.to_string()
             };
@@ -3177,7 +3222,10 @@ pub(crate) fn surface_verifier_finding_trace(
 /// - `derived` 空 ⇒ 退回 `caller_supplied`：覆盖 ① ctx_provider 测试 seam（不填派生集）；
 ///   ② Off/Shadow（apply_npc_activation 无操作 ⇒ 派生集恒等于 caller_supplied，两路同值）。
 /// 空-退-空保 s17 不变量（无供给即空）。
-fn effective_active_npc_ids<'a>(derived: &'a [String], caller_supplied: &'a [String]) -> &'a [String] {
+fn effective_active_npc_ids<'a>(
+    derived: &'a [String],
+    caller_supplied: &'a [String],
+) -> &'a [String] {
     if derived.is_empty() {
         caller_supplied
     } else {

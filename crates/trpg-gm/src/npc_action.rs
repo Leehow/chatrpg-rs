@@ -24,12 +24,12 @@
 //! `NoMechanicalOpposition` (an attack roll against the kernel's core mechanic); a full
 //! opposed defender binding is a documented follow-up (it would re-use the same
 //! `attack_defense_param` + NeedBus defender synth the player path already has).
+use crate::ports::{EngineRulesAdapter, RulesPort};
 use trpg_model::{
     ActorKind, ActorRef, CheckContract, CheckStakes, CheckTargetModel, DomainEvent,
     DomainEventKind, OppositionModel, RollAuthority, RollDisclosurePolicy, RollVisibility,
     RulingConfidence, RulingStatus, WorldReactionSet,
 };
-use crate::ports::{EngineRulesAdapter, RulesPort};
 use trpg_runtime::RuntimeEngine;
 
 /// Env gate `TRPG_WORLD_NPC_ACTION` — default **OFF**. Mirrors the `TRPG_NARRATOR_SPLIT` /
@@ -128,7 +128,10 @@ impl WorldAttackOutcome {
             },
             (false, None) => "resolved (no hit/miss verdict)".to_string(),
         };
-        format!("[roll]World NPC attack ({}): {}[/roll]", self.npc_id, verdict)
+        format!(
+            "[roll]World NPC attack ({}): {}[/roll]",
+            self.npc_id, verdict
+        )
     }
 }
 

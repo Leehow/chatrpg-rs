@@ -33,6 +33,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
 
+use trpg_agent::NarrationVerifierResult;
 use trpg_director::{build_director_brief_packet, DirectorMode};
 use trpg_model::{
     CheckContract, CheckResultRecord, DirectorPlan, NpcBehaviorPlan, NpcProfile,
@@ -44,7 +45,6 @@ use trpg_runtime::{
     project_for_npc_speech, project_for_player_narration, AutoRollExecution, NpcActionProjection,
     NpcSpeechProjection, PlayerNarrationProjection, RuntimeEngine, VerifierPrivateView,
 };
-use trpg_agent::NarrationVerifierResult;
 
 use crate::packet::NarrationPacket;
 use crate::presentation_gate::{presentation_gate_decision, PresentationGate};
@@ -80,7 +80,9 @@ impl NarratorPort for GmLoopNarratorAdapter<'_> {
         tx: &Sender<TurnEvent>,
         cancel: Option<&CancellationToken>,
     ) -> Option<String> {
-        self.0.run_narrator(packet, private_tokens, tx, cancel).await
+        self.0
+            .run_narrator(packet, private_tokens, tx, cancel)
+            .await
     }
 }
 

@@ -117,7 +117,8 @@ async fn world_attack_intent_reaches_real_roll_check() {
 
     // Durable hostile relationship toward the player party → hostile stance + high
     // willingness_to_fight ⇒ the World action gate proposes an Attack.
-    let mut rel = NpcRelationship::new(&session, npc_id, NpcRelationshipTarget::PlayerParty).unwrap();
+    let mut rel =
+        NpcRelationship::new(&session, npc_id, NpcRelationshipTarget::PlayerParty).unwrap();
     rel.apply_delta(&NpcRelationshipDelta {
         hostility: 95,
         evidence_event_ids: vec!["evt_p46".into()],
@@ -149,7 +150,11 @@ async fn world_attack_intent_reaches_real_roll_check() {
         &player_known,
     )
     .await;
-    assert_eq!(set.reactions.len(), 1, "exactly one active-NPC candidate (§24-#3)");
+    assert_eq!(
+        set.reactions.len(),
+        1,
+        "exactly one active-NPC candidate (§24-#3)"
+    );
     assert_eq!(set.reactions[0].npc_id, npc_id);
 
     // §24-#4: the withheld secret must NOT appear in the World knowledge basis.
@@ -213,10 +218,8 @@ async fn world_attack_intent_reaches_real_roll_check() {
         "flag must read ON after set_var"
     );
     let outcomes = if trpg_gm::npc_action::world_npc_action_enabled() {
-        trpg_gm::npc_action::resolve_world_attack_intents(
-            &engine, &session, turn_id, RULESET, &set,
-        )
-        .await
+        trpg_gm::npc_action::resolve_world_attack_intents(&engine, &session, turn_id, RULESET, &set)
+            .await
     } else {
         Vec::new()
     };
@@ -249,20 +252,25 @@ async fn world_attack_intent_reaches_real_roll_check() {
     // The folded gate fact (the load-bearing player-perceivable consumption) names the
     // NPC and a HIT/MISS verdict — it is never silently dropped.
     let fact = o.to_gate_fact();
-    assert!(fact.contains(npc_id), "gate fact must name the attacking NPC");
+    assert!(
+        fact.contains(npc_id),
+        "gate fact must name the attacking NPC"
+    );
     assert!(
         fact.contains("HIT") || fact.contains("MISS"),
         "gate fact must carry a real hit/miss verdict, got: {fact}"
     );
 
     // The roll committed a real check_results row (mechanical state lives in Rules).
-    let landed: i64 =
-        sqlx::query_scalar("select count(*) from check_results where check_id = $1")
-            .bind(&check_id)
-            .fetch_one(&db.pool)
-            .await
-            .unwrap();
-    assert_eq!(landed, 1, "a real check_result row must land for the NPC attack");
+    let landed: i64 = sqlx::query_scalar("select count(*) from check_results where check_id = $1")
+        .bind(&check_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        landed, 1,
+        "a real check_result row must land for the NPC attack"
+    );
 
     // ── P6.3: NpcActionResolved domain event write-through ───────────────────────────
     // Emit the typed event from the SAME outcomes the turn loop folds (the emit seam used
@@ -281,7 +289,11 @@ async fn world_attack_intent_reaches_real_roll_check() {
     let (de_kind, de_data) = de_row.expect("NpcActionResolved domain_events row must exist");
     assert_eq!(de_kind, "NpcActionResolved", "domain event kind token");
     // Typed parse-back: data fields == the typed WorldAttackOutcome (NOT a string scrape).
-    assert_eq!(de_data["npc_id"].as_str(), Some(npc_id), "npc_id round-trips");
+    assert_eq!(
+        de_data["npc_id"].as_str(),
+        Some(npc_id),
+        "npc_id round-trips"
+    );
     assert_eq!(
         de_data["check_id"].as_str(),
         Some(check_id.as_str()),
@@ -309,7 +321,10 @@ async fn world_attack_intent_reaches_real_roll_check() {
             .fetch_one(&db.pool)
             .await
             .unwrap();
-    assert_eq!(de_count, 1, "NpcActionResolved replay must fold to one row (de_npcaction_{{check_id}})");
+    assert_eq!(
+        de_count, 1,
+        "NpcActionResolved replay must fold to one row (de_npcaction_{{check_id}})"
+    );
 
     // ── Gap 3: §24-#3 negative-pool counter-example. A NON-active / unloaded NPC (no
     // profile passed in the pool) must NOT leak a reaction candidate. We pass an id that
@@ -436,7 +451,10 @@ async fn clock_advanced_is_idempotent_per_resulting_state() {
             .fetch_one(&db.pool)
             .await
             .unwrap();
-    assert_eq!(count_v1, 1, "applying the same tick twice ⇒ one ClockAdvanced row");
+    assert_eq!(
+        count_v1, 1,
+        "applying the same tick twice ⇒ one ClockAdvanced row"
+    );
 
     // A real advance to a NEW value (current=2) lands a SECOND, distinct row.
     let tick2 = trpg_model::ClockTick {
@@ -447,21 +465,24 @@ async fn clock_advanced_is_idempotent_per_resulting_state() {
     db.append_domain_event(&clock_advanced_event(&session, turn, &tick2))
         .await
         .unwrap();
-    let total: i64 =
-        sqlx::query_scalar("select count(*) from domain_events where session_id = $1 and kind = 'ClockAdvanced'")
-            .bind(&session)
-            .fetch_one(&db.pool)
-            .await
-            .unwrap();
-    assert_eq!(total, 2, "advance to a new value lands a distinct row (2 total)");
-    // delta is carried in data (current - previous).
-    let data_v2: serde_json::Value = sqlx::query_scalar(
-        "select data from domain_events where event_id = $1",
+    let total: i64 = sqlx::query_scalar(
+        "select count(*) from domain_events where session_id = $1 and kind = 'ClockAdvanced'",
     )
-    .bind(format!("de_clock_{session}_clock.scene_pressure_2"))
+    .bind(&session)
     .fetch_one(&db.pool)
     .await
     .unwrap();
+    assert_eq!(
+        total, 2,
+        "advance to a new value lands a distinct row (2 total)"
+    );
+    // delta is carried in data (current - previous).
+    let data_v2: serde_json::Value =
+        sqlx::query_scalar("select data from domain_events where event_id = $1")
+            .bind(format!("de_clock_{session}_clock.scene_pressure_2"))
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
     assert_eq!(data_v2["new_value"].as_i64(), Some(2));
     assert_eq!(data_v2["delta"].as_i64(), Some(1));
 

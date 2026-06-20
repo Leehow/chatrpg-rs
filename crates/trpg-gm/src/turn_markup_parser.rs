@@ -211,7 +211,10 @@ mod tests {
             "[narration]你站在接待处。[/narration][system]请决定继续追问或离开。[/system]",
         );
         let pt = doc.player_text();
-        assert!(pt.contains("请决定继续追问或离开"), "[system] must be player-visible: {pt}");
+        assert!(
+            pt.contains("请决定继续追问或离开"),
+            "[system] must be player-visible: {pt}"
+        );
         assert!(pt.contains("你站在接待处"));
         // and the System block itself is audience=Player.
         let sys = doc
@@ -272,7 +275,8 @@ mod tests {
 
     #[test]
     fn dialogue_player_visible() {
-        let doc = parse_turn_document("[dialogue actor=\"npc.receptionist\"]我替你递个话。[/dialogue]");
+        let doc =
+            parse_turn_document("[dialogue actor=\"npc.receptionist\"]我替你递个话。[/dialogue]");
         assert_eq!(doc.blocks[0].kind, TurnBlockKind::Dialogue);
         assert!(doc.player_text().contains("我替你递个话"));
     }
@@ -300,7 +304,7 @@ mod tests {
         assert!(pt.contains("通常成功"));
         assert!(pt.contains("递进去"));
         assert!(pt.contains("继续追问")); // [system] KEPT (A.0)
-        // internal: hide/meta absent from player_text.
+                                          // internal: hide/meta absent from player_text.
         assert!(!pt.contains("经理暗骰"));
         assert!(!pt.contains("公开魅惑检定"));
         assert_eq!(doc.hide_blocks().len(), 1);

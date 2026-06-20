@@ -81,7 +81,11 @@ mod tests {
         let r = strip_player_markup(
             "[narration]你感到一阵寒意。[/narration][system]请决定继续追问或离开。[/system]",
         );
-        assert!(r.player_text.contains("请决定继续追问或离开"), "{}", r.player_text);
+        assert!(
+            r.player_text.contains("请决定继续追问或离开"),
+            "{}",
+            r.player_text
+        );
         assert!(r.player_text.contains("你感到一阵寒意"));
         // [system] is NOT routed to meta/hide.
         assert!(r.meta_blocks.is_empty() && r.hide_blocks.is_empty());

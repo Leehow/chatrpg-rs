@@ -51,7 +51,9 @@ pub(crate) enum TurnBlockKind {
     /// Unknown tag → ExtensionBlock; default no state semantics (protocol §十一/§十七).
     /// Reserved for the plugin BlockRegistry (Phase 6); not yet emitted by the v1 parser.
     #[allow(dead_code)]
-    Extension { tag: String },
+    Extension {
+        tag: String,
+    },
 }
 
 impl TurnBlockKind {

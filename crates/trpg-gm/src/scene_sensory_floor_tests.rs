@@ -45,7 +45,8 @@ fn g1_off_is_byte_equal_no_floor_clause() {
     );
     // OFF user 必须仍以基线收尾行结束（确保未篡改既有格式）。
     assert!(
-        user.trim_end().ends_with("请据此用第二人称写一段有场景感、逐条覆盖上述机械结果的连贯散文。"),
+        user.trim_end()
+            .ends_with("请据此用第二人称写一段有场景感、逐条覆盖上述机械结果的连贯散文。"),
         "OFF user 必须保持基线收尾行字节不变，实得：\n{user}"
     );
 }
@@ -75,10 +76,7 @@ fn g1_on_floor_is_appended_after_baseline_tail() {
     let baseline_tail = "请据此用第二人称写一段有场景感、逐条覆盖上述机械结果的连贯散文。";
     let tail_pos = user.find(baseline_tail).expect("基线收尾行必须仍在");
     let floor_pos = user.find(FLOOR_HEADER).expect("兜底标题必须在");
-    assert!(
-        tail_pos < floor_pos,
-        "兜底子句必须**追加在**基线收尾行之后"
-    );
+    assert!(tail_pos < floor_pos, "兜底子句必须**追加在**基线收尾行之后");
 }
 
 /// G1-3：ON 但有非空 facts（what_changed）→ **不**触发兜底（仅在真饿时适用）。
