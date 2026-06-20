@@ -1124,10 +1124,21 @@ impl GmLoop {
                 // the 战报 labels them). GM_CRAFT-gated ⇒ additive; OFF==baseline (OFF skips this
                 // whole craft path, and split-OFF never calls run_narrator_phase).
                 if crate::gm_craft::enabled() {
+                    // (a) LLM-authored [hide]/[meta] from the adjudicator prose (richer secrets
+                    //     like [hide kind="secret"] the GM judged exist), if it emitted any.
                     let offstage = crate::gm_craft::extract_offstage_blocks(&adjudicator_prose);
                     if !offstage.is_empty() {
                         ctx.visible_text.push('\n');
                         ctx.visible_text.push_str(&offstage);
+                    }
+                    // (b) Deterministic floor: synthesize [meta]/[hide 暗骰] from the REAL ledger
+                    //     snapshot so the off-stage channels emit truthfully every adjudicated turn
+                    //     even when the LLM omits the tags (no invention — committed facts only).
+                    let synth =
+                        crate::gm_craft::synthesize_offstage_from_ledger(ctx.ledger.snapshot());
+                    if !synth.is_empty() {
+                        ctx.visible_text.push('\n');
+                        ctx.visible_text.push_str(&synth);
                     }
                 }
             }

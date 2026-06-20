@@ -90,6 +90,84 @@ pub(crate) fn extract_offstage_blocks(text: &str) -> String {
     out
 }
 
+/// Phase B (OB-meta / OB-hide), deterministic floor: synthesize the off-stage
+/// `[meta kind="decision_summary"]` audit line and `[hide kind="暗骰"]` private-roll records
+/// straight from the REAL mechanical turn data (the ledger snapshot of committed checks/rolls),
+/// so these channels emit TRUTHFULLY every adjudicated turn even when the adjudicator LLM omits
+/// the tags. Engine-authored from committed facts ⇒ zero invention (constitution: structured
+/// facts come from the kernel/ledger, never narrated guesswork). Returns "" when the turn had no
+/// adjudicated check. The caller is `TRPG_GM_CRAFT`-gated and split-ON only ⇒ OFF==baseline holds.
+pub(crate) fn synthesize_offstage_from_ledger(
+    snap: &trpg_agent::TurnLedgerSnapshot,
+) -> String {
+    use trpg_model::RollVisibility;
+    let mut out = String::new();
+    if snap.check_results.is_empty() {
+        return out; // no committed check this turn ⇒ nothing truthful to record
+    }
+    // [meta] decision summary — one line per committed check (label + expression + outcome band).
+    let mut summaries = Vec::new();
+    for r in &snap.check_results {
+        let oc = &r.outcome;
+        let label = oc
+            .get("check_label")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(r.check_id.as_str());
+        let expr = r.roll.expression.trim();
+        let band = oc
+            .get("degree")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| {
+                oc.get("success")
+                    .and_then(|v| v.as_bool())
+                    .map(|b| if b { "成功".into() } else { "失败".into() })
+            })
+            .unwrap_or_else(|| "待结算".into());
+        summaries.push(format!("{label}({expr})→{band}"));
+    }
+    if !summaries.is_empty() {
+        out.push_str(&format!(
+            "[meta kind=\"decision_summary\"]本回合裁定:{}[/meta]",
+            summaries.join("；")
+        ));
+    }
+    // [hide kind="暗骰"] — rolls the player must NOT see (e.g. an opposed defender's private roll,
+    // or a passive/secret resolution). Scanned from the real dice_rolls ledger, so it is the
+    // genuine off-screen die, not invention. One [hide] per hidden roll.
+    for d in &snap.dice_rolls {
+        if matches!(
+            d.visibility,
+            RollVisibility::PublicGmRoll | RollVisibility::PlayerRollRequired
+        ) {
+            continue; // player already saw it
+        }
+        let total = d
+            .result
+            .get("total")
+            .and_then(|v| v.as_i64())
+            .map(|t| t.to_string())
+            .unwrap_or_default();
+        let who = match d.roller_kind {
+            trpg_model::ActorKind::PlayerCharacter => "玩家角色",
+            trpg_model::ActorKind::Npc => "NPC/对手",
+            _ => "环境/系统",
+        };
+        let expr = d.expression.trim();
+        let tail = if total.is_empty() {
+            String::new()
+        } else {
+            format!("={total}")
+        };
+        out.push_str(&format!(
+            "\n[hide kind=\"暗骰\"]{who}台下私骰 {expr}{tail}（玩家不可见）[/hide]"
+        ));
+    }
+    out
+}
+
 /// Append the narrator craft overlay when `craft_on`. OFF ⇒ returns `base` unchanged (byte-equal).
 pub(crate) fn narrator_system(base: String, craft_on: bool) -> String {
     if craft_on {
@@ -293,5 +371,86 @@ mod tests {
         assert_eq!(extract_offstage_blocks("纯散文，没有任何台下标记。"), "");
         // not a real tag (no ']' or space after) → ignored, no panic.
         assert_eq!(extract_offstage_blocks("[hidden]不是真标签"), "");
+    }
+
+    // ---- deterministic offstage floor (OB-meta / OB-hide) ----
+
+    fn mk_result(
+        check_id: &str,
+        vis: trpg_model::RollVisibility,
+        label: &str,
+        degree: &str,
+    ) -> trpg_model::CheckResultRecord {
+        trpg_model::CheckResultRecord {
+            check_id: check_id.into(),
+            roll: trpg_model::DiceRollRecord {
+                roll_id: format!("roll_{check_id}"),
+                session_id: "s1".into(),
+                turn_id: "t1".into(),
+                check_id: Some(check_id.into()),
+                roller_kind: trpg_model::ActorKind::default(),
+                roller_id: None,
+                visibility: vis,
+                expression: "1d100".into(),
+                result: serde_json::json!({"total": 42}),
+                seed_commitment: String::new(),
+                revealed_at: None,
+                created_at: chrono::Utc::now(),
+            },
+            outcome: serde_json::json!({"check_label": label, "degree": degree, "success": true}),
+            committed_patches: vec![],
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn synth_emits_meta_for_every_committed_check() {
+        let mut snap = trpg_agent::TurnLedgerSnapshot::default();
+        snap.check_results.push(mk_result(
+            "chk1",
+            trpg_model::RollVisibility::PublicGmRoll,
+            "侦查",
+            "通常成功",
+        ));
+        let out = synthesize_offstage_from_ledger(&snap);
+        assert!(out.contains("[meta kind=\"decision_summary\"]"), "{out}");
+        assert!(out.contains("侦查(1d100)→通常成功"), "{out}");
+        // a public roll is NOT recorded as a hidden 暗骰.
+        assert!(!out.contains("[hide"), "{out}");
+    }
+
+    #[test]
+    fn synth_emits_hide_anggu_for_private_dice_roll() {
+        // an opposed defender's private roll lives in dice_rolls (not as a check_result) — it must
+        // surface as a [hide kind="暗骰"] off-screen record, never shown to the player.
+        let mut snap = trpg_agent::TurnLedgerSnapshot::default();
+        snap.check_results.push(mk_result(
+            "atk1",
+            trpg_model::RollVisibility::PublicGmRoll,
+            "开火",
+            "失败",
+        ));
+        let mut def = mk_result(
+            "atk1",
+            trpg_model::RollVisibility::PrivateGmRoll,
+            "防御",
+            "成功",
+        )
+        .roll;
+        def.roller_kind = trpg_model::ActorKind::Npc;
+        def.result = serde_json::json!({"total": 9});
+        snap.dice_rolls.push(def);
+        let out = synthesize_offstage_from_ledger(&snap);
+        // public attack ⇒ [meta]; private defender roll ⇒ [hide 暗骰].
+        assert!(out.contains("[meta kind=\"decision_summary\"]"), "{out}");
+        assert!(out.contains("[hide kind=\"暗骰\"]"), "{out}");
+        assert!(out.contains("NPC/对手"), "{out}");
+        assert!(out.contains("玩家不可见"), "{out}");
+    }
+
+    #[test]
+    fn synth_empty_when_no_committed_check() {
+        let snap = trpg_agent::TurnLedgerSnapshot::default();
+        assert_eq!(synthesize_offstage_from_ledger(&snap), "");
     }
 }
