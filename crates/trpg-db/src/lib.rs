@@ -660,6 +660,30 @@ impl Db {
         }
     }
 
+    /// MAT.M9a：只读加载某模组最新 prep packet 的 `current_session_packet`(玩家可发现线索的
+    /// 原文载体)。**必须独立读 `module_prep_packets` 表**——project bundle 内嵌的
+    /// `module_prep_packets` 快照被裁成 `{mode}`,不含线索数据(codex 复核确认)。镜像
+    /// `load_module_graph` 的纯读姿态;无 packet / null → None。
+    pub async fn load_module_prep_packet_session(
+        &self,
+        module_id: &str,
+    ) -> Result<Option<serde_json::Value>> {
+        let row = sqlx::query(
+            r#"select packet_json->'current_session_packet' as csp from module_prep_packets
+               where module_id = $1 order by updated_at desc limit 1"#,
+        )
+        .bind(module_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        match row {
+            Some(r) => {
+                let raw: Option<serde_json::Value> = r.try_get("csp").ok();
+                Ok(raw.filter(|v| !v.is_null()))
+            }
+            None => Ok(None),
+        }
+    }
+
     pub async fn load_project_bundle(&self, project_id: &str) -> Result<Option<ProjectBundle>> {
         let row = sqlx::query(r#"select content_json from parsed_bundles where bundle_id = $1 and bundle_kind = 'project'"#)
             .bind(project_id)

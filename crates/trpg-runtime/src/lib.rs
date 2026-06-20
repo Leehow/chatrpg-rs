@@ -826,16 +826,21 @@ impl RuntimeEngine {
         // persona). Off/Shadow == baseline (no block) → byte-equal. Pure read of the
         // already-loaded project.modules snapshot (no new DB path).
         if mat_mode.is_enforce() {
-            if let Some(text) =
-                clue_surface::module_clue_surface_text(&project.modules, mat_module_id.as_deref())
-            {
-                blocks.push(dynamic_text_block(
-                    "runtime.mat.clue_surface",
-                    BlockKind::Clue,
-                    "Authored Discoverable Clues",
-                    &text,
-                    vec!["materialization", "clue_surface", "gm_only"],
-                ));
+            if let Some(mid) = mat_module_id.as_deref() {
+                // Read the prep-packet `current_session_packet` from its own table (the
+                // project-bundle snapshot strips it to {mode}). fail-soft: any error → no block.
+                if let Ok(Some(csp)) = self.db.load_module_prep_packet_session(mid).await {
+                    let clues = clue_surface::surface_player_facing_clues(&csp);
+                    if !clues.is_empty() {
+                        blocks.push(dynamic_text_block(
+                            "runtime.mat.clue_surface",
+                            BlockKind::Clue,
+                            "Authored Discoverable Clues",
+                            &clue_surface::render_clue_surface(&clues),
+                            vec!["materialization", "clue_surface", "gm_only"],
+                        ));
+                    }
+                }
             }
         }
 
