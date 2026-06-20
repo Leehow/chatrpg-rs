@@ -13,7 +13,7 @@
 use crate::tools::AwaitingPlayerRoll;
 use serde::{Deserialize, Serialize};
 use trpg_agent::TurnLedgerSnapshot;
-use trpg_model::{RollVisibility, Visibility};
+use trpg_model::{CheckResultRecord, RollDisclosurePolicy, RollVisibility, Visibility};
 
 /// 单条机械事实摘要类别。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,11 +123,10 @@ impl AdjudicationPacket {
             let visible = roll_is_player_visible(result.roll.visibility);
             mechanical_outcomes.push(MechanicalFact {
                 kind: MechanicalFactKind::Check,
-                summary: format!(
-                    "check {}: {}",
-                    result.check_id,
-                    compact_value(&result.outcome)
-                ),
+                // OA-ROLLTRUTH: faithful canonical roll line (real expression + dice + target + band)
+                // so the split Narrator copies "6d4" instead of fabricating the die size. Replaces the
+                // old raw `compact_value(outcome)` JSON dump (which lacked the expression).
+                summary: faithful_roll_line(result),
                 ledger_ref: result.check_id.clone(),
                 player_visible: visible,
             });
@@ -255,6 +254,158 @@ impl NarrationPacket {
             .collect();
         self
     }
+}
+
+/// OA-ROLLTRUTH: render a faithful, player-safe roll line from the REAL kernel check record so the
+/// split Narrator copies the canonical dice expression (e.g. `6d4`) verbatim instead of fabricating
+/// the die size from the values it sees (the `6d?`/`6d6`/`6d3` bug). GENERIC — no ruleset/module name
+/// branch; derives the target description from `resolution_model.kind`. NEVER emits `?` or raw JSON.
+/// Player-safe: only mechanical numbers + the human check_label; respects `disclosure.show_dc_to_player`
+/// (explicit `false` ⇒ omit the target). check_id ref is kept (verifier reconciliation; the Narrator
+/// uses the human label, not the id).
+fn faithful_roll_line(result: &CheckResultRecord) -> String {
+    let oc = &result.outcome;
+    let label = oc
+        .get("check_label")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+    let head = match label {
+        Some(l) => format!("检定[{}] {}", result.check_id, l),
+        None => format!("检定[{}]", result.check_id),
+    };
+
+    // Resolved-ness: a real bound roll has a degree (str) or an explicit success bool. Provisional /
+    // awaiting_binding / success:null must NOT be dressed as a bound [roll] (codex #5).
+    let degree = oc.get("degree").and_then(|v| v.as_str());
+    let success = oc.get("success").and_then(|v| v.as_bool());
+    let awaiting = oc.get("awaiting_binding").is_some()
+        || matches!(oc.get("success"), Some(serde_json::Value::Null));
+    if (degree.is_none() && success.is_none()) || awaiting {
+        return format!("{head}（待结算，尚未绑定真实检定，勿当作已掷骰检定呈现）");
+    }
+
+    // Disclosure: prefer outcome.disclosure object; if the whole object is absent, derive from roll
+    // visibility (RollDisclosurePolicy::for_visibility); a missing individual flag ⇒ hide (fail-closed).
+    let fallback = RollDisclosurePolicy::for_visibility(result.roll.visibility);
+    let disc = oc.get("disclosure");
+    let flag = |name: &str, fb: bool| -> bool {
+        match disc {
+            Some(d) => d.get(name).and_then(|v| v.as_bool()).unwrap_or(false),
+            None => fb,
+        }
+    };
+    let show_formula = flag("show_formula_to_player", fallback.show_formula_to_player);
+    let show_roll = flag("show_roll_to_player", fallback.show_roll_to_player);
+    let show_dc = flag("show_dc_to_player", fallback.show_dc_to_player);
+    let show_band = flag(
+        "show_success_failure_to_player",
+        fallback.show_success_failure_to_player,
+    );
+
+    let expr = result.roll.expression.trim();
+    let dice = oc
+        .get("dice")
+        .or_else(|| result.roll.result.get("rolls"))
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_i64())
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        });
+    let total = oc
+        .get("total")
+        .or_else(|| result.roll.result.get("total"))
+        .and_then(|v| v.as_i64());
+    let values = match (&dice, total) {
+        (Some(d), _) if !d.is_empty() => format!("[{d}]"),
+        (_, Some(t)) => t.to_string(),
+        _ => String::new(),
+    };
+
+    // Target description — GENERIC from the real CheckResolutionModel kind (no ruleset name branch).
+    let rm = oc.get("resolution_model");
+    let kind = rm.and_then(|r| r.get("kind")).and_then(|k| k.as_str());
+    let geti = |obj: Option<&serde_json::Value>, key: &str| -> Option<i64> {
+        obj.and_then(|o| o.get(key)).and_then(|v| v.as_i64())
+    };
+    let target = if !show_dc {
+        String::new()
+    } else {
+        match kind {
+            // dice_pool_count: count dice whose face EQUALS target_face; success when count ≥ threshold.
+            Some("dice_pool_count") | Some("dice_pool_opposed") => {
+                let face = geti(rm, "target_face");
+                let thr = geti(rm, "threshold").or_else(|| geti(Some(oc), "threshold"));
+                match (face, thr) {
+                    (Some(f), Some(t)) => format!(" 目标:出现面值={f}的骰子≥{t}个"),
+                    (Some(f), None) => format!(" 目标:出现面值={f}的骰子"),
+                    _ => String::new(),
+                }
+            }
+            // d100 roll-under: success when total ≤ ability_value.
+            Some("percentile_roll_under") => match geti(rm, "ability_value") {
+                Some(v) => format!(" 目标:≤{v}"),
+                None => String::new(),
+            },
+            Some("static_target_number") => match geti(rm, "value") {
+                Some(v) => format!(" 目标:{v}"),
+                None => String::new(),
+            },
+            Some("saving_throw") => match geti(rm, "dc") {
+                Some(v) => format!(" 目标:DC{v}"),
+                None => String::new(),
+            },
+            Some("attack_vs_defense") => match geti(rm, "defense_value") {
+                Some(v) => format!(" 目标:对方防御{v}"),
+                None => String::new(),
+            },
+            // opposed / provisional / lookup: contest verdict carried by the band; no static target.
+            _ => match geti(Some(oc), "target") {
+                Some(v) => format!(" 目标:{v}"),
+                None => String::new(),
+            },
+        }
+    };
+
+    let band = if show_band {
+        degree
+            .map(band_label)
+            .or_else(|| success.map(|s| if s { "成功" } else { "失败" }.to_string()))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    let mut line = head;
+    let expr_part = if show_formula { expr } else { "" };
+    let val_part = if show_roll { values.as_str() } else { "" };
+    match (expr_part.is_empty(), val_part.is_empty()) {
+        (false, false) => line.push_str(&format!(": {expr_part}={val_part}")),
+        (false, true) => line.push_str(&format!(": {expr_part}")),
+        (true, false) => line.push_str(&format!(": {val_part}")),
+        (true, true) => {}
+    }
+    line.push_str(&target);
+    if !band.is_empty() {
+        line.push_str(&format!("，结果:{band}"));
+    }
+    line
+}
+
+/// Map a kernel degree token to a player-facing band label (GENERIC, no ruleset branch).
+fn band_label(degree: &str) -> String {
+    match degree {
+        "critical_success" | "critical" => "大成功",
+        "success" => "成功",
+        "partial" | "partial_success" => "部分成功",
+        "failure" | "fail" => "失败",
+        "fumble" | "critical_failure" => "大失败",
+        other => other,
+    }
+    .to_string()
 }
 
 /// 紧凑渲染一个 JSON value 为稳定短摘要(不展开大对象/数组的全部正文)。
@@ -411,6 +562,57 @@ mod tests {
         assert!(!serialized.contains("c_private"));
         assert!(!serialized.contains("e_gm"));
         assert!(!serialized.contains("i_gm"));
+    }
+
+    #[test]
+    fn faithful_roll_line_renders_real_pool_and_d100() {
+        // OA-ROLLTRUTH: the Check fact summary must carry the REAL canonical dice expression +
+        // rolled values + target + band (so the split Narrator copies "6d4" instead of fabricating
+        // "6d?"/"6d6"/"6d3"). It must NEVER emit "?" or raw JSON braces.
+        // Triangle dice-pool shape (the exact DB shape that broke).
+        let mut pool = check_result("check_pool", RollVisibility::PublicGmRoll);
+        pool.roll.expression = "6d4".into();
+        pool.roll.result = serde_json::json!({"rolls":[2,2,3,2,1,1],"total":11,"expression":"6d4"});
+        pool.outcome = serde_json::json!({
+            "dice":[2,2,3,2,1,1], "degree":"success", "success":true,
+            "check_label":"Talk your way past the guard",
+            "resolution_model":{"kind":"dice_pool_count","threshold":1,"target_face":3}
+        });
+        let line = faithful_roll_line(&pool);
+        assert!(line.contains("check_pool"), "must keep check_id ref for verifier: {line}");
+        assert!(line.contains("6d4"), "must carry canonical expression: {line}");
+        assert!(line.contains("2,2,3,2,1,1") || line.contains("[2, 2, 3, 2, 1, 1]"), "real dice: {line}");
+        // dice_pool_count = count dice whose face EQUALS target_face (codex #3), not ≥.
+        assert!(line.contains("面值=3"), "pool target face EQUALS semantics: {line}");
+        assert!(!line.contains('?'), "NEVER an unbound '?' marker: {line}");
+        assert!(!line.contains('{') && !line.contains('}'), "NEVER raw JSON braces: {line}");
+        assert!(line.contains("成功"), "outcome band: {line}");
+
+        // CoC d100 percentile_roll_under (the REAL CheckResolutionModel kind, codex #2).
+        let mut d100 = check_result("check_d100", RollVisibility::PublicGmRoll);
+        d100.roll.expression = "1d100".into();
+        d100.roll.result = serde_json::json!({"total":63,"rolls":[63]});
+        d100.outcome = serde_json::json!({
+            "total":63, "degree":"success", "success":true,
+            "check_label":"Spot Hidden",
+            "resolution_model":{"kind":"percentile_roll_under","ability_label":"Spot Hidden","ability_value":65}
+        });
+        let l2 = faithful_roll_line(&d100);
+        assert!(l2.contains("1d100"), "{l2}");
+        assert!(l2.contains("63"), "{l2}");
+        assert!(l2.contains("≤65"), "roll-under target: {l2}");
+        assert!(!l2.contains('?'), "{l2}");
+        assert!(!l2.contains('{'), "{l2}");
+
+        // Provisional / unresolved must NOT be dressed as a bound roll (codex #5).
+        let mut prov = check_result("check_prov", RollVisibility::PublicGmRoll);
+        prov.outcome = serde_json::json!({
+            "check_label":"Heavy Pistol attack", "success": serde_json::Value::Null,
+            "resolution_model":{"kind":"provisional","reason":"no source-backed DV","suggested_target":null}
+        });
+        let l3 = faithful_roll_line(&prov);
+        assert!(l3.contains("待结算"), "unresolved must be pending: {l3}");
+        assert!(!l3.contains("6d") && !l3.contains("1d"), "no fake dice on pending: {l3}");
     }
 
     #[test]
