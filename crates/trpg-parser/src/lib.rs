@@ -837,11 +837,18 @@ impl ProjectParseService {
                     .unwrap_or_default();
                 mech_sidecar = sidecar_text.clone();
                 mech_skills = skill_names.clone();
+                let option_catalogs = reader_run_kit
+                    .as_ref()
+                    .map(|rk| rk.option_catalogs.clone())
+                    .unwrap_or(serde_json::Value::Null);
                 let ctx = reader::CompileCtx {
                     units: &units,
                     sidecar_text: sidecar_text.clone(),
                     located_pages,
                     skill_names: skill_names.clone(),
+                    pool_scaling_parameter:
+                        trpg_db::kernel_override_pool_scaling_parameter(&ruleset_id),
+                    option_catalogs,
                 };
                 // The chargen compile pass is LOW-VOLUME (once per ruleset) but needs
                 // RELIABLE full-sheet extraction, so it runs on a stronger model

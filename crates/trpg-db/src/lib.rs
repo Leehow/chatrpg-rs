@@ -5687,6 +5687,20 @@ fn read_kernel_override_file(ruleset_id: &str) -> Option<serde_json::Value> {
     serde_json::from_str(embedded).ok()
 }
 
+/// The kernel override's `dice_core.pool_scaling_parameter`, if declared. This is
+/// the ONLY data place naming the param that scales a count_faces dice pool; the
+/// chargen compiler reads it (at parse time, before the override is DB-merged) so
+/// it can compile a matching numeric rated param onto the sheet. Generic — the
+/// param NAME lives in override DATA, not in Rust. None when absent.
+pub fn kernel_override_pool_scaling_parameter(ruleset_id: &str) -> Option<String> {
+    read_kernel_override_file(ruleset_id)?
+        .get("dice_core")?
+        .get("pool_scaling_parameter")?
+        .as_str()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// P0-2: binary-embedded kernel overrides (clean-checkout fallback). The 6
 /// canonical rulesets are matched by exact id; every arm is an `include_str!`
 /// of the git-tracked `embedded_config/rules/` copy (byte-identical to data/).
@@ -5961,6 +5975,59 @@ mod firearm_profile_override_tests {
         );
         assert_eq!(fp.source_refs.len(), 1);
         assert_eq!(fp.source_refs[0].page, Some(414));
+    }
+}
+
+#[cfg(test)]
+mod pool_scaling_override_tests {
+    use super::{embedded_kernel_override, merge_dice_core};
+
+    /// Q-2: the Triangle override declares the GENERIC pool-scaling contract in
+    /// `dice_core` (param name + base/per_rank). Asserts against the binary-embedded
+    /// (git-tracked) override so it is independent of any local `data/` mirror.
+    #[test]
+    fn triangle_override_declares_pool_scaling_contract() {
+        let doc: serde_json::Value = serde_json::from_str(
+            embedded_kernel_override("triangle_agency").expect("Triangle override embedded"),
+        )
+        .expect("Triangle override parses");
+        let dc = doc.get("dice_core").expect("dice_core block present");
+        assert_eq!(
+            dc.get("pool_scaling_parameter").and_then(|v| v.as_str()),
+            Some("competency_rank"),
+            "names the competency rank param the chargen compiler produces"
+        );
+        assert_eq!(dc.get("pool_base").and_then(|v| v.as_i64()), Some(6));
+        assert_eq!(dc.get("pool_per_rank").and_then(|v| v.as_i64()), Some(1));
+    }
+
+    /// The shallow `merge_dice_core` overlays the scaling keys onto the parsed
+    /// kernel dice_core WITHOUT clobbering the flat `6d4`/`count_faces`/`target_face`
+    /// (so OFF stays byte-identical and the faces are preserved when ON).
+    #[test]
+    fn merge_preserves_parsed_dice_and_adds_scaling() {
+        let parsed = serde_json::json!({"dice":"6d4","compare":"count_faces","target_face":3});
+        let doc: serde_json::Value = serde_json::from_str(
+            embedded_kernel_override("triangle_agency").expect("Triangle override embedded"),
+        )
+        .unwrap();
+        let over = doc["dice_core"].as_object().unwrap();
+        let merged = merge_dice_core(parsed, over);
+        assert_eq!(merged["dice"], serde_json::json!("6d4"), "flat dice preserved");
+        assert_eq!(merged["compare"], serde_json::json!("count_faces"));
+        assert_eq!(merged["target_face"], serde_json::json!(3));
+        assert_eq!(merged["pool_scaling_parameter"], serde_json::json!("competency_rank"));
+    }
+
+    /// The public accessor used by the parser at chargen-compile time returns the
+    /// override's param name (None for a ruleset that declares none).
+    #[test]
+    fn accessor_reads_param_name_from_override() {
+        // Force the embedded fallback (no local data/ override for this fake id).
+        assert_eq!(
+            super::kernel_override_pool_scaling_parameter("not_a_ruleset"),
+            None
+        );
     }
 }
 

@@ -201,6 +201,10 @@ impl StagedParse {
             sidecar_text: self.sidecar_text.clone(),
             located_pages: String::new(),
             skill_names: skills.clone(),
+            pool_scaling_parameter: trpg_db::kernel_override_pool_scaling_parameter(
+                &self.ruleset_id,
+            ),
+            option_catalogs: char_slice.option_catalogs.clone(),
         };
         let _ =
             reader::compile_chargen_formulas(compiler.as_ref(), &mut template, ctx, budget).await;

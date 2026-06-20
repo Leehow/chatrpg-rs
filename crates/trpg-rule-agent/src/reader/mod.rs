@@ -17,6 +17,7 @@ pub mod object_compile;
 mod object_regrab;
 pub mod onboarding_compile;
 pub mod parallel;
+pub mod pool_scaling;
 pub mod run_kit;
 pub(crate) mod scene_mechanics;
 pub mod tools;
@@ -38,6 +39,7 @@ pub use object_compile::{
     compile_object_schemas, discover_object_categories, extract_object_category, ObjectCtx,
 };
 pub use onboarding_compile::{compile_starter_pack, OnboardingCtx};
+pub use pool_scaling::pool_scaling_choice_record;
 pub use parallel::{
     plan_phase, read_character_slice, read_resolution_and_gm, run_reader_parallel, CharacterSlice,
     Plan, ResolutionGm,

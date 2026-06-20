@@ -1,4 +1,12 @@
 {
+  "_note_q2_pool_scaling": "Q-2 (TRPG_PARAM_DRIVEN_POOL): names the GENERIC pool-scaling contract for the count_faces 6d4 pool. The engine reads `pool_scaling_parameter` off the INITIATING actor's sheet (no ruleset Rust): the chargen compiler compiles the categorical `competency` CHOICE into a numeric `competency_rank` (ordinal of the chosen option in the ruleset's enumerated competency list -- data-sourced, not a per-label constant). pool_base=6 keeps the flat-baseline (rank 0 -> 6d4) so OFF is byte-identical; pool_per_rank=1 -> a more-competent agent draws on more Agency dice. Shallow-merged into the parsed dice_core (dice/compare/target_face preserved). When the flag is OFF, or no competency_rank is on the sheet, the pool stays a flat 6d4.",
+  "dice_core": {
+    "pool_scaling_parameter": "competency_rank",
+    "pool_base": 6,
+    "pool_per_rank": 1,
+    "pool_min": 1,
+    "pool_max": 24
+  },
   "_note": "P0-2 engine-dehardcode: combat_mode_policy migrates trpg-combat's legacy infer_combat_mode_from_intent for triangle_agency (was: ruleset_id.contains(\"triangle\") -> anomaly_encounter, always). fallback anomaly_encounter covers the unconditional triangle branch; the explicit disable_device+anomaly rule is documentary (same result). Pure data, no per-ruleset Rust.",
   "combat_mode_policy": {
     "rules": [

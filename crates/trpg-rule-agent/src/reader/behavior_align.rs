@@ -223,6 +223,8 @@ pub async fn fill_behavior_from_prose(
         sidecar_text,
         located_pages: String::new(),
         skill_names: Vec::new(),
+        pool_scaling_parameter: None,
+        option_catalogs: serde_json::Value::Null,
     };
     for track_id in &report.behavior_gaps {
         // 给 prompt 一个人类可读的名字：优先 track 的 name，否则 id。
