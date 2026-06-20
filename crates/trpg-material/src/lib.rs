@@ -14,6 +14,13 @@ use uuid::Uuid;
 /// first play-time use (Optimization 2 of staged parsing).
 mod staged_extract;
 
+/// MAT.M5 / DP-1 = 4b: provisional discoverable-content tier.
+mod content_tier;
+use content_tier::{
+    admitted_content_verifier_json, blocked_content_event_json, evaluate_4b_invariants,
+    CONTENT_REQUIRED_FIELDS,
+};
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
 pub enum MaterializationWritePolicy {
     #[default]
@@ -879,6 +886,13 @@ impl MaterializationService {
         extraction: &ExtractionRun,
         verification: &BindingVerificationResult,
     ) -> Result<Vec<RuntimeBindingWriteback>> {
+        // MAT.M5: DiscoverableContent targets follow the content-policy path, NOT the
+        // mechanical strict gate. Route them before the parameter gate below.
+        if demand.target_kind == MaterialTargetKind::DiscoverableContent {
+            return self
+                .writeback_content(demand, packet, extraction, verification)
+                .await;
+        }
         // v1.15.4: parameter writeback is source-backed by default.  A partial
         // extraction may still be useful context, but it must not seed runtime
         // HP/SP/skills/weapon damage with fabricated values.  When strict mode
@@ -936,6 +950,303 @@ impl MaterializationService {
                 .ok();
         }
         Ok(out)
+    }
+
+    /// MAT.M5 public API: the runtime lane requests discoverable-content
+    /// materialization (clue body / NPC dialogue/testimony / scene read_aloud).
+    ///
+    /// `payload` must contain `content_kind`, `content_text`, `source_refs`. For the
+    /// 4b provisional path also `provisional: true`, `facts_will_withhold: []`.
+    /// `gm_truth` is the optional ground-truth JSON for invariant (ii). Returns
+    /// `Ok(Some(writeback))` on admission, `Ok(None)`/empty when blocked (logged).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn request_content_materialization(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        ruleset_id: &str,
+        target_id: &str,
+        target_label: &str,
+        payload: serde_json::Value,
+        gm_truth: Option<&serde_json::Value>,
+        world_tick: Option<i64>,
+    ) -> Result<Option<RuntimeBindingWriteback>> {
+        let demand = MaterializationDemand {
+            demand_id: format!("demand_{}", Uuid::new_v4().simple()),
+            session_id: session_id.to_string(),
+            turn_id: Some(turn_id.to_string()),
+            target_kind: MaterialTargetKind::DiscoverableContent,
+            target_id: Some(target_id.to_string()),
+            target_label: target_label.to_string(),
+            target_description: target_label.to_string(),
+            ruleset_id: ruleset_id.to_string(),
+            world_tick,
+            ..Default::default()
+        };
+        let binding_id = format!("content_binding_{}", Uuid::new_v4().simple());
+        let extraction_id = format!("content_extract_{}", Uuid::new_v4().simple());
+        let source_refs = payload
+            .get("source_refs")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let missing: Vec<String> = CONTENT_REQUIRED_FIELDS
+            .iter()
+            .filter(|f| !json_has_field(&payload, f))
+            .map(|f| f.to_string())
+            .collect();
+        let status = if source_refs.is_empty() {
+            BindingVerificationStatus::RejectedNoSource
+        } else if missing.is_empty() {
+            BindingVerificationStatus::VerifiedExact
+        } else {
+            BindingVerificationStatus::ProvisionalNeedsAudit
+        };
+        let packet = RuleBindingPacket {
+            binding_id: binding_id.clone(),
+            target_kind: RuleBindingTargetKind::Unknown,
+            target_id: target_id.to_string(),
+            ruleset_id: ruleset_id.to_string(),
+            source_refs: source_refs
+                .iter()
+                .map(|s| SourceRef {
+                    source_id: s.clone(),
+                    ..Default::default()
+                })
+                .collect(),
+            extracted_json: payload.clone(),
+            confidence: if missing.is_empty() {
+                RulingConfidence::High
+            } else {
+                RulingConfidence::Low
+            },
+            verification_status: BindingStatus::BoundProvisional,
+            created_at_tick: world_tick,
+            ..Default::default()
+        };
+        let extraction = ExtractionRun {
+            extraction_run_id: extraction_id,
+            demand_id: demand.demand_id.clone(),
+            extractor_kind: ExtractorKind::Generic,
+            extracted_json: payload.clone(),
+            source_refs: packet.source_refs.clone(),
+            confidence: packet.confidence,
+            ..Default::default()
+        };
+        let verification = BindingVerificationResult {
+            verification_id: format!("content_verify_{}", Uuid::new_v4().simple()),
+            binding_id: binding_id.clone(),
+            target_kind: RuleBindingTargetKind::Unknown,
+            target_id: target_id.to_string(),
+            status,
+            missing_required_fields: missing,
+            contradictory_sources: vec![],
+            ..Default::default()
+        };
+        if matches!(verification.status, BindingVerificationStatus::RejectedNoSource) {
+            self.insert_blocked_content_event(
+                &demand,
+                &packet,
+                &extraction,
+                &verification,
+                "rejected_no_source",
+            )
+            .await
+            .ok();
+            return Ok(None);
+        }
+        let writebacks = self
+            .writeback_content_with_truth(&demand, &packet, &extraction, &verification, gm_truth)
+            .await?;
+        Ok(writebacks.into_iter().next())
+    }
+
+    /// MAT.M5 content path: handles DiscoverableContent targets.
+    /// Part A (unconditional): source-present VerifiedExact passes through.
+    /// Part B / 4b (Enforce-gated): persona-judge synthesized provisional content
+    /// admitted only when all three invariants hold; blocked + logged otherwise.
+    async fn writeback_content(
+        &self,
+        demand: &MaterializationDemand,
+        packet: &RuleBindingPacket,
+        extraction: &ExtractionRun,
+        verification: &BindingVerificationResult,
+    ) -> Result<Vec<RuntimeBindingWriteback>> {
+        self.writeback_content_with_truth(demand, packet, extraction, verification, None)
+            .await
+    }
+
+    async fn writeback_content_with_truth(
+        &self,
+        demand: &MaterializationDemand,
+        packet: &RuleBindingPacket,
+        extraction: &ExtractionRun,
+        verification: &BindingVerificationResult,
+        gm_truth: Option<&serde_json::Value>,
+    ) -> Result<Vec<RuntimeBindingWriteback>> {
+        let payload = &extraction.extracted_json;
+        let mode = MaterializationAffordanceMode::from_env();
+
+        // Part A: source-present VerifiedExact passes unconditionally (flag-agnostic).
+        if matches!(verification.status, BindingVerificationStatus::VerifiedExact) {
+            let writeback = RuntimeBindingWriteback {
+                writeback_id: format!("content_wb_{}", Uuid::new_v4().simple()),
+                binding_id: packet.binding_id.clone(),
+                target_kind: RuleBindingTargetKind::Unknown,
+                target_id: demand.target_id.clone().unwrap_or_default(),
+                table_name: "content_writebacks".into(),
+                status: "verified_exact".into(),
+                writeback_json: json!({
+                    "content_kind": payload.get("content_kind"),
+                    "content_text": payload.get("content_text"),
+                    "source_refs": payload.get("source_refs"),
+                    "tier": "source_present",
+                    "verification_status": "verified_exact"
+                }),
+                created_at_tick: demand.world_tick,
+            };
+            return Ok(vec![writeback]);
+        }
+
+        // Part B / 4b: ProvisionalNeedsAudit content requires Enforce.
+        if !mode.is_enforce() {
+            self.insert_blocked_content_event(
+                demand,
+                packet,
+                extraction,
+                verification,
+                "flag_off_4b_not_active",
+            )
+            .await
+            .ok();
+            return Ok(vec![]);
+        }
+
+        // Evaluate the three 4b invariants (gm_truth drives invariant ii).
+        let decision = evaluate_4b_invariants(payload, gm_truth);
+        if decision.is_blocked() {
+            let result_json =
+                blocked_content_event_json(&demand.demand_id, &packet.binding_id, &decision, payload);
+            self.insert_blocked_content_event_with_json(
+                demand,
+                packet,
+                extraction,
+                verification,
+                result_json,
+            )
+            .await
+            .ok();
+            return Ok(vec![]);
+        }
+
+        // All invariants satisfied: admit as provisional content, audited.
+        let verifier_json = admitted_content_verifier_json(
+            &demand.demand_id,
+            &extraction.extraction_run_id,
+            payload,
+        );
+        sqlx::query(r#"insert into binding_verifications (id, verification_id, binding_id, target_kind, target_id, status, missing_required_fields, contradictory_sources, visibility_issues, verifier_json) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) on conflict (verification_id) do nothing"#)
+            .bind(Uuid::new_v4())
+            .bind(format!("content_prov_{}", Uuid::new_v4().simple()))
+            .bind(&packet.binding_id)
+            .bind(demand.target_kind.as_str())
+            .bind(demand.target_id.as_deref())
+            .bind("provisional_needs_audit")
+            .bind(json!([]))
+            .bind(json!([]))
+            .bind(json!([]))
+            .bind(&verifier_json)
+            .execute(&self.db.pool)
+            .await
+            .ok();
+        sqlx::query(r#"insert into material_hydration_events (id, event_id, session_id, turn_id, frame_id, actor_id, object_id, ruleset_id, material_kind, hydration_status, query_text, result_json, world_tick) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)"#)
+            .bind(Uuid::new_v4())
+            .bind(format!("content_prov_{}", Uuid::new_v4().simple()))
+            .bind(&demand.session_id)
+            .bind(demand.turn_id.as_deref())
+            .bind(demand.frame_id.as_deref())
+            .bind::<Option<&str>>(None)
+            .bind::<Option<&str>>(None)
+            .bind(&demand.ruleset_id)
+            .bind("discoverable_content")
+            .bind("provisional_content_admitted_4b")
+            .bind(&demand.target_description)
+            .bind(&verifier_json)
+            .bind(demand.world_tick)
+            .execute(&self.db.pool)
+            .await
+            .ok();
+
+        let writeback = RuntimeBindingWriteback {
+            writeback_id: format!("content_wb_{}", Uuid::new_v4().simple()),
+            binding_id: packet.binding_id.clone(),
+            target_kind: RuleBindingTargetKind::Unknown,
+            target_id: demand.target_id.clone().unwrap_or_default(),
+            table_name: "content_writebacks".into(),
+            status: "provisional_needs_audit".into(),
+            writeback_json: json!({
+                "content_kind": payload.get("content_kind"),
+                "content_text": payload.get("content_text"),
+                "tier": "4b_provisional_content",
+                "invariants_verified": ["facts_can_reveal_only","no_gm_truth_contradiction","tagged_provisional"],
+                "verification_status": "provisional_needs_audit",
+                "note": "Provisional discoverable content admitted via 4b tier; not a ground-truth fact."
+            }),
+            created_at_tick: demand.world_tick,
+        };
+        Ok(vec![writeback])
+    }
+
+    async fn insert_blocked_content_event(
+        &self,
+        demand: &MaterializationDemand,
+        packet: &RuleBindingPacket,
+        extraction: &ExtractionRun,
+        verification: &BindingVerificationResult,
+        reason: &str,
+    ) -> Result<()> {
+        let result_json = json!({
+            "policy": "4b_provisional_content_tier",
+            "demand_id": demand.demand_id,
+            "binding_id": packet.binding_id,
+            "block_reason": reason,
+            "verification_status": verification.status.as_str(),
+            "note": "Provisional content blocked; no discoverable-content writeback applied."
+        });
+        self.insert_blocked_content_event_with_json(demand, packet, extraction, verification, result_json)
+            .await
+    }
+
+    async fn insert_blocked_content_event_with_json(
+        &self,
+        demand: &MaterializationDemand,
+        _packet: &RuleBindingPacket,
+        _extraction: &ExtractionRun,
+        _verification: &BindingVerificationResult,
+        result_json: Value,
+    ) -> Result<()> {
+        sqlx::query(r#"insert into material_hydration_events (id, event_id, session_id, turn_id, frame_id, actor_id, object_id, ruleset_id, material_kind, hydration_status, query_text, result_json, world_tick) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)"#)
+            .bind(Uuid::new_v4())
+            .bind(format!("content_blocked_{}", Uuid::new_v4().simple()))
+            .bind(&demand.session_id)
+            .bind(demand.turn_id.as_deref())
+            .bind(demand.frame_id.as_deref())
+            .bind::<Option<&str>>(None)
+            .bind::<Option<&str>>(None)
+            .bind(&demand.ruleset_id)
+            .bind("discoverable_content")
+            .bind("blocked_content_4b")
+            .bind(&demand.target_description)
+            .bind(result_json)
+            .bind(demand.world_tick)
+            .execute(&self.db.pool)
+            .await?;
+        Ok(())
     }
 
     async fn insert_blocked_materialization_event(
@@ -1582,6 +1893,7 @@ fn search_skill_for_demand(demand: &MaterializationDemand) -> SearchSkillKind {
             }
         }
         MaterialTargetKind::ConditionDefinition => SearchSkillKind::ConditionResource,
+        MaterialTargetKind::DiscoverableContent => SearchSkillKind::ModuleCard,
         MaterialTargetKind::Unknown => SearchSkillKind::GenericMechanical,
     }
 }
@@ -1935,6 +2247,7 @@ fn facet_kinds_for_demand(demand: &MaterializationDemand) -> Vec<ParameterFacetK
             ParameterFacetKind::EffectConditionBinding,
             ParameterFacetKind::EffectResourceBinding,
         ],
+        MaterialTargetKind::DiscoverableContent => vec![],
         MaterialTargetKind::Unknown => vec![ParameterFacetKind::Unknown],
     }
 }
@@ -1968,6 +2281,7 @@ fn parse_material_target_kind(s: &str) -> MaterialTargetKind {
         "damage_profile" => MaterialTargetKind::DamageProfile,
         "armor_profile" => MaterialTargetKind::ArmorProfile,
         "condition_definition" => MaterialTargetKind::ConditionDefinition,
+        "discoverable_content" => MaterialTargetKind::DiscoverableContent,
         _ => MaterialTargetKind::Unknown,
     }
 }
@@ -2160,6 +2474,7 @@ fn extractor_for(kind: MaterialTargetKind) -> ExtractorKind {
         }
         MaterialTargetKind::CheckTarget => ExtractorKind::CheckProcedure,
         MaterialTargetKind::ConditionDefinition => ExtractorKind::Condition,
+        MaterialTargetKind::DiscoverableContent => ExtractorKind::Generic,
         _ => ExtractorKind::Generic,
     }
 }
@@ -2219,6 +2534,7 @@ fn required_fields_for_target(kind: MaterialTargetKind) -> Vec<&'static str> {
         }
         MaterialTargetKind::EffectProfile => vec!["source", "target", "effect_model"],
         MaterialTargetKind::ConditionDefinition => vec!["condition_name", "mechanical_effect"],
+        MaterialTargetKind::DiscoverableContent => CONTENT_REQUIRED_FIELDS.to_vec(),
         _ => vec!["entry_name", "fields"],
     }
 }

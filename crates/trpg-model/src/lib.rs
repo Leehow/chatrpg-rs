@@ -7368,6 +7368,10 @@ pub enum MaterialTargetKind {
     DamageProfile,
     ArmorProfile,
     ConditionDefinition,
+    /// MAT.M5: discoverable narrative content (clue body / NPC dialogue or
+    /// testimony / scene read_aloud). Routed through the content-policy path
+    /// (content_tier) rather than the mechanical strict gate.
+    DiscoverableContent,
     Unknown,
 }
 impl Default for MaterialTargetKind {
@@ -7391,6 +7395,7 @@ impl MaterialTargetKind {
             Self::DamageProfile => "damage_profile",
             Self::ArmorProfile => "armor_profile",
             Self::ConditionDefinition => "condition_definition",
+            Self::DiscoverableContent => "discoverable_content",
             Self::Unknown => "unknown",
         }
     }
@@ -7409,6 +7414,8 @@ impl MaterialTargetKind {
             Self::CheckTarget => RuleBindingTargetKind::CheckContract,
             Self::EffectProfile => RuleBindingTargetKind::EffectContract,
             Self::ConditionDefinition => RuleBindingTargetKind::ConditionDefinition,
+            // Discoverable content is not a mechanical rule binding; map to Unknown.
+            Self::DiscoverableContent => RuleBindingTargetKind::Unknown,
             Self::Unknown => RuleBindingTargetKind::Unknown,
         }
     }

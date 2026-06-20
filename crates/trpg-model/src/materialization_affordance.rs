@@ -61,6 +61,11 @@ impl MaterializationAffordanceMode {
     pub fn is_enforce(self) -> bool {
         matches!(self, MaterializationAffordanceMode::Enforce)
     }
+
+    /// Off mode (baseline). Convenience inverse of [`Self::is_on`].
+    pub fn is_off(self) -> bool {
+        matches!(self, MaterializationAffordanceMode::Off)
+    }
 }
 
 #[cfg(test)]
