@@ -142,6 +142,8 @@ mod npc_testimony;
 
 pub mod scene_establishing;
 pub use scene_establishing::collect_scene_establishing;
+pub mod character_context;
+pub use character_context::collect_character_context;
 
 mod context_blocks;
 
@@ -918,6 +920,21 @@ impl RuntimeEngine {
                             scene_establishing::prep_packet_establishing(&csp);
                     }
                 }
+            }
+            // OA2 (G-3): carry the PC's player-safe competency profile to the split Narrator so
+            // narration can reference the PC's real abilities/traits (CoC 45+ skills/8 attrs,
+            // Cyber 19/10 are in DB but never reach the Narrator). The sheet is the player's OWN
+            // character ⇒ rendering it adds no leak surface. Enforce only; Off/Shadow ⇒ empty ⇒
+            // injects nothing ⇒ byte-equal. fail-soft: any error / no sheet ⇒ empty.
+            let pc_actor_id = request.viewer.actor_id.as_deref().unwrap_or("pc.current");
+            if let Ok(Some(params)) = trpg_params::RuntimeParameterService::new(self.db.clone())
+                .load_actor_parameters(&request.session_id, pc_actor_id)
+                .await
+            {
+                compiled.character_context = character_context::collect_character_context(
+                    &params.sheet_json,
+                    params.display_name.as_deref(),
+                );
             }
         }
         for block in compiled
@@ -3842,6 +3859,9 @@ impl ContextBuilder {
             // Q-MODULE: ContextBuilder 不产 establishing；由 prepare_turn_context 在 build 之后
             // 仅 Enforce 下填入（见 `compiled.scene_establishing = ...`）。此处恒空（OFF 字节等价）。
             scene_establishing: Vec::new(),
+            // OA2 (G-3): ContextBuilder 不产 character_context；由 prepare_turn_context 在 build
+            // 之后仅 Enforce 下填入（见 `compiled.character_context = ...`）。此处恒空（OFF 字节等价）。
+            character_context: Vec::new(),
         })
     }
 }

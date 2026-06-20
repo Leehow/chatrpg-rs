@@ -86,6 +86,12 @@ pub struct NarrationPacket {
     /// **绝不**承载 GM-only `gm_notes`/secret/clue(那些仍走 A2 奖励门控)。
     #[serde(default)]
     pub scene_establishing: Vec<String>,
+    /// OA2 (G-3)(§6 大考):player-safe 的 PC 能力档案(角色卡数值能力,玩家自知),由 runtime
+    /// 经 `CompiledContext.character_context` 在 `Enforce` 下提供。`project` 恒置空(OFF 字节
+    /// 等价),仅经 `with_character_context` 注入。Narrator 选择性引用 PC 能力/特长、**绝不**逐字
+    /// 罗列数值(尊重 Q-4 no-dump)。角色卡是玩家自己的 ⇒ 不新增泄漏面。
+    #[serde(default)]
+    pub character_context: Vec<String>,
 }
 
 fn roll_is_player_visible(visibility: RollVisibility) -> bool {
@@ -208,6 +214,8 @@ impl NarrationPacket {
             scene_context: Vec::new(),
             // Q-MODULE：project 恒置空(OFF 字节等价)；仅 Enforce 经 with_scene_establishing 注入。
             scene_establishing: Vec::new(),
+            // OA2：project 恒置空(OFF 字节等价)；仅 Enforce 经 with_character_context 注入。
+            character_context: Vec::new(),
         }
     }
 
@@ -229,6 +237,18 @@ impl NarrationPacket {
     /// (OFF/非 Enforce 字节等价)。
     pub fn with_scene_establishing(mut self, slices: &[String]) -> Self {
         self.scene_establishing = slices
+            .iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        self
+    }
+
+    /// OA2 (G-3)(§6 大考):注入 player-safe PC 能力档案(链式 builder)。调用方保证 `slices`
+    /// 来自 `CompiledContext.character_context`(runtime 仅 Enforce 填充、玩家自知的角色卡数值
+    /// 能力)。空 slices ⇒ 字段为空 ⇒ 渲染侧零新增字节(OFF/非 Enforce 字节等价)。
+    pub fn with_character_context(mut self, slices: &[String]) -> Self {
+        self.character_context = slices
             .iter()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
@@ -442,5 +462,27 @@ mod tests {
         // Empty slices ⇒ field stays empty ⇒ render adds zero bytes.
         let empty = NarrationPacket::project(&adj, "", &[]).with_scene_establishing(&[]);
         assert!(empty.scene_establishing.is_empty());
+    }
+
+    #[test]
+    fn character_context_project_empty_builder_injects_oa2() {
+        // OA2 (G-3): project() leaves character_context empty (OFF byte-equal);
+        // with_character_context injects the gated player-safe PC competency slices,
+        // trimming/filtering empties exactly like with_scene_establishing.
+        let adj = AdjudicationPacket::project("环顾", &TurnLedgerSnapshot::default(), &[], "", None);
+        let base = NarrationPacket::project(&adj, "", &[]);
+        assert!(base.character_context.is_empty(), "project must leave it empty (OFF byte-equal)");
+
+        let injected = NarrationPacket::project(&adj, "", &[]).with_character_context(&[
+            "  stats: STR 55、DEX 70  ".to_string(),
+            "   ".to_string(), // blank → filtered
+            "skills: Spot Hidden 50".to_string(),
+        ]);
+        assert_eq!(
+            injected.character_context,
+            vec!["stats: STR 55、DEX 70".to_string(), "skills: Spot Hidden 50".to_string()]
+        );
+        let empty = NarrationPacket::project(&adj, "", &[]).with_character_context(&[]);
+        assert!(empty.character_context.is_empty());
     }
 }

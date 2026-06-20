@@ -6864,6 +6864,12 @@ pub struct CompiledContext {
     /// 逐字倾倒/列清单(尊重 Q-4 no-dump)；secrets/clues 仍走 A2 奖励门控通道，本字段不碰。
     #[serde(default)]
     pub scene_establishing: Vec<String>,
+    /// OA2 (G-3)：本回合**玩家可知**的 PC 能力档案(角色卡数值能力 stats/skills/…,player-safe)。
+    /// 角色卡是玩家自己的角色 ⇒ 渲染不新增泄漏面;随 CompiledContext 传出,让分体 Narrator
+    /// 念白能引用 PC 真实能力/特长。仅 `Enforce` 下 runtime 填充;Off/Shadow ⇒ 空 ⇒ 注入空 ⇒
+    /// 字节等价基线。由 Narrator 选择性引用、**绝不**逐字罗列数值(尊重 Q-4 no-dump)。
+    #[serde(default)]
+    pub character_context: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]

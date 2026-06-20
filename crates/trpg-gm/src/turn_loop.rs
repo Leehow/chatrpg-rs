@@ -1102,9 +1102,12 @@ impl GmLoop {
         // CompiledContext.scene_establishing,= 当前场景 NON-secret read_aloud,剧透裁剪后)。
         // Off/Shadow ⇒ 该字段为空 ⇒ 注入空 ⇒ 字节等价基线。
         let scene_establishing = ctx.compiled().scene_establishing.clone();
+        // OA2 (G-3): player-safe PC 能力档案(runtime 仅 Enforce 填 character_context)。
+        let character_context = ctx.compiled().character_context.clone();
         let narration = crate::packet::NarrationPacket::project(&adj, "", &[])
             .with_scene_context(&player_safe_scene_context(input))
-            .with_scene_establishing(&scene_establishing);
+            .with_scene_establishing(&scene_establishing)
+            .with_character_context(&character_context);
         let private_tokens = ctx.ledger.private_roll_tokens();
         // P7.3：P1 Narrator 派发经 NarratorPort 适配器（GmLoopNarratorAdapter 仅委托
         // `GmLoop::run_narrator`）——dispatch 间接，byte-identical（无行为变更）。
@@ -2946,6 +2949,21 @@ fn build_narrator_messages(
              此刻的氛围,让开场有真实的模组质感;**绝不**逐字倾倒原文、**绝不**列成清单(①②③)、\
              **绝不**写成选项菜单;只呈现此刻自然可感知的部分,若该场景在前文已建立过,只带入\
              尚未呈现的新要素、不要重复已叙述过的定调;不得据此发明素材之外的实体/线索/机关/结论。"
+        )
+    };
+    // OA2 (G-3): append the player-safe PC competency profile when present (runtime fills it only
+    // under materialization Enforce). Empty ⇒ zero extra bytes ⇒ OFF / non-Enforce byte-equal.
+    // The Narrator may REFERENCE the PC's competencies/traits (e.g. an observant investigator
+    // notices, a strong agent forces) but must NEVER recite raw numbers / list the sheet (Q-4).
+    let character = packet.character_context.join("\n");
+    let user = if character.trim().is_empty() {
+        user
+    } else {
+        format!(
+            "{user}\n\n\
+             你的角色能力档案(玩家自知;仅供你让念白贴合 PC 的强项/弱项,绝不逐字罗列数值):\n{character}\n\
+             指令:当与该回合行动相关时,可让叙述自然体现 PC 的能力倾向(如擅长观察者更易留意细节、\
+             体格强者动作更具压迫感);**绝不**报数值、**绝不**罗列技能清单、**绝不**发明档案外的能力。"
         )
     };
     // Q-1/Q-4 (§2a.1/§2b.1): append GM-craft overlay when TRPG_GM_CRAFT ON; OFF ⇒ byte-equal.
