@@ -404,12 +404,25 @@ impl RuntimeEngine {
         .is_none()
             && state_owned.module_id.is_some()
         {
-            let loaded = self
+            let mut loaded = self
                 .db
                 .load_session_scene(&request.session_id)
                 .await
                 .ok()
                 .flatten();
+            // 自愈：会话从未激活入口场景（旧会话 / 入口激活在 session-init 失败）时，
+            // 每回合单点从 module graph 重派 entry scene 并持久化，避免整局 NULL 场景导致
+            // director/narrator 无锚点而空叙事。fail-soft：任何失败仅 warn，不阻断回合。
+            if loaded.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                if let Some(mid) = state_owned.module_id.as_deref() {
+                    if let Ok(Some(graph)) = self.db.load_module_graph(mid).await {
+                        if let Some(entry) = module_entry_scene_id(&graph) {
+                            let _ = self.db.set_session_scene(&request.session_id, &entry).await;
+                            loaded = Some(entry);
+                        }
+                    }
+                }
+            }
             state_owned.scene_id = resolve_turn_scene_id(
                 state_owned.scene_id.as_deref(),
                 state_owned.module_id.as_deref(),

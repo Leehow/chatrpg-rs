@@ -231,7 +231,39 @@ pub fn module_entry_scene_id(graph: &ModuleGraph) -> Option<String> {
     {
         return Some(s.node_id.clone());
     }
-    graph.scenes.first().map(|s| s.node_id.clone())
+    if let Some(id) = graph.scenes.first().map(|s| s.node_id.clone()) {
+        return Some(id);
+    }
+    // Fallback: 某些 module reader 把开局流程写进 spine.entry_hooks 而**未**归一化到
+    // graph.scenes（例：anthology/scenario_collection 模组）。此时上面全空 → 整局
+    // current_scene_id=NULL，director/narrator 无场景锚点而每回合"无新内容"空叙事。
+    // 从 spine 派生一个稳定的 synthetic entry scene id（`spine:<hook_id>`）解锁开局；
+    // 纯函数、不依赖 ruleset/module 名，对任意 spine 有 entry_hooks 的模组都生效。
+    spine_entry_scene_id(&graph.spine)
+}
+
+/// 从 spine 派生 synthetic entry scene id（graph.scenes 为空时的兜底）。
+/// 偏好 mission_briefing > standard_mission_start > 首个 entry_hook；都无则 None。
+/// 返回 `spine:<hook_id>` 形态，稳定可复现，不与真实 node_id 冲突。
+fn spine_entry_scene_id(spine: &serde_json::Value) -> Option<String> {
+    let hooks = spine.get("entry_hooks").and_then(|v| v.as_array())?;
+    let hook_id = |h: &serde_json::Value| {
+        h.get("id")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let typed = |want: &str| {
+        hooks
+            .iter()
+            .find(|h| h.get("type").and_then(|v| v.as_str()) == Some(want))
+            .and_then(hook_id)
+    };
+    let id = typed("mission_briefing")
+        .or_else(|| typed("standard_mission_start"))
+        .or_else(|| hooks.iter().find_map(hook_id))?;
+    Some(format!("spine:{id}"))
 }
 
 /// 决定本回合生效的 scene_id：已有非空则保留；否则仅当有 module 时用载入值。
@@ -871,6 +903,63 @@ mod module_scene_proj_tests {
             module_entry_scene_id(&ModuleGraph::default()),
             None,
             "空 → None"
+        );
+    }
+
+    #[test]
+    fn module_entry_scene_id_falls_back_to_spine_entry_hooks_when_scenes_empty() {
+        use trpg_model::ModuleGraph;
+        // graph.scenes 空，但 spine 有 entry_hooks（anthology/scenario_collection 形态）。
+        let mut g = ModuleGraph::default();
+        g.spine = serde_json::json!({
+            "entry_hooks": [
+                {"id": "vault_frame", "type": "campaign_frame"},
+                {"id": "agency_assignment", "type": "standard_mission_start"},
+                {"id": "se_briefing", "type": "mission_briefing", "mission": "Springs Eternal"}
+            ]
+        });
+        assert_eq!(
+            module_entry_scene_id(&g).as_deref(),
+            Some("spine:se_briefing"),
+            "scenes 空 → 偏好 mission_briefing 钩子"
+        );
+        // 无 mission_briefing → 退到 standard_mission_start。
+        g.spine = serde_json::json!({
+            "entry_hooks": [
+                {"id": "vault_frame", "type": "campaign_frame"},
+                {"id": "agency_assignment", "type": "standard_mission_start"}
+            ]
+        });
+        assert_eq!(
+            module_entry_scene_id(&g).as_deref(),
+            Some("spine:agency_assignment"),
+            "无 briefing → standard_mission_start"
+        );
+        // 都无优先类型 → 首个钩子。
+        g.spine = serde_json::json!({
+            "entry_hooks": [{"id": "only_hook", "type": "campaign_frame"}]
+        });
+        assert_eq!(
+            module_entry_scene_id(&g).as_deref(),
+            Some("spine:only_hook"),
+            "无优先类型 → 首个钩子"
+        );
+        // spine 无 entry_hooks → 仍 None（保持旧行为）。
+        g.spine = serde_json::json!({"synopsis": {}});
+        assert_eq!(
+            module_entry_scene_id(&g),
+            None,
+            "spine 无 entry_hooks → None"
+        );
+        // 有真实 scenes 时不走 spine 兜底（旧路径优先，字节不变）。
+        let mut n = trpg_model::ScenarioNode::default();
+        n.node_id = "real_scene".into();
+        g.scenes = vec![n];
+        g.spine = serde_json::json!({"entry_hooks": [{"id": "h", "type": "mission_briefing"}]});
+        assert_eq!(
+            module_entry_scene_id(&g).as_deref(),
+            Some("real_scene"),
+            "有真实 scenes → 不走 spine 兜底"
         );
     }
 
