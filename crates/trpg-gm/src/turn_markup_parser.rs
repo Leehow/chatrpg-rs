@@ -9,9 +9,9 @@
 //!   - unknown tag → still treated as literal text here (kept minimal; Extension kind exists in
 //!     the AST for future plugin registry — protocol §十七).
 //!
-//! Q-5 repair: a `[roll]` block with NO digit (pure prose / resource delta) is unwrapped — its
-//! inner prose becomes a Narration block and the wrapper is dropped; a `[roll]` with a digit
-//! (a real mechanical check) is kept intact as a Roll block.
+//! Q-5 / R-1 repair: a `[roll]` with NO digit OR an unbound/"未定" marker (target/result not bound)
+//! is MALFORMED → unwrapped to Narration (counted in `empty_rolls_unwrapped` / `malformed_rolls_
+//! unwrapped`); only a `[roll]` with a digit AND no unbound marker is kept as a real Roll block.
 //!
 //! Streaming note (protocol §十一 byte-boundary concern): this is a deterministic FULL-TEXT
 //! parse. It is byte-boundary safe in the sense required by protocol test #1 for the assembled
@@ -119,7 +119,14 @@ fn push_tag_block(doc: &mut TurnDocument, tag: WireTag, inner: &str) {
             .blocks
             .push(TurnBlock::new(TurnBlockKind::InternalMeta, trimmed)),
         WireTag::Roll => {
-            if inner_has_real_roll(inner) {
+            if inner_is_malformed_roll(inner) {
+                // R-1 (Q-5 guard extension): a roll that "fired" but whose target/result is
+                // unbound ("未定"/"未知"/"目标：?"/"DV?") is NOT a real check — drop the
+                // wrapper, keep inner prose as Narration, and count it. Mirrors the empty path.
+                doc.blocks
+                    .push(TurnBlock::new(TurnBlockKind::Narration, trimmed));
+                doc.malformed_rolls_unwrapped += 1;
+            } else if inner_has_real_roll(inner) {
                 doc.blocks
                     .push(TurnBlock::new(TurnBlockKind::Roll, trimmed));
             } else {
@@ -132,9 +139,22 @@ fn push_tag_block(doc: &mut TurnDocument, tag: WireTag, inner: &str) {
     }
 }
 
-/// A `[roll]` is a REAL check iff its inner content contains a digit (dice total / face / target).
+/// A `[roll]` is a REAL check iff it contains a digit AND is not malformed (the malformed check
+/// runs first in `push_tag_block`), so here we only confirm a digit is present.
 fn inner_has_real_roll(inner: &str) -> bool {
     inner.chars().any(|c| c.is_ascii_digit())
+}
+
+/// Markers signalling a `[roll]` fired but its target/difficulty/result is unbound. Such a block is
+/// MALFORMED → unwrapped to Narration (R-1), even if it carries an unrelated digit. Zero survive.
+const MALFORMED_ROLL_MARKERS: &[&str] = &[
+    "未定", "未知", "未绑定", "待定", "结果：未", "结果:未",
+    "目标：?", "目标:?", "目标？", "目标?", "DV?", "DV：?", "DV:?", "DC?", "DC：?", "DC:?",
+];
+
+/// True iff the inner `[roll]` content signals an unbound / undetermined check (R-1).
+fn inner_is_malformed_roll(inner: &str) -> bool {
+    MALFORMED_ROLL_MARKERS.iter().any(|m| inner.contains(m))
 }
 
 /// If an opening tag (with optional attributes) starts at `i`, return (tag, byte index just past
@@ -271,6 +291,36 @@ mod tests {
         assert_eq!(doc.blocks[0].kind, TurnBlockKind::Roll);
         assert!(doc.player_text().contains("63"));
         assert!(doc.player_text().contains("成功"));
+    }
+
+    #[test]
+    fn malformed_unbound_roll_unwrapped_to_narration() {
+        // R-1: a roll that "fired" but whose result is 未定 (unbound) → NOT a real check.
+        let doc = parse_turn_document("[roll]结果：未定[/roll]");
+        assert_eq!(doc.player_text(), "结果：未定");
+        assert_eq!(doc.malformed_rolls_unwrapped, 1);
+        assert_eq!(doc.empty_rolls_unwrapped, 0);
+        assert_eq!(doc.blocks[0].kind, TurnBlockKind::Narration);
+    }
+
+    #[test]
+    fn malformed_unbound_roll_unwrapped_even_with_digit() {
+        // R-1: even WITH a stray digit, an unbound-target/DV marker means malformed → unwrap.
+        for s in ["[roll]侦查 1d100 目标：? 结果未定[/roll]", "[roll]入侵终端 1d10 DV? 未知[/roll]"] {
+            let doc = parse_turn_document(s);
+            assert_eq!(doc.malformed_rolls_unwrapped, 1, "{s}");
+            assert_eq!(doc.empty_rolls_unwrapped, 0, "{s}");
+            assert_eq!(doc.blocks[0].kind, TurnBlockKind::Narration, "{s}");
+        }
+    }
+
+    #[test]
+    fn bound_roll_kept_despite_no_malformed_marker() {
+        // R-1 guard must NOT over-fire: a real bound roll (digit + no 未定 marker) stays a Roll.
+        let doc = parse_turn_document("[roll]入侵终端 1d10+6=14 ≥ DV13 成功[/roll]");
+        assert_eq!(doc.malformed_rolls_unwrapped, 0);
+        assert_eq!(doc.empty_rolls_unwrapped, 0);
+        assert_eq!(doc.blocks[0].kind, TurnBlockKind::Roll);
     }
 
     #[test]

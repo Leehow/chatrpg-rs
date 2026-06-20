@@ -34,6 +34,10 @@ pub(crate) struct StrippedNarration {
     pub hide_blocks: Vec<String>,
     /// Count of empty `[roll]` wrappers that were unwrapped (inner prose preserved as narration).
     pub empty_rolls_unwrapped: usize,
+    /// Count of MALFORMED `[roll]` wrappers unwrapped (R-1): a roll that fired but whose
+    /// target/difficulty/result was unbound ("未定"/"未知"/"目标：?"/"DV?"). The narrator-phase
+    /// debug trace + downstream 战报 assert this is ZERO (no undetermined [roll] reaches output).
+    pub malformed_rolls_unwrapped: usize,
 }
 
 impl StrippedNarration {
@@ -59,6 +63,7 @@ pub(crate) fn strip_player_markup(text: &str) -> StrippedNarration {
             .map(|b| b.content.clone())
             .collect(),
         empty_rolls_unwrapped: doc.empty_rolls_unwrapped,
+        malformed_rolls_unwrapped: doc.malformed_rolls_unwrapped,
     }
 }
 
@@ -124,6 +129,26 @@ mod tests {
         let r = strip_player_markup("[roll]侦查 1d100=63 ≤ 65 成功[/roll]");
         assert!(r.player_text.contains("63"));
         assert!(r.player_text.contains("成功"));
+        assert_eq!(r.empty_rolls_unwrapped, 0);
+        assert_eq!(r.malformed_rolls_unwrapped, 0);
+    }
+
+    #[test]
+    fn malformed_unbound_roll_unwrapped_and_counted_r1() {
+        // R-1: 未定 / unbound-target roll → unwrapped to narration, counted separately.
+        let r = strip_player_markup("[roll]结果：未定[/roll]");
+        assert_eq!(r.player_text, "结果：未定");
+        assert_eq!(r.malformed_rolls_unwrapped, 1);
+        assert_eq!(r.empty_rolls_unwrapped, 0);
+    }
+
+    #[test]
+    fn bound_roll_kept_malformed_count_zero_r1() {
+        // R-1 no over-fire: a real bound check stays a [roll] and malformed count is zero.
+        let r = strip_player_markup("[roll]入侵终端 1d10+6=14 ≥ DV13 成功[/roll]");
+        assert!(r.player_text.contains("14"));
+        assert!(r.player_text.contains("成功"));
+        assert_eq!(r.malformed_rolls_unwrapped, 0);
         assert_eq!(r.empty_rolls_unwrapped, 0);
     }
 
