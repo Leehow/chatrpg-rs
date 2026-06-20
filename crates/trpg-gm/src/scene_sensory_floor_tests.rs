@@ -37,7 +37,7 @@ fn system_content(messages: &[serde_json::Value]) -> String {
 #[test]
 fn g1_off_is_byte_equal_no_floor_clause() {
     let packet = starved_packet_with_scene();
-    let off = build_narrator_messages(&packet, false);
+    let off = build_narrator_messages(&packet, false, false);
     let user = user_content(&off);
     assert!(
         !user.contains(FLOOR_HEADER) && !user.contains(FLOOR_HARD_LIMIT),
@@ -54,7 +54,7 @@ fn g1_off_is_byte_equal_no_floor_clause() {
 #[test]
 fn g1_on_starved_appends_floor_clause() {
     let packet = starved_packet_with_scene();
-    let on = build_narrator_messages(&packet, true);
+    let on = build_narrator_messages(&packet, true, false);
     let user = user_content(&on);
     assert!(
         user.contains(FLOOR_HEADER),
@@ -70,7 +70,7 @@ fn g1_on_starved_appends_floor_clause() {
 #[test]
 fn g1_on_floor_is_appended_after_baseline_tail() {
     let packet = starved_packet_with_scene();
-    let on = build_narrator_messages(&packet, true);
+    let on = build_narrator_messages(&packet, true, false);
     let user = user_content(&on);
     let baseline_tail = "请据此用第二人称写一段有场景感、逐条覆盖上述机械结果的连贯散文。";
     let tail_pos = user.find(baseline_tail).expect("基线收尾行必须仍在");
@@ -86,7 +86,7 @@ fn g1_on_floor_is_appended_after_baseline_tail() {
 fn g1_on_with_nonempty_facts_no_floor() {
     let mut packet = starved_packet_with_scene();
     packet.what_changed = vec!["你的 HP 从 10 降到 7".to_string()];
-    let on = build_narrator_messages(&packet, true);
+    let on = build_narrator_messages(&packet, true, false);
     let user = user_content(&on);
     assert!(
         !user.contains(FLOOR_HEADER) && !user.contains(FLOOR_HARD_LIMIT),
@@ -99,7 +99,7 @@ fn g1_on_with_nonempty_facts_no_floor() {
 fn g1_on_with_nonempty_what_happened_no_floor() {
     let mut packet = starved_packet_with_scene();
     packet.what_happened = vec!["门被推开了".to_string()];
-    let on = build_narrator_messages(&packet, true);
+    let on = build_narrator_messages(&packet, true, false);
     let user = user_content(&on);
     assert!(
         !user.contains(FLOOR_HEADER),
@@ -112,7 +112,7 @@ fn g1_on_with_nonempty_what_happened_no_floor() {
 fn g1_on_empty_facts_but_nonempty_perceivable_no_floor() {
     let mut packet = starved_packet_with_scene();
     packet.player_perceivable_facts = vec!["你听见远处水滴声".to_string()];
-    let on = build_narrator_messages(&packet, true);
+    let on = build_narrator_messages(&packet, true, false);
     let user = user_content(&on);
     assert!(
         !user.contains(FLOOR_HEADER) && !user.contains(FLOOR_HARD_LIMIT),
@@ -125,7 +125,7 @@ fn g1_on_empty_facts_but_nonempty_perceivable_no_floor() {
 fn g1_on_empty_scene_no_floor() {
     let mut packet = starved_packet_with_scene();
     packet.scene_context = vec![];
-    let on = build_narrator_messages(&packet, true);
+    let on = build_narrator_messages(&packet, true, false);
     let user = user_content(&on);
     assert!(
         !user.contains(FLOOR_HEADER),
@@ -138,7 +138,7 @@ fn g1_on_empty_scene_no_floor() {
 fn g1_on_whitespace_only_scene_no_floor() {
     let mut packet = starved_packet_with_scene();
     packet.scene_context = vec!["   \n  ".to_string()];
-    let on = build_narrator_messages(&packet, true);
+    let on = build_narrator_messages(&packet, true, false);
     let user = user_content(&on);
     assert!(
         !user.contains(FLOOR_HEADER),
@@ -150,8 +150,8 @@ fn g1_on_whitespace_only_scene_no_floor() {
 #[test]
 fn g1_system_prompt_unchanged_across_floor_flag() {
     let packet = starved_packet_with_scene();
-    let off = build_narrator_messages(&packet, false);
-    let on = build_narrator_messages(&packet, true);
+    let off = build_narrator_messages(&packet, false, false);
+    let on = build_narrator_messages(&packet, true, false);
     assert_eq!(
         system_content(&off),
         system_content(&on),

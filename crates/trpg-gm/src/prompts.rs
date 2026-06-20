@@ -46,7 +46,13 @@ impl TurnMessages {
         tail: &DynamicTailInput<'_>,
     ) -> Self {
         let mut messages = Vec::new();
-        messages.push(json!({"role":"system","content": format!("{}\n\n{}", compiled.prefix_text, gm_skill_text)}));
+        // Q-6 (§2b.2 referee, not yes-man): append GM-craft adjudication overlay when
+        // TRPG_GM_CRAFT ON; OFF ⇒ byte-identical baseline system message.
+        let system_content = crate::gm_craft::adjudicator_system(
+            format!("{}\n\n{}", compiled.prefix_text, gm_skill_text),
+            crate::gm_craft::enabled(),
+        );
+        messages.push(json!({"role":"system","content": system_content}));
         messages.push(json!({"role":"user","content": format!("[gm]\n[BP2: Pinned Context]\n{}\n[/gm]", compiled.pinned_text)}));
         for h in history {
             messages.push(json!({"role": h.role, "content": h.content}));

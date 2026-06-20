@@ -1142,7 +1142,7 @@ impl GmLoop {
         let sensory_floor = std::env::var("TRPG_SCENE_SENSORY_FLOOR")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
-        let messages = build_narrator_messages(packet, sensory_floor);
+        let messages = build_narrator_messages(packet, sensory_floor, crate::gm_craft::enabled());
         let mut stream = match self
             .llm
             .stream_chat_with_tools(messages, vec![], ToolChoice::None)
@@ -2786,6 +2786,7 @@ fn player_safe_scene_context(input: &GmTurnInput<'_>) -> Vec<String> {
 fn build_narrator_messages(
     packet: &crate::packet::NarrationPacket,
     sensory_floor: bool,
+    gm_craft: bool,
 ) -> Vec<serde_json::Value> {
     let mut facts = String::new();
     for f in &packet.what_happened {
@@ -2858,6 +2859,8 @@ fn build_narrator_messages(
     } else {
         user
     };
+    // Q-1/Q-4 (§2a.1/§2b.1): append GM-craft overlay when TRPG_GM_CRAFT ON; OFF ⇒ byte-equal.
+    let system = crate::gm_craft::narrator_system(system, gm_craft);
     vec![
         serde_json::json!({"role": "system", "content": system}),
         serde_json::json!({"role": "user", "content": user}),

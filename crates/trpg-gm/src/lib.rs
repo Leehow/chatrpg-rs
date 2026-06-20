@@ -1,6 +1,7 @@
 pub mod errata;
 pub mod execute;
 pub mod gate;
+pub(crate) mod gm_craft;
 pub mod ledger;
 pub mod mode;
 pub mod mode_catalog;
