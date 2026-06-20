@@ -1068,9 +1068,12 @@ impl GmLoop {
             &adjudicator_prose,
             None,
         );
-        // StyleProfile：P1 用中性默认（空串 → NarrationPacket 内置默认）；不灌入完整 gm_skill
-        // （可能含规则原文）。forbidden_reveals P1 为空（P2/P3 收窄）。
-        let narration = crate::packet::NarrationPacket::project(&adj, "", &[]);
+        // StyleProfile：P1 用中性默认（空串 → NarrationPacket 内置第二人称 persona 默认，A1）；
+        // 不灌入完整 gm_skill（可能含规则原文）。forbidden_reveals P1 为空（P2/P3 收窄）。
+        // A2(§6 大考)：注入 player-safe scene_context(= 上一回合已交付 narration / 玩家已可见)，
+        // 给饿肚子的 split Narrator 补感官/连续性 grounding。来源 player-safe ⇒ 不新增泄漏面。
+        let narration = crate::packet::NarrationPacket::project(&adj, "", &[])
+            .with_scene_context(&player_safe_scene_context(input));
         let private_tokens = ctx.ledger.private_roll_tokens();
         // P7.3：P1 Narrator 派发经 NarratorPort 适配器（GmLoopNarratorAdapter 仅委托
         // `GmLoop::run_narrator`）——dispatch 间接，byte-identical（无行为变更）。
@@ -1823,8 +1826,15 @@ impl GmLoop {
         let gate = crate::ports::PresentationPolicyAdapter.presentation_gate(&gate_input);
         // gate 决策折一条 advisory trace（OFF/ON 都记，零行为变更；§20 explain --plugins 可见）。
         traces.push(presentation_gate_trace(&gate));
+        // A3(§6 大考)：白名单**之外**单独检 OmittedVisibleResult(空心念白)——旁路信号，
+        // 不改 gate 判定本身(仍 Allow)。
+        let omitted_visible_repair = omitted_visible_result_needs_repair(&gate_input);
 
-        VerifyAfterStreamOutcome { traces, gate }
+        VerifyAfterStreamOutcome {
+            traces,
+            gate,
+            omitted_visible_repair,
+        }
     }
 
     /// AfterLlmStream hook 接线（fail-soft）。构造只读 PluginContext（narration=visible_text），
@@ -2196,8 +2206,14 @@ impl GmLoop {
         // 零行为变更，**不**进 repair。ON 且 buffered_narration 就位（= TRPG_NARRATOR_SPLIT ON、
         // 文字在校验前经 Narrator 缓冲）时，Block ⇒ 跑修复阶梯；ON 但文字已实时流出（buffer 不在位）
         // ⇒ 退化为仅 trace（回收已流出文字无意义）。绝不回滚已 commit 的 ledger/DB。
-        if presentation_gate_enabled() && buffered_narration && ctx.presentation_gate.is_block() {
-            self.run_presentation_repair_ladder(ctx, input, tx, cancel)
+        //
+        // A3(§6 大考)：白名单之外的 OmittedVisibleResult(空心念白)在 ON+buffered 时**旁路**触发
+        // 同一阶梯——split Narrator 无 ReviseText 自修环,靠此补收敛守卫。触发条件加 NARRATOR_SPLIT
+        // 显式门(buffered_narration 已蕴含,但显式更清晰),且 OFF(任一 flag 关)恒不进 ⇒ 字节等价。
+        let gate_block = ctx.presentation_gate.is_block();
+        let omitted_repair = narrator_split_enabled() && outcome.omitted_visible_repair;
+        if presentation_gate_enabled() && buffered_narration && (gate_block || omitted_repair) {
+            self.run_presentation_repair_ladder(ctx, input, tx, cancel, omitted_repair)
                 .await;
         }
     }
@@ -2212,6 +2228,9 @@ impl GmLoop {
         input: &GmTurnInput<'_>,
         tx: &tokio::sync::mpsc::Sender<crate::turn_event::TurnEvent>,
         cancel: Option<&CancellationToken>,
+        // A3(§6 大考)：本次阶梯是否为 OmittedVisibleResult 旁路触发。为 true 时,recheck 除
+        // gate.is_block() 外还须**已不再漏报可见结果**才采纳重生稿,否则落确定性兜底(收敛保证)。
+        include_omitted_repair: bool,
     ) {
         // 收窄 forbidden_reveals：把触发 Block 的 finding detail 作为禁揭示约束喂回 Narrator。
         let forbidden: Vec<String> = match &ctx.presentation_gate {
@@ -2228,7 +2247,10 @@ impl GmLoop {
             &ctx.visible_text,
             None,
         );
-        let narration = crate::packet::NarrationPacket::project(&adj, "", &forbidden);
+        // A3：重生稿也注入 player-safe scene_context(= 上一回合已交付 narration / 玩家已可见),
+        // 让重生有感官 grounding 而非再次空心。来源 player-safe ⇒ 不新增泄漏面。
+        let narration = crate::packet::NarrationPacket::project(&adj, "", &forbidden)
+            .with_scene_context(&player_safe_scene_context(input));
         let private_tokens = ctx.ledger.private_roll_tokens();
         // P7.3：repair-ladder 的 Narrator 重生同样经 NarratorPort 适配器派发（byte-identical）。
         // `&mut self` 处只读重借 `&*self` 构造适配器，不持有跨 await 的可变借用。
@@ -2247,7 +2269,10 @@ impl GmLoop {
                     )
                     .await;
                 ctx.plugin_contributions.extend(recheck.traces);
-                if !recheck.gate.is_block() {
+                // A3：旁路触发时,recheck 还须确认重生稿不再漏报可见结果(白名单不管 OmittedVisible,
+                // 故必须显式查 recheck.omitted_visible_repair),否则不采纳 ⇒ 落确定性兜底(收敛)。
+                let still_omitted = include_omitted_repair && recheck.omitted_visible_repair;
+                if !recheck.gate.is_block() && !still_omitted {
                     ctx.presentation_gate = recheck.gate;
                     ctx.visible_text = text;
                     return;
@@ -2255,7 +2280,8 @@ impl GmLoop {
                 ctx.presentation_gate = recheck.gate;
             }
         }
-        // (2) 确定性 committed-facts 模板叙事（§18，never blank）。
+        // (2) 确定性 committed-facts 模板叙事（§18，never blank）。逐条复述可见证据 token ⇒
+        // 必过 OmittedVisibleResult 检查 ⇒ A3 旁路在 bounded retry=1 后**确定性收敛**,不死循环。
         ctx.visible_text = deterministic_committed_facts_narration(&narration);
     }
 
@@ -2536,6 +2562,34 @@ where
 /// 但走 tx.send 而非 on_delta；被门轮 blocked 丢弃）。
 /// 构造无工具 Narrator 的最小请求消息（system 风格契约 + user 机械事实）。
 /// 只含玩家可感知机械事实摘要 + player_input，无规则原文 / 无 schema / 无 GM 内部推理。
+/// A2(§6 大考)：从 GmTurnInput 抽 **player-safe** 场景上下文给 split Narrator 补 grounding。
+/// 唯一来源 = 上一回合**已对玩家交付**的 narration（recent_transcript 优先，否则 history 里
+/// 最后一条 assistant 消息）——按定义已脱敏、已对玩家可见,故 fail-closed 零新增泄漏面。
+/// 截断到稳定上界(避免把整段历史灌爆 prompt);为空 ⇒ 返回空 vec(graceful)。
+fn player_safe_scene_context(input: &GmTurnInput<'_>) -> Vec<String> {
+    let prior = input.recent_transcript.or_else(|| {
+        input
+            .history
+            .iter()
+            .rev()
+            .find(|m| m.role == "assistant")
+            .map(|m| m.content.as_str())
+    });
+    match prior {
+        Some(text) if !text.trim().is_empty() => {
+            // 取尾部 600 字(最近场景),按字符边界安全截断。
+            let trimmed = text.trim();
+            let snippet: String = if trimmed.chars().count() > 600 {
+                trimmed.chars().rev().take(600).collect::<Vec<_>>().into_iter().rev().collect()
+            } else {
+                trimmed.to_string()
+            };
+            vec![snippet]
+        }
+        _ => Vec::new(),
+    }
+}
+
 fn build_narrator_messages(packet: &crate::packet::NarrationPacket) -> Vec<serde_json::Value> {
     let mut facts = String::new();
     for f in &packet.what_happened {
@@ -2550,9 +2604,15 @@ fn build_narrator_messages(packet: &crate::packet::NarrationPacket) -> Vec<serde
     }
     let perceivable = packet.player_perceivable_facts.join("；");
     let forbidden = packet.forbidden_reveals.join("；");
+    let scene = packet.scene_context.join("\n");
     let system = format!(
         "你是 TRPG 叙事者(Narrator)。把已发生的机械事实写成玩家可见的连贯散文。\n\
          风格：{}\n\
+         人称：始终以**第二人称「你」**称呼玩家角色(绝不用第三人称「他/她/角色」叙述玩家)。\n\
+         感官场景：落地到具体可感知的场景(光线/声音/气味/触感/空间)，**不要**只机械朗读；\n\
+         绝不逐字复述或照搬玩家输入原句——把它转写成发生在场景里的画面。\n\
+         机械忠实：**逐条**复述下方“本回合机械事实”里的每一条结果(检定成败/伤害/资源/状态)，\n\
+         一条都不许略过(玩家必须感知到每个已落账的可见结果)。\n\
          铁律：只叙述下方机械事实与玩家可感知信息；绝不发明未列出的检定/伤害/资源/状态；\n\
          不输出规则原文、工具 JSON、GM 内部推理；不揭示下方“禁止揭示”项。\n\
          禁止揭示：{}",
@@ -2564,8 +2624,15 @@ fn build_narrator_messages(packet: &crate::packet::NarrationPacket) -> Vec<serde
         }
     );
     let user = format!(
-        "玩家输入：{}\n\n本回合机械事实：\n{}玩家可感知：{}\n\n请据此写一段连贯散文。",
+        "玩家输入：{}\n\n当前场景(玩家已感知，供延续与感官 grounding，勿复述其原句)：\n{}\n\n\
+         本回合机械事实(逐条复述，勿遗漏)：\n{}玩家可感知：{}\n\n\
+         请据此用第二人称写一段有场景感、逐条覆盖上述机械结果的连贯散文。",
         packet.player_input,
+        if scene.trim().is_empty() {
+            "（无前序场景，自行据机械事实落地一个可感知场景）".to_string()
+        } else {
+            scene
+        },
         if facts.is_empty() {
             "（无机械变化）\n".to_string()
         } else {
@@ -2641,6 +2708,30 @@ pub(crate) fn presentation_gate_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// A3(§6 大考)：TRPG_NARRATOR_SPLIT 是否 ON(默认 OFF = 字节级基线)。split Narrator 无统一
+/// agent loop 的 ReviseText 自修环，故 ON 路径需本修复谓词补一道收敛守卫。execute.rs 已就地
+/// 读此 flag 决定 buffer 模式;此 helper 供 phase_verify_after_stream 的 A3 谓词复用同一语义。
+pub(crate) fn narrator_split_enabled() -> bool {
+    std::env::var("TRPG_NARRATOR_SPLIT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// A3(§6 大考)：本回合 verify 结果是否含 **Blocker 级 OmittedVisibleResult**(念白漏报了玩家
+/// 可见的机械结果 ⇒ 空心念白)。这是 split Narrator 特有的不收敛缺口的触发谓词。
+///
+/// **绝不触动** charter 锁定白名单(presentation_gate::BLOCKING_KINDS)——OmittedVisibleResult
+/// 对 gate 仍判 Allow;本谓词是**旁路**修复信号,只在 ON(PRESENTATION_GATE+NARRATOR_SPLIT)
+/// 且 buffered 时把这条 finding 喂回既有 repair ladder(bounded retry + 确定性兜底 ⇒ 收敛)。
+pub(crate) fn omitted_visible_result_needs_repair(
+    result: &trpg_agent::NarrationVerifierResult,
+) -> bool {
+    result.findings.iter().any(|f| {
+        f.kind == trpg_agent::VerifierFindingKind::OmittedVisibleResult
+            && f.severity == trpg_agent::VerifierSeverity::Blocker
+    })
+}
+
 /// P6.7：reveal_fact 提名门控开关（默认 OFF = 字节级基线）。ON ⇒ reveal_fact 不再
 /// 即时落库，而是提名到 ctx.nominated_reveals，由 PresentationCommit 边界在终审
 /// Allow 后统一提交；OFF ⇒ reveal_fact 即时落库（F13 与今日行为逐字节等价）。
@@ -2677,6 +2768,9 @@ pub(crate) fn deterministic_committed_facts_narration(
 pub(crate) struct VerifyAfterStreamOutcome {
     pub traces: Vec<trpg_model::PluginContributionTrace>,
     pub gate: crate::presentation_gate::PresentationGate,
+    /// A3(§6 大考)：本回合是否检出 Blocker 级 OmittedVisibleResult(空心念白)。advisory，
+    /// **不**经 gate 白名单;调用方在 ON+buffered 时据此旁路触发 repair ladder(收敛守卫)。
+    pub omitted_visible_repair: bool,
 }
 
 /// P2 步骤8：把 PresentationGate 决策折成 advisory plugin trace（`trpg explain --plugins` 可见
@@ -3148,3 +3242,7 @@ mod tests;
 #[cfg(test)]
 #[path = "turn_loop_mode_tests.rs"]
 mod mode_tempo_tests;
+
+#[cfg(test)]
+#[path = "narrator_fix_tests.rs"]
+mod narrator_fix_tests;

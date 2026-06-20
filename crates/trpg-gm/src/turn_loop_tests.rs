@@ -1233,6 +1233,7 @@ async fn narrator_runs_with_empty_tools_and_tool_choice_none() {
         player_perceivable_facts: vec![],
         style_profile: "中性".to_string(),
         forbidden_reveals: vec![],
+        ..Default::default()
     };
     let (tx, mut rx) = mpsc::channel(64);
     let out = gm.run_narrator(&packet, &[], &tx, None).await;

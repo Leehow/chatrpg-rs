@@ -74,6 +74,11 @@ pub struct NarrationPacket {
     pub style_profile: String,
     /// 禁揭示项(P1 复用 verify 路径已采集的投影；为空也合法)。
     pub forbidden_reveals: Vec<String>,
+    /// A2(§6 大考)：player-safe 场景上下文(感官/连续性 grounding)。来源**只能**是已对
+    /// 玩家可见的散文(上一回合已交付 narration)——按定义已脱敏；`project` 恒置空(OFF 字节
+    /// 等价),仅 ON 经 `with_scene_context` 注入。**绝不**承载 GM-only/secret/规则原文/prose。
+    #[serde(default)]
+    pub scene_context: Vec<String>,
 }
 
 fn roll_is_player_visible(visibility: RollVisibility) -> bool {
@@ -178,7 +183,11 @@ impl NarrationPacket {
             }
         }
         let style = if style_profile.trim().is_empty() {
-            "中性、克制、贴合已发生的机械事实的第三人称叙事。".to_string()
+            // A1(§6 大考)：空 style 默认 persona = **第二人称「你」**。OFF 永不进 split
+            // 分支(此默认仅 split Narrator 可达)，故 OFF 字节不变；split Narrator 不读
+            // gm_skill markdown(其第二人称源)，由此默认补回沉浸式第二人称视角。
+            "以**第二人称「你」**称呼玩家角色，中性、克制、贴合已发生的机械事实地叙事。"
+                .to_string()
         } else {
             style_profile.trim().to_string()
         };
@@ -189,7 +198,21 @@ impl NarrationPacket {
             player_perceivable_facts: adj.resolved_gate_facts.clone(),
             style_profile: style,
             forbidden_reveals: forbidden_reveals.to_vec(),
+            // A2：project 恒置空 scene_context(OFF 字节等价)；ON 阶段经 with_scene_context 注入。
+            scene_context: Vec::new(),
         }
+    }
+
+    /// A2(§6 大考)：注入 player-safe 场景上下文(链式 builder)。`scenes` 的每条都**必须**
+    /// 是已对玩家可见的散文(调用方保证 = 上一回合已交付 narration / player_knowledge_view)；
+    /// 投影本身从不读 GM-only / adjudicator_prose ⇒ fail-closed,绝不新增泄漏面。
+    pub fn with_scene_context(mut self, scenes: &[String]) -> Self {
+        self.scene_context = scenes
+            .iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        self
     }
 }
 
