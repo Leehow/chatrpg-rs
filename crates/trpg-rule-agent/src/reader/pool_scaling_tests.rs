@@ -48,14 +48,23 @@ fn compiles_choice_into_ordinal_rank_record() {
         .expect("a choice + catalog -> a record");
     assert_eq!(rec["id"], json!("competency_rank"));
     assert_eq!(rec["role"], json!("attribute"), "routes to sheet stats");
-    assert_eq!(rec["expr"], json!("lookup(competency_rank_table,{{competency}})"));
+    assert_eq!(
+        rec["expr"],
+        json!("lookup(competency_rank_table,{{competency}})")
+    );
     let ranges = rec["lookup_tables"]["competency_rank_table"]["ranges"]
         .as_array()
         .unwrap();
     // 1-based ordinal from catalog ORDER (the data source), not a constant map.
     assert_eq!(ranges.len(), 3);
-    assert_eq!(ranges[0], json!({"min":"x.comp.archivist","max":"x.comp.archivist","value":1}));
-    assert_eq!(ranges[2], json!({"min":"x.comp.handler","max":"x.comp.handler","value":3}));
+    assert_eq!(
+        ranges[0],
+        json!({"min":"x.comp.archivist","max":"x.comp.archivist","value":1})
+    );
+    assert_eq!(
+        ranges[2],
+        json!({"min":"x.comp.handler","max":"x.comp.handler","value":3})
+    );
 }
 
 #[test]
@@ -98,6 +107,107 @@ fn fail_soft_when_no_choice_field_or_too_few_options() {
     assert!(pool_scaling_choice_record("  ", &t, &competency_catalog()).is_none());
 }
 
+/// A template whose `competency` choice declares an explicit `choices_material_id`
+/// and a distinct human title — the linkage real rulesets carry.
+fn template_with_material_link(material_id: &str, title: &str) -> CharacterTemplate {
+    let mut t = CharacterTemplate::default();
+    t.fields = vec![CharacterField {
+        field_id: "competency".into(),
+        title: title.into(),
+        field_type: "choice".into(),
+        choices_material_id: Some(material_id.into()),
+        ..Default::default()
+    }];
+    t
+}
+
+#[test]
+fn matches_group_via_choices_material_id_not_field_id() {
+    // The catalog keys its group by the field's declared material id — NOT by the
+    // snake_case field id and NOT by substring of "competency". Only honoring
+    // `choices_material_id` resolves it. (Generic linkage, the Q-2 coverage gap.)
+    let t = template_with_material_link("agent_role_options", "Role");
+    let catalog = json!([{
+        "catalog_id": "x.character_options.v1",
+        "option_groups": [{
+            "category": "role",
+            "group_id": "agent_role_options",
+            "locators": [
+                {"locator_id": "x.role.junior", "label": "Junior"},
+                {"locator_id": "x.role.senior", "label": "Senior"}
+            ]
+        }]
+    }]);
+    let rec = pool_scaling_choice_record("competency_rank", &t, &catalog)
+        .expect("choices_material_id links the group");
+    let ranges = rec["lookup_tables"]["competency_rank_table"]["ranges"]
+        .as_array()
+        .unwrap();
+    assert_eq!(ranges.len(), 2);
+    assert_eq!(ranges[0]["min"], json!("x.role.junior"));
+    assert_eq!(ranges[1]["value"], json!(2));
+}
+
+#[test]
+fn matches_group_via_field_title() {
+    // The group is keyed by the field's human TITLE ("Competency"), while the
+    // field id is a terse code. Title-as-needle resolves it.
+    let t = template_with_material_link("unused_material", "Competency");
+    let catalog = json!([{
+        "catalog_id": "x.options",
+        "option_groups": [{
+            "title": "Competency",
+            "group_id": "grp_7",
+            "options": [
+                {"option_id": "a", "title": "Alpha"},
+                {"option_id": "b", "title": "Beta"}
+            ]
+        }]
+    }]);
+    assert!(pool_scaling_choice_record("competency_rank", &t, &catalog).is_some());
+}
+
+#[test]
+fn matches_group_via_enclosing_catalog_id() {
+    // A flat single-group catalog whose only locating key is its catalog_id
+    // (== the field's material id). The catalog-level match still resolves.
+    let t = template_with_material_link("competency_catalog", "Comp");
+    let catalog = json!([{
+        "catalog_id": "competency_catalog",
+        "option_groups": [{
+            "group_id": "g",
+            "category": "misc",
+            "locators": [
+                {"locator_id": "one", "label": "One"},
+                {"locator_id": "two", "label": "Two"}
+            ]
+        }]
+    }]);
+    assert!(pool_scaling_choice_record("competency_rank", &t, &catalog).is_some());
+}
+
+#[test]
+fn unrelated_catalog_still_fail_soft() {
+    // None of the field's keys (id/title/material_id) appear on any group or the
+    // catalog id -> no group matches -> pool stays flat. This is the Triangle-live
+    // situation (groups are origin/role_or_class/equipment/abilities, none keyed
+    // to the `competency` field) and MUST remain a fail-soft None, not invention.
+    let t = template_with_material_link("competency_options", "Competency");
+    let unrelated = json!([{
+        "catalog_id": "x.character_options.v1",
+        "option_groups": [
+            {"category": "origin", "group_id": "x.origin",
+             "locators": [{"locator_id": "o1", "label": "L1"}, {"locator_id": "o2", "label": "L2"}]},
+            {"category": "equipment", "group_id": "x.equipment",
+             "locators": [{"locator_id": "e1", "label": "E1"}, {"locator_id": "e2", "label": "E2"}]}
+        ]
+    }]);
+    assert!(
+        pool_scaling_choice_record("competency_rank", &t, &unrelated).is_none(),
+        "no group keyed to the competency field -> fail-soft (no invented options)"
+    );
+}
+
 #[test]
 fn no_ruleset_name_literals_in_record() {
     // The emitted record carries only generic terms + the (generic) field id —
@@ -105,7 +215,10 @@ fn no_ruleset_name_literals_in_record() {
     let t = triangle_like_template();
     let rec = pool_scaling_choice_record("competency_rank", &t, &competency_catalog()).unwrap();
     let s = rec.to_string().to_ascii_lowercase();
-    assert!(!s.contains("triangle"), "no ruleset name leaks into the record");
+    assert!(
+        !s.contains("triangle"),
+        "no ruleset name leaks into the record"
+    );
     assert!(!s.contains("the_vault"));
 }
 
@@ -126,7 +239,10 @@ fn rank_for_pick(pick: &str) -> i64 {
         .expect("rank evaluated");
     ev.value
         .as_ref()
-        .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+        .and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        })
         .expect("numeric rank")
 }
 
@@ -138,7 +254,10 @@ fn end_to_end_higher_competency_yields_bigger_param_driven_pool() {
     let high = rank_for_pick("x.comp.handler"); // ordinal 3
     assert_eq!(low, 1);
     assert_eq!(high, 3);
-    assert!(high > low, "a later-listed competency compiles to a higher rank");
+    assert!(
+        high > low,
+        "a later-listed competency compiles to a higher rank"
+    );
 
     // Now feed those ranks through the SAME helper trpg-runtime uses to scale the
     // pool. The kernel names the param + a generic scaling contract (base+per_rank).
