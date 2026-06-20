@@ -2247,12 +2247,55 @@ impl RuntimeEngine {
         {
             c.dice_expression = d;
         }
+        // PARAM-DRIVEN POOL (TRPG_PARAM_DRIVEN_POOL, default OFF): a count_faces
+        // pool whose kernel declares `dice_core.pool_scaling_parameter` lets the
+        // ACTOR's competency rating set the pool SIZE (base + per_rank*rating)
+        // instead of a flat constant. Generic + data-driven (the kernel NAMES the
+        // param; the engine reads it off the actor sheet) — zero ruleset_id
+        // branching. OFF, or no scaling field, or no readable rating → the flat
+        // expr above is untouched (byte-identical legacy behavior).
+        self.scale_pool_if_param_driven(c, &kernel.dice_core).await;
         if let Some(bound) = kernel_default_target_binding(&c.target, &kernel.dice_core) {
             c.target = bound;
         }
         if !kernel.source_refs.is_empty() {
             c.source_refs = kernel.source_refs.clone();
             c.ruling_status = RulingStatus::SourceBacked;
+        }
+    }
+
+    /// Param-driven pool sizing (flag-gated, additive). When `TRPG_PARAM_DRIVEN_POOL`
+    /// is ON and `dice_core.pool_scaling_parameter` names a competency parameter, read
+    /// the initiating actor's rating for that param and rebuild the count_faces pool
+    /// expression to `base + per_rank*rating` dice (faces preserved). A competent vs
+    /// incompetent agent thus rolls a DIFFERENT pool. fail-soft at every step: flag OFF,
+    /// no scaling field, no actor params, or unreadable/non-numeric rating → leave the
+    /// flat expr exactly as set (byte-identical legacy behavior).
+    async fn scale_pool_if_param_driven(
+        &self,
+        c: &mut CheckContract,
+        dice_core: &serde_json::Value,
+    ) {
+        if !env_bool_runtime("TRPG_PARAM_DRIVEN_POOL", false) {
+            return;
+        }
+        let Some(param_name) = pool_scaling_parameter(dice_core) else {
+            return;
+        };
+        let Some(params) = RuntimeParameterService::new(self.db.clone())
+            .load_actor_parameters(&c.session_id, &c.initiator.actor_id)
+            .await
+            .ok()
+            .flatten()
+        else {
+            return;
+        };
+        let Some(rating) = numeric_param_from_profile(&params.mechanical_profile, &param_name)
+        else {
+            return;
+        };
+        if let Some(expr) = param_driven_pool_expression(dice_core, &c.dice_expression, rating) {
+            c.dice_expression = expr;
         }
     }
 
@@ -4574,6 +4617,138 @@ fn push_lower_term(terms: &mut Vec<String>, raw: &str) {
     }
 }
 
+/// Param-driven dice pool (TRPG_PARAM_DRIVEN_POOL): exercises the ENGINE glue
+/// `scale_pool_if_param_driven` end-to-end against a real DB. Proves the Q-2
+/// acceptance: OFF → flat 6d4 (byte-identical), ON → a competent vs incompetent
+/// agent rolls a DIFFERENT pool. DB-gated (skips when DATABASE_URL is unset).
+///
+/// NOTE (case b): the live Triangle PC sheet carries `competency` as a CATEGORICAL
+/// label ("Investigator"), not a numeric rating — so this test populates a
+/// SYNTHETIC numeric `competency_rank` param to prove the mechanism. The remaining
+/// data-population gap (compiling a numeric competency rating into chargen) is
+/// documented in the handoff.
+#[cfg(test)]
+mod param_driven_pool_engine_tests {
+    use super::*;
+    use serde_json::json;
+    use std::sync::Mutex;
+
+    // The flag is process-global env; serialize ON/OFF tests so neither sees the
+    // other's env mutation.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    const RULESET: &str = "qb_param_pool_test";
+
+    fn pool_kernel() -> RuleKernel {
+        serde_json::from_value(json!({
+            "kernel_id": format!("kernel_{}", uuid::Uuid::new_v4().simple()),
+            "ruleset_id": RULESET,
+            "version": "test",
+            "dice_core": {
+                "dice": "6d4",
+                "compare": "count_faces",
+                "target_face": 3,
+                "success_threshold": 1,
+                // Generic data-driven scaling contract (NO ruleset name in engine):
+                "pool_scaling_parameter": "competency_rank",
+                "pool_base": 4,
+                "pool_per_rank": 1
+            }
+        }))
+        .unwrap()
+    }
+
+    fn actor_params(session: &str, actor: &str, rank: i64) -> trpg_params::RuntimeActorParameters {
+        let sheet = json!({ "stats": { "competency_rank": rank } });
+        chargen::materialize_actor_params(session, RULESET, actor, "tmpl", actor, &sheet, 0)
+    }
+
+    fn count_faces_contract(session: &str, actor: &str) -> CheckContract {
+        serde_json::from_value(json!({
+            "check_id": format!("check_{}", uuid::Uuid::new_v4().simple()),
+            "session_id": session, "turn_id": "t", "ruleset_id": RULESET, "module_id": null,
+            "initiator": {"actor_id": actor, "actor_kind":"player_character","display_name":null},
+            "target_actor": null,
+            "opposition": {"kind":"no_mechanical_opposition"},
+            "action_summary": "draw on the Agency", "intent_kind": "agent_selected_check",
+            "check_label": "Agency pool", "dice_expression": "6d4", "modifiers": [],
+            "target": {"kind":"unknown_until_lookup"},
+            "tested_parameter": null, "opponent_tested_parameter": null,
+            "actor_snapshot_ids": [], "source_refs": [], "learned_packet_ids": [],
+            "roll_visibility": "public_gm_roll", "roll_authority": "system",
+            "disclosure": {"show_roll_to_player":true,"show_formula_to_player":true,"show_dc_to_player":true,"show_success_failure_to_player":true,"reveal_after_scene":false,"reveal_after_session":false},
+            "stakes": {"before_roll_public":"","success_public":"","failure_public":"","critical_public":null,"fumble_public":null,"success_patches_allowed":[],"failure_patches_allowed":[],"irreversible":false},
+            "confidence": "medium", "ruling_status": "provisional", "advice_refs": [], "expires_at_turn": null
+        })).unwrap()
+    }
+
+    async fn setup() -> Option<(Db, String)> {
+        let url = std::env::var("DATABASE_URL").ok()?;
+        let db = Db::connect(&url).await.ok()?;
+        let session = format!("session_qb_pool_{}", uuid::Uuid::new_v4().simple());
+        db.upsert_rule_kernel(&pool_kernel()).await.ok()?;
+        let svc = RuntimeParameterService::new(db.clone());
+        // Incompetent agent (rank 1) and competent agent (rank 5).
+        svc.upsert_actor_parameters(&actor_params(&session, "pc.low", 1))
+            .await
+            .ok()?;
+        svc.upsert_actor_parameters(&actor_params(&session, "pc.high", 5))
+            .await
+            .ok()?;
+        Some((db, session))
+    }
+
+    #[tokio::test]
+    async fn off_keeps_flat_pool_byte_identical() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("TRPG_PARAM_DRIVEN_POOL"); // default OFF
+        let Some((db, session)) = setup().await else {
+            eprintln!("SKIP: DATABASE_URL unset");
+            return;
+        };
+        let engine = RuntimeEngine::new(db);
+        let dc = pool_kernel().dice_core;
+        // Even the most competent agent stays at the flat kernel dice when OFF.
+        let mut c = count_faces_contract(&session, "pc.high");
+        engine.scale_pool_if_param_driven(&mut c, &dc).await;
+        assert_eq!(
+            c.dice_expression, "6d4",
+            "OFF: pool must be byte-identical to the flat kernel dice"
+        );
+    }
+
+    #[tokio::test]
+    async fn on_competent_agent_rolls_larger_pool() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::set_var("TRPG_PARAM_DRIVEN_POOL", "1");
+        let result = async {
+            let Some((db, session)) = setup().await else {
+                eprintln!("SKIP: DATABASE_URL unset");
+                return None;
+            };
+            let engine = RuntimeEngine::new(db);
+            let dc = pool_kernel().dice_core;
+
+            let mut low = count_faces_contract(&session, "pc.low");
+            engine.scale_pool_if_param_driven(&mut low, &dc).await;
+            let mut high = count_faces_contract(&session, "pc.high");
+            engine.scale_pool_if_param_driven(&mut high, &dc).await;
+            Some((low.dice_expression, high.dice_expression))
+        }
+        .await;
+        std::env::remove_var("TRPG_PARAM_DRIVEN_POOL");
+
+        let Some((low, high)) = result else { return };
+        // base 4 + 1*rank: rank 1 -> 5d4, rank 5 -> 9d4. Faces preserved.
+        assert_eq!(low, "5d4", "incompetent agent (rank 1) -> 5d4");
+        assert_eq!(high, "9d4", "competent agent (rank 5) -> 9d4");
+        assert_ne!(
+            low, high,
+            "ON: competent vs incompetent MUST roll a different pool"
+        );
+    }
+}
+
 #[cfg(test)]
 mod rule_sensitivity_tests {
     use super::looks_rule_or_module_sensitive;
@@ -5205,6 +5380,35 @@ fn player_supplied_roll_expressions_allowed() -> bool {
             )
         })
         .unwrap_or(false)
+}
+
+/// Read a NUMERIC rating for a named parameter off an actor's materialized
+/// `mechanical_profile`. Searches the standard buckets (stats, skills, fields,
+/// resources, derived_values) plus the profile top level, case-insensitively.
+/// Accepts a JSON number or a numeric string (e.g. "2"). Returns None when the
+/// key is absent or the value is non-numeric (e.g. a categorical competency
+/// label like "Investigator") — the pool then stays flat (fail-soft). Generic:
+/// the caller supplies the key NAME from the kernel; no hardcoded param names.
+fn numeric_param_from_profile(profile: &serde_json::Value, key: &str) -> Option<i64> {
+    fn as_num(v: &serde_json::Value) -> Option<i64> {
+        v.as_i64()
+            .or_else(|| v.as_f64().map(|f| f as i64))
+            .or_else(|| v.as_str().and_then(|s| s.trim().parse::<i64>().ok()))
+    }
+    fn lookup(obj: &serde_json::Value, key: &str) -> Option<i64> {
+        let m = obj.as_object()?;
+        m.iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(key))
+            .and_then(|(_, v)| as_num(v))
+    }
+    for bucket in ["stats", "skills", "fields", "resources", "derived_values"] {
+        if let Some(b) = profile.get(bucket) {
+            if let Some(v) = lookup(b, key) {
+                return Some(v);
+            }
+        }
+    }
+    lookup(profile, key)
 }
 
 fn env_bool_runtime(key: &str, default: bool) -> bool {

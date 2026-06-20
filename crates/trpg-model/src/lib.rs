@@ -3122,6 +3122,81 @@ pub fn count_faces_threshold(dice_core: &serde_json::Value) -> i64 {
         .unwrap_or(1)
 }
 
+/// Parse the dice COUNT and FACES from a flat `NdM` pool expression (e.g.
+/// "6d4" → (6, 4)). Tolerant of surrounding whitespace; returns None when the
+/// string is not a bare `NdM` pool (a modifier like "1d10+3" or a non-pool
+/// expression). Used by the param-driven pool scaler to rebuild the count while
+/// preserving the faces. Pure, no I/O.
+pub fn parse_pool_dice(expr: &str) -> Option<(i64, i64)> {
+    let s = expr.trim().to_ascii_lowercase();
+    let (count, faces) = s.split_once('d')?;
+    let count = count.trim().parse::<i64>().ok()?;
+    let faces = faces.trim().parse::<i64>().ok()?;
+    if count <= 0 || faces <= 0 {
+        return None;
+    }
+    Some((count, faces))
+}
+
+/// The kernel-declared parameter NAME whose actor rating scales a count_faces
+/// dice pool (e.g. `dice_core.pool_scaling_parameter = "competency_rank"`). When
+/// absent, the pool is a flat constant (byte-identical legacy behavior). Generic:
+/// the field NAMES a parameter; the engine looks it up on the actor — zero
+/// ruleset_id branching.
+pub fn pool_scaling_parameter(dice_core: &serde_json::Value) -> Option<String> {
+    dice_core
+        .get("pool_scaling_parameter")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Compute the param-driven pool dice expression for a count_faces kernel.
+///
+/// Reads the generic kernel scaling contract from `dice_core`:
+///   - `pool_scaling_parameter` (name of the actor competency param; required)
+///   - `pool_base`   (base dice count; defaults to the count parsed from `flat_expr`)
+///   - `pool_per_rank` (dice added per unit of the param; defaults to 1)
+///   - `pool_min` / `pool_max` (optional clamp on the final count; defaults 1 / 60)
+///
+/// `param_value` is the actor's loaded rating for `pool_scaling_parameter`.
+/// `flat_expr` is the kernel's flat dice (e.g. "6d4") — its FACES are preserved
+/// and its count is the `pool_base` fallback.
+///
+/// Returns the new `NdM` expression. Returns None (caller keeps the flat expr,
+/// fail-closed) when the kernel declares no scaling parameter, the flat expr is
+/// not a bare pool, or the computed count is non-positive after clamping.
+pub fn param_driven_pool_expression(
+    dice_core: &serde_json::Value,
+    flat_expr: &str,
+    param_value: i64,
+) -> Option<String> {
+    pool_scaling_parameter(dice_core)?;
+    let (flat_count, faces) = parse_pool_dice(flat_expr)?;
+    let base = dice_core
+        .get("pool_base")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(flat_count);
+    let per_rank = dice_core
+        .get("pool_per_rank")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(1);
+    let min = dice_core
+        .get("pool_min")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(1);
+    let max = dice_core
+        .get("pool_max")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(60);
+    let raw = base.saturating_add(per_rank.saturating_mul(param_value));
+    let count = raw.clamp(min.max(1), max.max(1));
+    if count <= 0 {
+        return None;
+    }
+    Some(format!("{count}d{faces}"))
+}
+
 pub fn target_model_from_dice_core(dice_core: &serde_json::Value) -> Option<CheckTargetModel> {
     let compare = dice_core.get("compare").and_then(|v| v.as_str());
     let direction = dice_core
@@ -3207,6 +3282,68 @@ mod target_model_dice_pool_tests {
         assert!(
             target_model_from_dice_core(&dc).is_none(),
             "no parseable face -> None (fail-closed, never invent)"
+        );
+    }
+
+    #[test]
+    fn parse_pool_dice_reads_count_and_faces() {
+        assert_eq!(parse_pool_dice("6d4"), Some((6, 4)));
+        assert_eq!(parse_pool_dice("  10D6 "), Some((10, 6)));
+        // Not a bare NdM pool -> None (a modified roll is not a scalable pool).
+        assert_eq!(parse_pool_dice("1d10+3"), None);
+        assert_eq!(parse_pool_dice("0d4"), None);
+        assert_eq!(parse_pool_dice("d20"), None);
+    }
+
+    #[test]
+    fn no_scaling_parameter_means_no_param_driven_expr() {
+        // A kernel WITHOUT pool_scaling_parameter never scales: caller keeps the
+        // flat expr. This is what guarantees byte-identical legacy behavior for
+        // today's Triangle kernel (which declares no scaling field).
+        let dc = json!({"dice":"6d4","compare":"count_faces","target_face":3});
+        assert_eq!(param_driven_pool_expression(&dc, "6d4", 99), None);
+    }
+
+    #[test]
+    fn param_value_scales_pool_count_preserving_faces() {
+        // Generic scaling contract: base=4, +1 die per competency rank.
+        let dc = json!({
+            "dice":"6d4","compare":"count_faces","target_face":3,
+            "pool_scaling_parameter":"competency_rank",
+            "pool_base":4,"pool_per_rank":1
+        });
+        // Incompetent agent (rank 1) rolls fewer dice than a competent one (rank 5).
+        assert_eq!(
+            param_driven_pool_expression(&dc, "6d4", 1).as_deref(),
+            Some("5d4")
+        );
+        assert_eq!(
+            param_driven_pool_expression(&dc, "6d4", 5).as_deref(),
+            Some("9d4")
+        );
+        // Faces preserved from the flat expr even if base differs.
+        assert_eq!(
+            param_driven_pool_expression(&dc, "6d4", 0).as_deref(),
+            Some("4d4")
+        );
+    }
+
+    #[test]
+    fn param_driven_pool_clamps_and_defaults() {
+        // pool_base defaults to the flat count; pool_per_rank defaults to 1.
+        let dc = json!({
+            "dice":"6d4","compare":"count_faces","target_face":3,
+            "pool_scaling_parameter":"competency_rank"
+        });
+        // base defaults to 6 (from "6d4"); rank 2 -> 8d4.
+        assert_eq!(
+            param_driven_pool_expression(&dc, "6d4", 2).as_deref(),
+            Some("8d4")
+        );
+        // Floor clamp: a hugely negative rating cannot drop below pool_min (default 1).
+        assert_eq!(
+            param_driven_pool_expression(&dc, "6d4", -999).as_deref(),
+            Some("1d4")
         );
     }
 }
