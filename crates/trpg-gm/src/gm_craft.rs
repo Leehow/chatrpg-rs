@@ -107,6 +107,9 @@ pub(crate) fn synthesize_offstage_from_ledger(
     }
     // [meta] decision summary — one line per committed check (label + expression + outcome band).
     let mut summaries = Vec::new();
+    // [hide kind="暗骰"] candidates harvested from the committed opposed outcomes (the defender's
+    // private roll lives in outcome.opposed, never in the player-visible dice_rolls vec).
+    let mut opposed_hides = Vec::new();
     for r in &snap.check_results {
         let oc = &r.outcome;
         let label = oc
@@ -127,6 +130,35 @@ pub(crate) fn synthesize_offstage_from_ledger(
             })
             .unwrap_or_else(|| "待结算".into());
         summaries.push(format!("{label}({expr})→{band}"));
+        // opposed defender roll is private (台下) by default — surface it as a truthful [hide 暗骰].
+        if let Some(op) = oc.get("opposed") {
+            let hidden = oc
+                .get("resolution_model")
+                .and_then(|m| m.get("defender_roll_visibility"))
+                .and_then(|v| v.as_str())
+                .map(|v| v != "public_gm_roll")
+                .unwrap_or(true);
+            if hidden {
+                let who = op
+                    .get("defender_actor_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("对手");
+                let dexpr = oc
+                    .get("resolution_model")
+                    .and_then(|m| m.get("defender_expression"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let dval = op
+                    .get("defender_value")
+                    .and_then(|v| v.as_i64())
+                    .map(|n| n.to_string())
+                    .unwrap_or_default();
+                let winner = op.get("winner").and_then(|v| v.as_str()).unwrap_or("");
+                opposed_hides.push(format!(
+                    "{who} 台下对抗私骰 {dexpr}={dval}（玩家不可见），对抗胜方:{winner}"
+                ));
+            }
+        }
     }
     if !summaries.is_empty() {
         out.push_str(&format!(
@@ -134,9 +166,11 @@ pub(crate) fn synthesize_offstage_from_ledger(
             summaries.join("；")
         ));
     }
-    // [hide kind="暗骰"] — rolls the player must NOT see (e.g. an opposed defender's private roll,
-    // or a passive/secret resolution). Scanned from the real dice_rolls ledger, so it is the
-    // genuine off-screen die, not invention. One [hide] per hidden roll.
+    for h in opposed_hides {
+        out.push_str(&format!("\n[hide kind=\"暗骰\"]{h}[/hide]"));
+    }
+    // Additional [hide kind="暗骰"] — any private/passive roll already present in the dice_rolls
+    // ledger (genuine off-screen die, not invention). One [hide] per hidden roll.
     for d in &snap.dice_rolls {
         if matches!(
             d.visibility,
@@ -445,6 +479,30 @@ mod tests {
         assert!(out.contains("[meta kind=\"decision_summary\"]"), "{out}");
         assert!(out.contains("[hide kind=\"暗骰\"]"), "{out}");
         assert!(out.contains("NPC/对手"), "{out}");
+        assert!(out.contains("玩家不可见"), "{out}");
+    }
+
+    #[test]
+    fn synth_emits_hide_anggu_from_opposed_outcome() {
+        // the defender's private roll lives in outcome.opposed (NOT dice_rolls) — surface it.
+        let mut snap = trpg_agent::TurnLedgerSnapshot::default();
+        let mut r = mk_result(
+            "atk1",
+            trpg_model::RollVisibility::PublicGmRoll,
+            "开火对抗",
+            "失败",
+        );
+        r.outcome = serde_json::json!({
+            "check_label":"开火对抗","degree":"defender_wins","success":false,
+            "opposed":{"winner":"defender","defender_actor_id":"npc_athena","defender_value":10},
+            "resolution_model":{"defender_expression":"1d10","defender_roll_visibility":"private_gm_roll"}
+        });
+        snap.check_results.push(r);
+        let out = synthesize_offstage_from_ledger(&snap);
+        assert!(out.contains("[meta kind=\"decision_summary\"]"), "{out}");
+        assert!(out.contains("[hide kind=\"暗骰\"]"), "{out}");
+        assert!(out.contains("npc_athena"), "{out}");
+        assert!(out.contains("1d10=10"), "{out}");
         assert!(out.contains("玩家不可见"), "{out}");
     }
 
