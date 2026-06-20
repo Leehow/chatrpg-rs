@@ -28,7 +28,8 @@ use serde_json::Value;
 pub const NPC_BODY_KEY_NORMALIZE_ENV: &str = "TRPG_NPC_BODY_KEY_NORMALIZE";
 
 /// `正文` 回退是否开启（读 env，默认 OFF）。
-/// `0/false/off/no`（大小写不敏感）→ OFF；其余非空真值 → ON；未设置 → OFF。
+/// 仅 `1/true/on/yes`（大小写不敏感）→ ON；其余任意值（含 `0/false/off/no`、空、
+/// 未设置、无法识别的串如 `enabled`）→ OFF。严格白名单，避免误判真值放开行为。
 pub fn body_key_normalize_enabled() -> bool {
     std::env::var(NPC_BODY_KEY_NORMALIZE_ENV)
         .map(|v| {

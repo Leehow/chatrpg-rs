@@ -146,6 +146,42 @@ mod tests {
         );
     }
 
+    /// §6 大考 正文-fix 安全折入（codex 设计复核 ⑤）：当 body-key normalize ON 时，
+    /// body-prose 读路径取 `正文`，故未揭示的 `正文`-secret 必须同样被裁，绝不绕过裁剪
+    /// 混进 GM/场景上下文。OFF → 不读也不裁 `正文`（字段表退 [body,summary]，字节等价）。
+    #[test]
+    fn zhengwen_keyed_secret_redacted_when_normalize_on() {
+        let v = json!({
+            "id": "npc_athena",
+            "name": "雅典娜",
+            "正文": "她其实是企业卧底，真名 Helix。",
+            "spoiler": {
+                "secret_terms": ["企业卧底", "Helix"],
+                "public_aliases": ["雅典娜"],
+                "reveal_conditions": ["破解她的终端后"]
+            }
+        });
+        let none: HashSet<String> = HashSet::new();
+
+        // ON：正文 secret 被裁。
+        std::env::set_var(trpg_model::NPC_BODY_KEY_NORMALIZE_ENV, "1");
+        let on = guard_entity(&v, &none);
+        std::env::remove_var(trpg_model::NPC_BODY_KEY_NORMALIZE_ENV);
+        let on_zw = on.get("正文").and_then(Value::as_str).unwrap_or("");
+        assert!(!on_zw.contains("企业卧底"), "ON: 正文 secret 必被裁: {on_zw}");
+        assert!(!on_zw.contains("Helix"), "ON: 正文 secret 必被裁: {on_zw}");
+
+        // OFF：字段表不含 正文 → 不动该键（与历史字节等价；正文 secret 原样，
+        // 因 OFF 下读路径本就不读 正文，secret 不会进上下文）。
+        std::env::remove_var(trpg_model::NPC_BODY_KEY_NORMALIZE_ENV);
+        let off = guard_entity(&v, &none);
+        let off_zw = off.get("正文").and_then(Value::as_str).unwrap_or("");
+        assert_eq!(
+            off_zw, "她其实是企业卧底，真名 Helix。",
+            "OFF: 正文 键不被裁剪触碰（字节等价）"
+        );
+    }
+
     /// 别太严：实体无 spoiler → guard 字节原样透传（绝不裁可玩内容）。
     #[test]
     fn entity_without_spoiler_passes_through_untouched() {
