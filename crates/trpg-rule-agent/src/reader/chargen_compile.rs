@@ -13,6 +13,15 @@ use serde_json::{json, Map, Value};
 use trpg_llm::LlmClient;
 use trpg_model::{CharacterField, CharacterTemplate, DerivedValue};
 
+/// `TRPG_PARAM_DRIVEN_POOL` gate (mirrors the runtime pool scaler's flag). Default OFF ⇒
+/// the chargen pool-scaling post-pass is skipped, so chargen artifacts are byte-identical
+/// to baseline. Accepts `1`/`true` (case-insensitive).
+fn param_driven_pool_enabled() -> bool {
+    std::env::var("TRPG_PARAM_DRIVEN_POOL")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 // ---------------------------------------------------------------------------
 // read_layout: slice the page-anchored `.layout.md` sidecar by page
 // ---------------------------------------------------------------------------
@@ -442,18 +451,25 @@ pub async fn compile_chargen_formulas(
     // compile it from a categorical CHOICE field's enumerated-option ORDINAL so the
     // param-driven dice pool can size from the sheet. Generic + data-driven; no-op when
     // the kernel declares no param or no matching choice/catalog exists.
-    if let Some(param) = ctx.pool_scaling_parameter.as_deref() {
-        if let Some(rec) =
-            super::pool_scaling::pool_scaling_choice_record(param, template, &ctx.option_catalogs)
-        {
-            let (mut dvs, mut g) = finalize_compiled(vec![rec], template);
-            gaps.append(&mut g);
-            if let Some(dv) = dvs.pop() {
-                gaps.push(format!(
+    // Flag-gated behind `TRPG_PARAM_DRIVEN_POOL` (same flag as the runtime pool scaler):
+    // OFF ⇒ this post-pass is skipped entirely so chargen artifacts are byte-identical to
+    // baseline (full-chain OFF==baseline, not just the runtime dice expression).
+    if param_driven_pool_enabled() {
+        if let Some(param) = ctx.pool_scaling_parameter.as_deref() {
+            if let Some(rec) = super::pool_scaling::pool_scaling_choice_record(
+                param,
+                template,
+                &ctx.option_catalogs,
+            ) {
+                let (mut dvs, mut g) = finalize_compiled(vec![rec], template);
+                gaps.append(&mut g);
+                if let Some(dv) = dvs.pop() {
+                    gaps.push(format!(
                     "pool-scaling param `{param}` compiled from a categorical choice ordinal (status={:?})",
                     dv.status
                 ));
-                template.derived_values.push(dv);
+                    template.derived_values.push(dv);
+                }
             }
         }
     }
