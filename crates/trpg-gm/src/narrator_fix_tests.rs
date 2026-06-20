@@ -40,7 +40,7 @@ fn a1_narrator_system_prompt_enforces_second_person() {
         player_perceivable_facts: vec![],
         ..Default::default()
     };
-    let messages = build_narrator_messages(&packet);
+    let messages = build_narrator_messages(&packet, false);
     let system = messages[0]["content"].as_str().unwrap();
     assert!(
         system.contains("第二人称") && system.contains("你"),
@@ -85,7 +85,7 @@ fn a2_narrator_messages_inject_scene_and_forbid_parroting() {
         ..Default::default()
     }
     .with_scene_context(&["昏黄油灯下，木桌油腻，角落坐着独眼客。".to_string()]);
-    let messages = build_narrator_messages(&packet);
+    let messages = build_narrator_messages(&packet, false);
     let system = messages[0]["content"].as_str().unwrap();
     let user = messages[1]["content"].as_str().unwrap();
     // 感官 / 禁复述 指令在 system
@@ -108,7 +108,7 @@ fn a2_empty_scene_context_is_graceful() {
         player_input: "我四处张望".to_string(),
         ..Default::default()
     };
-    let messages = build_narrator_messages(&packet);
+    let messages = build_narrator_messages(&packet, false);
     assert_eq!(messages.len(), 2);
     // 不 panic、user 仍含玩家输入
     let user = messages[1]["content"].as_str().unwrap();
@@ -206,7 +206,7 @@ fn a3_narrator_messages_force_restate_what_changed() {
         what_changed: vec!["effect e_dmg (damage)".to_string()],
         ..Default::default()
     };
-    let messages = build_narrator_messages(&packet);
+    let messages = build_narrator_messages(&packet, false);
     let system = messages[0]["content"].as_str().unwrap();
     assert!(
         system.contains("逐条") || system.contains("每一条") || system.contains("每条"),

@@ -1112,7 +1112,11 @@ impl GmLoop {
         tx: &tokio::sync::mpsc::Sender<crate::turn_event::TurnEvent>,
         cancel: Option<&CancellationToken>,
     ) -> Option<String> {
-        let messages = build_narrator_messages(packet);
+        // G1：env-gated「场景感兜底」。OFF（默认）字节等价旧装配；这是唯一读 env 处。
+        let sensory_floor = std::env::var("TRPG_SCENE_SENSORY_FLOOR")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let messages = build_narrator_messages(packet, sensory_floor);
         let mut stream = match self
             .llm
             .stream_chat_with_tools(messages, vec![], ToolChoice::None)
@@ -2614,7 +2618,14 @@ fn player_safe_scene_context(input: &GmTurnInput<'_>) -> Vec<String> {
     }
 }
 
-fn build_narrator_messages(packet: &crate::packet::NarrationPacket) -> Vec<serde_json::Value> {
+/// G1（§6 大考）：env-gated「场景感兜底」。`sensory_floor==true` 且本回合真饿
+/// （facts 与 player_perceivable_facts 皆空、scene 非空）时，向 user 消息**追加**一段
+/// 兜底子句，许可 Narrator 仅把**已知当前场景文本**重新组织成近景描写（绝不新增事实）。
+/// `false` 时与基线装配**字节等价**。唯一生产读 env 处 = run_narrator（不在此处读 env）。
+fn build_narrator_messages(
+    packet: &crate::packet::NarrationPacket,
+    sensory_floor: bool,
+) -> Vec<serde_json::Value> {
     let mut facts = String::new();
     for f in &packet.what_happened {
         facts.push_str("- ");
@@ -2629,6 +2640,11 @@ fn build_narrator_messages(packet: &crate::packet::NarrationPacket) -> Vec<serde
     let perceivable = packet.player_perceivable_facts.join("；");
     let forbidden = packet.forbidden_reveals.join("；");
     let scene = packet.scene_context.join("\n");
+    // G1：在 `scene` 被 user format 移动前先算兜底触发条件（三者皆满足才算真饿）。
+    let floor_triggered = sensory_floor
+        && facts.is_empty()
+        && packet.player_perceivable_facts.is_empty()
+        && !scene.trim().is_empty();
     let system = format!(
         "你是 TRPG 叙事者(Narrator)。把已发生的机械事实写成玩家可见的连贯散文。\n\
          风格：{}\n\
@@ -2668,6 +2684,19 @@ fn build_narrator_messages(packet: &crate::packet::NarrationPacket) -> Vec<serde
             perceivable.as_str()
         },
     );
+    // G1：仅在本回合真饿（无新增机械事实且无玩家可感知信息）且当前场景非空、
+    // 且 sensory_floor 开启时，追加「场景感兜底」尾段。OFF 时 user 字节等价基线。
+    let user = if floor_triggered {
+        format!(
+            "{user}\n\n\
+             场景感兜底（仅在本回合没有新增可公开结果时适用）：\n\
+             你可以把\"当前场景\"中已经写明、且玩家已经感知过的空间要素重新组织成一两句近景描写。\n\
+             硬限制：只可使用\"当前场景\"文本中明示出现的要素；不得补充文本未明示的实体、线索、机关、建筑/房间/道具、NPC意图、规则结论、检定成败、伤害/资源/状态变化；不得把玩家输入里的名词当成已存在场景物；不得断言\"没有线索/没有异常/没有发现\"，除非该否定事实已列在玩家可感知信息或机械事实中。\n\
+             若当前场景文本不足以支持重描，只写\"你只能确认眼前这些已见过的环境，暂无新的可公开结果。\"并保持第二人称。"
+        )
+    } else {
+        user
+    };
     vec![
         serde_json::json!({"role": "system", "content": system}),
         serde_json::json!({"role": "user", "content": user}),
@@ -3377,3 +3406,7 @@ mod mode_tempo_tests;
 #[cfg(test)]
 #[path = "narrator_fix_tests.rs"]
 mod narrator_fix_tests;
+
+#[cfg(test)]
+#[path = "scene_sensory_floor_tests.rs"]
+mod scene_sensory_floor_tests;
