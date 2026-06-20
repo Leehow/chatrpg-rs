@@ -79,6 +79,13 @@ pub struct NarrationPacket {
     /// 等价),仅 ON 经 `with_scene_context` 注入。**绝不**承载 GM-only/secret/规则原文/prose。
     #[serde(default)]
     pub scene_context: Vec<String>,
+    /// Q-MODULE DP-A'/DP-B'(§6 大考):模组授权的**进场 establishing 素材**(当前场景的
+    /// NON-secret `read_aloud`,剧透裁剪后),由 runtime 经 `CompiledContext.scene_establishing`
+    /// 在 `Enforce` 下提供。`project` 恒置空(OFF 字节等价),仅经 `with_scene_establishing` 注入。
+    /// 由 Narrator 改写成画面(具名场景/氛围)、**绝不**逐字倾倒/列清单(尊重 Q-4 no-dump);
+    /// **绝不**承载 GM-only `gm_notes`/secret/clue(那些仍走 A2 奖励门控)。
+    #[serde(default)]
+    pub scene_establishing: Vec<String>,
 }
 
 fn roll_is_player_visible(visibility: RollVisibility) -> bool {
@@ -199,6 +206,8 @@ impl NarrationPacket {
             forbidden_reveals: forbidden_reveals.to_vec(),
             // A2：project 恒置空 scene_context(OFF 字节等价)；ON 阶段经 with_scene_context 注入。
             scene_context: Vec::new(),
+            // Q-MODULE：project 恒置空(OFF 字节等价)；仅 Enforce 经 with_scene_establishing 注入。
+            scene_establishing: Vec::new(),
         }
     }
 
@@ -207,6 +216,19 @@ impl NarrationPacket {
     /// 投影本身从不读 GM-only / adjudicator_prose ⇒ fail-closed,绝不新增泄漏面。
     pub fn with_scene_context(mut self, scenes: &[String]) -> Self {
         self.scene_context = scenes
+            .iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        self
+    }
+
+    /// Q-MODULE DP-B'(§6 大考):注入模组授权的进场 establishing 素材(链式 builder)。
+    /// 调用方保证 `slices` 来自 `CompiledContext.scene_establishing`(runtime 仅 Enforce 填充、
+    /// 已剧透裁剪、仅 NON-secret `read_aloud`)。空 slices ⇒ 字段为空 ⇒ 渲染侧零新增字节
+    /// (OFF/非 Enforce 字节等价)。
+    pub fn with_scene_establishing(mut self, slices: &[String]) -> Self {
+        self.scene_establishing = slices
             .iter()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
@@ -395,5 +417,30 @@ mod tests {
         assert_eq!(narration.player_perceivable_facts, vec!["需要玩家投掷 DEX"]);
         assert_eq!(narration.forbidden_reveals, vec!["不可提及凶手身份"]);
         assert_eq!(narration.style_profile, "硬汉侦探腔");
+    }
+
+    #[test]
+    fn scene_establishing_project_empty_builder_injects_q_module() {
+        // DP-B': project() leaves scene_establishing empty (OFF byte-equal); with_scene_establishing
+        // injects the gated, redacted slices and trims/filters empties.
+        let adj = AdjudicationPacket::project("环顾", &TurnLedgerSnapshot::default(), &[], "", None);
+        let base = NarrationPacket::project(&adj, "", &[]);
+        assert!(base.scene_establishing.is_empty(), "project must leave it empty (OFF byte-equal)");
+
+        let injected = NarrationPacket::project(&adj, "", &[]).with_scene_establishing(&[
+            "  春雨敲打着加油站的雨棚。  ".to_string(),
+            "   ".to_string(), // blank → filtered
+            "霓虹在水洼里碎成猩红。".to_string(),
+        ]);
+        assert_eq!(
+            injected.scene_establishing,
+            vec![
+                "春雨敲打着加油站的雨棚。".to_string(),
+                "霓虹在水洼里碎成猩红。".to_string()
+            ]
+        );
+        // Empty slices ⇒ field stays empty ⇒ render adds zero bytes.
+        let empty = NarrationPacket::project(&adj, "", &[]).with_scene_establishing(&[]);
+        assert!(empty.scene_establishing.is_empty());
     }
 }

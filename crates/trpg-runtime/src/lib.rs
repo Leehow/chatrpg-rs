@@ -140,6 +140,9 @@ pub use met_engaged::{
 mod npc_profile_materialize;
 mod npc_testimony;
 
+pub mod scene_establishing;
+pub use scene_establishing::collect_scene_establishing;
+
 mod context_blocks;
 
 mod spotlight_roster;
@@ -526,12 +529,16 @@ impl RuntimeEngine {
         // (caller-supplied active_npc_ids preserved unchanged, s17 correction); Enforce =
         // derive-when-empty from the current scene (stable-dedup, fail-closed). Must run
         // BEFORE `let state = &state_owned;` so world_state_block sees the derived set.
-        let mat_mode = MaterializationAffordanceMode::from_env();
         let mat_module_id = request
             .module_id
             .as_deref()
             .or(state_owned.module_id.as_deref())
             .map(str::to_string);
+        // Q-MODULE DP-C: module-bound-aware default (NOT a global env flip). When the env is
+        // unset, a module-bound session defaults to Enforce (normal module play surfaces module
+        // content); a no-module session stays Off (byte-equal baseline). An explicit env value
+        // (incl. `off`) still wins in both directions.
+        let mat_mode = MaterializationAffordanceMode::from_env_for_session(mat_module_id.is_some());
         apply_npc_activation(
             &mut state_owned.active_npc_ids,
             &project.modules,
@@ -889,6 +896,18 @@ impl RuntimeEngine {
         // 集，修「派生集进不了对白消费者 → NPC 对白=0」缺陷。Off/Shadow 下 apply_npc_activation
         // 无操作 ⇒ 此值 == 调用方传入集 ⇒ 字节等价基线。
         compiled.active_npc_ids = state.active_npc_ids.clone();
+        // Q-MODULE DP-A'/DP-B': carry the current scene's player-deliverable establishing
+        // material (NON-secret read_aloud, spoiler-redacted) to the split Narrator so module-
+        // bound openings have real module texture (named location/atmosphere) instead of generic
+        // prose. Enforce only; Off/Shadow ⇒ left empty ⇒ split Narrator injects nothing ⇒
+        // byte-equal baseline. Secrets/clues are untouched (they stay on the A2 reward gate).
+        if mat_mode.is_enforce() {
+            compiled.scene_establishing = scene_establishing::collect_scene_establishing(
+                &project.modules,
+                mat_module_id.as_deref(),
+                state.scene_id.as_deref(),
+            );
+        }
         for block in compiled
             .prefix_blocks
             .iter()
@@ -3808,6 +3827,9 @@ impl ContextBuilder {
             // 在 build 之后填入（见 `compiled.active_npc_ids = ...`）。此处恒空，不破坏其它
             // 调用方（plan_blocks 测试等）的字节产物。
             active_npc_ids: Vec::new(),
+            // Q-MODULE: ContextBuilder 不产 establishing；由 prepare_turn_context 在 build 之后
+            // 仅 Enforce 下填入（见 `compiled.scene_establishing = ...`）。此处恒空（OFF 字节等价）。
+            scene_establishing: Vec::new(),
         })
     }
 }

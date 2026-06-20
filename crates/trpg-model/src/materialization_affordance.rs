@@ -37,6 +37,37 @@ impl MaterializationAffordanceMode {
         Self::parse(&std::env::var(MATERIALIZATION_AFFORDANCE_ENV).unwrap_or_default())
     }
 
+    /// Q-MODULE DP-C: module-bound-aware default (NOT a global env flip).
+    ///
+    /// When the env var is **explicitly set** (any non-empty value, including an explicit
+    /// `off`/`0`), it wins in BOTH directions — the operator's choice is honored. When the env
+    /// var is **unset/empty**, the default depends on whether a module is bound to the session:
+    /// a module-bound session defaults to `Enforce` (normal module play surfaces module content,
+    /// not just the exam); a session with no module stays `Off`.
+    ///
+    /// Non-module play is therefore byte-equal to today (unset + no module → Off). This is the
+    /// scoped default the architect approved in Q4 DP-C — applied at the per-turn mode
+    /// computation, never by mutating the global `from_env` / `parse`.
+    pub fn for_session(env_raw: &str, module_bound: bool) -> Self {
+        if env_raw.trim().is_empty() {
+            if module_bound {
+                MaterializationAffordanceMode::Enforce
+            } else {
+                MaterializationAffordanceMode::Off
+            }
+        } else {
+            Self::parse(env_raw)
+        }
+    }
+
+    /// [`Self::for_session`] reading the env once — the per-turn production entry point.
+    pub fn from_env_for_session(module_bound: bool) -> Self {
+        Self::for_session(
+            &std::env::var(MATERIALIZATION_AFFORDANCE_ENV).unwrap_or_default(),
+            module_bound,
+        )
+    }
+
     /// Pure parse of the flag value (kept separate from `from_env` so it is
     /// testable without mutating the process-global environment — env-race-free
     /// per the flake discipline).
@@ -81,6 +112,27 @@ mod tests {
                 "{raw:?} must parse Off (baseline fail-safe)"
             );
         }
+    }
+
+    #[test]
+    fn for_session_dp_c_module_bound_default() {
+        use MaterializationAffordanceMode::*;
+        // unset + no module → Off (non-module play byte-equal to today).
+        assert_eq!(MaterializationAffordanceMode::for_session("", false), Off);
+        assert_eq!(MaterializationAffordanceMode::for_session("  ", false), Off);
+        // unset + module bound → Enforce (DP-C scoped default).
+        assert_eq!(MaterializationAffordanceMode::for_session("", true), Enforce);
+        // explicit env wins BOTH ways, even for a module-bound session.
+        assert_eq!(MaterializationAffordanceMode::for_session("off", true), Off);
+        assert_eq!(MaterializationAffordanceMode::for_session("0", true), Off);
+        assert_eq!(
+            MaterializationAffordanceMode::for_session("enforce", false),
+            Enforce
+        );
+        assert_eq!(
+            MaterializationAffordanceMode::for_session("shadow", true),
+            Shadow
+        );
     }
 
     #[test]

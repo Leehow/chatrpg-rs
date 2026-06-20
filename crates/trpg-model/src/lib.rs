@@ -6856,6 +6856,14 @@ pub struct CompiledContext {
     /// 传入的 `state.active_npc_ids`（空即空、有则原样）；消费者读它与读旧 state 字节等价。
     #[serde(default)]
     pub active_npc_ids: Vec<String>,
+    /// Q-MODULE DP-A'/DP-B'：本回合**玩家可交付**的场景进场 establishing 素材（当前场景的
+    /// NON-secret `read_aloud`，剧透裁剪后；**不含** GM-only `gm_notes`）。随 CompiledContext
+    /// 一同传出，让分体 Narrator（`TRPG_NARRATOR_SPLIT`）在进场/转场时把模组的具名场景/氛围
+    /// 织进散文，而非泛化叙事。仅 `Enforce` 下 runtime 填充；Off/Shadow ⇒ 空 ⇒ 分体 Narrator
+    /// 注入空 ⇒ 字节等价基线。源为模组原文(source-anchored)，由 Narrator 改写为画面、**绝不**
+    /// 逐字倾倒/列清单(尊重 Q-4 no-dump)；secrets/clues 仍走 A2 奖励门控通道，本字段不碰。
+    #[serde(default)]
+    pub scene_establishing: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]

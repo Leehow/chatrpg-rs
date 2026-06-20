@@ -1098,8 +1098,13 @@ impl GmLoop {
         // 不灌入完整 gm_skill（可能含规则原文）。forbidden_reveals P1 为空（P2/P3 收窄）。
         // A2(§6 大考)：注入 player-safe scene_context(= 上一回合已交付 narration / 玩家已可见)，
         // 给饿肚子的 split Narrator 补感官/连续性 grounding。来源 player-safe ⇒ 不新增泄漏面。
+        // Q-MODULE DP-A'/DP-B'：注入模组授权的进场 establishing 素材(runtime 仅 Enforce 填充
+        // CompiledContext.scene_establishing,= 当前场景 NON-secret read_aloud,剧透裁剪后)。
+        // Off/Shadow ⇒ 该字段为空 ⇒ 注入空 ⇒ 字节等价基线。
+        let scene_establishing = ctx.compiled().scene_establishing.clone();
         let narration = crate::packet::NarrationPacket::project(&adj, "", &[])
-            .with_scene_context(&player_safe_scene_context(input));
+            .with_scene_context(&player_safe_scene_context(input))
+            .with_scene_establishing(&scene_establishing);
         let private_tokens = ctx.ledger.private_roll_tokens();
         // P7.3：P1 Narrator 派发经 NarratorPort 适配器（GmLoopNarratorAdapter 仅委托
         // `GmLoop::run_narrator`）——dispatch 间接，byte-identical（无行为变更）。
@@ -2865,6 +2870,7 @@ fn build_narrator_messages(
     let perceivable = packet.player_perceivable_facts.join("；");
     let forbidden = packet.forbidden_reveals.join("；");
     let scene = packet.scene_context.join("\n");
+    let establishing = packet.scene_establishing.join("\n");
     // G1：在 `scene` 被 user format 移动前先算兜底触发条件（三者皆满足才算真饿）。
     let floor_triggered = sensory_floor
         && facts.is_empty()
@@ -2921,6 +2927,23 @@ fn build_narrator_messages(
         )
     } else {
         user
+    };
+    // Q-MODULE DP-A'/DP-B': append the authored scene-establishing material when present
+    // (runtime fills it only under materialization Enforce). Empty ⇒ zero extra bytes ⇒ OFF /
+    // non-Enforce byte-equal. The Narrator must WEAVE it (named location / who-is-present /
+    // atmosphere) into the second-person fiction — NEVER a verbatim box-text dump, NEVER a list
+    // (①②③), NEVER a menu (respects Q-4 no-dump). Source-anchored: invent nothing beyond it.
+    let user = if establishing.trim().is_empty() {
+        user
+    } else {
+        format!(
+            "{user}\n\n\
+             本场景的模组进场素材(作者授权、玩家可知的场景定调；仅供你改写,绝不逐字照搬):\n{establishing}\n\
+             指令:把上述素材**编织**进你这一段第二人称散文——给出具名的地点、在场的人/物、\
+             此刻的氛围,让开场有真实的模组质感;**绝不**逐字倾倒原文、**绝不**列成清单(①②③)、\
+             **绝不**写成选项菜单;只呈现此刻自然可感知的部分,若该场景在前文已建立过,只带入\
+             尚未呈现的新要素、不要重复已叙述过的定调;不得据此发明素材之外的实体/线索/机关/结论。"
+        )
     };
     // Q-1/Q-4 (§2a.1/§2b.1): append GM-craft overlay when TRPG_GM_CRAFT ON; OFF ⇒ byte-equal.
     let system = crate::gm_craft::narrator_system(system, gm_craft);
