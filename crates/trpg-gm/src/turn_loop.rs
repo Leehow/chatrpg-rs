@@ -1144,6 +1144,9 @@ impl GmLoop {
                 meta_blocks = classified.meta_blocks.len(),
                 hide_blocks = classified.hide_blocks.len(),
                 empty_rolls = classified.empty_rolls_unwrapped,
+                // R-1: count of unbound/未定 [roll] blocks unwrapped to narration this turn
+                // (the v4 sample asserts ZERO undetermined [roll] reach the player text).
+                malformed_rolls = classified.malformed_rolls_unwrapped,
                 "gm_craft typed turn-document: audience classified (emit RAW, no strip at API)"
             );
             // NOTE: ctx.visible_text intentionally NOT overwritten — emit raw (Q-7-REVISED).
