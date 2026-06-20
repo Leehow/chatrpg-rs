@@ -931,10 +931,15 @@ impl RuntimeEngine {
                 .load_actor_parameters(&request.session_id, pc_actor_id)
                 .await
             {
-                compiled.character_context = character_context::collect_character_context(
-                    &params.sheet_json,
-                    params.display_name.as_deref(),
-                );
+                // fail-closed (codex ④): only a PlayerCharacter's own sheet may render into the
+                // player-visible carrier. `load_actor_parameters` keys solely by (session, actor)
+                // so a mis-supplied NPC actor_id would otherwise leak that actor's numeric buckets.
+                if params.actor_kind == trpg_model::ActorKind::PlayerCharacter {
+                    compiled.character_context = character_context::collect_character_context(
+                        &params.sheet_json,
+                        params.display_name.as_deref(),
+                    );
+                }
             }
         }
         for block in compiled
