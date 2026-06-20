@@ -15,6 +15,8 @@ pub mod ports;
 pub mod presentation_gate;
 pub(crate) mod presentation_markup;
 pub mod prompts;
+pub(crate) mod turn_document;
+pub(crate) mod turn_markup_parser;
 pub mod scene_policy;
 pub mod stimulus;
 pub mod stream;
