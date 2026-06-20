@@ -82,7 +82,7 @@ const INVESTIGATIVE_TERMS: &[&str] = &[
 ];
 
 /// 判断一次检定文本是否带侦查语义（generic、data-driven）。
-fn is_investigative(check: &ResolvedCheck<'_>) -> bool {
+pub(crate) fn is_investigative(check: &ResolvedCheck<'_>) -> bool {
     let mut hay = String::new();
     if let Some(p) = check.tested_parameter {
         hay.push_str(p);

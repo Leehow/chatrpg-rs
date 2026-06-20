@@ -4,7 +4,8 @@
 //! critical→heavy 串行，字节等价旧逻辑）。复用父模块的 build_nav_prompt / validate_transition /
 //! extract_module_scenes / prefetch_frontier / SCENE_NAV_SYS。
 use super::{
-    build_nav_prompt, extract_module_scenes, prefetch_frontier, validate_transition, SCENE_NAV_SYS,
+    build_nav_prompt, extract_module_scenes, prefetch_frontier, resolve_offgraph_to_neighbor,
+    validate_transition, SCENE_NAV_SYS,
 };
 use serde_json::json;
 use tracing::info;
@@ -68,8 +69,21 @@ pub async fn scene_navigate_critical(
             return Ok(None);
         }
     };
-    let Some(target) = validate_transition(&decision, &graph.scenes, &current) else {
-        return Ok(None);
+    let target = match validate_transition(&decision, &graph.scenes, &current) {
+        Some(t) => t,
+        None => {
+            // MAT.M9c（DP-C）：LLM 想移动但目标 off-graph → Enforce 下纠回当前场景真实邻接
+            // （绝不去图谱外编造场景）；匹配不到 ⇒ 留原场景（既有 fail-closed 行为）。
+            // Off/Shadow ⇒ resolve_offgraph_to_neighbor 恒 None ⇒ 字节级基线。
+            let mode = trpg_model::MaterializationAffordanceMode::from_env();
+            match resolve_offgraph_to_neighbor(&decision, &graph.scenes, &current, mode) {
+                Some(t) => {
+                    info!(session_id, from = %current, neighbor = %t, "MAT.M9c: off-graph nav target remapped to in-graph neighbor");
+                    t
+                }
+                None => return Ok(None),
+            }
+        }
     };
     db.set_session_scene(session_id, &target).await?;
     let reason = decision

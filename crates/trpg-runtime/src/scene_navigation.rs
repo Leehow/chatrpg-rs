@@ -219,6 +219,79 @@ pub fn validate_transition(
         .then(|| target.to_string())
 }
 
+/// MAT.M9c（DP-C）：当 LLM 判 `moved=true` 但目标**不在图谱**(`validate_transition` 拒)时，
+/// 在 `Enforce` 下尝试把这个 off-graph 目标**映射回当前场景的真实邻接场景**(current 的
+/// `links.to_node_id`，按 id/title 子串模糊匹配)。匹配不到 ⇒ None(留原场景,绝不乱跳/编造)。
+///
+/// 这是「绝不去图谱外编造的场景；只在真实已载/可抽场景间移动」的鲁棒兜底:LLM 偶尔会把一个
+/// 真实出口稍微叫错名,本函数把它纠回真实邻接。`Off`/`Shadow` ⇒ None(字节级基线,纯加性)。
+pub fn resolve_offgraph_to_neighbor(
+    decision: &serde_json::Value,
+    scenes: &[ScenarioNode],
+    current: &str,
+    mode: trpg_model::MaterializationAffordanceMode,
+) -> Option<String> {
+    if !mode.is_enforce() {
+        return None;
+    }
+    // 仅当 LLM 表达了移动意图,但目标无法 in-graph 校验通过时才介入。
+    if !decision
+        .get("moved")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    if validate_transition(decision, scenes, current).is_some() {
+        return None; // 目标已是合法 in-graph → 走既有路径,本函数不介入。
+    }
+    let target_raw = decision
+        .get("target_node_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    let tl = target_raw.to_lowercase();
+    // codex 折入:拒绝过短 token(易误配),要求 ≥3 字符。
+    if tl.chars().count() < 3 {
+        return None;
+    }
+    // 当前场景的真实邻接(去重、in-graph、≠current)。
+    let cur = scenes.iter().find(|s| s.node_id == current)?;
+    let mut neighbors: Vec<(&str, String)> = Vec::new(); // (id, title_lower)
+    for link in &cur.links {
+        let to = link.to_node_id.trim();
+        if to.is_empty() || to == current || neighbors.iter().any(|(id, _)| *id == to) {
+            continue;
+        }
+        let Some(node) = scenes.iter().find(|s| s.node_id == to) else {
+            continue; // 邻接必须在图谱(真实可载)。
+        };
+        neighbors.push((to, node.title.to_lowercase()));
+    }
+    // codex 折入:① 精确(id 或 title 全等)优先;② 否则子串模糊但**要求唯一匹配**
+    // (多个邻接命中 ⇒ 歧义 ⇒ None,绝不乱跳)。
+    if let Some((id, _)) = neighbors
+        .iter()
+        .find(|(id, title)| id.to_lowercase() == tl || *title == tl)
+    {
+        return Some((*id).to_string());
+    }
+    let fuzzy: Vec<&str> = neighbors
+        .iter()
+        .filter(|(id, title)| {
+            let idl = id.to_lowercase();
+            let id_match = idl.contains(&tl) || tl.contains(&idl);
+            let title_match = title.chars().count() >= 3 && (title.contains(&tl) || tl.contains(title));
+            id_match || title_match
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    if fuzzy.len() == 1 {
+        return Some(fuzzy[0].to_string());
+    }
+    None
+}
+
 // R5 Task1a：critical/heavy 拆分的导航函数（SceneNavCommit / scene_navigate_critical /
 // scene_navigate_heavy / scene_navigator wrapper）移至兄弟子模块以守 ≤400 行；经
 // `pub use` 重导出到 `scene_navigation::` 路径，调用方与签名不变。
@@ -339,6 +412,112 @@ mod tests {
             None,
             "缺字段 → 不动"
         );
+    }
+
+    fn scenes_linked() -> Vec<ScenarioNode> {
+        use trpg_model::ScenarioLink;
+        let mk = |id: &str, title: &str, links: &[&str]| {
+            let mut n = ScenarioNode::default();
+            n.node_id = id.into();
+            n.title = title.into();
+            n.links = links
+                .iter()
+                .map(|t| ScenarioLink {
+                    to_node_id: t.to_string(),
+                    ..Default::default()
+                })
+                .collect();
+            n
+        };
+        vec![
+            mk("sc_warehouse", "Scavv Warehouse", &["sc_talk_athena", "sc_street"]),
+            mk("sc_talk_athena", "Talking to Athena", &["sc_ending"]),
+            mk("sc_street", "Heywood Street", &[]),
+            mk("sc_ending", "Homecoming Finale", &[]),
+        ]
+    }
+
+    #[test]
+    fn offgraph_neighbor_fallback_remaps_misnamed_target() {
+        use trpg_model::MaterializationAffordanceMode::{Enforce, Off, Shadow};
+        let scenes = scenes_linked();
+        // LLM 想去 "athena" (off-graph 名),真实邻接 sc_talk_athena/title "Talking to Athena"。
+        let d = serde_json::json!({"moved":true,"target_node_id":"talking to athena"});
+        assert_eq!(
+            resolve_offgraph_to_neighbor(&d, &scenes, "sc_warehouse", Enforce).as_deref(),
+            Some("sc_talk_athena"),
+            "off-graph 目标应纠回 title 匹配的真实邻接"
+        );
+        // Off/Shadow ⇒ None(字节级基线)。
+        assert!(resolve_offgraph_to_neighbor(&d, &scenes, "sc_warehouse", Off).is_none());
+        assert!(resolve_offgraph_to_neighbor(&d, &scenes, "sc_warehouse", Shadow).is_none());
+    }
+
+    #[test]
+    fn offgraph_fallback_no_match_stays() {
+        use trpg_model::MaterializationAffordanceMode::Enforce;
+        let scenes = scenes_linked();
+        // 完全无关的 off-graph 目标 → 无邻接匹配 → None(留原场景,不乱跳)。
+        let d = serde_json::json!({"moved":true,"target_node_id":"moon_base_zeta"});
+        assert!(resolve_offgraph_to_neighbor(&d, &scenes, "sc_warehouse", Enforce).is_none());
+    }
+
+    #[test]
+    fn offgraph_fallback_skips_when_target_is_already_ingraph() {
+        use trpg_model::MaterializationAffordanceMode::Enforce;
+        let scenes = scenes_linked();
+        // 目标已合法 in-graph → validate_transition 处理,本函数不介入(None)。
+        let d = serde_json::json!({"moved":true,"target_node_id":"sc_talk_athena"});
+        assert!(resolve_offgraph_to_neighbor(&d, &scenes, "sc_warehouse", Enforce).is_none());
+    }
+
+    #[test]
+    fn offgraph_fallback_ambiguous_match_stays() {
+        use trpg_model::MaterializationAffordanceMode::Enforce;
+        use trpg_model::{ScenarioLink, ScenarioNode};
+        // 两个邻接 title 都含 "warehouse" → 模糊命中两条 → 歧义 → None(不乱跳)。
+        let mk = |id: &str, title: &str, links: &[&str]| {
+            let mut n = ScenarioNode::default();
+            n.node_id = id.into();
+            n.title = title.into();
+            n.links = links
+                .iter()
+                .map(|t| ScenarioLink {
+                    to_node_id: t.to_string(),
+                    ..Default::default()
+                })
+                .collect();
+            n
+        };
+        let scenes = vec![
+            mk("hub", "Hub", &["wh_a", "wh_b"]),
+            mk("wh_a", "North Warehouse", &[]),
+            mk("wh_b", "South Warehouse", &[]),
+        ];
+        let d = serde_json::json!({"moved":true,"target_node_id":"warehouse"});
+        assert!(
+            resolve_offgraph_to_neighbor(&d, &scenes, "hub", Enforce).is_none(),
+            "歧义模糊匹配应留原场景"
+        );
+    }
+
+    #[test]
+    fn offgraph_fallback_short_token_rejected() {
+        use trpg_model::MaterializationAffordanceMode::Enforce;
+        let scenes = scenes_linked();
+        let d = serde_json::json!({"moved":true,"target_node_id":"sc"});
+        assert!(
+            resolve_offgraph_to_neighbor(&d, &scenes, "sc_warehouse", Enforce).is_none(),
+            "过短 token(<3)应拒绝"
+        );
+    }
+
+    #[test]
+    fn offgraph_fallback_requires_moved_true() {
+        use trpg_model::MaterializationAffordanceMode::Enforce;
+        let scenes = scenes_linked();
+        let d = serde_json::json!({"moved":false,"target_node_id":"talking to athena"});
+        assert!(resolve_offgraph_to_neighbor(&d, &scenes, "sc_warehouse", Enforce).is_none());
     }
 
     #[test]

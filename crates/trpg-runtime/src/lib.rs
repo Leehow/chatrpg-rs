@@ -124,6 +124,11 @@ use npc_activation::apply_npc_activation;
 pub mod clue_affordance;
 pub use clue_affordance::{clue_reveal_candidates, ClueRevealCandidate, ResolvedCheck};
 
+pub mod clue_surface;
+pub use clue_surface::{
+    module_clue_surface_text, render_clue_surface, surface_player_facing_clues, SurfacedClue,
+};
+
 pub mod met_engaged;
 pub use met_engaged::{
     derive_met_engaged_gate, director_leverage_npc_ids, player_engaged_met_events,
@@ -812,6 +817,26 @@ impl RuntimeEngine {
                 input,
                 vec!["current_input"],
             ));
+        }
+
+        // MAT.M9a axis-2: authored clue SURFACE. Under Enforce, surface the module's
+        // player-facing prep-packet clues (gm_only tiers withheld at source) as a GmOnly,
+        // source-backed context block so the GM has authored material to reveal WHEN players
+        // earn it via a successful investigative check (mirrors M8 folding NPC body into
+        // persona). Off/Shadow == baseline (no block) → byte-equal. Pure read of the
+        // already-loaded project.modules snapshot (no new DB path).
+        if mat_mode.is_enforce() {
+            if let Some(text) =
+                clue_surface::module_clue_surface_text(&project.modules, mat_module_id.as_deref())
+            {
+                blocks.push(dynamic_text_block(
+                    "runtime.mat.clue_surface",
+                    BlockKind::Clue,
+                    "Authored Discoverable Clues",
+                    &text,
+                    vec!["materialization", "clue_surface", "gm_only"],
+                ));
+            }
         }
 
         dedupe_blocks(&mut blocks);
