@@ -25,11 +25,22 @@ impl ContestService {
         roll: &DiceRollRecord,
         defender_roll: Option<&DiceRollRecord>,
     ) -> Result<Value> {
-        let total = roll_total(roll);
+        let raw_total = roll_total(roll);
         let rolls = roll_dice_array(roll);
         let profile = self
-            .ensure_contest_profile(contract, Some(roll), total)
+            .ensure_contest_profile(contract, Some(roll), raw_total)
             .await?;
+        // D1: roll-high (meet_or_beat) checks add the actor's tested STAT/SKILL to the
+        // raw die before the verdict (`1d10 + STAT + SKILL >= DV`). The composition fires
+        // ONLY on the non-opposed meet_or_beat StaticTargetNumber path (the hard guard is
+        // inside `resolve_roll_high_modifiers`), so CoC (roll_under) and Triangle
+        // (count_faces) — and every all-OFF baseline — are byte-identical (mods stays []
+        // → `total == raw_total`). Fail-soft: a missing sheet value adds nothing.
+        let roll_high_mods = self
+            .resolve_roll_high_modifiers(contract, roll, &profile.resolution_model)
+            .await;
+        let mods_sum: i64 = roll_high_mods.iter().map(|m| m.value as i64).sum();
+        let total = raw_total + mods_sum;
         let (mut target, mut success, mut degree, awaiting_binding) =
             resolve_against_model(&profile.resolution_model, total, &rolls);
         // 对抗结算覆盖：OpposedRoll + 防御方骰子都在时，用 resolve_opposed 算胜负。
@@ -90,6 +101,15 @@ impl ContestService {
         outcome[outcome_fields::TOTAL] = json!(total);
         outcome[outcome_fields::TARGET] = json!(target);
         outcome[outcome_fields::SUCCESS] = json!(success);
+        // D1: surface the composed roll-high modifiers (labeled + source_ref'd) so the
+        // narrator/GM can show "REF 8 + Handgun 6". Emitted ONLY when non-empty: every
+        // non-firing path (CoC roll_under, Triangle count_faces, fail-soft no-match, the
+        // all-OFF baseline) leaves `outcome` without this key → JSON byte-identical. The
+        // `total` above already carries `raw_total + sum(modifiers)`; the persisted
+        // DiceRollRecord stays the bare die (audit honesty).
+        if !roll_high_mods.is_empty() {
+            outcome["modifiers"] = json!(roll_high_mods);
+        }
         // spec §4.3:fail-closed 不静默 miss。模型未绑定且对抗结算也没救回胜负
         // (success 仍 None)时,把待绑理由作为**显式** awaiting_binding 信号透出,GM agent
         // 据此改道(找 DV / request_player_roll / 叙事降级),而非默默当成 miss。
@@ -466,6 +486,108 @@ impl ContestService {
                 value_from_profile(mech.get("stats"), &key).map(|v| (key, v))
             }
         }
+    }
+
+    /// D1 — compose the actor's STAT/SKILL addends for a ROLL-HIGH (meet_or_beat) check.
+    ///
+    /// Cyberpunk-shaped resolution is `1d10 + STAT + Skill >= DV`: the actor's competence
+    /// must be ADDED to the raw die. CoC (roll_under, skill IS the target) and Triangle
+    /// (count_faces pool) add nothing — so this returns `vec![]` (no total change, no JSON
+    /// key) for them. Fully data-driven, ZERO ruleset_id branching.
+    ///
+    /// HARD GUARD (any false → `vec![]`, byte-identical to the prior engine):
+    ///   1. `kernel.dice_core.compare == "meet_or_beat"` — roll-high only.
+    ///   2. resolution model is `StaticTargetNumber` — the non-opposed DV path. (Opposed
+    ///      meet_or_beat routes through `resolve_opposed`; LHS-on-opposed is a separate
+    ///      follow-up, out of scope here.)
+    ///   3. BARE SYSTEM DIE: `roll.result.mode == "rolled"` AND `modifier == 0`. A
+    ///      player-reported total (`reported_total`/`reported_components`) or a
+    ///      pre-composed `1d10+N` (combat `compile_formula`) ALREADY carries the addend —
+    ///      adding again would double-count. So we compose only for a fresh bare die.
+    ///
+    /// VALUE RESOLUTION (no hardcoded skill→stat table):
+    ///   - tested SKILL: prefer the structured combined `fields.<skill>_base`
+    ///     (STAT + level, full CPR) when the runtime profile projects it; else the flat
+    ///     `skills.<skill>` level (the honest skill-only under-add when no `_base` exists).
+    ///   - skill-less "use only the linked STAT" case: tested source resolves to a Stat →
+    ///     add `stats.<stat>`.
+    /// Missing value → add nothing for that entry (fail-soft, never crash, never fake).
+    async fn resolve_roll_high_modifiers(
+        &self,
+        contract: &CheckContract,
+        roll: &DiceRollRecord,
+        model: &CheckResolutionModel,
+    ) -> Vec<CheckModifier> {
+        // Guard 2: non-opposed static DV path only.
+        if !matches!(model, CheckResolutionModel::StaticTargetNumber { .. }) {
+            return vec![];
+        }
+        // Guard 3: bare system die only (no double-add).
+        if !roll_is_bare_system_die(roll) {
+            return vec![];
+        }
+        // Guard 1: roll-high (meet_or_beat) ruleset only.
+        let Some(kernel) = self.db.load_rule_kernel(&contract.ruleset_id).await.ok().flatten()
+        else {
+            return vec![];
+        };
+        if kernel.dice_core.get("compare").and_then(|v| v.as_str()) != Some("meet_or_beat") {
+            return vec![];
+        }
+        // Load the actor sheet (same path as resolve_percentile_target_for).
+        let Some(params) = RuntimeParameterService::new(self.db.clone())
+            .load_actor_parameters(&contract.session_id, &contract.initiator.actor_id)
+            .await
+            .ok()
+            .flatten()
+        else {
+            return vec![];
+        };
+        let mech = &params.mechanical_profile;
+        // Prefer the contract's explicit tested label (exact skill name like "Handgun")
+        // before the substring-prone derive heuristic (avoids a broad key mis-binding).
+        let label_exact = contract
+            .tested_parameter
+            .as_ref()
+            .map(|t| t.label.clone())
+            .filter(|l| !l.trim().is_empty());
+        let mut mods: Vec<CheckModifier> = vec![];
+        if let Some(label) = label_exact.as_deref() {
+            if let Some(m) = skill_modifier_from_label(mech, label) {
+                mods.push(m);
+            }
+        }
+        if mods.is_empty() {
+            // Fall back to the shared data-driven source derivation.
+            if let Some(src) = derive_tested_source(
+                contract.tested_parameter.as_ref(),
+                &kernel,
+                mech,
+                &contract.check_label,
+                &contract.action_summary,
+                &contract.intent_kind,
+            ) {
+                match src {
+                    TestedSource::Skill { key } => {
+                        if let Some(m) = skill_modifier_from_label(mech, &key) {
+                            mods.push(m);
+                        }
+                    }
+                    TestedSource::Stat { key } => {
+                        if let Some(v) = value_from_profile(mech.get("stats"), &key) {
+                            mods.push(CheckModifier {
+                                label: key,
+                                value: v,
+                                source_ref: None,
+                            });
+                        }
+                    }
+                    // A resource track is not an additive roll-high competence addend.
+                    TestedSource::Track { .. } => {}
+                }
+            }
+        }
+        mods
     }
 
     /// Read a live resource-track CURRENT value from the single source of truth
@@ -1196,6 +1318,69 @@ fn json_to_i32(v: &Value) -> Option<i32> {
         .or_else(|| v.as_str().and_then(|s| s.trim().parse::<i32>().ok()))
 }
 
+/// D1 bare-die guard — only a FRESH system roll (`mode == "rolled"`, `modifier == 0`)
+/// may receive the composed STAT/SKILL add. A player-reported total
+/// (`reported_total`/`reported_components`) or a pre-composed `1d10+N` (combat
+/// `compile_formula` writes `modifier=N`) ALREADY carries the addend → adding again would
+/// double-count. Pure + cheap so the no-double-add invariant is unit-testable without DB.
+fn roll_is_bare_system_die(roll: &DiceRollRecord) -> bool {
+    roll.result.get("mode").and_then(|v| v.as_str()) == Some("rolled")
+        && roll
+            .result
+            .get("modifier")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+            == 0
+}
+
+/// D1 — resolve the additive roll-high modifier for a named skill, structured-first:
+///   1. `fields.<skill>_base` — the kernel-declared combined `STAT + skill_level` (full
+///      CPR competence) when the runtime profile projects it. The slug normalizes the
+///      skill name (lowercase, spaces/parens → `_`) to match field ids like
+///      `basic_tech_base` / `handgun_base`. Zero per-ruleset hardcoding; if no `_base`
+///      field exists this branch simply finds nothing.
+///   2. else `skills.<skill>` — the flat skill LEVEL (the honest skill-only under-add;
+///      the live runtime profile carries only this today).
+/// Returns a labeled modifier (`source_ref` left None — the actor sheet is the provenance,
+/// carried by the label). None when neither value is present (fail-soft).
+fn skill_modifier_from_label(mech: &Value, skill: &str) -> Option<CheckModifier> {
+    let slug = skill_field_slug(skill);
+    if let Some(fields) = mech.get("fields") {
+        for cand in [format!("{slug}_base"), format!("{slug}_skill_base")] {
+            if let Some(v) = value_from_profile(Some(fields), &cand) {
+                return Some(CheckModifier {
+                    label: format!("{skill} (base)"),
+                    value: v,
+                    source_ref: None,
+                });
+            }
+        }
+    }
+    value_from_profile(mech.get("skills"), skill).map(|v| CheckModifier {
+        label: skill.to_string(),
+        value: v,
+        source_ref: None,
+    })
+}
+
+/// Normalize a skill name to a sheet field-id slug: lowercase, non-alphanumeric → `_`,
+/// collapse repeats, trim edges. "Basic Tech" → "basic_tech"; "Firearms (Handgun)" →
+/// "firearms_handgun".
+fn skill_field_slug(skill: &str) -> String {
+    let mut out = String::with_capacity(skill.len());
+    let mut prev_us = false;
+    for ch in skill.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            prev_us = false;
+        } else if !prev_us {
+            out.push('_');
+            prev_us = true;
+        }
+    }
+    out.trim_matches('_').to_string()
+}
+
 #[cfg(test)]
 mod tested_param_tests {
     use super::*;
@@ -1373,3 +1558,8 @@ mod opposed_meet_or_beat_tests;
 #[cfg(test)]
 #[path = "opposed_dice_pool_tests.rs"]
 mod opposed_dice_pool_tests;
+
+// D1：roll-high(meet_or_beat)把 STAT+SKILL 加进 total；CoC/Triangle 字节等价（拆出文件）。
+#[cfg(test)]
+#[path = "roll_high_modifier_tests.rs"]
+mod roll_high_modifier_tests;
