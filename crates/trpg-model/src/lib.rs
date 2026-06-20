@@ -50,6 +50,8 @@ pub mod story;
 pub use story::*;
 pub mod director_plan;
 pub use director_plan::*;
+pub mod materialization_affordance;
+pub use materialization_affordance::*;
 
 pub const PROJECT_SCHEMA_VERSION: &str = "chatrpg.project_bundle.v1";
 pub const RULE_SCHEMA_VERSION: &str = "chatrpg.rule_bundle.v1";
