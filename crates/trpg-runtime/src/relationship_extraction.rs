@@ -20,7 +20,8 @@ use serde_json::Value;
 use std::collections::BTreeSet;
 use trpg_llm::{system, user, LlmClient};
 use trpg_model::{
-    sha256_hex, ChatMessage, MemoryFact, MemoryStatus, ModuleGraph, Scope, ScopeType, Visibility,
+    entity_body_prose, sha256_hex, ChatMessage, MemoryFact, MemoryStatus, ModuleGraph, Scope,
+    ScopeType, Visibility,
 };
 
 /// 交给抽取器的最小实体上下文：稳定 id + 通用 kind + 展示名/简介。
@@ -56,13 +57,7 @@ pub fn resolve_entity_refs(surfaced: &[(String, String)], graph: &ModuleGraph) -
                 .unwrap_or("")
                 .trim()
                 .to_string();
-            let prose = v
-                .get("body")
-                .or_else(|| v.get("summary"))
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .trim()
-                .to_string();
+            let prose = entity_body_prose(v).unwrap_or("").trim().to_string();
             if name.is_empty() && prose.is_empty() {
                 return None;
             }

@@ -4948,13 +4948,8 @@ fn module_static_blocks(module_id: &str, r: &reader::ModuleReadout) -> Vec<Conte
     let str_of =
         |v: &Value, key: &str| v.get(key).and_then(Value::as_str).unwrap_or("").to_string();
     let name_of = |v: &Value| str_of(v, "name");
-    let body_of = |v: &Value| {
-        v.get("body")
-            .or_else(|| v.get("summary"))
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string()
-    };
+    // body-prose 单一事实源：`body`，env-gated 回退 `正文`(locale-variant)，再 `summary`。
+    let body_of = |v: &Value| trpg_model::entity_body_prose(v).unwrap_or("").to_string();
 
     // BP2: module-specific custom rules -> resident pinned blocks.
     // I1: when a rule lacks `id`, fall back to a stable per-index `idx{i}` so the

@@ -59,7 +59,16 @@ fn guard_entity(v: &Value, revealed: &HashSet<String>) -> Value {
     }
     let hint = reveal_hint(&spoiler);
     let mut hint_attached = false;
-    for field in ["body", "summary"] {
+    // §6 大考 正文-fix（codex 设计复核 ⑤ 安全折入）：当 body-key normalize ON 时，
+    // body-prose 读路径会取 `正文`(locale-variant 键)，故裁剪字段表必须同步纳入 `正文`，
+    // 否则带 spoiler 实体的 `正文` secret 会绕过裁剪混进 GM/场景上下文。OFF → 不读 `正文`
+    // 也不裁，字段表退回 [body,summary] = 历史字节等价。
+    let fields: &[&str] = if trpg_model::entity_prose::body_key_normalize_enabled() {
+        &["body", "正文", "summary"]
+    } else {
+        &["body", "summary"]
+    };
+    for &field in fields {
         if let Some(t) = v.get(field).and_then(Value::as_str) {
             let mut red = spoiler.redact(t);
             if !hint_attached {

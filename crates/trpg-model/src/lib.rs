@@ -9,6 +9,8 @@ pub mod mechanics;
 pub use mechanics::*;
 pub mod mechanics_render;
 pub use mechanics_render::*;
+pub mod entity_prose;
+pub use entity_prose::{entity_body_prose, entity_body_value, NPC_BODY_KEY_NORMALIZE_ENV};
 pub mod outcome_fields;
 pub mod table_dice_policy;
 pub use table_dice_policy::*;

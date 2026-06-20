@@ -131,12 +131,7 @@ fn persona_from_graph(npcs: &[Value], npc_id: &str) -> Result<NpcPersona> {
             .and_then(Value::as_str)
             .unwrap_or(npc_id)
             .to_string(),
-        prose: raw
-            .get("body")
-            .or_else(|| raw.get("summary"))
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string(),
+        prose: trpg_model::entity_body_prose(raw).unwrap_or("").to_string(),
     })
 }
 
@@ -157,6 +152,25 @@ mod tests {
         assert_eq!(persona.actor_id, "npc.lars");
         assert_eq!(persona.name, "拉斯");
         assert_eq!(persona.prose, "沉默寡言的退伍兵。");
+    }
+
+    /// §6 大考 正文-fix：正文-键 NPC（如 npc_athena）的 persona prose 行为。
+    /// OFF（默认）→ 读空（字节等价基线，正文 不参与）；ON → 获得 正文 prose。
+    /// body-键 NPC 两路都正常（上面的 resolves_existing_npc 覆盖 body 路）。
+    #[test]
+    fn persona_zhengwen_keyed_npc_off_blank_on_prose() {
+        let npcs = vec![json!({"id": "npc_athena", "name": "雅典娜", "正文": "冷峻的网络幽灵。"})];
+
+        std::env::remove_var(trpg_model::NPC_BODY_KEY_NORMALIZE_ENV);
+        let off = persona_from_graph(&npcs, "npc_athena").unwrap();
+        assert_eq!(off.name, "雅典娜");
+        assert_eq!(off.prose, "", "OFF 字节等价基线：正文-键读空");
+
+        std::env::set_var(trpg_model::NPC_BODY_KEY_NORMALIZE_ENV, "1");
+        let on = persona_from_graph(&npcs, "npc_athena").unwrap();
+        std::env::remove_var(trpg_model::NPC_BODY_KEY_NORMALIZE_ENV);
+        assert_eq!(on.name, "雅典娜");
+        assert_eq!(on.prose, "冷峻的网络幽灵。", "ON：正文-键获得 prose");
     }
 
     #[test]

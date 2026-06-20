@@ -128,13 +128,10 @@ pub(crate) fn scene_node_to_blocks(
             .find(|v| v.get("id").and_then(|x| x.as_str()) == Some(id.as_str()))
         {
             let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("");
-            // Deep-extracted entities (reader DEEP_SYS) carry prose in `body`;
-            // shallow/index entities use `summary`. Prefer body, fall back.
-            let sum = v
-                .get("body")
-                .or_else(|| v.get("summary"))
-                .and_then(|x| x.as_str())
-                .unwrap_or("");
+            // Deep-extracted entities (reader DEEP_SYS) carry prose in `body`
+            // (or the locale-variant key `正文`, env-gated); shallow/index
+            // entities use `summary`. Single source: entity_body_prose.
+            let sum = entity_body_prose(v).unwrap_or("");
             body.push_str(&format!("\n[NPC] {name}: {sum}"));
         }
     }

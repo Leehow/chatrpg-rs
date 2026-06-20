@@ -3122,12 +3122,7 @@ impl RuntimeEngine {
             .and_then(|x| x.as_str())
             .unwrap_or("")
             .to_string();
-        let prose = v
-            .get("body")
-            .or_else(|| v.get("summary"))
-            .and_then(|x| x.as_str())
-            .unwrap_or("")
-            .to_string();
+        let prose = entity_body_prose(v).unwrap_or("").to_string();
         if name.trim().is_empty() && prose.trim().is_empty() {
             return None;
         }
@@ -3177,12 +3172,7 @@ impl RuntimeEngine {
                     .and_then(|x| x.as_str())
                     .unwrap_or("")
                     .to_string();
-                let prose = v
-                    .get("body")
-                    .or_else(|| v.get("summary"))
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("")
-                    .to_string();
+                let prose = entity_body_prose(v).unwrap_or("").to_string();
                 if name.trim().is_empty() && prose.trim().is_empty() {
                     return None;
                 }
