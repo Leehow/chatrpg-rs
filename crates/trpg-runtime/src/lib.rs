@@ -68,6 +68,9 @@ pub use relationship_extraction::{
 
 mod spoiler_guard;
 
+mod npc_activation;
+use npc_activation::apply_npc_activation;
+
 mod context_blocks;
 
 mod spotlight_roster;
@@ -279,7 +282,6 @@ impl RuntimeEngine {
             let loaded = self.db.load_session_scene(&request.session_id).await.ok().flatten();
             state_owned.scene_id = resolve_turn_scene_id(state_owned.scene_id.as_deref(), state_owned.module_id.as_deref(), loaded);
         }
-        let state = &state_owned;
         let _ = InteractionLifecycleKernel::new(self.db.clone()).reconcile_session(&request.session_id).await;
         // Load the project bundle FOR THIS RULESET (several rulesets may share a
         // DB; the latest-parsed one is not necessarily the one being played).
@@ -293,7 +295,7 @@ impl RuntimeEngine {
                 bundle_ids.push(ruleset.bundle_id.clone());
             }
         }
-        if let Some(module_id) = request.module_id.as_ref().or(state.module_id.as_ref()) {
+        if let Some(module_id) = request.module_id.as_ref().or(state_owned.module_id.as_ref()) {
             for module in &project.modules {
                 if &module.module_id == module_id {
                     bundle_ids.push(module.bundle_id.clone());
@@ -303,6 +305,17 @@ impl RuntimeEngine {
         if bundle_ids.is_empty() {
             return Err(anyhow!("no bundle found for ruleset={} module={:?}", request.ruleset_id, request.module_id));
         }
+        // MAT.M1 axis-1: per-turn NPC activation derivation from scene.referenced_npc_ids.
+        // OFF=strict no-op (caller-supplied active_npc_ids preserved unchanged, s17 correction).
+        // Shadow/Enforce: derive only when active_npc_ids is empty (additive, fail-closed).
+        apply_npc_activation(
+            &mut state_owned.active_npc_ids,
+            &project.modules,
+            request.module_id.as_deref().or(state_owned.module_id.as_deref()),
+            state_owned.scene_id.as_deref(),
+            MaterializationAffordanceMode::from_env(),
+        );
+        let state = &state_owned;
 
         let mut blocks = self.db.list_context_blocks_for_bundles(&bundle_ids).await?;
         // P1-4：本回合 Need 取数的来源 trace（rule / scene / parameter / material），

@@ -14,6 +14,8 @@ pub mod table_dice_policy;
 pub use table_dice_policy::*;
 pub mod lazy_object_schema_policy;
 pub use lazy_object_schema_policy::*;
+pub mod materialization_affordance_mode;
+pub use materialization_affordance_mode::*;
 pub mod observability;
 pub use observability::*;
 pub mod asset;
