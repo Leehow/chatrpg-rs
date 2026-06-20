@@ -98,6 +98,28 @@ The product-quality assessment MUST flag, as **blocking** defects: "GM rubber-st
 player-declared outcomes", "no world resistance on an opposed/risky action", and "no
 adjudication on an uncertain action".
 
+#### §2b.3 Visibility markup — the GM may emit `[system]`/`[hide]`; presentation strips them
+
+GM output that must **not** reach the player but **does** affect continuity is tagged, and the
+presentation layer strips the tag from the player's view while keeping the content where it
+belongs:
+
+- **`[system]…[/system]` = out-of-game meta** — mechanical-resolution exposition, dice math,
+  GM reasoning. The player sees only the fiction outcome, never the meta. This is the clean
+  route for "数值65 掷63 通常成功"-style exposition that must not leak into prose. Routed to
+  the engine/audit, stripped from player display.
+- **`[hide]…[/hide]` = in-fiction events that happened but THIS player did not perceive** —
+  off-screen NPC actions, secret-roll (暗骰) triggered events. They go to campaign-canon /
+  world-state (stay consistent, future-referenceable) but **not** to player-knowledge, and are
+  not rendered to the player this turn.
+- Presentation **strips both** from the player display; `[roll]…[/roll]` is reserved for a real
+  mechanical check (per §2a.2) and an empty `[roll]` wrapper is unwrapped (its inner prose kept,
+  the tag removed). This reuses the existing visibility filter / gm_only / known-to-player gate
+  — a GM-output markup face, not new infra.
+
+Validate: the player transcript shows **zero** `[system]`/`[hide]` content and zero raw
+mechanical exposition; the context/DB retains it (continuity preserved).
+
 ### §2c Character parameters are real and they drive the dice
 
 A character is defined by **mechanical parameters** compiled from the ruleset + the authored
