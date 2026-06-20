@@ -25,7 +25,9 @@ pub(crate) const NARRATOR_CRAFT: &str = "\
 检定可见化（每次真实检定都必须做）：每当本回合发生一次真实的骰子检定，必须输出一个 [roll]…[/roll] 块，写明骰子算式、目标值/难度与结果（成功/失败/部分成功/大成功/大失败），例如 [roll]侦查 1d100=63 ≤ 65 通常成功[/roll]；[roll] 只包裹这一次真实检定，绝不把纯叙事、资源增减或「没有检定」的内容塞进 [roll]，也绝不输出空的 [roll]。\n\
 [roll] 必须是绑定完整的真实检定（R-1，零容忍）：一个 [roll] 必须同时含有骰子算式、明确的目标值/难度（如 ≤65 或 ≥DV13）与已定的结果；严禁在 [roll] 里写「未定」「未知」「目标：?」「DV?」「结果：未定」等未绑定占位——这种未定检定一律视为无效。若此刻目标值/难度尚未绑定，就不要用 [roll] 包裹：要么从角色卡/规则/模组取到真实难度后作为一次绑定检定结算，要么改用普通散文叙述，绝不输出结果未定的 [roll]。\n\
 检定数据必须忠实（R-3，零容忍）：[roll] 里的骰子算式、骰值与目标值，必须逐字采用系统在「本回合机械事实」中提供的那一行真实检定数据（形如「检定[...] 6d4=[2,2,3,2,1,1] 目标:面值≥3 需≥1个，结果:成功」）——直接照搬其中的骰子算式（如 6d4）、骰值与目标，绝不自行编造或按看到的点数反推骰型（严禁把 6d4 写成 6d6/6d3/6d?，也严禁把不存在的检定凭空写成 [roll]）。系统没有给出某次检定的真实数据，就不要为它编一个 [roll]。\n\
-检定必有叙事（绝不空壳）：凡有检定发生的回合，[roll] 之外必须另写真实的第二人称中文散文，把这次检定的结果作为故事呈现出来——角色此刻看到/听到/感受到什么、世界如何回应、因果如何推进；严禁只丢一行机械结果或「（机械结果）」之类占位而没有真正的情节叙述。";
+检定必有叙事（绝不空壳）：凡有检定发生的回合，[roll] 之外必须另写真实的第二人称中文散文，把这次检定的结果作为故事呈现出来——角色此刻看到/听到/感受到什么、世界如何回应、因果如何推进；严禁只丢一行机械结果或「（机械结果）」之类占位而没有真正的情节叙述。\n\
+NPC 台词标记（[dialogue]）：当在场且玩家可见的 NPC 真正开口说话时，把这句台词用 [dialogue actor=\"NPC的名字或称谓\"]……[/dialogue] 包裹（actor 取该角色在故事里的名字或身份，例如「郊狼麦克」「酒保」「警员」）；台词本身仍是自然口语、随情境流动，不要因加了标记就变成一问一答的机械对白；没有人真正说话的回合就不要硬塞 [dialogue]。\n\
+可选行动提示（[choice]，须极克制）：仅当本回合自然收束于一个真实、当下、二到三选一级别的关键抉择点（如：是否冒险一搏、走哪条路、是否当面摊牌）时，才可在散文之后附最多 2-3 个 [choice]……[/choice] 作为【可选】提示；这绝不是强制菜单——玩家永远可以无视它自由行动，你也绝不能因此停止用散文把世界推进下去。严禁用 [choice] 罗列线索、把调查/探索拆成选单、或在琐碎回合给选项（那会退化成菜单，违反「展示而非告知」）。";
 
 /// Q-6 (§2b.2 referee, not yes-man). Appended to the adjudicator/GM system prompt — this is
 /// where the decision to run a check vs. just narrate, and how the world resists, is made.
@@ -48,7 +50,45 @@ pub(crate) const ADJUDICATOR_CRAFT: &str = "\
 [提高检定密度] 真实剧本里不确定/对抗/有风险的行动远多于免检琐事；过去的样本检定过疏（约 2/10），这是失职。默认倾向于「开检定」：只要行动结果对玩家有意义且非必然，就掷骰裁定，把检定密度拉到与情境风险相称的水平，而不是把大多数行动当作免检直接放行。\n\
 [世界反制] 掷骰之外，世界必须按自己的逻辑机械地反推：相关 NPC/阵营/时钟/环境据 World 层与模组自主反应（必要时推进时钟、改变状态轨、触发对方行动），不因玩家一句话就让步。\n\
 [结果归属] 结果可以不如玩家所愿——失败、部分成功、代价高昂的成功都合法且应当常见（这是 TRPG 应有的检定密度），干净的成功要靠挣得。绝不因玩家「声称」成功就盖章通过。\n\
-[唯一豁免] 只有真正安全、必然成功、无人对抗的琐碎行动（走进一扇没上锁的门、拿起桌上自己的杯子、平静环境下的闲聊）才免检直接发生；不要把「我懒得掷骰」伪装成「这事很琐碎」。";
+[唯一豁免] 只有真正安全、必然成功、无人对抗的琐碎行动（走进一扇没上锁的门、拿起桌上自己的杯子、平静环境下的闲聊）才免检直接发生；不要把「我懒得掷骰」伪装成「这事很琐碎」。\n\
+[台下隐藏信息（[hide]）——本回合若满足触发条件就必须写] 对玩家此刻【尚不可见】的台下事实用 [hide kind=\"暗骰|npc_action|secret\"]……[/hide] 记录。下列任一发生时，必须各留至少一个对应 [hide]：① 本回合有对抗/暗骰（对方或环境的私下掷骰、防守方对抗结果的内部细节）→ [hide kind=\"暗骰\"]；② 镜头外或玩家未注意到的 NPC/阵营/时钟在私下行动、换位、集结、推进 → [hide kind=\"npc_action\"]；③ 存在玩家尚未察觉的秘密线索/真相/状态变化 → [hide kind=\"secret\"]。[hide] 是写给战役 canon 的【提案】(authority=Proposal)，绝不写进玩家可见散文，也绝不替系统提交状态（状态只由 Kernel 提交）。玩家已经亲眼看到/亲耳听到的内容不要塞进 [hide]。\n\
+[台下决策摘要（[meta]）——每个有裁定的回合必须写一条] 只要本回合发生了检定/对抗/重要 GM 决策，就必须用 [meta kind=\"decision_summary\"]……[/meta] 留一句台下摘要：写明你为何开（或不开）检定、用了哪条难度/对抗值依据、世界为何这样反制。[meta] 绝不出现在玩家可见散文里，只走台下审计通道。\n\
+[台下标记位置] [hide] 与 [meta] 写在你这一轮台下输出的末尾即可，一律使用上面的尖括号标记包裹，不要用其它格式。";
+
+/// Phase B (OB-hide / OB-meta): extract the RAW `[hide…]…[/hide]` and `[meta…]…[/meta]` blocks
+/// (verbatim, including any `kind="…"` attribute) from the adjudicator (台下) prose, so they
+/// survive the split-mode narrator replacement of `visible_text`. Returns the concatenation, or
+/// an empty string when none are present. The caller is `TRPG_GM_CRAFT`-gated and only invokes
+/// this on the split-ON path, so OFF==baseline holds (this never runs on the OFF byte-equal path).
+pub(crate) fn extract_offstage_blocks(text: &str) -> String {
+    let mut out = String::new();
+    for tag in ["hide", "meta"] {
+        let open_prefix = format!("[{tag}");
+        let close = format!("[/{tag}]");
+        let mut from = 0usize;
+        while let Some(rel) = text[from..].find(&open_prefix) {
+            let start = from + rel;
+            let next = text[start + open_prefix.len()..].chars().next();
+            // a genuine open tag is `[hide]` or `[hide ...]` — next char is ']' or whitespace.
+            if !matches!(next, Some(']') | Some(' ') | Some('\t')) {
+                from = start + open_prefix.len();
+                continue;
+            }
+            match text[start..].find(&close) {
+                Some(crel) => {
+                    let end = start + crel + close.len();
+                    if !out.is_empty() {
+                        out.push('\n');
+                    }
+                    out.push_str(&text[start..end]);
+                    from = end;
+                }
+                None => break, // unterminated → leave it (treated as literal upstream)
+            }
+        }
+    }
+    out
+}
 
 /// Append the narrator craft overlay when `craft_on`. OFF ⇒ returns `base` unchanged (byte-equal).
 pub(crate) fn narrator_system(base: String, craft_on: bool) -> String {
@@ -191,5 +231,67 @@ mod tests {
     #[test]
     fn overlays_are_distinct() {
         assert_ne!(NARRATOR_CRAFT, ADJUDICATOR_CRAFT);
+    }
+
+    // ---- Phase B channels (overnight OB-*) ----
+
+    #[test]
+    fn on_instructs_dialogue_channel_ob_dialogue() {
+        let out = narrator_system("BASE".to_string(), true);
+        // Narrator (player-facing) wraps present-NPC speech in [dialogue actor="…"].
+        assert!(out.contains("[dialogue actor="));
+        assert!(out.contains("NPC 真正开口说话"));
+        // Must NOT degrade into mechanical Q&A, and not forced on silent turns.
+        assert!(out.contains("不要硬塞 [dialogue]"));
+    }
+
+    #[test]
+    fn on_instructs_choice_channel_conservatively_ob_system_choice() {
+        let out = narrator_system("BASE".to_string(), true);
+        // [choice] is an OPTIONAL affordance at a real decision point — never a forced menu (Q-4).
+        assert!(out.contains("[choice]"));
+        assert!(out.contains("绝不是强制菜单"));
+        assert!(out.contains("玩家永远可以无视它自由行动"));
+        // [system] remains the player-visible flow channel (A.0) — still present.
+        assert!(out.contains("只用于玩家可见的流程"));
+    }
+
+    #[test]
+    fn on_instructs_hide_channel_as_proposal_ob_hide() {
+        // [hide] lives on the ADJUDICATOR (台下 layer that knows secrets), NOT the player-facing
+        // Narrator — respects constitution ⑧ (Narrator never authors hidden facts).
+        let adj = adjudicator_system("BASE".to_string(), true);
+        assert!(adj.contains("[hide kind="));
+        assert!(adj.contains("Proposal"));
+        assert!(adj.contains("绝不替系统提交状态"));
+        let narr = narrator_system("BASE".to_string(), true);
+        assert!(!narr.contains("[hide kind="), "Narrator must not author [hide]");
+    }
+
+    #[test]
+    fn on_instructs_meta_decision_summary_ob_meta() {
+        let adj = adjudicator_system("BASE".to_string(), true);
+        assert!(adj.contains("[meta kind=\"decision_summary\"]"));
+        assert!(adj.contains("台下摘要"));
+        assert!(adj.contains("绝不出现在玩家可见散文"));
+    }
+
+    #[test]
+    fn extract_offstage_blocks_keeps_hide_and_meta_raw() {
+        let prose = "你看到门厅空无一人。[hide kind=\"npc_action\"]守卫悄悄换了班[/hide]\
+                     更深处传来脚步声。[meta kind=\"decision_summary\"]开感知检定 DV13[/meta]";
+        let off = extract_offstage_blocks(prose);
+        assert!(off.contains("[hide kind=\"npc_action\"]守卫悄悄换了班[/hide]"));
+        assert!(off.contains("[meta kind=\"decision_summary\"]开感知检定 DV13[/meta]"));
+        // player-visible prose must NOT be carried over.
+        assert!(!off.contains("门厅空无一人"));
+        assert!(!off.contains("脚步声"));
+    }
+
+    #[test]
+    fn extract_offstage_blocks_empty_when_none() {
+        assert_eq!(extract_offstage_blocks("纯散文，没有任何台下标记。"), "");
+        // not a real tag (no ']' or space after) → ignored, no panic.
+        assert_eq!(extract_offstage_blocks("[hidden]不是真标签"), "");
     }
 }

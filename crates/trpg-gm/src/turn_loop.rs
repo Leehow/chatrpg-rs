@@ -1117,6 +1117,19 @@ impl GmLoop {
         match narrated {
             Some(text) if !text.trim().is_empty() => {
                 ctx.visible_text = text; // Narrator 输出 = 玩家可见单一事实源
+                // OB-hide / OB-meta (Phase B): the split Narrator (player-facing, constitution ⑧)
+                // does NOT author hidden facts; the adjudicator (台下) emits [hide]/[meta]. Those
+                // blocks would be LOST when narrator output replaces visible_text — so preserve
+                // them RAW (Q-7-REVISED: transport emits raw; the parser classifies them hidden;
+                // the 战报 labels them). GM_CRAFT-gated ⇒ additive; OFF==baseline (OFF skips this
+                // whole craft path, and split-OFF never calls run_narrator_phase).
+                if crate::gm_craft::enabled() {
+                    let offstage = crate::gm_craft::extract_offstage_blocks(&adjudicator_prose);
+                    if !offstage.is_empty() {
+                        ctx.visible_text.push('\n');
+                        ctx.visible_text.push_str(&offstage);
+                    }
+                }
             }
             _ => {
                 tracing::warn!(
