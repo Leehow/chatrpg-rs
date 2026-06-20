@@ -985,6 +985,21 @@ impl GmLoop {
         ctx.rejected_nominations = rejections_cell
             .into_inner()
             .unwrap_or_else(|p| p.into_inner());
+        // MAT.M3 axis-2：成功侦查 → 提名揭示一条 source-backed 线索 FACT（DP-3）。双闸：
+        // 仅 MaterializationAffordanceMode::Enforce ∧ reveal-gating ON 才产提名（Off/Shadow/
+        // gating-off ⇒ 严格无操作，字节级基线）。提名经既有 RevealNomination 通道 →
+        // PresentationCommit 边界终审 Allow 后 commit（proposal-only：本路径不调 reveal_fact /
+        // 不写 DB）。reveal_gating 与 reveals_cell 取回为前置（OFF 时 ctx.nominated_reveals 恒空）。
+        // 传 disjoint 字段引用（非 &mut ctx 整体）：messages/ledger 借用 ctx 其它字段且贯穿本
+        // 函数，故经独立字段引用避开整体可变重借（split-borrow）。
+        self.apply_clue_affordance(
+            &ctx.state_agent,
+            input,
+            ledger.snapshot(),
+            &mut ctx.nominated_reveals,
+            reveal_gating,
+        )
+        .await;
         // —— 终态 A：request_player_roll gate ——
         if let Some(gate) = awaiting {
             ctx.visible_text = visible_text;
@@ -2392,6 +2407,93 @@ impl GmLoop {
                 error = %err,
                 "PresentationCommit story rejection persist failed (non-fatal)"
             );
+        }
+    }
+
+    /// MAT.M3 axis-2 线索发现能供（DP-3）：本回合每条**成功的侦查类检定**若目标解析到
+    /// **当前场景引用**的某条线索（`graph.clues`），就提名揭示该线索的**单条 source-backed
+    /// FACT**（fact_id = 线索 id，**非**正文逐字），推进既有 `RevealNomination` 通道，由
+    /// `presentation_commit_boundary` 终审 Allow 后 commit。
+    ///
+    /// proposal-only / 跨 crate 干净：检定→线索的纯映射在 `trpg_runtime::clue_reveal_candidates`
+    /// （DB-free），本方法只读 ledger + 加载 module graph（只读），把候选映射成 `RevealNomination`
+    /// 推进 `ctx.nominated_reveals`——**不**调 `reveal_fact` / 不写 DB（commit 归边界）。
+    ///
+    /// 双闸 fail-closed：`gating_on` 为前置形参（reveal-gating OFF ⇒ 直接早返，
+    /// ctx.nominated_reveals 恒空 = F13 基线）；模式闸在纯函数内（Off/Shadow ⇒ 空候选）。
+    /// 幂等：同一线索 fact 跨多条命中检定 / 与既有提名去重（commit primitive 本身幂等，
+    /// 提名去重让排序/计数确定；ContextSurfaced 由 runtime 幂等记，本路径不重复记）。
+    async fn apply_clue_affordance(
+        &self,
+        state_agent: &trpg_model::RuntimeState,
+        input: &GmTurnInput<'_>,
+        snap: &trpg_agent::TurnLedgerSnapshot,
+        nominated_reveals: &mut Vec<crate::tools::RevealNomination>,
+        gating_on: bool,
+    ) {
+        let mode = trpg_model::MaterializationAffordanceMode::from_env();
+        // 模式闸 + gating 闸：任一关 ⇒ 严格无操作（与纯函数双闸一致，省去无谓 graph 加载）。
+        if !mode.is_enforce() || !gating_on {
+            return;
+        }
+        let Some(scene_id) = state_agent.scene_id.clone() else {
+            return;
+        };
+        let Some(module_id) = input
+            .request
+            .module_id
+            .clone()
+            .or_else(|| state_agent.module_id.clone())
+        else {
+            return;
+        };
+        let graph = match self.engine.db.load_module_graph(&module_id).await {
+            Ok(Some(g)) => g,
+            _ => return, // 无图谱 → fail-closed（线索能供不揭）。
+        };
+        let Some(scene) = graph.scenes.iter().find(|s| s.node_id == scene_id) else {
+            return;
+        };
+        // 结果 join 契约（by check_id）→ 逐条跑纯映射，收集候选（DP-3 单 fact / 检定）。
+        // 先收集再推送：snapshot() 是 &ctx 不可变借用，与后续 ctx.nominated_reveals 可变推送
+        // 不能交叠，故分两段（借用规则）。
+        let mut candidates: Vec<crate::tools::RevealNomination> = Vec::new();
+        for result in &snap.check_results {
+            let success = result
+                .outcome
+                .get("success")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            if !success {
+                continue;
+            }
+            let Some(contract) = snap
+                .check_contracts
+                .iter()
+                .find(|c| c.check_id == result.check_id)
+            else {
+                continue;
+            };
+            let resolved = trpg_runtime::ResolvedCheck {
+                success,
+                tested_parameter: contract.tested_parameter.as_ref().map(|p| p.label.as_str()),
+                check_label: contract.check_label.as_str(),
+                action_summary: contract.action_summary.as_str(),
+            };
+            for cand in
+                trpg_runtime::clue_reveal_candidates(&resolved, scene, &graph, mode, gating_on)
+            {
+                candidates.push(crate::tools::RevealNomination {
+                    fact_id: cand.fact_id,
+                    reason: Some(cand.reason),
+                });
+            }
+        }
+        // 与既有提名 + 候选间去重（同 fact_id 只提名一次；保留首次 reason）。
+        for cand in candidates {
+            if !nominated_reveals.iter().any(|n| n.fact_id == cand.fact_id) {
+                nominated_reveals.push(cand);
+            }
         }
     }
 

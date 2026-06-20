@@ -1809,3 +1809,112 @@ async fn presentation_commit_rejection_block_drops() {
         "Block ⇒ rejection nomination dropped, nothing persisted"
     );
 }
+
+// ======================== MAT.M3 axis-2 线索发现能供（DP-3）========================
+// 纯映射逻辑（成功侦查→线索 fact）在 trpg_runtime::clue_reveal_candidates 全量单测；
+// 这里只测 gm 侧两件「边界 + 通道」事：(#4) 线索 fact 走与 reveal 同一终审 gate
+// （Block 丢弃 / Allow 提交）；(#5) 同回合 surface+learn 的提名去重幂等（不双计）。
+
+/// MAT.M3 #4(Block)：线索能供产出的 RevealNomination 必须遵守 PresentationCommit 终审 gate
+/// —— Block ⇒ 零 PlayerLearnedFact 行（与既有 reveal Block 同口径，证明线索 fact 非旁路）。
+#[tokio::test]
+async fn clue_reveal_nomination_blocked_writes_no_player_learned_fact() {
+    let session = format!("s_clue_block_{}", uuid::Uuid::new_v4().simple());
+    let Some((mut gm, request)) = real_gm(&session).await else {
+        eprintln!("SKIP: DATABASE_URL unset");
+        return;
+    };
+    let mut ctx = TurnContext::new();
+    // 模拟线索能供已把一条线索 fact 提名进通道（fact_id = 线索 id，非正文）。
+    ctx.nominated_reveals = vec![RevealNomination {
+        fact_id: "clue_diary".into(),
+        reason: Some("successful 侦查 check examined the clue in the current scene".into()),
+    }];
+    ctx.presentation_gate = block_gate(); // 终审 Block
+    gm.presentation_commit_boundary(&mut ctx, &request).await;
+    assert!(
+        gm.engine
+            .db
+            .list_revealed_facts(&session)
+            .await
+            .unwrap()
+            .is_empty(),
+        "Block ⇒ 线索 fact 不提交（PlayerLearnedFact 零行）"
+    );
+}
+
+/// MAT.M3 #4(Allow)：终审 Allow ⇒ 线索 fact 经既有 reveal commit primitive 落库
+/// （ContextSurfaced→提名→PlayerLearnedFact，仅 Allow 后才成 learned）。
+#[tokio::test]
+async fn clue_reveal_nomination_allow_commits_player_learned_fact() {
+    let session = format!("s_clue_allow_{}", uuid::Uuid::new_v4().simple());
+    let Some((mut gm, request)) = real_gm(&session).await else {
+        eprintln!("SKIP: DATABASE_URL unset");
+        return;
+    };
+    let mut ctx = TurnContext::new();
+    ctx.nominated_reveals = vec![RevealNomination {
+        fact_id: "clue_diary".into(),
+        reason: Some("found via Spot Hidden".into()),
+    }];
+    ctx.presentation_gate = PresentationGate::Allow; // 终审 Allow
+    gm.presentation_commit_boundary(&mut ctx, &request).await;
+    assert_eq!(
+        gm.engine.db.list_revealed_facts(&session).await.unwrap(),
+        vec!["clue_diary".to_string()],
+        "Allow ⇒ 线索 fact 提交为 revealed（PlayerLearnedFact）"
+    );
+}
+
+/// MAT.M3 #5：同回合「线索 surface + learn」幂等——线索能供绝不重复提名同一 fact。
+/// 直接断言纯映射重复跑 / 多条命中检定产稳定单条 fact（idempotency invariant：
+/// record_context_surfaced_entities 幂等 per-session，本路径只产提名、不写 ContextSurfaced，
+/// 故不会与 surfaced 事件 race / 双计）。DB-free。
+#[test]
+fn clue_affordance_same_turn_surface_and_learn_is_idempotent() {
+    use trpg_model::MaterializationAffordanceMode::Enforce;
+    use trpg_model::{ModuleGraph, ScenarioNode};
+    use trpg_runtime::{clue_reveal_candidates, ResolvedCheck};
+
+    let scene = ScenarioNode {
+        node_id: "sc01".into(),
+        referenced_clue_ids: vec!["clue_diary".into()],
+        ..Default::default()
+    };
+    let graph = ModuleGraph {
+        clues: vec![json!({"id":"clue_diary","name":"血迹斑斑的日记","body":"正文不该逐字揭示"})],
+        ..Default::default()
+    };
+    let check = ResolvedCheck {
+        success: true,
+        tested_parameter: Some("侦查"),
+        check_label: "侦查血迹斑斑的日记",
+        action_summary: "玩家仔细搜查书房",
+    };
+    // 同一回合内（surface 后立即 learn）多次求值必产同一单条 fact —— 调用方据 fact_id 去重，
+    // 故不会双计；fact_id 是线索 id，绝非正文。
+    let a = clue_reveal_candidates(&check, &scene, &graph, Enforce, true);
+    let b = clue_reveal_candidates(&check, &scene, &graph, Enforce, true);
+    assert_eq!(a.len(), 1);
+    assert_eq!(a, b, "同回合重复求值必产同一提名（确定性，可去重）");
+    assert_eq!(a[0].fact_id, "clue_diary");
+    assert!(!a[0].reason.contains("正文"), "reason 不得含线索正文逐字");
+
+    // 调用方去重语义：把同 fact 二次合并入既有提名集 ⇒ 仍只一条（gm wiring 同款 any() 守卫）。
+    let mut noms: Vec<RevealNomination> = a
+        .iter()
+        .map(|c| RevealNomination {
+            fact_id: c.fact_id.clone(),
+            reason: Some(c.reason.clone()),
+        })
+        .collect();
+    for c in &b {
+        if !noms.iter().any(|n| n.fact_id == c.fact_id) {
+            noms.push(RevealNomination {
+                fact_id: c.fact_id.clone(),
+                reason: Some(c.reason.clone()),
+            });
+        }
+    }
+    assert_eq!(noms.len(), 1, "同 fact 跨多次命中只提名一次（幂等去重，不双计）");
+}

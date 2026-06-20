@@ -121,6 +121,9 @@ mod spoiler_guard;
 mod npc_activation;
 use npc_activation::apply_npc_activation;
 
+pub mod clue_affordance;
+pub use clue_affordance::{clue_reveal_candidates, ClueRevealCandidate, ResolvedCheck};
+
 mod npc_profile_materialize;
 
 mod context_blocks;
