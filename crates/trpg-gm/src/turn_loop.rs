@@ -1125,18 +1125,20 @@ impl GmLoop {
                 ctx.visible_text = adjudicator_prose;
             }
         }
-        // Q-5/Q-7 (§2a.2/§2b.3): strip player-visible markup from the persisted narration
-        // when TRPG_GM_CRAFT ON; OFF ⇒ untouched (byte-equal baseline). [system]→audit,
-        // [hide]→canon, empty [roll] unwrapped (inner prose kept).
+        // Q-5/Q-7 + protocol A.0: parse the GM wire text into a typed TurnDocument and keep the
+        // deterministic player_text ({narration,dialogue,roll,system,choice}) as the persisted
+        // player-visible narration. TRPG_GM_CRAFT ON only; OFF ⇒ untouched (byte-equal baseline).
+        // A.0 correction: [system] is PLAYER-VISIBLE and KEPT; strip set = {meta,hide}. [meta]→
+        // audit, [hide]→canon Proposal, empty [roll] unwrapped to narration (inner prose kept).
         if crate::gm_craft::enabled() {
             let stripped = crate::presentation_markup::strip_player_markup(&ctx.visible_text);
             if stripped.changed(&ctx.visible_text) {
                 tracing::debug!(
                     turn_id = %input.request.turn_id,
-                    system_blocks = stripped.system_blocks.len(),
+                    meta_blocks = stripped.meta_blocks.len(),
                     hide_blocks = stripped.hide_blocks.len(),
                     empty_rolls = stripped.empty_rolls_unwrapped,
-                    "gm_craft markup stripped from player narration"
+                    "gm_craft typed turn-document: player_text rebuilt (keeps [system], strips meta/hide)"
                 );
                 ctx.visible_text = stripped.player_text;
             }
