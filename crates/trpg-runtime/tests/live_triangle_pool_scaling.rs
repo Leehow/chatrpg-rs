@@ -77,10 +77,24 @@ async fn live_competent_triangle_agent_rolls_bigger_param_driven_pool() {
     );
 
     // Enumerate the live competency options to pick a low- vs high-ordinal one.
+    // NOTE (Q4 DP-E finding): the live Triangle onboarding pack carries NO group
+    // keyed to the `competency` choice (its groups are origin/role_or_class/
+    // equipment/abilities, and their locators are prose section fragments, not the
+    // nine competency tier names — the template field's own note says they were
+    // "mentioned but not read"). "Liaison" — the value real chargen picks —
+    // appears in NO content_json table in the live DB. So this is an UPSTREAM
+    // DATA-ABSENCE (the competency tiers were never extracted into an enumerable
+    // catalog), not a parser-matching gap: the compiler now honors field_id,
+    // title AND `choices_material_id` linkages (covered by the in-crate
+    // deterministic tests), yet still finds < 2 options because none exist in the
+    // data. This test therefore SKIPs honestly until the Triangle competency
+    // catalog is reparsed with the tier list; the mechanism + linkage are proven
+    // by the deterministic in-crate tests.
     let Some(rec) = pool_scaling_choice_record("competency_rank", &template, &catalogs) else {
         eprintln!(
-            "SKIP: live option catalog enumerates < 2 competency options \
-             (parse coverage gap) — deterministic+in-crate tests still prove the mechanism"
+            "SKIP: live Triangle catalog has NO enumerable competency tier group \
+             (upstream data-absence: tiers were never parsed; not a matcher gap) — \
+             deterministic in-crate tests prove the linkage + mechanism"
         );
         return;
     };

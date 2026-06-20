@@ -28,33 +28,55 @@ use trpg_model::CharacterTemplate;
 /// Generic — these are rating-noun suffixes, not ruleset terms.
 const RANK_SUFFIXES: &[&str] = &["_rank", "_rating", "_level", "_score", "_tier", "_value"];
 
-/// The choice field id that a scaling param scales: the param itself if a choice
-/// field already carries that exact id, else the param with a trailing
-/// rating-noun suffix stripped (`competency_rank` -> `competency`). Returns the
-/// matched `choice` field's id (preserving its original casing), or None.
-fn choice_field_for_param(param: &str, template: &CharacterTemplate) -> Option<String> {
+/// The `choice` field a scaling param scales, with every DATA-DECLARED key the
+/// ruleset offers for locating that field's option group. The field is matched
+/// by the param itself (exact) or the param with a trailing rating-noun suffix
+/// stripped (`competency_rank` -> `competency`). On a hit, returns the field's
+/// own match keys (preserving original casing): its `field_id`, its human
+/// `title`, and its explicit `choices_material_id` (the field's authoritative
+/// declaration of WHICH option material/group supplies its choices). These are
+/// the generic, data-driven hooks `enumerated_options` uses to find the group —
+/// no ruleset literals, no per-label table. Returns None when no choice stems it.
+fn choice_field_for_param(param: &str, template: &CharacterTemplate) -> Option<ChoiceFieldKeys> {
     let p = param.trim().to_ascii_lowercase();
     if p.is_empty() {
         return None;
     }
-    let is_choice = |fid: &str| {
+    let keys_for = |fid: &str| {
         template.fields.iter().find_map(|f| {
             (f.field_type.eq_ignore_ascii_case("choice")
                 && f.field_id.trim().eq_ignore_ascii_case(fid))
-            .then(|| f.field_id.trim().to_string())
+            .then(|| ChoiceFieldKeys {
+                field_id: f.field_id.trim().to_string(),
+                title: f.title.trim().to_string(),
+                choices_material_id: f
+                    .choices_material_id
+                    .as_deref()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty()),
+            })
         })
     };
-    if let Some(hit) = is_choice(&p) {
+    if let Some(hit) = keys_for(&p) {
         return Some(hit);
     }
     for suf in RANK_SUFFIXES {
         if let Some(stem) = p.strip_suffix(suf) {
-            if let Some(hit) = is_choice(stem) {
+            if let Some(hit) = keys_for(stem) {
                 return Some(hit);
             }
         }
     }
     None
+}
+
+/// Every key a ruleset's data offers for locating a choice field's option group:
+/// the field id, its human title, and its explicit `choices_material_id` pointer.
+/// All are generic field metadata — never ruleset/module name literals.
+struct ChoiceFieldKeys {
+    field_id: String,
+    title: String,
+    choices_material_id: Option<String>,
 }
 
 /// True when any derived value already PRODUCES this param (case-insensitive on
@@ -107,10 +129,30 @@ fn slug(s: &str) -> String {
 }
 
 /// Enumerated option ids for a choice field, in catalog ORDER, de-duplicated.
-/// Reads the matching option group (by `category` / `group_id` containing the
-/// field id) and pulls `options[]` then `locators[]`. Empty when no group.
-fn enumerated_options(field_id: &str, option_catalogs: &Value) -> Vec<String> {
-    let fid = field_id.trim().to_ascii_lowercase();
+/// Finds the option group by ANY data-declared key the field offers — its
+/// `field_id`, its human `title`, or its explicit `choices_material_id` pointer —
+/// matched against a group's `group_id` / `category` / `title` and the enclosing
+/// `catalog_id`. The field's `choices_material_id` is the AUTHORITATIVE link a
+/// ruleset draws from the field to its option material; honoring it (and the
+/// field title) is what lets a catalog that keys its group by material id or by
+/// human label — not by the snake_case field id — still resolve. Pulls the
+/// group's `options[]` then `locators[]`. Empty when no group matches. Generic:
+/// the keys are field metadata, never ruleset/module literals.
+fn enumerated_options(keys: &ChoiceFieldKeys, option_catalogs: &Value) -> Vec<String> {
+    // Every non-empty lowercase needle the field declares for locating its group.
+    let mut needles: Vec<String> = Vec::new();
+    let mut add_needle = |s: &str| {
+        let t = s.trim().to_ascii_lowercase();
+        if !t.is_empty() && !needles.iter().any(|x| x == &t) {
+            needles.push(t);
+        }
+    };
+    add_needle(&keys.field_id);
+    add_needle(&keys.title);
+    if let Some(m) = &keys.choices_material_id {
+        add_needle(m);
+    }
+
     let mut out: Vec<String> = Vec::new();
     let mut push = |id: String| {
         if !id.is_empty() && !out.iter().any(|x| x == &id) {
@@ -120,15 +162,20 @@ fn enumerated_options(field_id: &str, option_catalogs: &Value) -> Vec<String> {
     let Some(cats) = option_catalogs.as_array() else {
         return out;
     };
-    let group_matches = |g: &Value| -> bool {
-        ["category", "group_id", "title"].iter().any(|k| {
-            g.get(*k)
-                .and_then(Value::as_str)
-                .map(|s| s.to_ascii_lowercase().contains(&fid))
-                .unwrap_or(false)
-        })
+    // A group matches when any field needle appears in (or equals) any of the
+    // group's locating keys, OR the enclosing catalog id. Substring keeps the
+    // prior behavior; equality covers id-keyed links (choices_material_id).
+    let key_hit = |v: &Value, k: &str| -> bool {
+        v.get(k)
+            .and_then(Value::as_str)
+            .map(|s| {
+                let s = s.to_ascii_lowercase();
+                needles.iter().any(|n| s.contains(n.as_str()))
+            })
+            .unwrap_or(false)
     };
     for cat in cats {
+        let cat_hit = key_hit(cat, "catalog_id");
         // A catalog is either a flat option list or holds `option_groups`.
         let groups: Vec<&Value> = cat
             .get("option_groups")
@@ -136,7 +183,11 @@ fn enumerated_options(field_id: &str, option_catalogs: &Value) -> Vec<String> {
             .map(|a| a.iter().collect())
             .unwrap_or_else(|| vec![cat]);
         for g in groups {
-            if !group_matches(g) {
+            let group_matches = cat_hit
+                || ["category", "group_id", "title"]
+                    .iter()
+                    .any(|k| key_hit(g, k));
+            if !group_matches {
                 continue;
             }
             for arr_key in ["options", "locators"] {
@@ -171,8 +222,9 @@ pub fn pool_scaling_choice_record(
     if param.is_empty() || already_compiled(param, template) {
         return None;
     }
-    let field = choice_field_for_param(param, template)?;
-    let options = enumerated_options(&field, option_catalogs);
+    let keys = choice_field_for_param(param, template)?;
+    let field = keys.field_id.clone();
+    let options = enumerated_options(&keys, option_catalogs);
     if options.len() < 2 {
         return None; // not a real scale -> leave the pool flat (fail-soft)
     }
