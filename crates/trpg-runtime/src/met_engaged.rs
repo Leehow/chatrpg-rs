@@ -26,7 +26,7 @@
 
 use std::collections::HashSet;
 
-use trpg_model::MaterializationAffordanceMode;
+use trpg_model::{DomainEvent, DomainEventKind, MaterializationAffordanceMode};
 
 /// 玩家暴露集里的 NPC entity_kind 取值（与 truthgraph 写穿口径一致）。
 /// 仅按 entity_id 匹配即可（id 全会话唯一），kind 仅作判定辅助，不强制。
@@ -144,6 +144,68 @@ never chase a climax (rule 6). An un-met NPC speaks only reactively.\n[/npc_pres
         // base 为空但有 un-met active NPC：约束块本身即指引（dynamic tail 会写它）。
         _ => Some(block),
     }
+}
+
+/// MAT.M7 (D2) PURE：玩家本回合**主动接触/对抗**某个 active NPC ⇒ 该 NPC 即「已会面」。
+///
+/// # 为什么需要这条路（M6 暴露的 met/engaged 死锁）
+///
+/// `met_engaged` 把「已会面」派生自玩家暴露集（`PlayerExposed`/`EntitySurfaced`）。但此前
+/// **唯一**发 `PlayerExposed` 的路径是「NPC 名字/别名已出现在玩家可见念白里」
+/// （[`crate::truthgraph::player_exposed_events_for_scene_narration`]）。而 M4 的 un-met 闸
+/// （[`restrict_unmet_npc_guidance`]）又禁止未会面 NPC 主动自报身份——于是一个戏剧价值
+/// 就在「自报身份」的 NPC（如 cyberpunk `npc.athena`）永远进不了「已会面」：没会面就不能
+/// 被点名、不被点名就不会面。M6 实跑 19 回合 `PlayerExposed=0`，Athena reveal 不可达。
+///
+/// # 解法（DP-2 原意：玩家**选择**接触即是「会面」之举）
+///
+/// 玩家**故意**对一个在场 active NPC 发起接触/对抗（如对它跑对抗检定 / open-fire / 接触
+/// 握手）——这一**玩家主动**的行为本身就是「met」之举（不是 NPC 自报，不破坏剧透闸）。
+/// 故在此情形为该 NPC 发一条 `PlayerExposed`，`met_engaged` 即据此把它判为已会面，
+/// `restrict_unmet_npc_guidance` 不再约束它，它方可（在既有 secret 门允许内）开口揭示。
+///
+/// # 信号口径（确定性、source-grounded，非 LLM 猜测）
+///
+/// `engaged_npc_id` 必须是引擎已**确定性解析**的接触目标——M7 接线点取
+/// `opposed_binding.persona.actor_id`（对抗预 pass 已按 id 命中场景 NPC、fail-closed）。
+/// 本函数再做一道收口：该 id 必须落在 `active_npc_ids` 集内（present 才谈得上「会面」），
+/// 否则不发（绝不凭空把非在场 id 标为已会面）。
+///
+/// # 严格基线
+///
+/// 仅 `mode.is_enforce()` 才产事件；Off/Shadow ⇒ 恒空（无新事件 ⇒ 玩家暴露投影不变 ⇒
+/// 字节级基线）。事件 id `de_exposed_{session}_{npc}` 与念白路径同口径 ⇒ on-conflict-do-nothing
+/// 幂等折叠（同一 NPC 既被念白暴露又被接触暴露，仍是一行）。
+pub fn player_engaged_met_events(
+    session_id: &str,
+    turn_id: &str,
+    active_npc_ids: &[String],
+    engaged_npc_id: &str,
+    mode: MaterializationAffordanceMode,
+) -> Vec<DomainEvent> {
+    if !mode.is_enforce() {
+        return Vec::new(); // Off/Shadow：不产事件 → 字节级基线。
+    }
+    let engaged = engaged_npc_id.trim();
+    if engaged.is_empty() {
+        return Vec::new();
+    }
+    // 收口：接触目标必须是本回合在场（active）NPC——present 才谈得上「会面」。
+    if !active_npc_ids.iter().any(|id| id == engaged) {
+        return Vec::new();
+    }
+    let data = serde_json::json!({
+        "entity_id": engaged,
+        "entity_kind": NPC_ENTITY_KIND,
+        "reason": "player deliberately engaged this present NPC (opposed/contact interaction)",
+    });
+    vec![DomainEvent::new(
+        format!("de_exposed_{session_id}_{engaged}"),
+        session_id,
+        turn_id,
+        DomainEventKind::PlayerExposed,
+        data,
+    )]
 }
 
 #[cfg(test)]
@@ -279,6 +341,84 @@ mod tests {
                 expect_met,
                 "id={active_id} seen={seen_id} 应纯 data-driven 判定"
             );
+        }
+    }
+
+    // ===== MAT.M7 (D2): 玩家主动接触 active NPC → 发 PlayerExposed → 解 met 死锁 =====
+
+    /// TDD #3：Enforce 下，玩家故意接触一个 active 且 un-met 的 NPC ⇒ 发 PlayerExposed；
+    /// 该事件喂回 derive_met_engaged_gate ⇒ 该 NPC 现判为 met ⇒ 不再受 un-met 约束。
+    #[test]
+    fn deliberate_engage_of_active_unmet_npc_emits_player_exposed_then_met() {
+        let active = ids(&["npc_athena"]);
+        // 接触前：未暴露 ⇒ un-met（M4 闸约束它）。
+        let before = derive_met_engaged_gate(&active, &exposed(&[]), Enforce);
+        assert!(before.is_unmet("npc_athena"), "接触前应为 un-met");
+        assert!(
+            restrict_unmet_npc_guidance(Some("BASE".into()), &before)
+                .unwrap()
+                .contains("[npc_presence_gate]"),
+            "接触前 un-met 闸应约束它"
+        );
+
+        // 玩家主动接触 ⇒ 发 PlayerExposed。
+        let evs = player_engaged_met_events("sess", "t1", &active, "npc_athena", Enforce);
+        assert_eq!(evs.len(), 1, "应为被接触的 active NPC 发一条事件");
+        assert_eq!(evs[0].kind, trpg_model::DomainEventKind::PlayerExposed);
+        assert_eq!(evs[0].event_id, "de_exposed_sess_npc_athena", "与念白暴露同口径 ⇒ 幂等折叠");
+        assert_eq!(
+            evs[0].data.get("entity_id").and_then(|v| v.as_str()),
+            Some("npc_athena")
+        );
+
+        // 把该事件折进玩家暴露集 ⇒ 现判为 met ⇒ 不再受约束。
+        let now_exposed = exposed(&[("npc_athena", "npc")]);
+        let after = derive_met_engaged_gate(&active, &now_exposed, Enforce);
+        assert!(!after.is_unmet("npc_athena"), "接触后应为 met");
+        assert_eq!(after.met, ids(&["npc_athena"]));
+        assert_eq!(
+            restrict_unmet_npc_guidance(Some("BASE".into()), &after),
+            Some("BASE".into()),
+            "接触后 met ⇒ 不再追加 un-met 约束（恢复基线）"
+        );
+    }
+
+    /// TDD #4：没有主动接触 ⇒ 仅在场 active NPC 不自动暴露 ⇒ M4 un-met 闸照旧成立。
+    #[test]
+    fn merely_present_active_npc_is_not_auto_exposed() {
+        let active = ids(&["npc_present"]);
+        // 接触目标为空 ⇒ 不发事件。
+        assert!(player_engaged_met_events("sess", "t1", &active, "", Enforce).is_empty());
+        // 接触一个**不在场**的 id ⇒ 不发事件（绝不把非在场标为已会面）。
+        assert!(
+            player_engaged_met_events("sess", "t1", &active, "npc_offscreen", Enforce).is_empty(),
+            "接触目标必须是 active NPC 才发"
+        );
+        // 未暴露 ⇒ 仍 un-met，M4 闸仍约束。
+        let gate = derive_met_engaged_gate(&active, &exposed(&[]), Enforce);
+        assert!(gate.is_unmet("npc_present"));
+    }
+
+    /// TDD #5：Off / Shadow ⇒ player_engaged_met_events 恒空（字节级基线）。
+    #[test]
+    fn engage_event_is_noop_under_off_and_shadow() {
+        let active = ids(&["npc_athena"]);
+        for mode in [Off, Shadow] {
+            assert!(
+                player_engaged_met_events("sess", "t1", &active, "npc_athena", mode).is_empty(),
+                "{mode:?}: 不产暴露事件（基线）"
+            );
+        }
+    }
+
+    /// TDD #6：GENERIC —— 任意 ruleset/module 命名都 data-driven，无名分支。
+    #[test]
+    fn engage_event_is_generic_no_name_branch() {
+        for npc in ["coc_keeper_npc", "dnd_tavern_npc", "生造模组_村长", "npc.athena_drone"] {
+            let active = ids(&[npc]);
+            let evs = player_engaged_met_events("s", "t", &active, npc, Enforce);
+            assert_eq!(evs.len(), 1, "id={npc} 应纯 data-driven 发事件");
+            assert_eq!(evs[0].data.get("entity_id").and_then(|v| v.as_str()), Some(npc));
         }
     }
 

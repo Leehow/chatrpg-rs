@@ -6710,6 +6710,15 @@ pub struct CompiledContext {
     /// CompiledContext 一同传递，故 prepare_turn_context 签名与两处调用方均不变。
     #[serde(default)]
     pub need_trace: Vec<NeedResolutionTrace>,
+    /// MAT.M7 (D1)：`prepare_turn_context` 本回合**派生后**的 active NPC 集（axis-1
+    /// activation 把 scene.referenced_npc_ids 折进来后的结果）。随 CompiledContext 一同
+    /// 传出，让 gm 回合循环的对白/反应消费者读到派生集，而非调用方传入的陈旧
+    /// `state.active_npc_ids`（Enforce 下后者恒空 → NPC 对白=0 的 M6 缺陷）。
+    ///
+    /// 严格基线：Off/Shadow 下 `apply_npc_activation` 是无操作，故此字段恒 == 调用方
+    /// 传入的 `state.active_npc_ids`（空即空、有则原样）；消费者读它与读旧 state 字节等价。
+    #[serde(default)]
+    pub active_npc_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]

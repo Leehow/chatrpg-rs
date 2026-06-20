@@ -126,7 +126,8 @@ pub use clue_affordance::{clue_reveal_candidates, ClueRevealCandidate, ResolvedC
 
 pub mod met_engaged;
 pub use met_engaged::{
-    derive_met_engaged_gate, director_leverage_npc_ids, restrict_unmet_npc_guidance, MetEngagedGate,
+    derive_met_engaged_gate, director_leverage_npc_ids, player_engaged_met_events,
+    restrict_unmet_npc_guidance, MetEngagedGate,
 };
 
 mod npc_profile_materialize;
@@ -810,6 +811,11 @@ impl RuntimeEngine {
         let mut compiled = ContextBuilder::default().build(planned, request)?;
         // P1-4：把本回合 Need 取数 trace 挂到返回的 CompiledContext（source_refs 不再丢弃）。
         compiled.need_trace = need_trace;
+        // MAT.M7 (D1)：把本回合**派生后**的 active NPC 集（apply_npc_activation 已折进
+        // state_owned）一同传出。gm 回合循环读 ctx.compiled.active_npc_ids 出对白/反应消费
+        // 集，修「派生集进不了对白消费者 → NPC 对白=0」缺陷。Off/Shadow 下 apply_npc_activation
+        // 无操作 ⇒ 此值 == 调用方传入集 ⇒ 字节等价基线。
+        compiled.active_npc_ids = state.active_npc_ids.clone();
         for block in compiled
             .prefix_blocks
             .iter()
@@ -898,6 +904,41 @@ impl RuntimeEngine {
                 tracing::warn!(error = %err, event_id = %ev.event_id, "truthgraph: append ContextSurfaced failed (fail-soft)");
             }
         }
+    }
+
+    /// MAT.M7 (D2)：玩家本回合**主动接触/对抗**某 active NPC ⇒ 为它写穿一条 `PlayerExposed`
+    /// （fail-soft）。这是「玩家**选择**接触在场 NPC 即是会面之举」的 met 信号——解 M6 的
+    /// met/engaged 死锁（一个戏剧价值在「自报身份」的 NPC 永远进不了已会面，因 M4 闸禁其
+    /// 自报）。事件由纯函数 [`met_engaged::player_engaged_met_events`] 构造（含 Enforce 门 +
+    /// 「目标须在 active 集」收口 + 与念白暴露同口径的幂等 event_id）。
+    ///
+    /// 信号必须是引擎已**确定性解析**的接触目标（接线点取 opposed_binding.persona.actor_id，
+    /// 对抗预 pass 已按 id 命中场景 NPC、fail-closed），绝非 LLM 语义猜测。
+    /// Off/Shadow ⇒ 纯函数返回空 ⇒ 零写入 ⇒ 字节级基线。返回成功写入条数（便于观测/测试）。
+    pub async fn record_player_engaged_npc(
+        &self,
+        request: &ContextRequest,
+        active_npc_ids: &[String],
+        engaged_npc_id: &str,
+        mode: MaterializationAffordanceMode,
+    ) -> usize {
+        let events = met_engaged::player_engaged_met_events(
+            &request.session_id,
+            &request.turn_id,
+            active_npc_ids,
+            engaged_npc_id,
+            mode,
+        );
+        let mut written = 0usize;
+        for ev in &events {
+            match self.db.append_domain_event(ev).await {
+                Ok(()) => written += 1,
+                Err(err) => {
+                    tracing::warn!(error = %err, event_id = %ev.event_id, "MAT.M7: append player-engaged PlayerExposed failed (fail-soft)")
+                }
+            }
+        }
+        written
     }
 
     /// 反剧透 TruthGraph 玩家暴露写穿（fail-soft）：如果当前场景引用的 NPC/线索名字
@@ -3647,6 +3688,10 @@ impl ContextBuilder {
             token_estimate,
             block_version_ids,
             need_trace: Vec::new(),
+            // MAT.M7 (D1): ContextBuilder 不做 NPC activation；派生集由 prepare_turn_context
+            // 在 build 之后填入（见 `compiled.active_npc_ids = ...`）。此处恒空，不破坏其它
+            // 调用方（plan_blocks 测试等）的字节产物。
+            active_npc_ids: Vec::new(),
         })
     }
 }

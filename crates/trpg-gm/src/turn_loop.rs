@@ -277,6 +277,17 @@ impl TurnContext {
         &self.compiled
     }
 
+    /// MAT.M7 (D1)：本回合**消费者可见**的 active NPC 集——优先取
+    /// `compiled.active_npc_ids`（prepare_turn_context 派生后填，Enforce 下 ==
+    /// scene.referenced_npc_ids），它为空时退回调用方传入的 `state.active_npc_ids`。
+    ///
+    /// 退回保证两件事：① ctx_provider 测试 seam（生产恒 None）返回的 CompiledContext 不填
+    /// 此字段 ⇒ 退回 state ⇒ 既有 gm 单测行为不变；② Off/Shadow 下派生集 == state 集
+    /// （apply_npc_activation 无操作），两路同值 ⇒ 字节等价基线。空-退-空亦保 s17 不变量。
+    pub(crate) fn effective_active_npc_ids<'a>(&'a self, state: &'a RuntimeState) -> &'a [String] {
+        effective_active_npc_ids(&self.compiled.active_npc_ids, &state.active_npc_ids)
+    }
+
     /// 本回合已解析的 RuleKernel（context_assembly 填）。影子 binding 读它派生权威 facet。
     pub(crate) fn rule_kernel(&self) -> Option<&trpg_model::RuleKernel> {
         self.rule_kernel.as_ref()
@@ -1434,6 +1445,24 @@ impl GmLoop {
         // 当 World 反应隐含 Attack intent 时，本调用还会把 Rules 结算出的 NPC-action 结果
         // 折进 ctx.resolved_gate_facts（→ dynamic tail / player_perceivable_facts，load-bearing）
         // 并向 Flight Recorder 记一条可观测 trace —— OFF ⇒ 全 no-op ⇒ 字节不变。
+        // MAT.M7 (D2): the player deliberately engaging a present NPC IS the "met" act.
+        // The opposed pre-pass has DETERMINISTICALLY resolved (fail-closed, by id) the
+        // contact/opposed target the player initiated this turn. If that target is an active
+        // NPC, write a PlayerExposed for it BEFORE build_npc_behavior_guidance runs — so the
+        // same-turn met/engaged gate (which reads list_surfaced_entities) now treats it as
+        // met and stops constraining it (breaks the M6 self-identification deadlock where an
+        // un-met NPC can never be named, so can never become met). Enforce-only; Off/Shadow
+        // ⇒ record_player_engaged_npc is a pure no-op ⇒ byte-identical baseline.
+        let mat_mode = trpg_model::MaterializationAffordanceMode::from_env();
+        if mat_mode.is_enforce() {
+            if let Some(binding) = ctx.opposed_binding.as_ref() {
+                let engaged_id = binding.persona.actor_id.clone();
+                let active = ctx.effective_active_npc_ids(input.state).to_vec();
+                self.engine
+                    .record_player_engaged_npc(input.request, &active, &engaged_id, mat_mode)
+                    .await;
+            }
+        }
         let npc_guidance = self.build_npc_behavior_guidance(ctx, input).await;
         // P5.6: the Director packet was stashed on ctx by build_npc_behavior_guidance (flag OFF
         // ⇒ None ⇒ no block ⇒ byte-identical). Mirror npc_guidance: pass as Option<&str>.
@@ -1550,7 +1579,12 @@ impl GmLoop {
         ));
         ctx.plugin_contributions.push(view_load_trace(
             "npc_mind_views",
-            &format!("{} active npc(s)", input.state.active_npc_ids.len()),
+            // MAT.M7 (D1): 读派生集（prepare_turn_context 填 ctx.compiled.active_npc_ids），
+            // 而非陈旧的 input.state.active_npc_ids（Enforce 下后者恒空 → "0 active npc(s)"）。
+            &format!(
+                "{} active npc(s)",
+                ctx.effective_active_npc_ids(input.state).len()
+            ),
         ));
         ctx.plugin_contributions.push(view_load_trace(
             "player_knowledge_view",
@@ -1625,7 +1659,14 @@ impl GmLoop {
         ctx: &mut TurnContext,
         input: &GmTurnInput<'_>,
     ) -> Option<String> {
-        let active = &input.state.active_npc_ids;
+        // MAT.M7 (D1): consume the per-turn DERIVED active set (prepare_turn_context filled
+        // ctx.compiled.active_npc_ids), not the stale caller-supplied input.state set (empty
+        // under Enforce → no NPC guidance was ever produced). Snapshot to an owned Vec so the
+        // later `&mut ctx` borrows (director packet stash) don't conflict. Off/Shadow: derived
+        // == caller-supplied ⇒ byte-equal baseline; ctx_provider seam: derived empty ⇒ falls
+        // back to state ⇒ existing gm unit tests unchanged.
+        let active: Vec<String> = ctx.effective_active_npc_ids(input.state).to_vec();
+        let active = &active;
         if active.is_empty() {
             return None;
         }
@@ -3105,6 +3146,21 @@ pub(crate) fn surface_verifier_finding_trace(
             .to_string(),
         kind: "verifier_finding".to_string(),
         summary,
+    }
+}
+
+/// MAT.M7 (D1) PURE：本回合消费者可见的 active NPC 集——优先派生集（非空时），否则退回
+/// 调用方传入集。确定性、无 IO，便于单测 byte-equal-baseline 不变量。
+///
+/// - `derived` 非空 ⇒ 取派生集（Enforce 下 = scene.referenced_npc_ids）。
+/// - `derived` 空 ⇒ 退回 `caller_supplied`：覆盖 ① ctx_provider 测试 seam（不填派生集）；
+///   ② Off/Shadow（apply_npc_activation 无操作 ⇒ 派生集恒等于 caller_supplied，两路同值）。
+/// 空-退-空保 s17 不变量（无供给即空）。
+fn effective_active_npc_ids<'a>(derived: &'a [String], caller_supplied: &'a [String]) -> &'a [String] {
+    if derived.is_empty() {
+        caller_supplied
+    } else {
+        derived
     }
 }
 

@@ -1926,6 +1926,34 @@ fn clue_affordance_same_turn_surface_and_learn_is_idempotent() {
 // knowledge_basis（= facts_can_reveal）且绝不自动揭示——M4 约束只追加 prompt 文本、绝不
 // 触碰 secret 门；(#3) Off/Shadow 下 guidance 不被追加约束（字节级基线）。
 
+/// MAT.M7 (D1)：`effective_active_npc_ids` 的优先/退回语义——派生集非空 ⇒ 取派生集
+/// （= 消费者读到的 active 集，修 NPC 对白=0）；派生集空 ⇒ 退回调用方集（ctx_provider
+/// 测试 seam + Off/Shadow 字节等价基线 + s17 空-退-空不变量）。纯函数，DB-free。
+#[test]
+fn m7_effective_active_npc_ids_prefers_derived_else_caller() {
+    let ids = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+    // Enforce 形态：prepare_turn_context 派生集非空 ⇒ 取派生集（即便调用方传入空，= M6 缺陷场景）。
+    let derived = ids(&["npc_athena", "npc_russ"]);
+    let caller_empty: Vec<String> = vec![];
+    assert_eq!(
+        effective_active_npc_ids(&derived, &caller_empty),
+        derived.as_slice(),
+        "派生集非空 ⇒ 消费者读派生集（修「派生集进不了消费者 → 对白=0」）"
+    );
+
+    // Off/Shadow / ctx_provider seam：派生集空 ⇒ 退回调用方集（保留其原样，字节等价基线）。
+    let caller_supplied = ids(&["npc_supplied"]);
+    assert_eq!(
+        effective_active_npc_ids(&[], &caller_supplied),
+        caller_supplied.as_slice(),
+        "派生集空 ⇒ 退回调用方集（Off/Shadow 字节等价 + ctx_provider seam 行为不变）"
+    );
+
+    // s17 不变量：两路皆空 ⇒ 空（无供给即空，绝不臆造）。
+    assert!(effective_active_npc_ids(&[], &caller_empty).is_empty());
+}
+
 /// MAT.M4 #1：active-but-UN-MET NPC 的 withheld secret 永不进 knowledge_basis、永不自动揭示。
 /// secret 门（facts_can_reveal vs facts_will_withhold）由既有 viewer_behavior_context 派生；
 /// M4 的反应式约束（restrict_unmet_npc_guidance）只在 prompt 块尾追加文本，**绝不**把任何
