@@ -6,6 +6,7 @@
 //! with root-cause + turn evidence.
 
 pub mod aggregate;
+pub mod contract;
 pub mod model;
 pub mod parser;
 pub mod probes;
@@ -13,6 +14,7 @@ pub mod report;
 pub mod score;
 
 pub use aggregate::evaluate;
+pub use contract::{contract_for, contracts, FieldRequest, IntentField, ResponseContract};
 pub use model::{EvalFinding, RootCause, Severity, Transcript, Turn, Verdict};
 pub use parser::parse_transcript;
 pub use report::redboard;

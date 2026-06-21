@@ -26,12 +26,6 @@ pub(crate) const NO_INFO_MARKERS: &[&str] = &[
     "没有立刻把答案",
 ];
 
-/// Player actions that request information / a concrete resolution (蓝图 §四 intent).
-pub(crate) const QUESTION_INTENT_MARKERS: &[&str] = &[
-    "逼问", "盘问", "质问", "交代", "是谁", "核对", "打听", "询问", "确认", "问他", "问清",
-    "数清", "评估", "看清", "分辨", "判断",
-];
-
 /// Env override helpers — defaults chosen to separate the bad fixtures from the
 /// clean control; overriding them flips findings, proving metric-driven behavior.
 pub(crate) fn env_usize(key: &str, default: usize) -> usize {
@@ -73,7 +67,8 @@ pub fn run_all(t: &Transcript) -> Vec<EvalFinding> {
     out.extend(repetition::scene_reset(t));
     out.extend(semantic::semantic_noop(t));
     out.extend(semantic::success_without_information(t));
-    out.extend(semantic::response_intent_mismatch(t));
+    // Field-level RESPONSE_INTENT_MISMATCH (蓝图 §四 Response Contract, V2-P2).
+    out.extend(crate::contract::response_intent_mismatch(t));
     out.extend(debt::unresolved_mechanical_debt(t));
     out
 }

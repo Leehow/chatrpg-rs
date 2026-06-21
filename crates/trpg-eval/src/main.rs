@@ -26,6 +26,7 @@ fn main() -> ExitCode {
         let out = serde_json::json!({
             "verdict": verdict,
             "score": trpg_eval::score_card(&verdict),
+            "response_contracts": trpg_eval::contracts(&transcript),
         });
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
     } else {

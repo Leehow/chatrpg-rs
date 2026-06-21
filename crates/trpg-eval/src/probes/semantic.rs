@@ -1,7 +1,7 @@
-//! SEMANTIC_NOOP + SUCCESS_WITHOUT_INFORMATION + RESPONSE_INTENT_MISMATCH
-//! (蓝图 §四 Response Contract / §五.4 语义空壳).
+//! SEMANTIC_NOOP + SUCCESS_WITHOUT_INFORMATION (蓝图 §五.4 语义空壳).
+//! RESPONSE_INTENT_MISMATCH moved to field-level in `crate::contract` (V2-P2).
 
-use super::{contains_any, snippet, NO_INFO_MARKERS, QUESTION_INTENT_MARKERS};
+use super::{contains_any, snippet, NO_INFO_MARKERS};
 use crate::model::{EvalFinding, RootCause, Severity, Transcript};
 
 const MIN_PROSE_CHARS: usize = 40;
@@ -64,39 +64,6 @@ pub fn success_without_information(t: &Transcript) -> Vec<EvalFinding> {
         ids.clone(),
         "成功检定应给出与成功等级相称的具体信息",
         format!("{} 个成功检定没有产出任何具体信息", ids.len()),
-        evidence,
-    )]
-}
-
-/// Player explicitly asked for information; GM's reply carries a no-answer marker.
-pub fn response_intent_mismatch(t: &Transcript) -> Vec<EvalFinding> {
-    let mut ids = Vec::new();
-    let mut evidence = Vec::new();
-    for turn in &t.turns {
-        if contains_any(&turn.player_action, QUESTION_INTENT_MARKERS).is_none() {
-            continue;
-        }
-        if let Some(marker) = contains_any(&turn.visible_text(), NO_INFO_MARKERS) {
-            ids.push(turn.index);
-            if evidence.len() < 4 {
-                evidence.push(format!(
-                    "turn {} 问「{}」→ 答「{}」",
-                    turn.index,
-                    snippet(&turn.player_action, 24),
-                    marker
-                ));
-            }
-        }
-    }
-    if ids.is_empty() {
-        return vec![];
-    }
-    vec![EvalFinding::new(
-        RootCause::ResponseIntentMismatch,
-        Severity::Hard,
-        ids.clone(),
-        "GM 应回应玩家实际意图(回答所问/要求检定/说明为何无法获知)",
-        format!("{} 个回合玩家提问被无内容回复搪塞", ids.len()),
         evidence,
     )]
 }

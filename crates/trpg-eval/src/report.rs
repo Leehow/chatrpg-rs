@@ -1,5 +1,6 @@
 //! Evidenced red-board (蓝图 §八 末尾示例的格式) + 软加权质量分 (蓝图 §七).
 
+use crate::contract::contracts;
 use crate::model::{Severity, Transcript, Verdict};
 use crate::score::score_card;
 
@@ -37,7 +38,35 @@ pub fn redboard(t: &Transcript, v: &Verdict) -> String {
         }
         s.push('\n');
     }
+    s.push_str(&contract_section(t));
     s.push_str(&score_section(v));
+    s
+}
+
+/// Response Contract field-level audit (蓝图 §四, V2-P2). Lists every action that
+/// requested information and which fields the GM left unanswered.
+fn contract_section(t: &Transcript) -> String {
+    let cs = contracts(t);
+    if cs.is_empty() {
+        return String::new();
+    }
+    let asked: usize = cs.iter().map(|c| c.requests.len()).sum();
+    let unanswered: usize = cs.iter().map(|c| c.unanswered().count()).sum();
+    let mut s = String::new();
+    s.push_str(&format!(
+        "\n## Response Contract (蓝图 §四 逐字段): {} 回合提请求, {} 字段被请求, {} 未获答复\n",
+        cs.len(),
+        asked,
+        unanswered
+    ));
+    for c in cs.iter().filter(|c| c.unanswered().count() > 0) {
+        let fields = c
+            .unanswered()
+            .map(|r| format!("{}「{}」", r.field.id(), r.marker))
+            .collect::<Vec<_>>()
+            .join(" + ");
+        s.push_str(&format!("  turn {} 未答: {}\n", c.turn, fields));
+    }
     s
 }
 
