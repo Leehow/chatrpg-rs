@@ -224,17 +224,65 @@ pub(crate) const NARRATOR_SINGLE_ADVANCE: &str = "\
 - 一次只解决玩家本回合真正声明的动作及其直接后果，不要为凑篇幅而循环复述同一段经过；\n\
 - 时间线只向前推进：绝不把场景时间倒回更早的时段(如已是夜晚就不要写回傍晚)。";
 
+/// L-N 收束于既成结果 · 不悬置(理念§3 no-hollow):smokeGND turn1 实证,Narrator 把一回合收尾在
+/// 「没有任何资源被实际消耗 / 局势只是更紧张 / 一切悬而未决」的悬置态(空壳非推进),该编辑性负面断言
+/// 被 player-sim 当作既成事实记入 facts,下一回合玩家真正行动即与之矛盾 ⇒ 误判 AMNESIA(turn2)。此 flag
+/// 开时给 Narrator overlay 追加「每回合收束在真实发生了的具体当前结果上、不以悬置语收尾」纪律(不强令捏造
+/// 消耗/后果——没发生的别写,只是落在真实发生的那点变化上)。**默认 ON**,OFF 字节等价,零 ruleset 分支。
+pub(crate) fn narrator_no_hollow_suspension_enabled() -> bool {
+    !matches!(
+        std::env::var("TRPG_NARRATOR_NO_HOLLOW_SUSPENSION")
+            .ok()
+            .map(|v| v.to_ascii_lowercase())
+            .as_deref(),
+        Some("0") | Some("false") | Some("off") | Some("no")
+    )
+}
+
+/// L-N 不悬置纪律(追加在 NARRATOR_SINGLE_ADVANCE 之后)。直击 smokeGND turn1 悬置收尾→turn2 误判失忆。
+pub(crate) const NARRATOR_NO_SUSPENSION: &str = "\
+【收束于既成结果 · 不悬置】本回合叙述必须收束在一个**本回合真实发生了的、具体可感的当前结果或既成改变**上(谁做了什么、世界如何回应、此刻局面变成了什么样)；绝不以「本回合什么都还没真正发生 / 没有任何资源被实际消耗 / 没有新的变化 / 局势只是更紧张 / 一切悬而未决」这类**无实质推进的悬置语**收尾，也不要为强调'尚未'而把本回合未发生的状态写成一条断言式事实(那会被后续回合当作既成事实而自相矛盾)。这不是要你凭空捏造消耗或后果——没发生的别写——而是把本回合**确实发生了的**那一点变化讲清、讲实，落地为当前局面，而不是停在'还没发生'的真空里。";
+
+/// L-O 叙述地点忠实(理念§二.8 Narrator 表达已决定的、不发明事实):smokeGND3 turn8 实证,即便委派
+/// 场景已由 content-gravity 合法转入 `scene_warehouse_hacking`(committed,转移 reason 明记「角色仍在掩体后」=
+/// 仍在仓库外墙缆线处),Narrator 仍把玩家**凭空写进一个既成场景未确立的内部空间**(「狭窄的设备间里」)⇒
+/// player-sim 判位置 AMNESIA(与既定地点不符)。此 flag 开时给 Narrator overlay 追加「只渲染当前 committed
+/// 场景 + 连续性锚确立的地点,绝不发明玩家并未进入的新房间/内部/区域」纪律——合法场景转移由 committed 状态
+/// 带来,Narrator 据之渲染新地点,但不得在叙述里自行把玩家挪进未确立的空间。**默认 ON**,OFF 字节等价,零 ruleset 分支。
+pub(crate) fn narrator_location_fidelity_enabled() -> bool {
+    !matches!(
+        std::env::var("TRPG_NARRATOR_LOCATION_FIDELITY")
+            .ok()
+            .map(|v| v.to_ascii_lowercase())
+            .as_deref(),
+        Some("0") | Some("false") | Some("off") | Some("no")
+    )
+}
+
+/// L-O 地点忠实纪律(追加在 NARRATOR_NO_SUSPENSION 之后)。直击 smokeGND3 turn8:叙述把玩家凭空写进设备间。
+pub(crate) const NARRATOR_LOCATION_FIDELITY: &str = "\
+【地点忠实 · 只渲染既定场景】本回合叙述里玩家所处的地点、空间与周遭环境,必须忠于「连续性锚」与当前 committed 场景所确立的所在(玩家此刻在哪、在什么掩护/位置)。绝不在散文里凭空把玩家**写进一个既定场景尚未确立的新房间、内部空间、设备间、走廊或区域**(例如既定他仍在仓库外墙掩体后,就不要叙述成他已身处「狭窄的设备间里」);也不要因为剧情想推进就让叙述擅自把玩家带进/穿过一道门或一处内部。地点的改变只能来自既成的场景转移——当场景确实已转入新地点时按新地点渲染,否则一律把玩家留在其既定所在处续写。";
+
 /// Append the narrator craft overlay when `craft_on`. OFF ⇒ returns `base` unchanged (byte-equal).
+/// 全部追加 flag 关时 ⇒ `base\n{NARRATOR_CRAFT}`(历史基线字节等价)。
 pub(crate) fn narrator_system(base: String, craft_on: bool) -> String {
-    if craft_on {
-        if narrator_single_advance_enabled() {
-            format!("{base}\n{NARRATOR_CRAFT}\n{NARRATOR_SINGLE_ADVANCE}")
-        } else {
-            format!("{base}\n{NARRATOR_CRAFT}")
-        }
-    } else {
-        base
+    if !craft_on {
+        return base;
     }
+    let mut out = format!("{base}\n{NARRATOR_CRAFT}");
+    if narrator_single_advance_enabled() {
+        out.push('\n');
+        out.push_str(NARRATOR_SINGLE_ADVANCE);
+    }
+    if narrator_no_hollow_suspension_enabled() {
+        out.push('\n');
+        out.push_str(NARRATOR_NO_SUSPENSION);
+    }
+    if narrator_location_fidelity_enabled() {
+        out.push('\n');
+        out.push_str(NARRATOR_LOCATION_FIDELITY);
+    }
+    out
 }
 
 /// L-K 玩家位置主权(§4 relocation-toward-player,GM 核心守则层):观测到即便有连续性锚 + L-I
@@ -256,26 +304,65 @@ pub(crate) fn gm_no_relocate_player_enabled() -> bool {
 pub(crate) const ADJUDICATOR_NO_RELOCATE: &str = "\
 [玩家位置主权 · §4] 「绝不替玩家声明结果」同样适用于**移动与位置**:玩家声明意图，你绝不替他声明未经其声明的移动、潜行、前往或位置改变。玩家选择留在原地、观察、等待或停在某门前时，就让他**留在其当前所在处**，绝不擅自把他下楼、绕路、靠近或瞬移到剧情冲突/核心 beat 的发生地。若模组核心 beat 或冲突在别处而本回合需要推进，按§4 让那股压力**主动波及玩家当前所在处**（消息、声响、NPC 闯入、势力或时钟外溢到此地）——把 beat 搬到玩家处，绝不把玩家搬到 beat 处。";
 
+/// L-N 物体/世界状态主权(理念§6 裁判非应声虫 + §二.9 Policy 可拒绝修复不造新事实):smokeGND 实证,
+/// 即便位置不再漂移(L-K 生效),GM 仍会**默认采纳玩家声明里预设的、与既成事实矛盾的物体/世界状态**——
+/// 把已被甩开的干扰器当作还握在手里(turn3)、把仅刮出浅痕未断的缆线当作已露线芯(turn4)⇒ player-sim 判
+/// AMNESIA(GM 矛盾既成事实)。此守则把「绝不替玩家声明结果」从位置(L-K)扩展到**物体/世界状态**:以
+/// 既成事实(连续性锚 + 本回合机械事实)为权威,据之裁定玩家的错误前提,绝不凭措辞径直翻转世界状态。
+/// **默认 ON**(eval 不设 ⇒ 自动吃到),OFF 字节等价,零 ruleset 分支。
+pub(crate) fn gm_object_state_authority_enabled() -> bool {
+    !matches!(
+        std::env::var("TRPG_GM_OBJECT_STATE_AUTHORITY")
+            .ok()
+            .map(|v| v.to_ascii_lowercase())
+            .as_deref(),
+        Some("0") | Some("false") | Some("off") | Some("no")
+    )
+}
+
+/// L-N 守则(追加在 ADJUDICATOR_NO_RELOCATE 之后)。直击 smokeGND turn3/turn4:GM 采纳玩家虚构的物体状态。
+/// **L-N+(smokeGND2 turn3 残留扩面)**:同根 class 的子case——玩家预设「既成事实尚未确认存在」的地点特征
+/// (入口/侧门/线缆接点)为已存在并径直通过(established「未确认入口」⇒ player「滑到最近的侧门」⇒ GM 坐实)。
+/// 同 flag/同 overlay 扩词覆盖,additive,OFF 仍字节等价。
+pub(crate) const ADJUDICATOR_OBJECT_STATE: &str = "\
+[物体/世界状态主权 · §6] 「绝不替玩家声明结果」同样适用于**物体与世界的状态、以及地点特征是否存在**:以「连续性锚」与「本回合机械事实」中既成的物体/世界/场景状态为唯一权威。当玩家本回合的声明**预设了一个与既成事实矛盾、或既成事实尚未确认的状态/存在**——例如把已被丢出/甩开/脱手的工具当作还握在手里、把仅被刮伤/未断/未开启/未损坏的东西当作已断/已破/已开/已露芯、把一次尚未成功的结果当作已经达成、**或把一个既成事实尚未确认存在的入口/出口/侧门/通道/线缆接点或其他地点特征当作已经存在·已被找到·可直接通过（例如既成事实仅记「未确认入口」时玩家径直「滑到最近的侧门」并摸索门缝）**——你绝不默认采纳这个虚构前提，也绝不因玩家这样指称就把它确认为既成存在。要么据既成事实当场纠正它（指出工具已不在手、缆线仍未断、该侧门尚未被发现，玩家须先重新够到、重做或先去搜寻确认），要么把玩家的真实**意图**当作一次按既成状态进行的**新尝试**——包括一次去寻找/确认该地点特征是否存在的探查——其有无与成败由你依既成事实裁定；绝不因玩家这样措辞就把世界状态径直翻转、或把未确认的特征凭空坐实。你只依据 Kernel 既成事实推进，不创造玩家凭空声称的状态改变或地点特征。";
+
 /// Append the adjudicator craft overlay when `craft_on`. OFF ⇒ returns `base` unchanged.
+/// 全部追加 flag 关时 ⇒ `base\n\n{ADJUDICATOR_CRAFT}`(历史基线字节等价)。
 pub(crate) fn adjudicator_system(base: String, craft_on: bool) -> String {
-    if craft_on {
-        if gm_no_relocate_player_enabled() {
-            format!("{base}\n\n{ADJUDICATOR_CRAFT}\n{ADJUDICATOR_NO_RELOCATE}")
-        } else {
-            format!("{base}\n\n{ADJUDICATOR_CRAFT}")
-        }
-    } else {
-        base
+    if !craft_on {
+        return base;
     }
+    let mut out = format!("{base}\n\n{ADJUDICATOR_CRAFT}");
+    if gm_no_relocate_player_enabled() {
+        out.push('\n');
+        out.push_str(ADJUDICATOR_NO_RELOCATE);
+    }
+    if gm_object_state_authority_enabled() {
+        out.push('\n');
+        out.push_str(ADJUDICATOR_OBJECT_STATE);
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// These overlay tests mutate process-global env vars; serialize them so parallel
+    /// threads don't race the same flag (poison-tolerant). Byte-equal baselines depend
+    /// on no other test toggling a sibling flag mid-assertion.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn narrator_single_advance_flag_and_overlay() {
+        let _g = env_guard();
         let prev = std::env::var("TRPG_NARRATOR_SINGLE_ADVANCE").ok();
+        let prev_ns = std::env::var("TRPG_NARRATOR_NO_HOLLOW_SUSPENSION").ok();
+        let prev_lf = std::env::var("TRPG_NARRATOR_LOCATION_FIDELITY").ok();
         // 默认 ON(未设)⇒ craft_on 路径在 NARRATOR_CRAFT 之后追加单步推进纪律。
         std::env::remove_var("TRPG_NARRATOR_SINGLE_ADVANCE");
         assert!(narrator_single_advance_enabled(), "未设 ⇒ 默认 ON");
@@ -285,8 +372,10 @@ mod tests {
         assert!(on.contains("时间线只向前推进"), "ON 应含时间单向子句");
         assert!(on.contains(NARRATOR_CRAFT), "ON 仍保留既有 NARRATOR_CRAFT");
 
-        // 显式 OFF ⇒ 与既有 NARRATOR_CRAFT 字节等价(不追加单步推进)。
+        // 显式 OFF(三个追加 flag 全关)⇒ 与既有 NARRATOR_CRAFT 字节等价(不追加任何 overlay)。
         std::env::set_var("TRPG_NARRATOR_SINGLE_ADVANCE", "off");
+        std::env::set_var("TRPG_NARRATOR_NO_HOLLOW_SUSPENSION", "off");
+        std::env::set_var("TRPG_NARRATOR_LOCATION_FIDELITY", "off");
         assert!(!narrator_single_advance_enabled(), "off ⇒ OFF");
         let off = narrator_system("BASE".to_string(), true);
         assert_eq!(off, format!("BASE\n{NARRATOR_CRAFT}"), "OFF 须与历史 craft overlay 字节等价");
@@ -300,11 +389,65 @@ mod tests {
             Some(v) => std::env::set_var("TRPG_NARRATOR_SINGLE_ADVANCE", v),
             None => std::env::remove_var("TRPG_NARRATOR_SINGLE_ADVANCE"),
         }
+        match prev_ns {
+            Some(v) => std::env::set_var("TRPG_NARRATOR_NO_HOLLOW_SUSPENSION", v),
+            None => std::env::remove_var("TRPG_NARRATOR_NO_HOLLOW_SUSPENSION"),
+        }
+        match prev_lf {
+            Some(v) => std::env::set_var("TRPG_NARRATOR_LOCATION_FIDELITY", v),
+            None => std::env::remove_var("TRPG_NARRATOR_LOCATION_FIDELITY"),
+        }
+    }
+
+    #[test]
+    fn narrator_location_fidelity_flag_and_overlay() {
+        let _g = env_guard();
+        let prev = std::env::var("TRPG_NARRATOR_LOCATION_FIDELITY").ok();
+        std::env::remove_var("TRPG_NARRATOR_LOCATION_FIDELITY");
+        assert!(narrator_location_fidelity_enabled(), "未设 ⇒ 默认 ON");
+        let on = narrator_system("BASE".to_string(), true);
+        assert!(on.contains("地点忠实 · 只渲染既定场景"), "ON 应追加地点忠实纪律: {on}");
+        assert!(on.contains("狭窄的设备间里"), "ON 应含 smokeGND3 turn8 失败模式示例");
+        assert!(on.contains("地点的改变只能来自既成的场景转移"), "ON 应含'地点改变源自committed场景转移'子句(不伤 J3)");
+
+        std::env::set_var("TRPG_NARRATOR_LOCATION_FIDELITY", "off");
+        assert!(!narrator_location_fidelity_enabled(), "off ⇒ OFF");
+        let off = narrator_system("BASE".to_string(), true);
+        assert!(!off.contains("地点忠实 · 只渲染既定场景"), "OFF 不得追加地点忠实纪律");
+
+        match prev {
+            Some(v) => std::env::set_var("TRPG_NARRATOR_LOCATION_FIDELITY", v),
+            None => std::env::remove_var("TRPG_NARRATOR_LOCATION_FIDELITY"),
+        }
+    }
+
+    #[test]
+    fn narrator_no_hollow_suspension_flag_and_overlay() {
+        let _g = env_guard();
+        let prev = std::env::var("TRPG_NARRATOR_NO_HOLLOW_SUSPENSION").ok();
+        std::env::remove_var("TRPG_NARRATOR_NO_HOLLOW_SUSPENSION");
+        assert!(narrator_no_hollow_suspension_enabled(), "未设 ⇒ 默认 ON");
+        let on = narrator_system("BASE".to_string(), true);
+        assert!(on.contains("收束于既成结果 · 不悬置"), "ON 应追加不悬置纪律: {on}");
+        assert!(on.contains("一切悬而未决"), "ON 应含悬置语禁止子句");
+        assert!(on.contains("没发生的别写"), "ON 应含'不捏造未发生'子句(理念 no-invention)");
+
+        std::env::set_var("TRPG_NARRATOR_NO_HOLLOW_SUSPENSION", "off");
+        assert!(!narrator_no_hollow_suspension_enabled(), "off ⇒ OFF");
+        let off = narrator_system("BASE".to_string(), true);
+        assert!(!off.contains("收束于既成结果 · 不悬置"), "OFF 不得追加不悬置纪律");
+
+        match prev {
+            Some(v) => std::env::set_var("TRPG_NARRATOR_NO_HOLLOW_SUSPENSION", v),
+            None => std::env::remove_var("TRPG_NARRATOR_NO_HOLLOW_SUSPENSION"),
+        }
     }
 
     #[test]
     fn gm_no_relocate_flag_and_overlay() {
+        let _g = env_guard();
         let prev = std::env::var("TRPG_GM_NO_RELOCATE_PLAYER").ok();
+        let prev_os = std::env::var("TRPG_GM_OBJECT_STATE_AUTHORITY").ok();
         std::env::remove_var("TRPG_GM_NO_RELOCATE_PLAYER");
         assert!(gm_no_relocate_player_enabled(), "未设 ⇒ 默认 ON");
         let on = adjudicator_system("BASE".to_string(), true);
@@ -312,7 +455,9 @@ mod tests {
         assert!(on.contains("把 beat 搬到玩家处"), "ON 应含§4 relocation-toward-player");
         assert!(on.contains(ADJUDICATOR_CRAFT), "ON 仍保留既有 ADJUDICATOR_CRAFT");
 
+        // 两个追加 flag 全关 ⇒ 与既有 ADJUDICATOR_CRAFT 字节等价。
         std::env::set_var("TRPG_GM_NO_RELOCATE_PLAYER", "off");
+        std::env::set_var("TRPG_GM_OBJECT_STATE_AUTHORITY", "off");
         assert!(!gm_no_relocate_player_enabled(), "off ⇒ OFF");
         let off = adjudicator_system("BASE".to_string(), true);
         assert_eq!(off, format!("BASE\n\n{ADJUDICATOR_CRAFT}"), "OFF 须与历史 adjudicator overlay 字节等价");
@@ -322,6 +467,33 @@ mod tests {
         match prev {
             Some(v) => std::env::set_var("TRPG_GM_NO_RELOCATE_PLAYER", v),
             None => std::env::remove_var("TRPG_GM_NO_RELOCATE_PLAYER"),
+        }
+        match prev_os {
+            Some(v) => std::env::set_var("TRPG_GM_OBJECT_STATE_AUTHORITY", v),
+            None => std::env::remove_var("TRPG_GM_OBJECT_STATE_AUTHORITY"),
+        }
+    }
+
+    #[test]
+    fn gm_object_state_authority_flag_and_overlay() {
+        let _g = env_guard();
+        let prev = std::env::var("TRPG_GM_OBJECT_STATE_AUTHORITY").ok();
+        std::env::remove_var("TRPG_GM_OBJECT_STATE_AUTHORITY");
+        assert!(gm_object_state_authority_enabled(), "未设 ⇒ 默认 ON");
+        let on = adjudicator_system("BASE".to_string(), true);
+        assert!(on.contains("物体/世界状态主权"), "ON 应追加物体状态主权守则: {on}");
+        assert!(on.contains("已被丢出/甩开/脱手的工具当作还握在手里"), "ON 应含 turn3 失败模式");
+        assert!(on.contains("尚未确认存在的入口/出口/侧门/通道/线缆接点"), "ON 应含 smokeGND2 turn3 地点特征虚构模式");
+        assert!(on.contains("不创造玩家凭空声称的状态改变或地点特征"), "ON 应含§二.9 不造新事实子句");
+
+        std::env::set_var("TRPG_GM_OBJECT_STATE_AUTHORITY", "off");
+        assert!(!gm_object_state_authority_enabled(), "off ⇒ OFF");
+        let off = adjudicator_system("BASE".to_string(), true);
+        assert!(!off.contains("物体/世界状态主权"), "OFF 不得追加物体状态主权守则");
+
+        match prev {
+            Some(v) => std::env::set_var("TRPG_GM_OBJECT_STATE_AUTHORITY", v),
+            None => std::env::remove_var("TRPG_GM_OBJECT_STATE_AUTHORITY"),
         }
     }
 
