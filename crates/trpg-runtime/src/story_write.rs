@@ -213,6 +213,41 @@ mod tests {
         }
     }
 
+    // M4 (decision #6): a BASE-era persisted `state_json` (no L3.3/L3.4 director fields) loaded and
+    // RE-RUN through the live story_write transforms must NOT break — the floor still fires, the
+    // events still derive, and the result re-serializes stably. This is the "强制重跑 story_write 变换
+    // + serde round-trip" guarantee: existing stored state flows through the now-live write loop
+    // exactly as a fresh state would.
+    #[test]
+    fn base_era_blob_survives_rerun_through_story_write_transforms() {
+        // A pre-director blob: one Dormant thread keyed on a fact, zero new fields anywhere.
+        let blob = serde_json::json!({
+            "active_threads": [{
+                "thread_id": "thr_legacy",
+                "related_fact_ids": ["fact_revealed"],
+                "status": "dormant"
+            }]
+        });
+        let loaded: StoryState = serde_json::from_value(blob).expect("BASE-era blob loads");
+
+        // Re-run the live floor transform on the loaded old state.
+        let (floored, changed) = apply_thread_opened(loaded.clone(), &["fact_revealed".to_string()]);
+        assert!(changed, "floor must fire on the loaded legacy thread");
+        assert_eq!(floored.active_threads[0].status, StoryThreadStatus::Introduced);
+
+        // The transition events derive from the before/after diff exactly as for a fresh state.
+        let events = thread_status_events(&loaded, &floored, "s1", "t1");
+        assert_eq!(events.len(), 1, "one StoryThreadOpened event");
+
+        // Idempotent re-run + stable serde round-trip on the transformed legacy state.
+        let (again, changed2) = apply_thread_opened(floored.clone(), &["fact_revealed".to_string()]);
+        assert!(!changed2, "re-floor is a no-op (idempotent)");
+        let json = serde_json::to_string(&again.validated()).unwrap();
+        let back: StoryState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.active_threads[0].thread_id, "thr_legacy");
+        assert_eq!(back.active_threads[0].status, StoryThreadStatus::Introduced);
+    }
+
     // A fresh rejection proposal for a thread with no prior signal appends a rejected signal.
     #[test]
     fn merge_rejections_appends_new_signal() {

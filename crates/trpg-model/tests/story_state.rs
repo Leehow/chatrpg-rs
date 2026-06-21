@@ -312,3 +312,94 @@ fn validated_drops_empty_id_entries() {
     assert!(s.character_arcs.is_empty());
     assert!(s.player_interests.is_empty());
 }
+
+/// M4 (decision #6): a COMPLETE BASE-era `state_json` — every sub-object populated with ONLY the
+/// pre-director (283-line) fields and NONE of the L3.3/L3.4 director additions — must deserialize
+/// cleanly into the current 391-line superset, default every new field fail-closed, survive
+/// `validated()` without dropping a valid entry, and re-round-trip stably. This is the aggregate
+/// "存量 state_json 不破" guarantee (the per-type variants above only test one sub-object at a time).
+#[test]
+fn m4_full_base_era_blob_deserializes_defaults_and_round_trips() {
+    // The pre-director persisted shape: threads/promises/arcs/beats/pacing/interests all present,
+    // but no `title`/`origin`/`module_anchor`/`payoff_candidates` (thread), no `setup`/`thread_id`/
+    // `expiry_policy`/`earliest_payoff_turn`/`payoff_event_id` (promise), no `spotlight_debt`/
+    // `expressed_desires`/… (arc).
+    let base_era = serde_json::json!({
+        "active_threads": [{
+            "thread_id": "thr_1",
+            "premise": "the missing heir",
+            "dramatic_question": "who killed the duke?",
+            "stakes": ["succession"],
+            "participant_ids": ["npc_a"],
+            "related_fact_ids": ["fact_x"],
+            "status": "escalating",
+            "urgency": 0.7, "momentum": 0.4, "player_interest": 0.9,
+            "unresolved_questions": ["where is the will?"],
+            "unresolved_consequences": ["civil war"],
+            "last_touched_turn": "turn_12"
+        }],
+        "promises": [{
+            "promise_id": "prm_1",
+            "setup_event_ids": ["ev_1"],
+            "expected_payoff_kind": "revelation",
+            "status": "developing",
+            "maturity": 0.5,
+            "payoff_candidate_fact_ids": ["fact_y"]
+        }],
+        "character_arcs": [{
+            "character_id": "pc_1",
+            "arc_premise": "from coward to hero",
+            "current_stage": "refusal",
+            "progress": 0.3,
+            "want": "safety", "need": "courage",
+            "related_thread_ids": ["thr_1"]
+        }],
+        "recent_beats": [{
+            "beat_kind": "complicate",
+            "turn_id": "turn_12",
+            "thread_id": "thr_1",
+            "summary": "the will is missing",
+            "source_event_ids": ["ev_2"]
+        }],
+        "pacing": {"tension": 0.6, "time_since_relief": 0.5, "beats_since_escalation": 2, "phase": "rising"},
+        "player_interests": [{
+            "thread_id": "thr_1",
+            "signal": "invested",
+            "strength": 0.8,
+            "source_event_ids": ["ev_3"]
+        }]
+    });
+
+    let state: StoryState = serde_json::from_value(base_era).expect("BASE-era blob must deserialize");
+    // Old fields survive.
+    assert_eq!(state.active_threads[0].thread_id, "thr_1");
+    assert_eq!(state.active_threads[0].status, StoryThreadStatus::Escalating);
+    assert_eq!(state.promises[0].promise_id, "prm_1");
+    assert_eq!(state.character_arcs[0].character_id, "pc_1");
+    assert_eq!(state.recent_beats[0].beat_kind, BeatKind::Complicate);
+    // Every NEW director field defaulted fail-closed.
+    let t = &state.active_threads[0];
+    assert_eq!(t.title, "");
+    assert_eq!(t.origin, StoryThreadOrigin::Unspecified);
+    assert_eq!(t.module_anchor, None);
+    assert!(t.payoff_candidates.is_empty());
+    let p = &state.promises[0];
+    assert_eq!(p.thread_id, "");
+    assert_eq!(p.setup, "");
+    assert_eq!(p.expiry_policy, ExpiryPolicy::Never);
+    assert_eq!(p.earliest_payoff_turn, None);
+    assert_eq!(p.payoff_event_id, None);
+    let a = &state.character_arcs[0];
+    assert_eq!(a.spotlight_debt, 0.0);
+    assert!(a.expressed_desires.is_empty());
+    assert_eq!(a.emotional_direction, "");
+
+    // validated() keeps every valid entry (no id is empty) and the re-round-trip is stable.
+    let validated = state.clone().validated();
+    assert_eq!(validated.active_threads.len(), 1);
+    assert_eq!(validated.promises.len(), 1);
+    assert_eq!(validated.character_arcs.len(), 1);
+    let json = serde_json::to_string(&validated).unwrap();
+    let back: StoryState = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, validated, "re-serialize → deserialize must be a stable fixpoint");
+}
