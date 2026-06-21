@@ -281,7 +281,29 @@ pub(crate) fn narrator_dialogue_fidelity_enabled() -> bool {
 
 /// L-Q 台词忠实纪律(追加在 NARRATOR_LOCATION_FIDELITY 之后)。直击 smokeq3 t3/t4:复述既定 NPC 喊话时改写措辞/指称。
 pub(crate) const NARRATOR_DIALOGUE_FIDELITY: &str = "\
-【台词忠实 · 既定台词与说话者不改写】当本回合需要**回指或复述一句此前已经说出口的 NPC 台词**(开场念白里 NPC 喊的话、连续性锚或前文已确立的对白)时,必须**忠实保留其原措辞与说话者的身份指称**——既定的称谓、用词、语气不得在复述里被换成近义的另一种说法(例如既定喊的是「长官」就不要复述成「局长」,既定是「滚出去!」就不要改写成「滚出来!」),也不要把同一个说话者改换成另一身份。已说出的台词与其说话者是**已确立的事实**,与既定地点同样不可在叙述里被悄悄改写。需要推进对话时,让 NPC 说**一句新的台词**,而不是把那句旧台词重写成不同的版本。";
+【台词忠实 · 既定台词与说话者不改写】当本回合需要**回指或复述一句此前已经说出口的 NPC 台词**(开场念白里 NPC 喊的话、连续性锚或前文已确立的对白)时,必须**忠实保留其原措辞与说话者的身份指称**——既定的称谓、用词、语气不得在复述里被换成近义的另一种说法(例如既定喊的是「长官」就不要复述成「局长」,既定是「滚出去!」就不要改写成「滚出来!」),也不要把同一个说话者改换成另一身份,**也不要在复述时把这句话原本喊向的对象改成另一个对象**(既定是喊给玩家的警告就不要改写成对火线里另一个人的嘶吼)。已说出的台词、其说话者与其喊话对象都是**已确立的事实**,与既定地点同样不可在叙述里被悄悄改写。需要推进对话时,让 NPC 说**一句新的台词**,而不是把那句旧台词重写成不同的版本。";
+
+/// L-S 既成状态变更持久 · 不复活已终止的世界状态(理念§二.8 Narrator 表达已决定的、§二.3 Projection 是视图不是第二真相):
+/// aliveFull30v2 turn10 实证——玩家在 turn~8 切断喂向无人机的供电、已确立事实记「供电已被切断,粗缆震动和低频嗡鸣停止」,
+/// 但 Narrator 在 turn10 把同一根粗缆重新描述成「低沉的电流嗡鸣贴着货架和地面传过来」⇒ 把一个**已被既成事实确立为终止**
+/// 的世界状态(通电/嗡鸣)在叙述里复活,正面矛盾既成事实 ⇒ player-sim 判 AMNESIA。根因=场景的环境定场框架(嗡鸣的活缆)
+/// 在玩家造成的状态变更之上**惯性复投**。这是 L-O 地点忠实在**世界/环境状态变更**维度的同构残面:committed 既成事实里
+/// 一旦记录某状态发生了**变更/终止**(供电切断→静默、灯熄、门开、火灭、嗡鸣/震动停止、设备关停、警报消音),Narrator 须按
+/// 其**新状态**续写,绝不把它的**变更前旧状态**当作仍在持续而复活。**默认 ON**(eval 不设 ⇒ 自动吃到),OFF 字节等价,零 ruleset 分支。
+pub(crate) fn narrator_state_persistence_enabled() -> bool {
+    !matches!(
+        std::env::var("TRPG_NARRATOR_STATE_PERSISTENCE")
+            .ok()
+            .map(|v| v.to_ascii_lowercase())
+            .as_deref(),
+        Some("0") | Some("false") | Some("off") | Some("no")
+    )
+}
+
+/// L-S 既成状态持久纪律(追加在 NARRATOR_DIALOGUE_FIDELITY 之后)。**双向**:turn10 已切断的供电嗡鸣被叙述复活(终止态复活);
+/// turn13 仍在发热的粗缆被叙述成「硬冷」(持续态被反转)。两向同根——叙述把既成世界状态改写成与既成事实不符的样子。
+pub(crate) const NARRATOR_STATE_PERSISTENCE: &str = "\
+【既成状态忠实 · 持久不复活、不反转】本回合叙述里任何已被「连续性锚」或「本回合机械事实」确立的世界/环境/物体状态——它的有无、开关、通断、冷热温度、运转/停止、明灭、损坏/完好、在场/离场——都必须与既成事实**保持一致**,不得在叙述里被悄悄改写成不符的样子。这有**两个方向**都要守:① **不把已完成的变更倒回旧状态**:既成事实记录某状态已**变更/终止**(供电切断、电流/嗡鸣/震动停止、灯熄、火灭、门开、设备关停、警报消音、某物被破坏移除)后,就按其**新状态**续写,绝不再把它**变更前的旧状态**当作仍在持续而复活(既定「供电已切断、粗缆嗡鸣停止」后就不要再写那根缆'仍有低沉电流嗡鸣传来')。② **不把仍持续的既成状态反转**:既成事实确立某状态**仍在持续**(粗缆仍在发热、设备仍在运转、某门仍开着)时,就不要在叙述里把它写成它的反面(既定粗缆'仍从设备暗处带出热量、正在发热'就不要写成'隔着布料仍能感觉到外皮硬冷')。残留的**物理痕迹**可以如实描写(切断后的缆线仍有余温、焦味、断口),但不要借此把**已终止的活动状态**(通电、运转、发声)写成死灰复燃,也不要拿它否定一个**仍持续的状态**。若确有一个**另外的、新的**来源产生类似现象(更深处另有一台仍通电的设备),须明确叙述为一个**区别于既成那个状态的新来源**,而非让旧状态本身复活或反转;且不得为此凭空捏造既成事实之外的来源。世界状态只朝既成事实记录的方向走,绝不在叙述里被无声地倒回或反转。";
 
 /// Append the narrator craft overlay when `craft_on`. OFF ⇒ returns `base` unchanged (byte-equal).
 /// 全部追加 flag 关时 ⇒ `base\n{NARRATOR_CRAFT}`(历史基线字节等价)。
@@ -305,6 +327,10 @@ pub(crate) fn narrator_system(base: String, craft_on: bool) -> String {
     if narrator_dialogue_fidelity_enabled() {
         out.push('\n');
         out.push_str(NARRATOR_DIALOGUE_FIDELITY);
+    }
+    if narrator_state_persistence_enabled() {
+        out.push('\n');
+        out.push_str(NARRATOR_STATE_PERSISTENCE);
     }
     out
 }
@@ -388,6 +414,7 @@ mod tests {
         let prev_ns = std::env::var("TRPG_NARRATOR_NO_HOLLOW_SUSPENSION").ok();
         let prev_lf = std::env::var("TRPG_NARRATOR_LOCATION_FIDELITY").ok();
         let prev_df = std::env::var("TRPG_NARRATOR_DIALOGUE_FIDELITY").ok();
+        let prev_sp = std::env::var("TRPG_NARRATOR_STATE_PERSISTENCE").ok();
         // 默认 ON(未设)⇒ craft_on 路径在 NARRATOR_CRAFT 之后追加单步推进纪律。
         std::env::remove_var("TRPG_NARRATOR_SINGLE_ADVANCE");
         assert!(narrator_single_advance_enabled(), "未设 ⇒ 默认 ON");
@@ -402,6 +429,7 @@ mod tests {
         std::env::set_var("TRPG_NARRATOR_NO_HOLLOW_SUSPENSION", "off");
         std::env::set_var("TRPG_NARRATOR_LOCATION_FIDELITY", "off");
         std::env::set_var("TRPG_NARRATOR_DIALOGUE_FIDELITY", "off");
+        std::env::set_var("TRPG_NARRATOR_STATE_PERSISTENCE", "off");
         assert!(!narrator_single_advance_enabled(), "off ⇒ OFF");
         let off = narrator_system("BASE".to_string(), true);
         assert_eq!(off, format!("BASE\n{NARRATOR_CRAFT}"), "OFF 须与历史 craft overlay 字节等价");
@@ -427,6 +455,34 @@ mod tests {
             Some(v) => std::env::set_var("TRPG_NARRATOR_DIALOGUE_FIDELITY", v),
             None => std::env::remove_var("TRPG_NARRATOR_DIALOGUE_FIDELITY"),
         }
+        match prev_sp {
+            Some(v) => std::env::set_var("TRPG_NARRATOR_STATE_PERSISTENCE", v),
+            None => std::env::remove_var("TRPG_NARRATOR_STATE_PERSISTENCE"),
+        }
+    }
+
+    #[test]
+    fn narrator_state_persistence_flag_and_overlay() {
+        let _g = env_guard();
+        let prev = std::env::var("TRPG_NARRATOR_STATE_PERSISTENCE").ok();
+        std::env::remove_var("TRPG_NARRATOR_STATE_PERSISTENCE");
+        assert!(narrator_state_persistence_enabled(), "未设 ⇒ 默认 ON");
+        let on = narrator_system("BASE".to_string(), true);
+        assert!(on.contains("既成状态忠实 · 持久不复活、不反转"), "ON 应追加既成状态忠实纪律: {on}");
+        assert!(on.contains("不把已完成的变更倒回旧状态"), "ON 应含方向①(终止态不复活,直击 turn10)");
+        assert!(on.contains("不把仍持续的既成状态反转"), "ON 应含方向②(持续态不反转,直击 turn13)");
+        assert!(on.contains("残留的**物理痕迹**可以如实描写"), "ON 应含'物理痕迹可写但不复活活动状态'子句(不伤真实描写)");
+        assert!(on.contains("区别于既成那个状态的新来源"), "ON 应含'新来源须明确区分而非旧状态复活'子句(不伤 J3 新事件)");
+
+        std::env::set_var("TRPG_NARRATOR_STATE_PERSISTENCE", "off");
+        assert!(!narrator_state_persistence_enabled(), "off ⇒ OFF");
+        let off = narrator_system("BASE".to_string(), true);
+        assert!(!off.contains("既成状态忠实 · 持久不复活、不反转"), "OFF 不得追加既成状态忠实纪律");
+
+        match prev {
+            Some(v) => std::env::set_var("TRPG_NARRATOR_STATE_PERSISTENCE", v),
+            None => std::env::remove_var("TRPG_NARRATOR_STATE_PERSISTENCE"),
+        }
     }
 
     #[test]
@@ -440,6 +496,10 @@ mod tests {
         assert!(
             on.contains("让 NPC 说**一句新的台词**"),
             "ON 应含'推进靠新台词而非改写旧台词'子句(不伤对话推进)"
+        );
+        assert!(
+            on.contains("把这句话原本喊向的对象改成另一个对象"),
+            "ON 应含'喊话对象不改写'子句(L-Q 扩面,直击 aliveFull30v2 turn5 addressee slip)"
         );
 
         std::env::set_var("TRPG_NARRATOR_DIALOGUE_FIDELITY", "off");
