@@ -14,6 +14,12 @@ fn main() -> ExitCode {
     if args.get(1).map(|s| s.as_str()) == Some("counterfactual") {
         return run_counterfactual(&args);
     }
+    if args.get(1).map(|s| s.as_str()) == Some("flight") {
+        return run_flight(&args);
+    }
+    if args.get(1).map(|s| s.as_str()) == Some("ab") {
+        return run_ab(&args);
+    }
     let path = match args.iter().skip(1).find(|a| !a.starts_with("--")) {
         Some(p) => p,
         None => {
@@ -141,6 +147,83 @@ fn run_counterfactual(args: &[String]) -> ExitCode {
         println!("\nVERDICT: {}", if all_pass { "PASS" } else { "FAIL" });
     }
     if all_pass {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+/// `trpg-eval flight <recording.json>` — layered attribution (验收3): read the
+/// Flight Recorder contribution trail and blame the producing layer. Exits
+/// non-zero if any defect is attributed.
+fn run_flight(args: &[String]) -> ExitCode {
+    let path = match args.iter().skip(2).find(|a| !a.starts_with("--")) {
+        Some(p) => p.clone(),
+        None => {
+            eprintln!("usage: trpg-eval flight <flight-recorder.json> [--json]");
+            return ExitCode::from(2);
+        }
+    };
+    let json = match std::fs::read_to_string(&path) {
+        Ok(j) => j,
+        Err(e) => {
+            eprintln!("read {path}: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let rec = match trpg_eval::FlightRecording::parse(&json) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("parse {path}: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let verdict = trpg_eval::attribute(&rec);
+    if args.iter().any(|a| a == "--json") {
+        println!("{}", serde_json::to_string_pretty(&verdict).unwrap());
+    } else {
+        print!("{}", trpg_eval::flight_redboard(&rec, &verdict));
+    }
+    if verdict.is_fail() {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// `trpg-eval ab <baseline.md> <candidate.md>` — blind paired comparison (验收4).
+/// Holds the input fixed and reports which arm is stably better; reproducible.
+fn run_ab(args: &[String]) -> ExitCode {
+    let files: Vec<&String> = args.iter().skip(2).filter(|a| !a.starts_with("--")).collect();
+    let (base_p, cand_p) = match (files.first(), files.get(1)) {
+        (Some(a), Some(b)) => (a.as_str(), b.as_str()),
+        _ => {
+            eprintln!("usage: trpg-eval ab <baseline.md> <candidate.md> [--json]");
+            return ExitCode::from(2);
+        }
+    };
+    let read = |p: &str| std::fs::read_to_string(p).map_err(|e| format!("read {p}: {e}"));
+    let (base_md, cand_md) = match (read(base_p), read(cand_p)) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(e), _) | (_, Err(e)) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+    let base = trpg_eval::parse_transcript(&base_md);
+    let cand = trpg_eval::parse_transcript(&cand_md);
+    // A = baseline, B = candidate. The comparator stays blind to these labels.
+    let c = trpg_eval::compare(&base, &cand);
+    let reproducible = trpg_eval::is_reproducible(&base, &cand, 20);
+    if args.iter().any(|a| a == "--json") {
+        let out = serde_json::json!({ "comparison": c, "reproducible": reproducible });
+        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+    } else {
+        print!("{}", trpg_eval::ab_board(base_p, cand_p, &c));
+        println!("reproducible(20x)={reproducible}");
+    }
+    // Exit 0 when the candidate (B) is stably at least as good as the baseline.
+    if matches!(c.overall, trpg_eval::Arm::B | trpg_eval::Arm::Tie) {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE

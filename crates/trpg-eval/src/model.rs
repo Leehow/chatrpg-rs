@@ -52,6 +52,53 @@ pub struct Transcript {
     pub turns: Vec<Turn>,
 }
 
+/// The eight runtime layers a defect can attribute to (蓝图 §九/§十 第三阶段).
+/// Shared vocabulary across the static-transcript arm (coarse symptom→layer) and
+/// the Flight-Recorder arm (per-turn contribution trail → producing layer, V2-P5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+pub enum Layer {
+    PlayerPolicy,
+    Intent,
+    Rules,
+    World,
+    Director,
+    Narrator,
+    Policy,
+    Reporter,
+}
+
+impl Layer {
+    pub fn id(&self) -> &'static str {
+        match self {
+            Layer::PlayerPolicy => "PLAYER_POLICY",
+            Layer::Intent => "INTENT",
+            Layer::Rules => "RULES",
+            Layer::World => "WORLD",
+            Layer::Director => "DIRECTOR",
+            Layer::Narrator => "NARRATOR",
+            Layer::Policy => "POLICY",
+            Layer::Reporter => "REPORTER",
+        }
+    }
+    /// All eight layers, fixed §十 order (used by reports for stable coverage rows).
+    pub const ALL: [Layer; 8] = [
+        Layer::PlayerPolicy,
+        Layer::Intent,
+        Layer::Rules,
+        Layer::World,
+        Layer::Director,
+        Layer::Narrator,
+        Layer::Policy,
+        Layer::Reporter,
+    ];
+}
+
+impl fmt::Display for Layer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.id())
+    }
+}
+
 /// The documented milestone-1 root causes (RUN_SPEC_V2 验收1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub enum RootCause {
@@ -76,15 +123,19 @@ impl RootCause {
         }
     }
     /// Runtime layer this defect attributes to (蓝图 §九 分层归因).
-    pub fn root_layer(&self) -> &'static str {
+    pub fn layer(&self) -> Layer {
         match self {
-            RootCause::PlayerActionLoop => "PLAYER_POLICY",
-            RootCause::SceneReset => "WORLD",
-            RootCause::SemanticNoop => "NARRATOR",
-            RootCause::UnresolvedMechanicalDebt => "RULES",
-            RootCause::SuccessWithoutInformation => "DIRECTOR",
-            RootCause::ResponseIntentMismatch => "NARRATOR",
+            RootCause::PlayerActionLoop => Layer::PlayerPolicy,
+            RootCause::SceneReset => Layer::World,
+            RootCause::SemanticNoop => Layer::Narrator,
+            RootCause::UnresolvedMechanicalDebt => Layer::Rules,
+            RootCause::SuccessWithoutInformation => Layer::Director,
+            RootCause::ResponseIntentMismatch => Layer::Narrator,
         }
+    }
+    /// Stable screaming-snake layer id (kept for existing `&str` report consumers).
+    pub fn root_layer(&self) -> &'static str {
+        self.layer().id()
     }
 }
 

@@ -1,0 +1,27 @@
+{
+  "identity": {
+    "scenario_id": "JRNY-HOME-04-flight-recorder-provenance",
+    "scenario_version": "1",
+    "evidence_schema_version": "tc-jrny-02.evidence.v1"
+  },
+  "recorded_mode": "deterministic",
+  "turns": [
+    {
+      "user_input": "我先站在巷口的安全距离观察现场，看看无人机、警察和仓库门口分别是什么情况。",
+      "count_delta": {},
+      "newest_contest_row": null,
+      "player_visible_body": "你站在巷口观察：一架无人机悬停在仓库门口，警察在外围拉起警戒线。",
+      "flight_recorder": {
+        "contributions": [
+          { "plugin_id": "core.view_loader", "hook": "context_assembly", "kind": "view_load", "summary": "gm_context: 6 compiled block(s)" },
+          { "plugin_id": "core.view_loader", "hook": "context_assembly", "kind": "view_load", "summary": "npc_mind_views: 1 active npc(s)" },
+          { "plugin_id": "core.view_loader", "hook": "context_assembly", "kind": "view_load", "summary": "player_knowledge_view: 0 player-known fact(s)" },
+          { "plugin_id": "core.no_spoiler_guard", "hook": "context_assembly", "kind": "prompt_block", "summary": "no_spoiler_guidance" },
+          { "plugin_id": "core.no_spoiler_guard", "hook": "context_assembly", "kind": "context_filter", "summary": "drop 1 block(s)" },
+          { "plugin_id": "core.no_spoiler_guard", "hook": "after_llm_stream", "kind": "verifier_finding", "summary": "secret_leak" }
+        ],
+        "ledger_event_kinds": ["TurnFinalized"]
+      }
+    }
+  ]
+}
