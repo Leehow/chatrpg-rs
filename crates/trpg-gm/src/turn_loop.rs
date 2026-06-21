@@ -20,8 +20,8 @@ use tokio_util::sync::CancellationToken;
 use trpg_interaction::InteractionLifecycleKernel;
 use trpg_llm::{LlmClient, StreamEvent, ToolChoice};
 use trpg_model::{
-    ChatMessage, CompiledContext, ContextRequest, MechanicDue, MemoryEvent, MemoryKind,
-    RuntimeState, StateFrame, Visibility, WorldEventKind,
+    ChatMessage, CompiledContext, ContextRequest, MechanicDue, MechanicalResultView, MemoryEvent,
+    MemoryKind, RuntimeState, StateFrame, Visibility, WorldEventKind, WorldReactionCandidate,
 };
 use trpg_runtime::RuntimeEngine;
 use uuid::Uuid;
@@ -228,6 +228,15 @@ pub(crate) struct TurnContext {
     // 时填本回合玩家拒绝的线索提名；PresentationCommit 边界 drain 后调 commit_story_writes 持久化。
     // OFF ⇒ 恒空（工具不注册、通道不挂 ⇒ 字节级基线）。
     rejected_nominations: Vec<crate::tools::RejectionNomination>,
+    // L1.1 SPINE (flag `TRPG_DIRECTOR_POST_ADJUDICATION`, default OFF)：post-adjudication
+    // committed-result projection. `resolution_commit_boundary` projects the turn ledger's
+    // committed checks into read-only `MechanicalResultView`s here so the (L1.2) Beat Director
+    // can plan a beat reflecting the REAL outcome. OFF ⇒ 恒空 ⇒ 无消费者 ⇒ 字节等价基线。
+    post_adjudication_results: Vec<MechanicalResultView>,
+    // L1.1 SPINE：the World reaction candidate pool captured pre-adjudication (in
+    // `build_npc_behavior_guidance`) and retained for the post-adjudication Director seam.
+    // OFF ⇒ 恒空 ⇒ 字节等价基线。
+    world_candidates: Vec<WorldReactionCandidate>,
 }
 impl TurnContext {
     pub(crate) fn new() -> Self {
@@ -256,6 +265,8 @@ impl TurnContext {
             director_packet_block: None,
             nominated_reveals: Vec::new(),
             rejected_nominations: Vec::new(),
+            post_adjudication_results: Vec::new(),
+            world_candidates: Vec::new(),
         }
     }
 
@@ -263,6 +274,34 @@ impl TurnContext {
     /// awaiting 终态且 visible_text 为空 → gate.prompt_public 兜底；否则 → visible_text。
     /// critical phase_finalize（save_turn）与 heavy phase_finalize_heavy_memory（记忆/审计）
     /// 必须用同一值；后者在 `take_outcome` 清空 ctx 后才跑，故调用方须在清空前调此快照。
+    /// L1.1 SPINE: project the turn ledger's committed checks onto `ctx` for the (L1.2) Beat
+    /// Director, ONLY when the post-adjudication flag is ON. OFF ⇒ leaves the field empty
+    /// (no-op) ⇒ byte-identical baseline. Pure read of `self.ledger`; fail-closed (a check with
+    /// no `success` bool projects to `Unresolved`, never silently passed).
+    pub(crate) fn capture_post_adjudication(&mut self, enabled: bool) {
+        self.post_adjudication_results =
+            project_post_adjudication_results(self.ledger.snapshot(), enabled);
+    }
+
+    /// L1.1 SPINE read-only accessor: the post-adjudication committed-result projection (the
+    /// L1.2 Director's input). Empty when the flag is OFF.
+    pub(crate) fn post_adjudication_results(&self) -> &[MechanicalResultView] {
+        &self.post_adjudication_results
+    }
+
+    /// Test-only: seed the turn ledger with a committed check result so the L1.1 ctx-capture
+    /// seam (`capture_post_adjudication`) can be exercised without a full GM turn.
+    #[cfg(test)]
+    pub(crate) fn test_record_check_result(&mut self, result: &trpg_model::CheckResultRecord) {
+        self.ledger.record_result(result);
+    }
+
+    /// L1.1 SPINE read-only accessor: the captured pre-adjudication World candidate pool.
+    /// Empty when the flag is OFF.
+    pub(crate) fn world_candidates(&self) -> &[WorldReactionCandidate] {
+        &self.world_candidates
+    }
+
     pub(crate) fn heavy_assistant_output(&self) -> String {
         match &self.awaiting_gate {
             Some(gate) if self.visible_text.trim().is_empty() => gate.prompt_public.clone(),
@@ -1761,6 +1800,13 @@ impl GmLoop {
         let (mut reaction_set, plans) = crate::ports::EngineWorldAdapter(&self.engine)
             .load_reaction_plans(session_id, &npc_ids, &profiles, &targets, &player_known)
             .await;
+        // L1.1 SPINE: retain the pre-adjudication World candidate pool for the post-adjudication
+        // Director seam (`resolution_commit_boundary`). Flag-gated (default OFF ⇒ no stash ⇒
+        // byte-identical baseline). The Director (L1.2) reads it ALONGSIDE the committed result
+        // so a relocated beat can still pull toward live world reactions (content-gravity).
+        if director_post_adjudication_enabled() {
+            ctx.world_candidates = reaction_set.reactions.clone();
+        }
         // P4.6 Part B (flag-gated, default OFF): when an active NPC's reaction implies an
         // Attack intent, the World layer EMITS the typed intent (it resolves nothing). The
         // Rules/Kernel path settles it downstream via `execute_system_roll_bundle` (the SAME
@@ -2487,6 +2533,13 @@ impl GmLoop {
         ctx: &mut TurnContext,
         request: &ContextRequest,
     ) {
+        // L1.1 SPINE: at this post-adjudication seam the committed check_result/effects are
+        // finally available (the inversion fix — the pre-adjudication Director at the
+        // ContextAssembly phase could NOT see them). Flag-gated capture (default OFF ⇒ no-op ⇒
+        // byte-identical baseline): project the committed results onto ctx for the (L1.2) Beat
+        // Director. No Director invocation yet (L1.2). The World candidate pool was already
+        // retained pre-adjudication in `build_npc_behavior_guidance` (also flag-gated).
+        ctx.capture_post_adjudication(director_post_adjudication_enabled());
         // P3.7 BeforeCommit 重定位：从 save_turn 前迁到 AgentLoop 结束这一真正的
         // 机械结算后检查点（advisory/trace-only，本期不阻断）。
         self.run_advisory_trace_hook(ctx, request, crate::plugin::PluginHook::BeforeCommit, None)
@@ -3063,6 +3116,35 @@ pub(crate) fn narrator_split_enabled() -> bool {
     std::env::var("TRPG_NARRATOR_SPLIT")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
+}
+
+/// L1.1 SPINE: is the post-adjudication Director seam ON? Flag `TRPG_DIRECTOR_POST_ADJUDICATION`,
+/// default OFF (= byte-identical baseline). Mirrors `narrator_split_enabled`. When ON, the
+/// `resolution_commit_boundary` projects committed results + retains the World candidate pool so
+/// the (L1.2) Beat Director can plan a beat reflecting the REAL outcome — fixing the turn-order
+/// inversion (Director currently built pre-adjudication at the ContextAssembly phase).
+pub(crate) fn director_post_adjudication_enabled() -> bool {
+    std::env::var("TRPG_DIRECTOR_POST_ADJUDICATION")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// L1.1 SPINE: project the committed check results from the turn ledger snapshot into read-only
+/// [`MechanicalResultView`]s, ONLY when the post-adjudication flag is ON. OFF ⇒ empty (no
+/// consumer ⇒ byte-identical baseline). Pure; fail-closed (each view's outcome is `Unresolved`
+/// unless the committed `outcome.success` bool is present — see `MechanicalResultView::from`).
+pub(crate) fn project_post_adjudication_results(
+    snapshot: &trpg_agent::TurnLedgerSnapshot,
+    enabled: bool,
+) -> Vec<MechanicalResultView> {
+    if !enabled {
+        return Vec::new();
+    }
+    snapshot
+        .check_results
+        .iter()
+        .map(MechanicalResultView::from)
+        .collect()
 }
 
 /// A3(§6 大考)：本回合 verify 结果是否含 **Blocker 级 OmittedVisibleResult**(念白漏报了玩家

@@ -2126,3 +2126,74 @@ fn m4_off_shadow_guidance_is_byte_identical_baseline() {
         );
     }
 }
+
+// —— L1.1 SPINE: post-adjudication committed-result projection (pure seam) ——
+fn pa_check_result(check_id: &str, success: bool) -> CheckResultRecord {
+    let roll = DiceRollRecord {
+        roll_id: format!("roll_{check_id}"),
+        session_id: "s".to_string(),
+        turn_id: "t".to_string(),
+        check_id: Some(check_id.to_string()),
+        roller_kind: ActorKind::PlayerCharacter,
+        roller_id: Some("pc.current".to_string()),
+        visibility: RollVisibility::PublicGmRoll,
+        expression: "1d100".to_string(),
+        result: json!({"total": if success { 12 } else { 88 }}),
+        seed_commitment: "seed".to_string(),
+        revealed_at: None,
+        created_at: Utc::now(),
+    };
+    CheckResultRecord {
+        check_id: check_id.to_string(),
+        roll,
+        outcome: json!({"success": success, "degree": if success {"success"} else {"failure"}}),
+        committed_patches: vec![],
+        created_at: Utc::now(),
+    }
+}
+
+#[test]
+fn post_adjudication_off_empty_on_projects_committed_results() {
+    use trpg_agent::TurnLedgerSnapshot;
+    let mut snap = TurnLedgerSnapshot::default();
+    snap.check_results.push(pa_check_result("c.pass", true));
+    snap.check_results.push(pa_check_result("c.fail", false));
+
+    // OFF ⇒ empty (no consumer ⇒ byte-identical baseline).
+    assert!(
+        project_post_adjudication_results(&snap, false).is_empty(),
+        "flag OFF must yield no results"
+    );
+
+    // ON ⇒ projects the committed results reflecting the real pass/fail outcome.
+    let views = project_post_adjudication_results(&snap, true);
+    assert_eq!(views.len(), 2);
+    assert_eq!(views[0].check_id, "c.pass");
+    assert_eq!(views[0].outcome, trpg_model::CheckOutcomeView::Passed);
+    assert_eq!(views[1].check_id, "c.fail");
+    assert_eq!(views[1].outcome, trpg_model::CheckOutcomeView::Failed);
+}
+
+#[test]
+fn ctx_capture_post_adjudication_off_empty_on_carries_committed_results() {
+    // The L1.1 ctx seam: `resolution_commit_boundary` calls `capture_post_adjudication`.
+    let mut ctx = TurnContext::new();
+    ctx.test_record_check_result(&pa_check_result("c.pass", true));
+    ctx.test_record_check_result(&pa_check_result("c.fail", false));
+
+    // OFF ⇒ ctx carries nothing (no consumer ⇒ byte-identical baseline).
+    ctx.capture_post_adjudication(false);
+    assert!(
+        ctx.post_adjudication_results().is_empty(),
+        "flag OFF must leave ctx empty"
+    );
+
+    // ON ⇒ ctx carries the committed-result projection reflecting real pass/fail.
+    ctx.capture_post_adjudication(true);
+    let views = ctx.post_adjudication_results();
+    assert_eq!(views.len(), 2);
+    assert_eq!(views[0].outcome, trpg_model::CheckOutcomeView::Passed);
+    assert_eq!(views[1].outcome, trpg_model::CheckOutcomeView::Failed);
+    // World candidate pool defaults empty until the pre-adjudication stash runs (flag ON).
+    assert!(ctx.world_candidates().is_empty());
+}
