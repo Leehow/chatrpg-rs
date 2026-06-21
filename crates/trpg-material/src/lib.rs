@@ -898,11 +898,23 @@ impl MaterializationService {
         }
 
         let mut out = Vec::new();
+        // Lane B (supervisor 2026-06-22): npc_synth/ensure_npc_parameter OWNS
+        // runtime_actor_parameters (mechanical_profile/status_json/source_kind), written
+        // per-param from the tiered sheet. materialize_turn must NOT clobber those columns,
+        // so ActorProfile/NpcStatBlock are DEMOTED to demand+evidence-only: the demand /
+        // binding / extraction / verification rows already persisted above ARE the evidence;
+        // we skip the runtime_actor_parameters writeback (so no facet / actor_runtime_bindings
+        // either). VehicleCard/EncounterCard are NOT npc_synth-owned and keep full writeback.
+        if actor_writeback_demoted(demand.target_kind) {
+            tracing::debug!(
+                demand_id = %demand.demand_id,
+                target_kind = demand.target_kind.as_str(),
+                "materialize_turn: actor-param writeback demoted to evidence-only (npc_synth owns runtime_actor_parameters)"
+            );
+            return Ok(out);
+        }
         match demand.target_kind {
-            MaterialTargetKind::ActorProfile
-            | MaterialTargetKind::NpcStatBlock
-            | MaterialTargetKind::VehicleCard
-            | MaterialTargetKind::EncounterCard => out.push(
+            MaterialTargetKind::VehicleCard | MaterialTargetKind::EncounterCard => out.push(
                 self.writeback_actor(demand, packet, extraction, verification)
                     .await?,
             ),
@@ -2396,6 +2408,17 @@ fn extracted_i64(v: &Value, paths: &[&str]) -> Option<i64> {
 fn strict_source_backed_materialization() -> bool {
     env_bool("TRPG_STRICT_SOURCE_BACKED_MATERIALIZATION", true)
 }
+/// Lane B (supervisor 2026-06-22): runtime_actor_parameters (mechanical_profile /
+/// status_json / source_kind) is OWNED by npc_synth/ensure_npc_parameter, which writes
+/// it per-param from the tiered sheet. So materialize_turn's ActorProfile/NpcStatBlock
+/// writeback is demoted to demand+evidence-only (no runtime clobber). VehicleCard /
+/// EncounterCard are not npc_synth-owned and retain full actor writeback.
+fn actor_writeback_demoted(kind: MaterialTargetKind) -> bool {
+    matches!(
+        kind,
+        MaterialTargetKind::ActorProfile | MaterialTargetKind::NpcStatBlock
+    )
+}
 fn infer_object_kind(label: &str, extracted: &Value) -> ObjectKind {
     // Honor the extractor's OWN classification first — schema-guided extraction
     // sets `object_kind` reliably (e.g. "weapon" for a revolver). The label/keyword
@@ -2544,6 +2567,21 @@ mod tests {
             &json!({"mechanical_profile": {"ammo": 0}}),
             "mechanical_profile"
         ));
+    }
+
+    // Lane B: ActorProfile/NpcStatBlock writeback is demoted to demand+evidence-only so
+    // materialize_turn never clobbers runtime_actor_parameters (npc_synth's sole-owned
+    // columns). Vehicle/Encounter cards and all non-actor kinds keep full writeback.
+    #[test]
+    fn actor_param_writeback_demoted_only_for_npc_synth_owned_kinds() {
+        assert!(actor_writeback_demoted(MaterialTargetKind::ActorProfile));
+        assert!(actor_writeback_demoted(MaterialTargetKind::NpcStatBlock));
+        assert!(!actor_writeback_demoted(MaterialTargetKind::VehicleCard));
+        assert!(!actor_writeback_demoted(MaterialTargetKind::EncounterCard));
+        assert!(!actor_writeback_demoted(MaterialTargetKind::ObjectDefinition));
+        assert!(!actor_writeback_demoted(MaterialTargetKind::AbilityDefinition));
+        assert!(!actor_writeback_demoted(MaterialTargetKind::CheckTarget));
+        assert!(!actor_writeback_demoted(MaterialTargetKind::EffectProfile));
     }
 
     // -------------------------------------------------------------------------

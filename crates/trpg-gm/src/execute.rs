@@ -28,6 +28,21 @@ pub struct OwnedTurnRequest {
     pub cancel: Option<CancellationToken>,
 }
 
+/// PhaseId::Materialize 的门控（NEW、default-OFF）。**绝不**复用 default-true 的
+/// `TRPG_REAL_MATERIALIZATION_ENABLE_V110`（那是 producer 内层逻辑门、且 CLI profile 硬置真）——
+/// 那样无法得到 OFF==基线。未设/非真值 ⇒ false ⇒ 头部循环整段跳过 Materialize（不 push、不 dispatch）
+/// ⇒ 与 15-phase 基线字节级一致。仅显式置 1/true 才启用 per-turn producer 回灌。
+pub(crate) fn materialize_phase_enabled() -> bool {
+    materialize_phase_enabled_from(
+        std::env::var("TRPG_MATERIALIZE_PHASE_ENABLE").ok().as_deref(),
+    )
+}
+/// 纯解析（可单测、无 env 竞争）：仅显式 "1"/"true"(大小写不敏感) ⇒ true；未设/空/其它 ⇒ false。
+/// 默认 false 是 must_fix #1 的载重不变式——绝不可像 TRPG_REAL_MATERIALIZATION_ENABLE_V110 那样默认 true。
+fn materialize_phase_enabled_from(v: Option<&str>) -> bool {
+    matches!(v, Some(s) if s == "1" || s.eq_ignore_ascii_case("true"))
+}
+
 /// agent_loop phase 的终态信号——决定尾部 phase 取舍（早返 vs 全尾部）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentSignal {
@@ -148,6 +163,11 @@ async fn run_pipeline(
         // mode_inference / context_assembly fail-closed 返 Err（P1-1）：发 TurnFailed
         // （**不再**发空 TurnComplete 伪装成功）+ 落 turns.failure_kind + 写失败 TurnTrace 后早返。
         for phase in plan.iter().filter(|p| p.kind == PhaseKind::Deterministic) {
+            // 唯一的条件确定性头 Materialize：default-OFF（TRPG_MATERIALIZE_PHASE_ENABLE 未设）⇒
+            // 整段跳过——不 push phases_run、不 dispatch ⇒ 字节级等价 15-phase 基线（OFF==baseline）。
+            if phase.id == PhaseId::Materialize && !materialize_phase_enabled() {
+                continue;
+            }
             phases_run.push(format!("{:?}", phase.id));
             if let Err(f) = dispatch_deterministic(&mut gm, &mut ctx, &input, phase.id).await {
                 // 确定性头部失败的只有 mode_inference / context_assembly，按分级器均为 AbortTurn
@@ -525,6 +545,9 @@ async fn dispatch_deterministic(
             }
         }
         PhaseId::DebtLoad => gm.phase_debt_load(ctx, input).await,
+        // 仅 flag-ON 才进此分发（头部循环已门控）。fail-soft：producer 失败仅 warn，绝不中止回合
+        //（additive，物化失败不该让叙事回合失败）。在 ContextAssembly 之前 ⇒ 同回合 demand 可见。
+        PhaseId::Materialize => gm.phase_materialize(ctx, input).await,
         PhaseId::ContextAssembly => {
             if let Err(err) = gm.phase_context_assembly(ctx, input).await {
                 tracing::warn!(error = %err, "context_assembly failed; aborting turn");

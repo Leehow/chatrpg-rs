@@ -1325,6 +1325,37 @@ impl GmLoop {
         ctx.obligations_block = self.obligations.carryover_block();
     }
 
+    /// PhaseId::Materialize — per-turn 物化 producer 回灌（NEW，default-OFF，仅 flag-ON 才被分发）。
+    /// 复用既有 `RuntimeEngine::try_materialize_turn`（无重建）：内层仍受 producer 自身的
+    /// real_materialization/strict 门控。落在 DebtLoad 与 ContextAssembly 之间 ⇒ 本回合写入的
+    /// materialization_demands（今天的 world_tick）对同回合 prepare_turn_context 的 MaterialNeedResolver
+    /// 投影可见。fail-soft：物化是 additive 增益，失败仅 warn，绝不中止叙事回合（不返 Err）。
+    pub(crate) async fn phase_materialize(
+        &mut self,
+        _ctx: &mut TurnContext,
+        input: &GmTurnInput<'_>,
+    ) {
+        match self
+            .engine
+            .try_materialize_turn(input.request, input.state, input.user_input)
+            .await
+        {
+            Ok(result) => {
+                if result.handled {
+                    tracing::debug!(
+                        turn_id = %input.request.turn_id,
+                        demands = result.demands.len(),
+                        writebacks = result.writebacks.len(),
+                        "materialize phase: per-turn producer ran"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, turn_id = %input.request.turn_id, "materialize phase failed (non-fatal; turn continues)");
+            }
+        }
+    }
+
     /// PhaseId::ContextAssembly — prepare_turn_context + 四级 gm_skill 合并 + mode
     /// 目录联动 + errata/novelty BP3 块 + TurnMessages 组装 + mode 工具/节拍参数。
     /// fail-closed：budget 超限 / gm_skill 缺 / 未知工具名 → Err 终止回合。

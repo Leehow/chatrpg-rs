@@ -9,10 +9,10 @@ pub enum PhaseKind {
     Postprocess,
 }
 
-/// 规范回合的 15 个 phase 标识。顺序即 CANONICAL_TURN_PLAN 顺序。
+/// 规范回合的 16 个 phase 标识。顺序即 CANONICAL_TURN_PLAN 顺序。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PhaseId {
-    // —— 9 个确定性头部 ——
+    // —— 10 个确定性头部（含 1 个条件 Materialize，默认 OFF）——
     RecordPlayerAction,
     RefreshLiveDerived,
     Reconcile,
@@ -21,6 +21,10 @@ pub enum PhaseId {
     OpposedPrepass,
     ModeInference,
     DebtLoad,
+    // 条件确定性头：default-OFF（TRPG_MATERIALIZE_PHASE_ENABLE）。flag 未设时 execute 头部循环
+    // 整段跳过（不 push phases_run、不 dispatch）⇒ 与 15-phase 基线字节级一致；ON 时在
+    // ContextAssembly 之前跑 per-turn 物化 producer，使同回合 demand 对 prepare_turn_context 可见。
+    Materialize,
     ContextAssembly,
     // —— 1 个 agent 主体 ——
     AgentLoop,
@@ -40,8 +44,9 @@ pub struct TurnPhasePlan {
     pub conditional: bool,
 }
 
-/// 规范回合管线：execute_turn 按此顺序解释。9 确定性头 + 1 agent 主体 + 5 后置尾。
-/// conditional=true 仅 SceneNavigate（仅 module_id.is_some()）/ CarryoverDebt（仅工具轮耗尽且有未决义务），余皆 false。
+/// 规范回合管线：execute_turn 按此顺序解释。10 确定性头（含条件 Materialize）+ 1 agent 主体 + 5 后置尾。
+/// conditional=true：Materialize（仅 TRPG_MATERIALIZE_PHASE_ENABLE 置真）/ SceneNavigate（仅
+/// module_id.is_some()）/ CarryoverDebt（仅工具轮耗尽且有未决义务），余皆 false。
 pub const CANONICAL_TURN_PLAN: &[TurnPhasePlan] = &[
     det(PhaseId::RecordPlayerAction),
     det(PhaseId::RefreshLiveDerived),
@@ -51,6 +56,13 @@ pub const CANONICAL_TURN_PLAN: &[TurnPhasePlan] = &[
     det(PhaseId::OpposedPrepass),
     det(PhaseId::ModeInference),
     det(PhaseId::DebtLoad),
+    // 条件确定性头：default-OFF。位于 DebtLoad 与 ContextAssembly 之间，使同回合 producer 写入
+    // 对该回合 prepare_turn_context 可见。flag OFF 时头部循环跳过 ⇒ 字节级等价 15-phase 基线。
+    TurnPhasePlan {
+        id: PhaseId::Materialize,
+        kind: PhaseKind::Deterministic,
+        conditional: true,
+    },
     det(PhaseId::ContextAssembly),
     TurnPhasePlan {
         id: PhaseId::AgentLoop,
@@ -84,8 +96,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_plan_has_fifteen_phases() {
-        assert_eq!(CANONICAL_TURN_PLAN.len(), 15);
+    fn canonical_plan_has_sixteen_phases() {
+        assert_eq!(CANONICAL_TURN_PLAN.len(), 16);
     }
 
     #[test]
@@ -95,8 +107,8 @@ mod tests {
     }
 
     #[test]
-    fn head_nine_are_deterministic() {
-        for p in &CANONICAL_TURN_PLAN[0..9] {
+    fn head_ten_are_deterministic() {
+        for p in &CANONICAL_TURN_PLAN[0..10] {
             assert_eq!(
                 p.kind,
                 PhaseKind::Deterministic,
@@ -108,9 +120,9 @@ mod tests {
 
     #[test]
     fn agent_loop_is_the_single_middle_body() {
-        // 第 10 项（index 9）是唯一 AgentLoop body。
-        assert_eq!(CANONICAL_TURN_PLAN[9].id, PhaseId::AgentLoop);
-        assert_eq!(CANONICAL_TURN_PLAN[9].kind, PhaseKind::AgentLoop);
+        // 第 11 项（index 10）是唯一 AgentLoop body。
+        assert_eq!(CANONICAL_TURN_PLAN[10].id, PhaseId::AgentLoop);
+        assert_eq!(CANONICAL_TURN_PLAN[10].kind, PhaseKind::AgentLoop);
         let agent_count = CANONICAL_TURN_PLAN
             .iter()
             .filter(|p| p.kind == PhaseKind::AgentLoop)
@@ -120,7 +132,7 @@ mod tests {
 
     #[test]
     fn tail_five_are_postprocess() {
-        for p in &CANONICAL_TURN_PLAN[10..15] {
+        for p in &CANONICAL_TURN_PLAN[11..16] {
             assert_eq!(
                 p.kind,
                 PhaseKind::Postprocess,
@@ -131,10 +143,12 @@ mod tests {
     }
 
     #[test]
-    fn only_scene_navigate_and_carryover_debt_are_conditional() {
+    fn only_materialize_scene_navigate_and_carryover_debt_are_conditional() {
         for p in CANONICAL_TURN_PLAN {
-            let expect_conditional =
-                matches!(p.id, PhaseId::SceneNavigate | PhaseId::CarryoverDebt);
+            let expect_conditional = matches!(
+                p.id,
+                PhaseId::Materialize | PhaseId::SceneNavigate | PhaseId::CarryoverDebt
+            );
             assert_eq!(
                 p.conditional, expect_conditional,
                 "phase {:?} conditional flag wrong",
@@ -157,6 +171,7 @@ mod tests {
                 PhaseId::OpposedPrepass,
                 PhaseId::ModeInference,
                 PhaseId::DebtLoad,
+                PhaseId::Materialize,
                 PhaseId::ContextAssembly,
                 PhaseId::AgentLoop,
                 PhaseId::VerifyAfterStream,

@@ -100,6 +100,23 @@ fn should_run_carryover_uses_signal_and_live_pending() {
     );
 }
 
+// must_fix #1：Materialize phase 门控默认 OFF——未设 ⇒ false（头部循环跳过 ⇒ OFF==基线）。
+// 绝不可复用 default-true 的 TRPG_REAL_MATERIALIZATION_ENABLE_V110；仅显式 1/true 才启用。
+#[test]
+fn materialize_phase_default_off_only_explicit_truthy_enables() {
+    assert!(
+        !materialize_phase_enabled_from(None),
+        "unset MUST be OFF (byte-identical baseline)"
+    );
+    assert!(!materialize_phase_enabled_from(Some("")));
+    assert!(!materialize_phase_enabled_from(Some("0")));
+    assert!(!materialize_phase_enabled_from(Some("false")));
+    assert!(!materialize_phase_enabled_from(Some("no")));
+    assert!(materialize_phase_enabled_from(Some("1")));
+    assert!(materialize_phase_enabled_from(Some("true")));
+    assert!(materialize_phase_enabled_from(Some("TRUE")));
+}
+
 // AgentLoop 永远在序列里且恰好一次（它是 body，非可选）。
 #[test]
 fn agent_loop_present_exactly_once() {
