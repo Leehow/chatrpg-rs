@@ -42,6 +42,40 @@ pub fn nav_content_gravity_enabled() -> bool {
     )
 }
 
+/// L-Y 离场提交子句（aliveFull30LW full-run J1+J3 共同根：玩家叙事已进入仓库内部，但 committed
+/// 场景仍钉在外景入口到达 beat `scene_warehouse_arrival`，nav-LLM 每回合判"留"从不 commit 转移 ⇒
+/// 外景定场逐回合回灌 = 位置失忆[J1 t9-12/t23]+ 场景冻结[J3 frozen 19]）。在 content-gravity 的
+/// ①②③ 判据之上**追加**判 moved=true 的依据④「离场提交」：玩家已明确**离开**当前场景既定锚点位置
+/// （外部进内部/地表入纵深/穿通道朝某直接衔接 beat 区域推进），即便尚未抵达该 beat 核心点位，只要
+/// 叙事位置已落入某个『直接衔接 beat』territory ⇒ 判 moved 到该 beat 的真实 node_id。仍 fail-closed
+/// （原地观察/试探、未真正离开既定位置 → 不动）。理由：把玩家钉在他已实际离开的位置会让旧场景到达/
+/// 外景定场反复回灌（理念§4 把 beat 搬到玩家而非把玩家搬回 beat；§7 顺玩家投入软推进非强拽）。
+const SCENE_NAV_DEPARTURE_CLAUSE: &str = "④ **离场提交**——若玩家已明确离开当前场景的既定锚点位置（如从建筑外部进入内部、从地表深入纵深、穿过通道/管道/缆线井朝某个『直接衔接 beat』的区域推进），即便尚未抵达该 beat 的核心点位，只要叙事位置已落入某个『直接衔接 beat』的范围，应判 moved=true 到该 beat 的真实 node_id（优先取『直接衔接 beat』）。理由：把玩家钉在他已实际离开的位置，会让旧场景的到达/外景定场反复回灌，造成位置失忆与场景冻结。仍须 fail-closed：玩家只是在原地观察/试探、或并未离开既定锚点位置 → moved=false。";
+
+/// L-Y 离场提交开关。镜像 L-C 模式：默认 ON，仅显式 `0/false/off/no` 关。
+/// 关 ⇒ gravity 提示串退回纯 SCENE_NAV_SYS_GRAVITY（无④子句）⇒ 字节等价 L-C 基线。
+pub fn nav_departure_commit_enabled() -> bool {
+    !matches!(
+        std::env::var("TRPG_SCENE_NAV_DEPARTURE_COMMIT")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "0" | "false" | "off" | "no"
+    )
+}
+
+/// 纯函数：构建 content-gravity 导航 system prompt。`departure_commit=false` ⇒ 返回纯
+/// `SCENE_NAV_SYS_GRAVITY`（字节等价 L-C 基线）；`true`（默认）⇒ 追加 L-Y 离场提交④子句。
+/// 便于单测锁定 OFF==基线字节等价 + ON 含④子句。
+pub fn gravity_nav_system_prompt(departure_commit: bool) -> String {
+    if departure_commit {
+        format!("{SCENE_NAV_SYS_GRAVITY}\n{SCENE_NAV_DEPARTURE_CLAUSE}")
+    } else {
+        SCENE_NAV_SYS_GRAVITY.to_string()
+    }
+}
+
 /// 内容引力提示：在 build_nav_prompt 之上，把『当前场景直接衔接 beat』(node_id | title)
 /// 作为一节前置上下文。exits 为空 ⇒ 退回裸 build_nav_prompt（字节等价）。
 pub fn build_nav_prompt_with_exits(
@@ -668,6 +702,50 @@ mod tests {
         assert!(p.contains("sc02 | 内厅"), "应列出衔接 beat");
         assert!(p.contains("我推门走向内厅深处"), "仍含玩家输入");
         assert!(p.contains("叙事正文"), "仍含叙事");
+    }
+
+    // L-Y 离场提交：departure_commit=false ⇒ gravity system prompt 字节等价纯
+    // SCENE_NAV_SYS_GRAVITY（L-C 基线，OFF==baseline）。
+    #[test]
+    fn gravity_nav_prompt_departure_off_is_byte_equal_to_baseline() {
+        assert_eq!(
+            gravity_nav_system_prompt(false),
+            SCENE_NAV_SYS_GRAVITY,
+            "departure OFF 必须与纯 gravity system prompt 字节等价"
+        );
+    }
+
+    // L-Y 离场提交：departure_commit=true ⇒ 在 gravity 基线之上追加④离场提交子句，
+    // 且仍保留原①②③内容引力判据（纯追加，不改写基线）。
+    #[test]
+    fn gravity_nav_prompt_departure_on_appends_clause() {
+        let p = gravity_nav_system_prompt(true);
+        assert!(
+            p.starts_with(SCENE_NAV_SYS_GRAVITY),
+            "ON 必须以 gravity 基线为前缀（纯追加）"
+        );
+        assert!(p.contains("离场提交"), "ON 应含④离场提交子句");
+        assert!(
+            p.contains("内容引力") || p.contains("③"),
+            "ON 应保留原内容引力判据"
+        );
+        assert!(
+            p.contains("fail-closed") || p.contains("原地观察"),
+            "④子句应保留 fail-closed 守卫"
+        );
+        assert!(p.len() > SCENE_NAV_SYS_GRAVITY.len(), "ON 严格更长（追加）");
+    }
+
+    // L-Y flag 默认 ON（未设环境变量时）。同 L-C 模式：仅显式 0/false/off/no 关。
+    #[test]
+    fn nav_departure_commit_defaults_on_when_unset() {
+        // 测试隔离：仅在未设时断言默认 ON（CI/本地默认环境无此 var）。
+        if std::env::var("TRPG_SCENE_NAV_DEPARTURE_COMMIT").is_err() {
+            assert!(
+                nav_departure_commit_enabled(),
+                "未设 TRPG_SCENE_NAV_DEPARTURE_COMMIT ⇒ 默认 ON"
+            );
+        }
     }
 
     // R5 Task1a 边界测试：编译级断言 critical/heavy 两个新公开异步函数的存在与签名

@@ -4,9 +4,9 @@
 //! critical→heavy 串行，字节等价旧逻辑）。复用父模块的 build_nav_prompt / validate_transition /
 //! extract_module_scenes / prefetch_frontier / SCENE_NAV_SYS。
 use super::{
-    build_nav_prompt, build_nav_prompt_with_exits, extract_module_scenes,
-    nav_content_gravity_enabled, prefetch_frontier, resolve_offgraph_to_neighbor,
-    validate_transition, SCENE_NAV_SYS, SCENE_NAV_SYS_GRAVITY,
+    build_nav_prompt, build_nav_prompt_with_exits, extract_module_scenes, gravity_nav_system_prompt,
+    nav_content_gravity_enabled, nav_departure_commit_enabled, prefetch_frontier,
+    resolve_offgraph_to_neighbor, validate_transition, SCENE_NAV_SYS,
 };
 use serde_json::json;
 use tracing::info;
@@ -74,18 +74,20 @@ pub async fn scene_navigate_critical(
                     .join("\n")
             })
             .unwrap_or_default();
+        // L-Y：gravity 提示串在 ①②③ 之上按 flag 追加④离场提交子句（默认 ON；OFF ⇒ 纯
+        // SCENE_NAV_SYS_GRAVITY 字节等价 L-C 基线）。
         (
-            SCENE_NAV_SYS_GRAVITY,
+            gravity_nav_system_prompt(nav_departure_commit_enabled()),
             build_nav_prompt_with_exits(&current, cur_title, &exits, &list, player_input, narration),
         )
     } else {
         (
-            SCENE_NAV_SYS,
+            SCENE_NAV_SYS.to_string(),
             build_nav_prompt(&current, cur_title, &list, player_input, narration),
         )
     };
     let decision = match llm
-        .complete_json(vec![trpg_llm::system(sys), trpg_llm::user(&usr)], 0.0)
+        .complete_json(vec![trpg_llm::system(&sys), trpg_llm::user(&usr)], 0.0)
         .await
     {
         Ok(v) => v,
