@@ -26,9 +26,11 @@
 pub mod fallback;
 pub mod render;
 pub mod outcome;
+pub mod scene_plan;
 pub mod select;
 
 pub use fallback::{fallback_beat_plan, pick_spotlight_target};
+pub use scene_plan::{derive_scene_plan, scene_plan_enabled, ScenePlan};
 pub use outcome::{
     apply_committed_outcome, DESIRED_CHANGE_CAPITALIZE_SUCCESS, DESIRED_CHANGE_FAIL_FORWARD,
 };

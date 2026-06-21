@@ -12,8 +12,9 @@ mod story;
 pub use service::{BeatPlanInputs, DirectorUnsupported, StoryDirectorService};
 pub use spotlight::SpotlightParticipant;
 pub use story::{
-    apply_committed_outcome, build_director_brief_packet, fallback_beat_plan, pick_spotlight_target,
-    render_director_packet_block, DESIRED_CHANGE_CAPITALIZE_SUCCESS, DESIRED_CHANGE_FAIL_FORWARD,
+    apply_committed_outcome, build_director_brief_packet, derive_scene_plan, fallback_beat_plan,
+    pick_spotlight_target, render_director_packet_block, scene_plan_enabled, ScenePlan,
+    DESIRED_CHANGE_CAPITALIZE_SUCCESS, DESIRED_CHANGE_FAIL_FORWARD,
 };
 
 #[cfg(test)]
