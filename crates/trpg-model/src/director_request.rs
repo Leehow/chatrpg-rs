@@ -55,6 +55,10 @@ pub struct DirectorRequest {
     /// The read-only story snapshot to plan against.
     #[serde(default)]
     pub snapshot: StorySnapshot,
+    /// L8.2 — module-extracted [`crate::NarrativeAnchor`]s (L8.1) the Director MAY seed threads
+    /// from (proposal-only). Additive: empty ⇒ no seeding ⇒ byte-identical to the snapshot path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub module_anchors: Vec<crate::NarrativeAnchor>,
 }
 
 #[cfg(test)]
@@ -108,14 +112,42 @@ mod tests {
                 turn_id: Some("turn_3".into()),
                 ..Default::default()
             },
+            ..Default::default()
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: DirectorRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(req, back);
 
-        // Partial JSON ⇒ fail-closed default (Beat, empty snapshot).
+        // Partial JSON ⇒ fail-closed default (Beat, empty snapshot, no anchors).
         let partial: DirectorRequest = serde_json::from_str("{}").unwrap();
         assert_eq!(partial.horizon, DirectorHorizon::Beat);
         assert_eq!(partial.snapshot, StorySnapshot::default());
+        assert!(partial.module_anchors.is_empty());
+    }
+
+    #[test]
+    fn module_anchors_round_trip_and_default_empty() {
+        use crate::{NarrativeAnchor, NarrativeAnchorKind};
+        // Empty anchors serialize away (skip_serializing_if) ⇒ byte-stable for pre-L8.2 payloads.
+        let bare = DirectorRequest::default();
+        let bare_json = serde_json::to_string(&bare).unwrap();
+        assert!(
+            !bare_json.contains("module_anchors"),
+            "empty module_anchors must not appear in the wire form: {bare_json}"
+        );
+
+        let req = DirectorRequest {
+            module_anchors: vec![NarrativeAnchor {
+                anchor_id: "anchor_thread_s1_s2".into(),
+                kind: NarrativeAnchorKind::PotentialThread,
+                summary: "顺着日记线索深入地窖".into(),
+                related_ids: vec!["s2".into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: DirectorRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(req, back);
     }
 }

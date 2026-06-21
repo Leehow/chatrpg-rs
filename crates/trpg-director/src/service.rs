@@ -90,6 +90,39 @@ impl StoryDirectorService {
         Ok(crate::apply_committed_outcome(base, results))
     }
 
+    /// L8.2 — Beat altitude with module-anchor seeding. When `TRPG_DIRECTOR_ANCHOR_SEED` is ON and
+    /// `req.module_anchors` is non-empty, promote the request's `PotentialThread` anchors into
+    /// proposal threads (proposal-only, DB-free) and plan over the augmented story so an
+    /// anchor-seeded thread is selectable by the scorer. Fail-closed + flag-gated: OFF, or no
+    /// anchors, ⇒ byte-identical to [`Self::plan_beat`] (no augmentation). Non-Beat ⇒
+    /// [`DirectorUnsupported`].
+    pub fn plan_beat_with_anchor_seeds(
+        &self,
+        req: &DirectorRequest,
+        inputs: &BeatPlanInputs<'_>,
+    ) -> Result<DirectorPlan, DirectorUnsupported> {
+        if req.horizon != DirectorHorizon::Beat {
+            return Err(DirectorUnsupported {
+                horizon: req.horizon,
+            });
+        }
+        if !crate::anchor_seed_enabled() || req.module_anchors.is_empty() {
+            return self.plan_beat(req, inputs);
+        }
+        let augmented =
+            crate::augment_story_with_anchor_seeds(&req.snapshot.story_state, &req.module_anchors);
+        Ok(crate::build_director_brief_packet(
+            inputs.mode,
+            inputs.candidates,
+            &augmented,
+            inputs.player_known,
+            inputs.gm_truth,
+            inputs.spotlights,
+            inputs.rejected_thread_ids,
+            inputs.acting_actor_id,
+        ))
+    }
+
     /// Situation altitude: pure delegation to the existing facilitation engine. Dormant on
     /// the shipped turn (L0.1) — exposed for completeness, no behavior change.
     pub fn plan_situation(
@@ -145,6 +178,7 @@ mod tests {
                 story_state: story.clone(),
                 ..Default::default()
             },
+            ..Default::default()
         };
         let inputs = BeatPlanInputs {
             mode: DirectorMode::OnDemand,
@@ -194,6 +228,7 @@ mod tests {
                 story_state: story,
                 ..Default::default()
             },
+            ..Default::default()
         };
         let inputs = BeatPlanInputs {
             mode: DirectorMode::OnDemand,
@@ -256,6 +291,44 @@ mod tests {
         }
         assert!(StoryDirectorService::supports(DirectorHorizon::Beat));
         assert!(StoryDirectorService::supports(DirectorHorizon::Situation));
+    }
+
+    #[test]
+    fn anchor_seeds_off_is_byte_identical_to_plain_beat() {
+        // L8.2 OFF byte-equal: with the flag default-OFF, even a request carrying module anchors
+        // plans EXACTLY as plan_beat (no augmentation). (The flag is not set in this test ⇒ OFF.)
+        use trpg_model::{NarrativeAnchor, NarrativeAnchorKind};
+        let story = story_with_thread();
+        let candidates = vec![candidate("npc.broker")];
+        let req = DirectorRequest {
+            horizon: DirectorHorizon::Beat,
+            snapshot: StorySnapshot {
+                story_state: story,
+                ..Default::default()
+            },
+            module_anchors: vec![NarrativeAnchor {
+                anchor_id: "anchor_thread_s1_s2".into(),
+                kind: NarrativeAnchorKind::PotentialThread,
+                summary: "顺着线索通向 s2".into(),
+                related_ids: vec!["s2".into()],
+                ..Default::default()
+            }],
+        };
+        let inputs = BeatPlanInputs {
+            mode: DirectorMode::OnDemand,
+            candidates: &candidates,
+            player_known: None,
+            gm_truth: None,
+            spotlights: &[],
+            rejected_thread_ids: &[],
+            acting_actor_id: "pc.current",
+        };
+        let svc = StoryDirectorService::new();
+        assert_eq!(
+            svc.plan_beat_with_anchor_seeds(&req, &inputs).unwrap(),
+            svc.plan_beat(&req, &inputs).unwrap(),
+            "flag OFF ⇒ anchor seeding is a no-op (byte-equal to plan_beat)"
+        );
     }
 
     #[test]
