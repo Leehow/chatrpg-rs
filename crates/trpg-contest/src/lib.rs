@@ -559,8 +559,14 @@ impl ContestService {
             .map(|t| t.label.clone())
             .filter(|l| !l.trim().is_empty());
         let mut mods: Vec<CheckModifier> = vec![];
+        // The skill whose FLAT level we added (→ needs its linked STAT for full CPR
+        // competence). A `<skill>_base` add is already STAT+level ⇒ stays None.
+        let mut flat_skill: Option<String> = None;
         if let Some(label) = label_exact.as_deref() {
             if let Some(m) = skill_modifier_from_label(mech, label) {
+                if is_flat_skill_modifier(&m, label) {
+                    flat_skill = Some(label.to_string());
+                }
                 mods.push(m);
             }
         }
@@ -577,6 +583,9 @@ impl ContestService {
                 match src {
                     TestedSource::Skill { key } => {
                         if let Some(m) = skill_modifier_from_label(mech, &key) {
+                            if is_flat_skill_modifier(&m, &key) {
+                                flat_skill = Some(key.clone());
+                            }
                             mods.push(m);
                         }
                     }
@@ -591,6 +600,16 @@ impl ContestService {
                     }
                     // A resource track is not an additive roll-high competence addend.
                     TestedSource::Track { .. } => {}
+                }
+            }
+        }
+        // L-U: a flat skill add carried the LEVEL only — append the source-backed
+        // governing STAT so the verdict composes `1d10 + STAT + Skill >= DV` (full
+        // CPR competence). OFF flag (or no kernel linkage) ⇒ skill-only byte-equal.
+        if skill_competence_stat_enabled() {
+            if let Some(skill) = flat_skill {
+                if let Some(m) = linked_stat_modifier(&kernel, mech, &skill) {
+                    mods.push(m);
                 }
             }
         }
@@ -919,6 +938,53 @@ fn attack_roll_competence_enabled() -> bool {
             .as_deref(),
         Some("0") | Some("false") | Some("off") | Some("no")
     )
+}
+
+/// L-U: a CPR-shaped Skill Check is `1d10 + STAT + Skill Level >= DV` (CPR Core
+/// p130). The flat-skill add (`skills.<skill>`) carries the LEVEL only; the
+/// governing STAT addend (~6-8) was missing because the pass-one chargen reader
+/// dropped the skill→STAT linkage (the runtime profile never projected
+/// `fields.<skill>_base = STAT+level`). Smoke census: Persuasion total 8 vs DV14 =
+/// die2 + Persuasion6 with COOL8 omitted ⇒ a competent PC fails nearly every DV
+/// 13-14 check ⇒ no committed effect (J2) + the player grinds one beat (J3).
+/// This restores the STAT addend from the SOURCE-BACKED `dice_core.skill_stat_links`
+/// map (kernel override, healed under-extraction; zero ruleset_id Rust branch).
+/// **Default ON**; OFF (`0`/`false`/`off`/`no`) ⇒ skill-only byte-equal baseline.
+fn skill_competence_stat_enabled() -> bool {
+    !matches!(
+        std::env::var("TRPG_SKILL_COMPETENCE_STAT")
+            .ok()
+            .map(|v| v.to_ascii_lowercase())
+            .as_deref(),
+        Some("0") | Some("false") | Some("off") | Some("no")
+    )
+}
+
+/// L-U — the governing-STAT addend for a flat-skill roll-high competence. Looks up
+/// the skill's linked STAT in `kernel.dice_core.skill_stat_links` (case-insensitive
+/// by skill TITLE), then reads that stat's value from `mech.stats`. None when the
+/// kernel carries no linkage (e.g. a ruleset without the override → the all-generic
+/// path stays skill-only, byte-equal) or the actor sheet lacks the stat (fail-soft).
+fn linked_stat_modifier(kernel: &RuleKernel, mech: &Value, skill: &str) -> Option<CheckModifier> {
+    let links = kernel.dice_core.get("skill_stat_links")?.as_object()?;
+    let stat_key = links
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(skill))
+        .and_then(|(_, v)| v.as_str())?;
+    let value = value_from_profile(mech.get("stats"), stat_key)?;
+    Some(CheckModifier {
+        label: stat_key.to_string(),
+        value,
+        source_ref: None,
+    })
+}
+
+/// L-U — true when a skill modifier came from the FLAT `skills.<skill>` level
+/// (label == the bare skill name), NOT the structured `fields.<skill>_base`
+/// (label == `"<skill> (base)"`, already STAT+level). Only the flat case needs the
+/// separate linked-STAT addend; adding it to a `_base` modifier would double-count.
+fn is_flat_skill_modifier(m: &CheckModifier, skill: &str) -> bool {
+    m.label.eq_ignore_ascii_case(skill)
 }
 
 fn is_attack_contract(contract: &CheckContract) -> bool {
@@ -1575,6 +1641,76 @@ mod tested_param_tests {
         // Skill 40 (<50): 96-100 all fumble; skill 75 (>=50): 96-99 are plain fail.
         assert_eq!(tier(97, 40), "fumble");
         assert_eq!(tier(97, 75), "failure");
+    }
+
+    // ─── L-U: full CPR competence = 1d10 + STAT + Skill (linked-stat addend) ───
+    fn cpr_kernel_with_links() -> RuleKernel {
+        let mut k = RuleKernel::default();
+        k.dice_core = json!({
+            "compare": "meet_or_beat",
+            "skill_stat_links": {"Persuasion": "COOL", "Handgun": "REF", "Basic Tech": "TECH"}
+        });
+        k
+    }
+    fn cpr_mech_flat() -> Value {
+        // Flat runtime profile (no fields.<skill>_base): the exact smokeLT shape.
+        json!({
+            "stats": {"COOL": 8, "REF": 7, "TECH": 5, "DEX": 6},
+            "skills": {"Persuasion": 6, "Handgun": 6, "Basic Tech": 2}
+        })
+    }
+
+    #[test]
+    fn linked_stat_resolves_governing_stat_value() {
+        let k = cpr_kernel_with_links();
+        let m = linked_stat_modifier(&k, &cpr_mech_flat(), "Persuasion")
+            .expect("Persuasion → COOL must resolve");
+        assert_eq!(m.label, "COOL");
+        assert_eq!(m.value, 8, "COOL stat value from sheet");
+    }
+
+    #[test]
+    fn linked_stat_lookup_is_case_insensitive_by_title() {
+        let k = cpr_kernel_with_links();
+        assert_eq!(
+            linked_stat_modifier(&k, &cpr_mech_flat(), "basic tech").map(|m| m.value),
+            Some(5),
+            "lower-cased skill title still maps Basic Tech → TECH 5"
+        );
+    }
+
+    #[test]
+    fn linked_stat_none_when_no_kernel_linkage() {
+        // A ruleset without the skill_stat_links override stays skill-only (byte-equal).
+        let k = RuleKernel::default();
+        assert!(linked_stat_modifier(&k, &cpr_mech_flat(), "Persuasion").is_none());
+    }
+
+    #[test]
+    fn full_competence_meets_dv_that_skill_only_misses() {
+        // smokeLT root: Persuasion check vs DV 14. Skill-only = die2 + 6 = 8 < 14 (fail).
+        // With L-U linked COOL 8: 2 + 6 + 8 = 16 >= 14 (pass).
+        let skill = skill_modifier_from_label(&cpr_mech_flat(), "Persuasion").unwrap();
+        let stat = linked_stat_modifier(&cpr_kernel_with_links(), &cpr_mech_flat(), "Persuasion").unwrap();
+        let comp: i64 = (skill.value + stat.value) as i64; // 6 + 8 = 14
+        assert!(2 + (skill.value as i64) < 14, "skill-only under-add still fails DV14");
+        assert!(2 + comp >= 14, "full STAT+SKILL competence meets DV14");
+    }
+
+    #[test]
+    fn flat_skill_modifier_distinguished_from_base() {
+        let flat = skill_modifier_from_label(&cpr_mech_flat(), "Persuasion").unwrap();
+        assert!(is_flat_skill_modifier(&flat, "Persuasion"), "flat skill add needs linked stat");
+        // A structured `_base` modifier is labeled "<skill> (base)" → already STAT+level.
+        let base = CheckModifier { label: "Persuasion (base)".into(), value: 14, source_ref: None };
+        assert!(!is_flat_skill_modifier(&base, "Persuasion"), "_base must NOT re-add stat");
+    }
+
+    #[test]
+    fn skill_competence_stat_flag_defaults_on() {
+        // No env set in test ⇒ default ON (eval inherits it).
+        std::env::remove_var("TRPG_SKILL_COMPETENCE_STAT");
+        assert!(skill_competence_stat_enabled());
     }
 }
 

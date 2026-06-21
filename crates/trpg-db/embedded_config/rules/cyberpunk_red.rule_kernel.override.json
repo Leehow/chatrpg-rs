@@ -103,5 +103,32 @@
       5,
       35
     ]
+  },
+  "_note_skill_stat_links": "L-U engine-dehardcode: heals a reader under-extraction (same hazard as the luck/humanity track note). The CPR Core skill list (p131-152) organizes every skill under its governing STAT — a Skill Check is '1d10 + STAT + Skill Level vs DV' (p130 Resolving Actions with Skills). The pass-one chargen reader captured each skill's LEVEL but dropped the skill->STAT linkage, so the runtime mechanical_profile carried skill level only and roll-high checks composed '1d10 + Skill' (missing the STAT addend ~6-8) => structurally under-powered vs CPR DVs (smokeLT census: Persuasion total 8 vs DV14 = die2 + Persuasion6, COOL8 omitted). This map restores the linkage as DATA (no per-ruleset Rust). dice_core shallow-merge keeps base 'compare'. Keyed by skill TITLE (case-insensitive consumer lookup); value = STAT field in mechanical_profile.stats. Consumed by trpg-contest resolve_roll_high_modifiers (flag TRPG_SKILL_COMPETENCE_STAT, OFF==skill-only byte-equal baseline). source_ref: cyberpunk_red CPR Core p130-152 skill list.",
+  "dice_core": {
+    "skill_stat_links": {
+      "Accounting": "INT", "Acting": "COOL", "Air Vehicle Tech": "TECH",
+      "Animal Handling": "INT", "Archery": "REF", "Athletics": "DEX",
+      "Autofire": "REF", "Basic Tech": "TECH", "Brawling": "DEX",
+      "Bribery": "COOL", "Bureaucracy": "INT", "Business": "INT",
+      "Composition": "INT", "Concentration": "WILL", "Conceal/Reveal Object": "INT",
+      "Contortionist": "DEX", "Conversation": "EMP", "Criminology": "INT",
+      "Cryptography": "INT", "Cybertech": "TECH", "Dance": "DEX",
+      "Deduction": "INT", "Demolitions": "TECH", "Drive Land Vehicle": "REF",
+      "Education": "INT", "Electronics/Security Tech": "TECH", "Endurance": "WILL",
+      "Evasion": "DEX", "First Aid": "TECH", "Forgery": "TECH",
+      "Gamble": "INT", "Handgun": "REF", "Heavy Weapons": "REF",
+      "Human Perception": "EMP", "Interrogation": "COOL", "Land Vehicle Tech": "TECH",
+      "Library Search": "INT", "Lip Reading": "INT", "Local Expert": "INT",
+      "Martial Arts": "DEX", "Melee Weapon": "DEX", "Paint/Draw/Sculpt": "TECH",
+      "Paramedic": "TECH", "Perception": "INT", "Personal Expert": "INT",
+      "Personal Grooming": "COOL", "Persuasion": "COOL", "Photography/Film": "TECH",
+      "Pick Lock": "TECH", "Pick Pocket": "TECH", "Pilot Air Vehicle": "REF",
+      "Pilot Sea Vehicle": "REF", "Play Instrument": "TECH", "Resist Torture/Drugs": "WILL",
+      "Riding": "REF", "Science": "INT", "Sea Vehicle Tech": "TECH",
+      "Shoulder Arms": "REF", "Stealth": "DEX", "Streetwise": "COOL",
+      "Tactics": "INT", "Tracking": "INT", "Trading": "COOL",
+      "Wardrobe & Style": "COOL", "Weaponstech": "TECH", "Wilderness Survival": "INT"
+    }
   }
 }
