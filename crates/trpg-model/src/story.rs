@@ -271,6 +271,28 @@ pub enum BeatKind {
     Transition,
 }
 
+impl BeatKind {
+    /// Stable snake_case token, matching the serde representation. Used by the L6.1
+    /// player-safe DirectorPlan→Narrator steering projection (a structured token, never
+    /// secret prose). Keep in sync with the `#[serde(rename_all = "snake_case")]` above.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BeatKind::Respond => "respond",
+            BeatKind::Reveal => "reveal",
+            BeatKind::Complicate => "complicate",
+            BeatKind::Consequence => "consequence",
+            BeatKind::Choice => "choice",
+            BeatKind::Reaction => "reaction",
+            BeatKind::Callback => "callback",
+            BeatKind::Foreshadow => "foreshadow",
+            BeatKind::Escalate => "escalate",
+            BeatKind::Relief => "relief",
+            BeatKind::Payoff => "payoff",
+            BeatKind::Transition => "transition",
+        }
+    }
+}
+
 /// Pacing read used to modulate beat selection. Scores normalized `0.0..=1.0`.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct PacingState {

@@ -92,6 +92,14 @@ pub struct NarrationPacket {
     /// 罗列数值(尊重 Q-4 no-dump)。角色卡是玩家自己的 ⇒ 不新增泄漏面。
     #[serde(default)]
     pub character_context: Vec<String>,
+    /// L6.1 SPINE→narration:post-adjudication Beat `DirectorPlan` 的 **player-safe 结构化转向 token**
+    /// (beat_kind / desired_change / dramatic_function 等枚举/短串),由 runtime 经
+    /// `ctx.post_adjudication_plan()` 在 `TRPG_DIRECTOR_POST_ADJUDICATION` ON 下提供,与
+    /// `scene_establishing`/`character_context` **并列**组合(§2 composition rule)。`project` 恒置空
+    /// (OFF 字节等价),仅经 `with_director_plan` 注入。**只承载结构化 token**——绝不承载 reveal 事实
+    /// 原文/world candidate/secret(reveal 仍是 proposal、forbidden_reveals 仍单独流向 Narrator)。
+    #[serde(default)]
+    pub director_plan: Vec<String>,
 }
 
 fn roll_is_player_visible(visibility: RollVisibility) -> bool {
@@ -215,6 +223,8 @@ impl NarrationPacket {
             scene_establishing: Vec::new(),
             // OA2：project 恒置空(OFF 字节等价)；仅 Enforce 经 with_character_context 注入。
             character_context: Vec::new(),
+            // L6.1：project 恒置空(OFF 字节等价)；仅 spine ON 经 with_director_plan 注入。
+            director_plan: Vec::new(),
         }
     }
 
@@ -248,6 +258,19 @@ impl NarrationPacket {
     /// 能力)。空 slices ⇒ 字段为空 ⇒ 渲染侧零新增字节(OFF/非 Enforce 字节等价)。
     pub fn with_character_context(mut self, slices: &[String]) -> Self {
         self.character_context = slices
+            .iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        self
+    }
+
+    /// L6.1(链式 builder):注入 post-adjudication DirectorPlan 的 player-safe 结构化转向 token。
+    /// 调用方保证 `tokens` 来自 `ctx.post_adjudication_plan()` 的结构化投影(仅枚举/短串,无 reveal
+    /// 事实原文/secret)。空 tokens(spine OFF ⇒ 无 plan) ⇒ 字段为空 ⇒ 渲染侧零新增字节(OFF 字节
+    /// 等价)。与 `with_scene_establishing`/`with_character_context` 行为一致(trim+drop empties)。
+    pub fn with_director_plan(mut self, tokens: &[String]) -> Self {
+        self.director_plan = tokens
             .iter()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
@@ -686,5 +709,28 @@ mod tests {
         );
         let empty = NarrationPacket::project(&adj, "", &[]).with_character_context(&[]);
         assert!(empty.character_context.is_empty());
+    }
+
+    #[test]
+    fn director_plan_project_empty_builder_injects_l61() {
+        // L6.1: project() leaves director_plan empty (spine OFF ⇒ byte-equal); with_director_plan
+        // injects the player-safe structured steering tokens, trimming/filtering empties exactly
+        // like with_scene_establishing/with_character_context.
+        let adj = AdjudicationPacket::project("环顾", &TurnLedgerSnapshot::default(), &[], "", None);
+        let base = NarrationPacket::project(&adj, "", &[]);
+        assert!(base.director_plan.is_empty(), "project must leave it empty (OFF byte-equal)");
+
+        let injected = NarrationPacket::project(&adj, "", &[]).with_director_plan(&[
+            "  beat:complicate  ".to_string(),
+            "   ".to_string(), // blank → filtered
+            "desired_change:fail_forward".to_string(),
+        ]);
+        assert_eq!(
+            injected.director_plan,
+            vec!["beat:complicate".to_string(), "desired_change:fail_forward".to_string()]
+        );
+        // Empty slices ⇒ field stays empty ⇒ render adds zero bytes.
+        let empty = NarrationPacket::project(&adj, "", &[]).with_director_plan(&[]);
+        assert!(empty.director_plan.is_empty());
     }
 }

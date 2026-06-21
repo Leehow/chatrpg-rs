@@ -1157,10 +1157,20 @@ impl GmLoop {
         let scene_establishing = ctx.compiled().scene_establishing.clone();
         // OA2 (G-3): player-safe PC 能力档案(runtime 仅 Enforce 填 character_context)。
         let character_context = ctx.compiled().character_context.clone();
+        // L6.1 SPINE→narration: the post-adjudication Beat DirectorPlan (built at
+        // resolution_commit_boundary BEFORE this phase, execute.rs:242→251) flows into the Narrator
+        // as player-safe structured steering tokens, ALONGSIDE scene_establishing/character_context
+        // (§2 composition rule). Spine flag OFF ⇒ post_adjudication_plan() is None ⇒ empty tokens ⇒
+        // carrier empty ⇒ OFF byte-equal. Reveal facts / forbidden_reveals are NOT carried here.
+        let director_plan_tokens = ctx
+            .post_adjudication_plan()
+            .map(player_safe_director_plan_tokens)
+            .unwrap_or_default();
         let narration = crate::packet::NarrationPacket::project(&adj, "", &[])
             .with_scene_context(&player_safe_scene_context(input))
             .with_scene_establishing(&scene_establishing)
-            .with_character_context(&character_context);
+            .with_character_context(&character_context)
+            .with_director_plan(&director_plan_tokens);
         let private_tokens = ctx.ledger.private_roll_tokens();
         // P7.3：P1 Narrator 派发经 NarratorPort 适配器（GmLoopNarratorAdapter 仅委托
         // `GmLoop::run_narrator`）——dispatch 间接，byte-identical（无行为变更）。
@@ -3210,6 +3220,28 @@ pub(crate) fn project_post_adjudication_results(
         .iter()
         .map(MechanicalResultView::from)
         .collect()
+}
+
+/// L6.1 SPINE→narration: project a post-adjudication [`DirectorPlan`] into **player-safe
+/// structured steering tokens** for the Narrator. ONLY the enum/short-string steering fields
+/// (`beat_kind` / `desired_change` / `dramatic_function`) — these are narrative-direction
+/// directives the Narrator uses to shape prose, NOT secret facts. Deliberately EXCLUDES
+/// `reveal_candidate_fact_ids`, `selected_world_candidates`, `must_preserve`/`must_avoid`,
+/// `spotlight_target`, and any `world_query` prose (those stay 台下 proposal/audit; reveal is a
+/// proposal, `forbidden_reveals` flows to the Narrator separately). A `None`/empty plan ⇒ empty
+/// vec ⇒ the `director_plan` carrier stays empty ⇒ OFF byte-equal. Generic (§二-⑪: no ruleset
+/// branch).
+pub(crate) fn player_safe_director_plan_tokens(plan: &DirectorPlan) -> Vec<String> {
+    let mut tokens = vec![format!("beat:{}", plan.beat_kind.as_str())];
+    let change = plan.desired_change.trim();
+    if !change.is_empty() {
+        tokens.push(format!("desired_change:{change}"));
+    }
+    let func = plan.dramatic_function.trim();
+    if !func.is_empty() {
+        tokens.push(format!("dramatic_function:{func}"));
+    }
+    tokens
 }
 
 /// A3(§6 大考)：本回合 verify 结果是否含 **Blocker 级 OmittedVisibleResult**(念白漏报了玩家

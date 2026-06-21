@@ -2197,3 +2197,37 @@ fn ctx_capture_post_adjudication_off_empty_on_carries_committed_results() {
     // World candidate pool defaults empty until the pre-adjudication stash runs (flag ON).
     assert!(ctx.world_candidates().is_empty());
 }
+
+#[test]
+fn l61_player_safe_director_plan_tokens_carry_only_steering_not_secrets() {
+    use trpg_model::story::BeatKind;
+    // A fully-populated plan: only beat_kind/desired_change/dramatic_function are player-safe.
+    let plan = DirectorPlan {
+        beat_kind: BeatKind::Complicate,
+        desired_change: "  fail_forward  ".to_string(),
+        dramatic_function: "raise_stakes".to_string(),
+        // secrets that must NOT leak into the Narrator carrier:
+        reveal_candidate_fact_ids: vec!["secret_fact_1".to_string()],
+        must_avoid: vec!["the_killer_is_the_butler".to_string()],
+        primary_thread_id: Some("thr_hidden".to_string()),
+        ..Default::default()
+    };
+    let tokens = player_safe_director_plan_tokens(&plan);
+    assert_eq!(
+        tokens,
+        vec![
+            "beat:complicate".to_string(),
+            "desired_change:fail_forward".to_string(), // trimmed
+            "dramatic_function:raise_stakes".to_string(),
+        ]
+    );
+    // No secret/id field ever appears in the carrier.
+    let joined = tokens.join("|");
+    assert!(!joined.contains("secret_fact_1"));
+    assert!(!joined.contains("the_killer_is_the_butler"));
+    assert!(!joined.contains("thr_hidden"));
+
+    // Minimal default plan ⇒ only the always-present beat token (empty short-strings dropped).
+    let minimal = player_safe_director_plan_tokens(&DirectorPlan::default());
+    assert_eq!(minimal, vec!["beat:respond".to_string()]);
+}
