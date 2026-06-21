@@ -2324,6 +2324,30 @@ impl RuntimeEngine {
         if !kernel.source_refs.is_empty() {
             c.source_refs = kernel.source_refs.clone();
             c.ruling_status = RulingStatus::SourceBacked;
+        } else if kernel_dicecore_is_source_enabled() && kernel_dice_core_is_typed(&kernel.dice_core)
+        {
+            // KERNEL-DICECORE-IS-SOURCE (BUG-1, default ON kill-switch
+            // `TRPG_KERNEL_DICECORE_IS_SOURCE`): when the parsed ruleset kernel
+            // carries a *typed* core mechanic (a non-empty `dice` + a `compare`
+            // rule) but its `source_refs` array happens to be empty (a parse
+            // METADATA gap, not a "no rule exists" case), the bound dice/target
+            // above ARE the source-backed ruleset rule. Cite the kernel itself so
+            // the missing-source-backed guard recognizes the check as
+            // ruleset-grounded instead of over-blocking an otherwise-resolvable
+            // check (理念 §二: mechanics come from parsed source, never invented;
+            // zero ruleset_id branching — any kernel with a typed core qualifies).
+            // OFF (`0/false/off/no`) → no synth ref → byte-identical legacy.
+            c.source_refs.push(SourceRef {
+                source_id: format!("rule_kernel:{}:dice_core", c.ruleset_id),
+                anchor_id: Some("dice_core".to_string()),
+                section_path: vec!["dice_core".to_string()],
+                note: Some(
+                    "ruleset kernel typed core mechanic (parsed source-backed resolution rule)"
+                        .to_string(),
+                ),
+                ..Default::default()
+            });
+            c.ruling_status = RulingStatus::SourceBacked;
         }
     }
 
@@ -5493,6 +5517,31 @@ fn env_bool_runtime(key: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
+/// BUG-1 kill-switch (`TRPG_KERNEL_DICECORE_IS_SOURCE`, default ON). When ON, a
+/// contract bound to the parsed ruleset kernel's *typed* core mechanic is treated
+/// as source-backed even if `kernel.source_refs` is empty. Set to `0/false/off/no`
+/// to restore byte-identical legacy behavior (no synthetic kernel source_ref).
+fn kernel_dicecore_is_source_enabled() -> bool {
+    std::env::var("TRPG_KERNEL_DICECORE_IS_SOURCE")
+        .ok()
+        .map(|v| !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"))
+        .unwrap_or(true)
+}
+
+/// A kernel `dice_core` is *typed* (a real resolution rule, not an empty stub)
+/// when it declares both a non-empty `dice` expression AND a non-empty `compare`
+/// rule. Generic over rulesets: no ruleset_id / module_id branching.
+fn kernel_dice_core_is_typed(dice_core: &serde_json::Value) -> bool {
+    let non_empty_str = |key: &str| {
+        dice_core
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+    };
+    non_empty_str("dice") && non_empty_str("compare")
+}
+
 /// Fail-LOUD config guard (fail-closed philosophy). The mechanical spine — check →
 /// roll → resolve → effect → writeback — is gated behind these `*_ENABLE_V1xx`
 /// flags; if any is OFF the engine silently degrades to narration-only and every
@@ -5578,6 +5627,69 @@ mod build_rule_need_tests {
         let need = build_rule_need_for_turn("orc", None, "s", "t", None, "look around");
         assert!(need.module_id.is_none());
         assert!(need.scene_id.is_none());
+    }
+}
+
+#[cfg(test)]
+mod kernel_dicecore_source_tests {
+    use super::*;
+    use serde_json::json;
+
+    static KDS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct EnvGuard {
+        prev: Option<String>,
+    }
+    impl EnvGuard {
+        fn set(v: Option<&str>) -> Self {
+            let prev = std::env::var("TRPG_KERNEL_DICECORE_IS_SOURCE").ok();
+            match v {
+                Some(val) => std::env::set_var("TRPG_KERNEL_DICECORE_IS_SOURCE", val),
+                None => std::env::remove_var("TRPG_KERNEL_DICECORE_IS_SOURCE"),
+            }
+            Self { prev }
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var("TRPG_KERNEL_DICECORE_IS_SOURCE", v),
+                None => std::env::remove_var("TRPG_KERNEL_DICECORE_IS_SOURCE"),
+            }
+        }
+    }
+
+    #[test]
+    fn typed_requires_both_dice_and_compare() {
+        // cyberpunk_red-shaped kernel: real typed core.
+        assert!(kernel_dice_core_is_typed(
+            &json!({"dice":"1d10","compare":"meet_or_beat"})
+        ));
+        // metadata gaps that must NOT qualify as a typed rule.
+        assert!(!kernel_dice_core_is_typed(&json!({"dice":"1d10"})));
+        assert!(!kernel_dice_core_is_typed(&json!({"compare":"meet_or_beat"})));
+        assert!(!kernel_dice_core_is_typed(&json!({"dice":"","compare":"x"})));
+        assert!(!kernel_dice_core_is_typed(&json!({})));
+        assert!(!kernel_dice_core_is_typed(&serde_json::Value::Null));
+    }
+
+    #[test]
+    fn enabled_defaults_on_and_off_switch_is_byte_equal_intent() {
+        let _lk = KDS_ENV_LOCK.lock().unwrap();
+        // default (env absent) → ON.
+        let _g = EnvGuard::set(None);
+        assert!(kernel_dicecore_is_source_enabled());
+        // explicit truthy/empty still ON.
+        let _g = EnvGuard::set(Some("1"));
+        assert!(kernel_dicecore_is_source_enabled());
+        // OFF tokens → legacy byte-equal path (no synth ref).
+        for off in ["0", "false", "off", "no", "OFF", "False"] {
+            let _g = EnvGuard::set(Some(off));
+            assert!(
+                !kernel_dicecore_is_source_enabled(),
+                "{off} must disable the synth-ref path"
+            );
+        }
     }
 }
 
