@@ -112,6 +112,21 @@ pub(crate) fn scene_read_aloud_first_entry_only_enabled() -> bool {
     )
 }
 
+/// L-I 位置失忆结构杠杆:玩家**已首次进入**本场景后(include_read_aloud=false),本场景的
+/// `gm_notes`(开场战斗布置)与 NPC 到场散文是**首进框定**——每回合复投会把 GM 念白拽回该场景
+/// 的到场点位 ⇒ 玩家既定当前位置被吞 ⇒ player-sim 判位置 AMNESIA。此 flag 开时把这些静态框定
+/// **降格为持久背景参考、显式从属于「连续性锚」**(durable 机制由 `scene_mechanics` 块另投,不丢)。
+/// **默认 ON**(eval profile 不设 ⇒ 自动吃到),OFF 字节等价(gated body 与历史一致)。零 ruleset 分支。
+pub(crate) fn scene_static_framing_subordinate_enabled() -> bool {
+    !matches!(
+        std::env::var("TRPG_SCENE_STATIC_FRAMING_SUBORDINATE")
+            .ok()
+            .map(|v| v.to_ascii_lowercase())
+            .as_deref(),
+        Some("0") | Some("false") | Some("off") | Some("no")
+    )
+}
+
 pub(crate) fn scene_node_to_blocks(
     module_id: &str,
     n: &ScenarioNode,
@@ -137,6 +152,9 @@ pub(crate) fn scene_node_to_blocks_with_opts(
         // 防 GM 完全失去"我在哪个场景"。fail-closed：不含正文、不编造。
         return vec![skeleton_fallback_block(module_id, n, scenes)];
     }
+    // L-I:首进已交付后(include_read_aloud=false)且 flag 开 ⇒ 把开场战斗布置/到场散文降格为
+    // 从属于连续性锚的持久背景参考(防位置失忆)。OFF 或首进路径 ⇒ subordinate=false ⇒ 字节等价。
+    let subordinate = !include_read_aloud && scene_static_framing_subordinate_enabled();
     let mut body = String::new();
     if let Some(ra) = &n.read_aloud {
         if !ra.trim().is_empty() {
@@ -152,12 +170,32 @@ pub(crate) fn scene_node_to_blocks_with_opts(
             }
         }
     }
+    if subordinate {
+        // 把下面的 GM 注记/NPC 散文显式标注为持久背景参考、从属于连续性锚 —— 直接嵌在
+        // 会"渗血"的内容旁(高显著度),压过单独连续性锚块被并列内容盖过的弱效。
+        body.push_str(
+            "【场景静态参考 · 非当前时刻】下面的 GM 注记与 NPC 描述是本场景的**持久背景参考**，\
+             写的是首次进入时的到场/开场布置，**不是本回合正在发生的事**。\n\
+             ⚠️ 玩家**当前所在位置与既成局面一律以「连续性锚」为准**：严禁据此把玩家挪回本场景的\
+             到场/开场布置、严禁重述开场、严禁把身处别处的玩家瞬移到此处；若本场景核心冲突需要介入，\
+             按§4 让冲突**主动来到玩家当前所在处**（威胁外溢／NPC 闯入／时钟波及——改 setting 保实质）。\n",
+        );
+    }
     if let Some(g) = &n.gm_notes {
         if !g.trim().is_empty() {
-            body.push_str("\n【GM】\n");
+            body.push_str(if subordinate {
+                "\n【GM · 场景持久参考（背景设定，非当前时刻）】\n"
+            } else {
+                "\n【GM】\n"
+            });
             body.push_str(g);
             body.push('\n');
         }
+    }
+    if subordinate && !n.referenced_npc_ids.is_empty() {
+        body.push_str(
+            "\n[场景角色名册 · 持久参考；谁在场、与玩家的距离/关系一律以当前既成局面（连续性锚）为准]",
+        );
     }
     for id in &n.referenced_npc_ids {
         if let Some(v) = npcs
@@ -482,6 +520,57 @@ mod module_scene_proj_tests {
         match prev {
             Some(v) => std::env::set_var("TRPG_SCENE_READ_ALOUD_FIRST_ENTRY_ONLY", v),
             None => std::env::remove_var("TRPG_SCENE_READ_ALOUD_FIRST_ENTRY_ONLY"),
+        }
+    }
+
+    /// L-I:首进后(include_read_aloud=false)默认 ON ⇒ gm_notes/NPC 降格为从属连续性锚的背景
+    /// 参考(防位置失忆);显式 OFF ⇒ gated body 与历史(裸 GM/NPC + read_aloud 锚提示)字节等价。
+    /// gm_notes/NPC 文本本身始终保留(durable 参考不丢)。env 进程级 ⇒ 持锁串行 + 复原。
+    #[test]
+    fn static_framing_subordinate_flag_and_behavior() {
+        let _lock = N3_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("TRPG_SCENE_STATIC_FRAMING_SUBORDINATE").ok();
+        let mut n = ScenarioNode::default();
+        n.node_id = "loc1".into();
+        n.title = "仓库".into();
+        n.read_aloud = Some("警笛把你引向第四街的小仓库……".into());
+        n.gm_notes = Some("开场战斗:无人机被警方围攻，PC 别无选择只能应战。".into());
+        n.extraction_status = SceneExtractionStatus::DeepExtracted;
+        n.referenced_npc_ids = vec!["npc1".into()];
+        let npcs = vec![serde_json::json!({"id":"npc1","name":"雅典娜","summary":"失控无人机"})];
+
+        // 默认 ON(未设)⇒ 注入从属指令,但 gm_notes/NPC 文本仍在。
+        std::env::remove_var("TRPG_SCENE_STATIC_FRAMING_SUBORDINATE");
+        assert!(scene_static_framing_subordinate_enabled(), "未设 ⇒ 默认 ON");
+        let on = scene_node_to_blocks_with_opts("mod1", &n, &npcs, &[], false);
+        let on_t = on[0].content.render_text();
+        assert!(on_t.contains("场景静态参考"), "ON 应注入从属框定: {on_t}");
+        assert!(on_t.contains("连续性锚"), "ON 应指向连续性锚为权威: {on_t}");
+        assert!(
+            on_t.contains("主动来到玩家当前所在处"),
+            "ON 应含§4 relocation-toward-player: {on_t}"
+        );
+        assert!(on_t.contains("场景角色名册"), "ON 应注入 NPC 名册从属注记: {on_t}");
+        assert!(!on_t.contains("【GM】"), "ON 应改用从属 GM 头: {on_t}");
+        assert!(on_t.contains("别无选择只能应战"), "ON 仍保留 gm_notes 文本(durable): {on_t}");
+        assert!(on_t.contains("雅典娜"), "ON 仍保留 NPC 文本(durable): {on_t}");
+
+        // OFF ⇒ gated body 与历史字节等价(原 read_aloud 锚提示 + 裸 【GM】 + 无名册注记)。
+        for off in ["0", "false", "OFF", "no"] {
+            std::env::set_var("TRPG_SCENE_STATIC_FRAMING_SUBORDINATE", off);
+            assert!(!scene_static_framing_subordinate_enabled(), "{off} ⇒ OFF");
+        }
+        std::env::set_var("TRPG_SCENE_STATIC_FRAMING_SUBORDINATE", "off");
+        let off = scene_node_to_blocks_with_opts("mod1", &n, &npcs, &[], false);
+        let off_t = off[0].content.render_text();
+        assert!(off_t.contains("【GM】"), "OFF 应保留原 GM 头: {off_t}");
+        assert!(!off_t.contains("场景静态参考"), "OFF 不得注入从属指令: {off_t}");
+        assert!(!off_t.contains("场景角色名册"), "OFF 不得注入名册注记: {off_t}");
+        assert!(off_t.contains("请勿复述"), "OFF 仍保留 L-G read_aloud 锚提示: {off_t}");
+
+        match prev {
+            Some(v) => std::env::set_var("TRPG_SCENE_STATIC_FRAMING_SUBORDINATE", v),
+            None => std::env::remove_var("TRPG_SCENE_STATIC_FRAMING_SUBORDINATE"),
         }
     }
 
