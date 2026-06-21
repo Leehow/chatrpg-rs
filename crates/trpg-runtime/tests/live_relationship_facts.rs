@@ -213,6 +213,7 @@ async fn relationship_triple_written_and_gated_by_new_surface() {
         tags: vec![],
         limit: 10,
         viewer: VisibilityProfile::gm(),
+        layers: vec![],
     };
     let retrieved = db.retrieve_memory(&query).await.expect("retrieve");
     assert!(

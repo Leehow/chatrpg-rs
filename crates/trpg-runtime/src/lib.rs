@@ -3149,6 +3149,7 @@ impl RuntimeEngine {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(8),
             viewer: request.viewer.clone(),
+            layers: vec![], // M2: monolithic (un-layered) retrieval — byte-identical baseline (M3 wires per-layer)
         };
         let retrieved = self.db.retrieve_memory(&memory_query).await?;
         if !retrieved.facts.is_empty() || !retrieved.events.is_empty() {

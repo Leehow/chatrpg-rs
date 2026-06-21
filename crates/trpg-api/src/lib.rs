@@ -1879,6 +1879,7 @@ async fn retrieve_session_memory(
         tags: req.tags,
         limit: req.limit.unwrap_or_else(default_memory_limit),
         viewer: VisibilityProfile::gm(),
+        layers: vec![], // M2: monolithic (un-layered) retrieval — byte-identical baseline
     };
     let result = state.db.retrieve_memory(&query).await?;
     Ok(Json(result))

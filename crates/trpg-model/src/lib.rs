@@ -56,6 +56,8 @@ pub mod mechanical_result;
 pub use mechanical_result::*;
 pub mod narrative_anchor;
 pub use narrative_anchor::*;
+pub mod memory_layer;
+pub use memory_layer::*;
 pub mod materialization_affordance;
 pub use materialization_affordance::*;
 
@@ -2801,6 +2803,13 @@ pub struct MemoryQuery {
     pub tags: Vec<String>,
     pub limit: u32,
     pub viewer: VisibilityProfile,
+    /// M2 (memory-wiring): the memory LAYERS this query wants projected. `#[serde(default)]` ⇒
+    /// EMPTY (the pre-M2 shape, and any deserialized old payload) means the monolithic, un-layered
+    /// behavior (every block passes — byte-identical baseline). A non-empty set restricts the
+    /// result to those layers (see [`memory_layer::project_blocks_by_layers`]). Consumers wire the
+    /// layers they are allowed to read in M3 (e.g. the Adjudicator asks for `Mechanical` only).
+    #[serde(default)]
+    pub layers: Vec<MemoryLayer>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
