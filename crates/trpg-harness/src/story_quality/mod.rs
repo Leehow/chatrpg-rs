@@ -14,6 +14,7 @@
 //! - [`scene_restate`] — checkpoint #6 (L9.1): a scene is not restated with no progress (treading water).
 //! - [`consequence`]   — checkpoint #7 (L9.1): every committed choice gets a downstream consequence.
 //! - [`spotlight`]     — checkpoint #8 (L9.1): a high spotlight-debt PC is not perpetually sidelined.
+//! - [`narrator_mechanics`] — L6.2: the split Narrator authors no mechanics unbacked by the ledger.
 //!
 //! Each module is kept under the 400-line discipline cap; this `mod.rs` re-exports the public
 //! surface so consumers keep using `trpg_harness::story_quality::<Item>` unchanged.
@@ -21,6 +22,7 @@
 pub mod beat;
 pub mod beat_repeat;
 pub mod consequence;
+pub mod narrator_mechanics;
 pub mod railroad;
 pub mod reveal;
 pub mod scene_restate;
@@ -30,6 +32,7 @@ pub mod unpaid_setup;
 pub use beat::*;
 pub use beat_repeat::*;
 pub use consequence::*;
+pub use narrator_mechanics::*;
 pub use railroad::*;
 pub use reveal::*;
 pub use scene_restate::*;

@@ -3511,6 +3511,7 @@ dependencies = [
  "trpg-combat",
  "trpg-db",
  "trpg-director",
+ "trpg-harness",
  "trpg-interaction",
  "trpg-llm",
  "trpg-mechanics",
