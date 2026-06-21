@@ -15,6 +15,8 @@
 
 pub mod beat;
 pub mod railroad;
+pub mod reveal;
 
 pub use beat::*;
 pub use railroad::*;
+pub use reveal::*;
