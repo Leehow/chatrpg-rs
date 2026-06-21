@@ -36,14 +36,16 @@ use tokio_util::sync::CancellationToken;
 use trpg_agent::NarrationVerifierResult;
 use trpg_director::{build_director_brief_packet, DirectorMode};
 use trpg_model::{
-    CheckContract, CheckResultRecord, DirectorPlan, NpcBehaviorPlan, NpcProfile,
-    NpcRelationshipTarget, SpotlightState, StoryState, WorldReactionCandidate, WorldReactionSet,
+    CheckContract, CheckResultRecord, DirectorPlan, MechanicalResultView, NpcBehaviorPlan,
+    NpcProfile, NpcRelationshipTarget, SpotlightState, StoryState, WorldReactionCandidate,
+    WorldReactionSet,
 };
 use trpg_runtime::world::reaction::load_world_reaction_plans;
 use trpg_runtime::{
-    build_verifier_private_view, prepare_director_brief, project_for_npc_action,
-    project_for_npc_speech, project_for_player_narration, AutoRollExecution, NpcActionProjection,
-    NpcSpeechProjection, PlayerNarrationProjection, RuntimeEngine, VerifierPrivateView,
+    build_verifier_private_view, prepare_director_brief, prepare_director_plan_post_adjudication,
+    project_for_npc_action, project_for_npc_speech, project_for_player_narration, AutoRollExecution,
+    NpcActionProjection, NpcSpeechProjection, PlayerNarrationProjection, RuntimeEngine,
+    VerifierPrivateView,
 };
 
 use crate::packet::NarrationPacket;
@@ -214,6 +216,19 @@ pub trait DirectorPort {
         candidates: &[WorldReactionCandidate],
         acting_actor_id: &str,
     ) -> Option<String>;
+
+    /// L1.2 SPINE thin-async: build the POST-adjudication typed [`DirectorPlan`] (loads surfaces,
+    /// runs Beat selection, applies the committed-outcome overlay). The caller gates on
+    /// `TRPG_DIRECTOR_POST_ADJUDICATION`; the plan is delivered via the L6.1 carrier, not the BP3
+    /// tail. `None` only on a non-Beat horizon (here always Beat ⇒ `Some`).
+    async fn prepare_plan_post_adjudication(
+        &self,
+        engine: &RuntimeEngine,
+        session_id: &str,
+        candidates: &[WorldReactionCandidate],
+        acting_actor_id: &str,
+        results: &[MechanicalResultView],
+    ) -> Option<DirectorPlan>;
 }
 
 /// Thin adapter delegating to the real Director entries. Stateless (the pure core
@@ -253,6 +268,24 @@ impl DirectorPort for DirectorAdapter {
         acting_actor_id: &str,
     ) -> Option<String> {
         prepare_director_brief(&engine.db, session_id, candidates, acting_actor_id).await
+    }
+
+    async fn prepare_plan_post_adjudication(
+        &self,
+        engine: &RuntimeEngine,
+        session_id: &str,
+        candidates: &[WorldReactionCandidate],
+        acting_actor_id: &str,
+        results: &[MechanicalResultView],
+    ) -> Option<DirectorPlan> {
+        prepare_director_plan_post_adjudication(
+            &engine.db,
+            session_id,
+            candidates,
+            acting_actor_id,
+            results,
+        )
+        .await
     }
 }
 

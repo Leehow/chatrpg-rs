@@ -25,8 +25,12 @@
 
 pub mod fallback;
 pub mod render;
+pub mod outcome;
 pub mod select;
 
 pub use fallback::{fallback_beat_plan, pick_spotlight_target};
+pub use outcome::{
+    apply_committed_outcome, DESIRED_CHANGE_CAPITALIZE_SUCCESS, DESIRED_CHANGE_FAIL_FORWARD,
+};
 pub use render::render_director_packet_block;
 pub use select::build_director_brief_packet;

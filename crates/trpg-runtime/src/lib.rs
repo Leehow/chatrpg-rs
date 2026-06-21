@@ -83,7 +83,8 @@ pub mod knowledge_leak_verifier;
 pub mod story_write;
 pub mod world;
 pub use director_brief::{
-    apply_story_proposals, build_director_block, commit_story_writes, prepare_director_brief,
+    apply_story_proposals, build_director_block, build_director_plan_post_adjudication,
+    commit_story_writes, prepare_director_brief, prepare_director_plan_post_adjudication,
 };
 pub use knowledge_leak_verifier::{
     behavior_finding_to_verifier_finding, to_verifier_finding, to_verifier_findings,

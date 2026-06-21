@@ -20,8 +20,9 @@ use tokio_util::sync::CancellationToken;
 use trpg_interaction::InteractionLifecycleKernel;
 use trpg_llm::{LlmClient, StreamEvent, ToolChoice};
 use trpg_model::{
-    ChatMessage, CompiledContext, ContextRequest, MechanicDue, MechanicalResultView, MemoryEvent,
-    MemoryKind, RuntimeState, StateFrame, Visibility, WorldEventKind, WorldReactionCandidate,
+    ChatMessage, CompiledContext, ContextRequest, DirectorPlan, MechanicDue, MechanicalResultView,
+    MemoryEvent, MemoryKind, RuntimeState, StateFrame, Visibility, WorldEventKind,
+    WorldReactionCandidate,
 };
 use trpg_runtime::RuntimeEngine;
 use uuid::Uuid;
@@ -237,6 +238,11 @@ pub(crate) struct TurnContext {
     // `build_npc_behavior_guidance`) and retained for the post-adjudication Director seam.
     // OFF ⇒ 恒空 ⇒ 字节等价基线。
     world_candidates: Vec<WorldReactionCandidate>,
+    // L1.2 SPINE：the post-adjudication Beat DirectorPlan, built at `resolution_commit_boundary`
+    // from the committed result (`post_adjudication_results`) + the retained World pool. Per the
+    // §2 composition rule it is delivered to narration via a new NarrationPacket carrier (L6.1),
+    // NOT the pre-adjudication BP3 tail. OFF ⇒ 恒 None ⇒ 字节等价基线。
+    post_adjudication_plan: Option<DirectorPlan>,
 }
 impl TurnContext {
     pub(crate) fn new() -> Self {
@@ -267,6 +273,7 @@ impl TurnContext {
             rejected_nominations: Vec::new(),
             post_adjudication_results: Vec::new(),
             world_candidates: Vec::new(),
+            post_adjudication_plan: None,
         }
     }
 
@@ -300,6 +307,13 @@ impl TurnContext {
     /// Empty when the flag is OFF.
     pub(crate) fn world_candidates(&self) -> &[WorldReactionCandidate] {
         &self.world_candidates
+    }
+
+    /// L1.2 SPINE read-only accessor: the post-adjudication Beat DirectorPlan (the L6.1 carrier's
+    /// input). `None` when the flag is OFF or no plan was built. Consumed by the L6.1 carrier.
+    #[allow(dead_code)]
+    pub(crate) fn post_adjudication_plan(&self) -> Option<&DirectorPlan> {
+        self.post_adjudication_plan.as_ref()
     }
 
     pub(crate) fn heavy_assistant_output(&self) -> String {
@@ -1872,14 +1886,22 @@ impl GmLoop {
         // P7.3：Director 简报渲染（thin-async 运行时缝）经 DirectorPort 适配器派发
         // （DirectorAdapter::prepare_brief 仅委托 `prepare_director_brief`，flag OFF ⇒ None
         // byte-identical 基线）——dispatch 间接，无行为变更。
-        ctx.director_packet_block = crate::ports::DirectorAdapter
-            .prepare_brief(
-                &self.engine,
-                session_id,
-                &reaction_set.reactions,
-                &acting_actor_id,
-            )
-            .await;
+        //
+        // L1.2 SPINE: when `TRPG_DIRECTOR_POST_ADJUDICATION` is ON, the Director runs AFTER
+        // adjudication (at `resolution_commit_boundary`, seeing the committed result) and is
+        // delivered via the L6.1 carrier. Building the pre-adjudication packet here too would be a
+        // double-build with a stale (pre-result) plan, so we SKIP it under the spine flag —
+        // `director_packet_block` stays None. OFF ⇒ unchanged ⇒ byte-identical baseline.
+        if !director_post_adjudication_enabled() {
+            ctx.director_packet_block = crate::ports::DirectorAdapter
+                .prepare_brief(
+                    &self.engine,
+                    session_id,
+                    &reaction_set.reactions,
+                    &acting_actor_id,
+                )
+                .await;
+        }
         // The GM-context guidance bytes render from the retained (lossless) plans via the
         // SAME `to_guidance_block` method as before — provably byte-identical (locked by
         // `render_is_byte_identical_to_legacy_join`).
@@ -2536,10 +2558,35 @@ impl GmLoop {
         // L1.1 SPINE: at this post-adjudication seam the committed check_result/effects are
         // finally available (the inversion fix — the pre-adjudication Director at the
         // ContextAssembly phase could NOT see them). Flag-gated capture (default OFF ⇒ no-op ⇒
-        // byte-identical baseline): project the committed results onto ctx for the (L1.2) Beat
-        // Director. No Director invocation yet (L1.2). The World candidate pool was already
-        // retained pre-adjudication in `build_npc_behavior_guidance` (also flag-gated).
-        ctx.capture_post_adjudication(director_post_adjudication_enabled());
+        // byte-identical baseline): project the committed results onto ctx for the Beat Director.
+        // The World candidate pool was already retained pre-adjudication in
+        // `build_npc_behavior_guidance` (also flag-gated).
+        let post_adjudication = director_post_adjudication_enabled();
+        ctx.capture_post_adjudication(post_adjudication);
+        // L1.2 SPINE: invoke the Beat Director POST-adjudication so its plan reflects the REAL
+        // committed result (fail-forward on failure, escalate on success). The typed plan is
+        // stashed on ctx and delivered to narration via the L6.1 carrier — NOT the pre-adjudication
+        // BP3 tail (skipped under this flag, no double-build). OFF ⇒ this block never runs ⇒
+        // byte-identical baseline. Fail-soft: a None plan leaves ctx unchanged.
+        if post_adjudication {
+            let candidates = ctx.world_candidates().to_vec();
+            let results = ctx.post_adjudication_results().to_vec();
+            let acting_actor_id = request
+                .viewer
+                .actor_id
+                .clone()
+                .unwrap_or_else(|| "pc.current".to_string());
+            let plan = crate::ports::DirectorAdapter
+                .prepare_plan_post_adjudication(
+                    &self.engine,
+                    &request.session_id,
+                    &candidates,
+                    &acting_actor_id,
+                    &results,
+                )
+                .await;
+            ctx.post_adjudication_plan = plan;
+        }
         // P3.7 BeforeCommit 重定位：从 save_turn 前迁到 AgentLoop 结束这一真正的
         // 机械结算后检查点（advisory/trace-only，本期不阻断）。
         self.run_advisory_trace_hook(ctx, request, crate::plugin::PluginHook::BeforeCommit, None)

@@ -47,10 +47,12 @@
 
 use trpg_db::Db;
 use trpg_director::{
-    build_director_brief_packet, director_packet_mode_from_env, render_director_packet_block,
-    DirectorMode,
+    apply_committed_outcome, build_director_brief_packet, director_packet_mode_from_env,
+    render_director_packet_block, DirectorMode,
 };
-use trpg_model::{SpotlightState, StoryState, WorldReactionCandidate};
+use trpg_model::{
+    DirectorPlan, MechanicalResultView, SpotlightState, StoryState, WorldReactionCandidate,
+};
 
 /// Build the rendered Director packet block for one turn, or `None` when the flag is OFF or
 /// the plan is a no-op (nothing to append). Thin-async, fail-closed per field.
@@ -199,6 +201,76 @@ pub async fn commit_story_writes(
         return Ok(());
     }
     apply_story_proposals(db, session_id, after, updated_turn).await
+}
+
+/// L1.2 SPINE — build the POST-adjudication typed [`DirectorPlan`]: the first build that sees the
+/// committed result. Loads the SAME per-turn surfaces as [`prepare_director_brief`] (fail-soft),
+/// runs the pure Beat selection, then applies the committed-outcome overlay
+/// ([`apply_committed_outcome`]) so the beat reflects the REAL outcome.
+///
+/// Returns a TYPED plan (not a rendered string): per the §2 composition rule the
+/// post-adjudication plan reaches narration via a new `NarrationPacket` carrier (L6.1), NEVER the
+/// pre-adjudication BP3 tail (that phase already ran). The caller gates on
+/// `TRPG_DIRECTOR_POST_ADJUDICATION`; this runs the Director at `OnDemand` (the spine flag is the
+/// master switch — independent of `TRPG_DIRECTOR_PACKET`). Fail-soft loads ⇒ never panics;
+/// fail-closed overlay ⇒ empty/all-`Unresolved` results yield the plain pre-overlay Beat plan.
+pub async fn prepare_director_plan_post_adjudication(
+    db: &Db,
+    session_id: &str,
+    candidates: &[WorldReactionCandidate],
+    acting_actor_id: &str,
+    results: &[MechanicalResultView],
+) -> Option<DirectorPlan> {
+    // Two SEPARATE Option knowledge reads (codex fold #4): a DB failure on one surface must never
+    // masquerade as an empty set and reopen over-reveal (the pure core fail-closes on `None`).
+    let gm_truth: Option<Vec<String>> = db.gm_truth_view(session_id).await.ok();
+    let player_known: Option<Vec<String>> = db.player_knowledge_view(session_id).await.ok();
+    let story = db
+        .load_story_state(session_id)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let rejected = rejected_thread_ids(&story);
+    let spotlights: Vec<SpotlightState> =
+        db.load_spotlight_states(session_id).await.unwrap_or_default();
+    Some(build_director_plan_post_adjudication(
+        candidates,
+        &story,
+        gm_truth.as_deref(),
+        player_known.as_deref(),
+        &rejected,
+        &spotlights,
+        acting_actor_id,
+        results,
+    ))
+}
+
+/// Pure (DB-free) core of [`prepare_director_plan_post_adjudication`]: Beat selection at
+/// `OnDemand` + the committed-outcome overlay. DB-free so the spine proof stays testable without
+/// a live Postgres. The overlay is fail-closed (no committed pass/fail ⇒ plan unchanged).
+#[allow(clippy::too_many_arguments)]
+pub fn build_director_plan_post_adjudication(
+    candidates: &[WorldReactionCandidate],
+    story: &StoryState,
+    gm_truth: Option<&[String]>,
+    player_known: Option<&[String]>,
+    rejected: &[String],
+    spotlights: &[SpotlightState],
+    acting_actor_id: &str,
+    results: &[MechanicalResultView],
+) -> DirectorPlan {
+    let plan = build_director_brief_packet(
+        DirectorMode::OnDemand,
+        candidates,
+        story,
+        player_known,
+        gm_truth,
+        spotlights,
+        rejected,
+        acting_actor_id,
+    );
+    apply_committed_outcome(plan, results)
 }
 
 /// Pure (DB-free) core of [`prepare_director_brief`]: given the resolved knowledge `Option`s,

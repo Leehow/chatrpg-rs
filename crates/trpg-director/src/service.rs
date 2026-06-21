@@ -74,6 +74,22 @@ impl StoryDirectorService {
         ))
     }
 
+    /// L1.2 SPINE — Beat altitude, POST-adjudication: build the base Beat plan, then re-shape it
+    /// so the beat reflects the REAL committed result (`results`, the L1.1 projection). This is
+    /// the load-bearing call at the `resolution_commit_boundary` seam — the first time the
+    /// Director can see the committed `check_result`/effects. Fail-closed: empty/all-`Unresolved`
+    /// `results` ⇒ identical to [`Self::plan_beat`] (no invented outcome). Any non-Beat horizon
+    /// returns [`DirectorUnsupported`].
+    pub fn plan_beat_post_adjudication(
+        &self,
+        req: &DirectorRequest,
+        inputs: &BeatPlanInputs<'_>,
+        results: &[trpg_model::MechanicalResultView],
+    ) -> Result<DirectorPlan, DirectorUnsupported> {
+        let base = self.plan_beat(req, inputs)?;
+        Ok(crate::apply_committed_outcome(base, results))
+    }
+
     /// Situation altitude: pure delegation to the existing facilitation engine. Dormant on
     /// the shipped turn (L0.1) — exposed for completeness, no behavior change.
     pub fn plan_situation(
@@ -165,6 +181,53 @@ mod tests {
             via_service.primary_thread_id.is_some(),
             "snapshot story should have produced a thread selection"
         );
+    }
+
+    #[test]
+    fn post_adjudication_failed_check_differs_from_pre_adjudication() {
+        use trpg_model::{CheckOutcomeView, MechanicalResultView};
+        let story = story_with_thread();
+        let candidates = vec![candidate("npc.broker")];
+        let req = DirectorRequest {
+            horizon: DirectorHorizon::Beat,
+            snapshot: StorySnapshot {
+                story_state: story,
+                ..Default::default()
+            },
+        };
+        let inputs = BeatPlanInputs {
+            mode: DirectorMode::OnDemand,
+            candidates: &candidates,
+            player_known: None,
+            gm_truth: None,
+            spotlights: &[],
+            rejected_thread_ids: &[],
+            acting_actor_id: "pc.current",
+        };
+        let svc = StoryDirectorService::new();
+
+        // Pre-adjudication: the Director guesses (no committed result seen).
+        let pre = svc.plan_beat(&req, &inputs).unwrap();
+
+        // Post-adjudication on a FAILED committed check: beat responds to the real failure.
+        let failed = vec![MechanicalResultView {
+            check_id: "c.dodge".into(),
+            outcome: CheckOutcomeView::Failed,
+            ..Default::default()
+        }];
+        let post = svc.plan_beat_post_adjudication(&req, &inputs, &failed).unwrap();
+
+        assert_eq!(post.beat_kind, trpg_model::BeatKind::Complicate);
+        assert_eq!(post.desired_change, crate::DESIRED_CHANGE_FAIL_FORWARD);
+        // Provably different from the pre-adjudication plan on the SAME fixture.
+        assert_ne!(post.beat_kind, pre.beat_kind);
+        assert_ne!(post.desired_change, pre.desired_change);
+        // Selection guarantees preserved (same thread spotlighted).
+        assert_eq!(post.primary_thread_id, pre.primary_thread_id);
+
+        // Fail-closed: no committed result ⇒ identical to pre-adjudication.
+        let none = svc.plan_beat_post_adjudication(&req, &inputs, &[]).unwrap();
+        assert_eq!(none, pre, "no committed result ⇒ no override");
     }
 
     #[test]

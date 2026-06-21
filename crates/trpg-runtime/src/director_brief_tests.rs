@@ -194,3 +194,32 @@ fn absent_spotlight_states_yield_no_target() {
         "empty roster must NOT emit a spotlight_target (fail-soft None)"
     );
 }
+
+// L1.2 SPINE: the pure post-adjudication core re-shapes the beat to the committed result, and
+// is fail-closed (no committed signal ⇒ identical to the plain Beat plan).
+#[test]
+fn post_adjudication_core_reflects_committed_failure() {
+    use trpg_model::{BeatKind, CheckOutcomeView, MechanicalResultView};
+    let candidates = [cand("npc_a", vec!["e1"])];
+    let story = StoryState::default();
+
+    let failed = [MechanicalResultView {
+        check_id: "c.dodge".into(),
+        outcome: CheckOutcomeView::Failed,
+        ..Default::default()
+    }];
+    let post = build_director_plan_post_adjudication(
+        &candidates, &story, None, None, &[], &[], "pc_1", &failed,
+    );
+    assert_eq!(post.beat_kind, BeatKind::Complicate);
+    assert_eq!(post.desired_change, trpg_director::DESIRED_CHANGE_FAIL_FORWARD);
+
+    // Fail-closed: no committed result ⇒ identical to the plain Beat build.
+    let plain = build_director_plan_post_adjudication(
+        &candidates, &story, None, None, &[], &[], "pc_1", &[],
+    );
+    let base = build_director_brief_packet(
+        DirectorMode::OnDemand, &candidates, &story, None, None, &[], &[], "pc_1",
+    );
+    assert_eq!(plain, base, "no committed result ⇒ no overlay");
+}
