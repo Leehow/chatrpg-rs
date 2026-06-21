@@ -5,8 +5,8 @@
 //! extract_module_scenes / prefetch_frontier / SCENE_NAV_SYS。
 use super::{
     build_nav_prompt, build_nav_prompt_with_exits, extract_module_scenes, gravity_nav_system_prompt,
-    nav_content_gravity_enabled, nav_departure_commit_enabled, prefetch_frontier,
-    resolve_offgraph_to_neighbor, validate_transition, SCENE_NAV_SYS,
+    nav_content_gravity_enabled, nav_departure_commit_enabled, nav_objective_commit_enabled,
+    prefetch_frontier, resolve_offgraph_to_neighbor, validate_transition, SCENE_NAV_SYS,
 };
 use serde_json::json;
 use tracing::info;
@@ -74,10 +74,14 @@ pub async fn scene_navigate_critical(
                     .join("\n")
             })
             .unwrap_or_default();
-        // L-Y：gravity 提示串在 ①②③ 之上按 flag 追加④离场提交子句（默认 ON；OFF ⇒ 纯
+        // L-Y/L-AA：gravity 提示串在 ①②③ 之上按各自 flag 追加④离场提交（首跳地理位移）+
+        // ⑤目标承接（同区域内多回合目标驱动推进）子句（皆默认 ON；皆 OFF ⇒ 纯
         // SCENE_NAV_SYS_GRAVITY 字节等价 L-C 基线）。
         (
-            gravity_nav_system_prompt(nav_departure_commit_enabled()),
+            gravity_nav_system_prompt(
+                nav_departure_commit_enabled(),
+                nav_objective_commit_enabled(),
+            ),
             build_nav_prompt_with_exits(&current, cur_title, &exits, &list, player_input, narration),
         )
     } else {

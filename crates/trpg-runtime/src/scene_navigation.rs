@@ -65,15 +65,46 @@ pub fn nav_departure_commit_enabled() -> bool {
     )
 }
 
-/// 纯函数：构建 content-gravity 导航 system prompt。`departure_commit=false` ⇒ 返回纯
-/// `SCENE_NAV_SYS_GRAVITY`（字节等价 L-C 基线）；`true`（默认）⇒ 追加 L-Y 离场提交④子句。
-/// 便于单测锁定 OFF==基线字节等价 + ON 含④子句。
-pub fn gravity_nav_system_prompt(departure_commit: bool) -> String {
+/// L-AA 目标承接提交子句（aliveFinalLZ full-run J3 残根：L-Y ④离场提交只覆盖**首跳地理位移**
+/// 模式[外部进内部/地表入纵深]，但玩家抵达 committed 场景 `scene_athena_conversation` 后再朝
+/// 服务器/控制源**持续多回合推进**[顺缆线朝仓库深处推进/找服务器/抢下控制权/切断控制线/hack]
+/// 时——这是**同一大区域内的目标/任务承接**而非干净的地理离场，④子句的范例不匹配 ⇒ nav-LLM
+/// 每回合判"留"，committed 钉死在 athena_conversation 28 回合 = J3 frozen[scene_transitions 2→0]）。
+/// 在 ①②③④ 之上**追加**判 moved=true 的依据⑤「目标承接」：当玩家不再围绕当前场景核心交互、
+/// 而是用持续主动的行动去执行/夺取某个『直接衔接 beat』所定义的核心目标（该 beat 标题/主题所指
+/// 任务），即便仍在同一大区域、无明显地理位移，也应判 moved 到与玩家所追目标语义最匹配的衔接 beat。
+/// 仍 fail-closed（仅提及/询问/考虑、未付诸持续行动、或仍停在原 beat 核心交互 → 不动）。理念依据：
+/// §4 把 beat 搬到玩家而非把玩家搬回 beat / §7 顺玩家投入软推进非强拽 / §二.8 表达已决定。
+const SCENE_NAV_OBJECTIVE_CLAUSE: &str = "⑤ **目标承接推进（持续多跳）**——若玩家不再围绕当前场景的核心交互，而是已用持续、主动的行动去执行或夺取某个『直接衔接 beat』所定义的核心目标/活动（例如该 beat 标题/主题所指的任务：入侵或夺取服务器、控制源头、瓦解该 beat 的核心冲突对象），即便仍停留在同一大区域、未发生明显地理位移，也应判 moved=true 到与玩家所追目标语义最匹配的『直接衔接 beat』的真实 node_id。理由：玩家已用持续行动承接了下一个 beat 的目标，把他钉在已被其行动超越的旧 beat，会让旧场景定场反复回灌＝场景冻结与进度/位置失忆。仍须 fail-closed：玩家只是提及/询问/考虑该目标、尚未付诸持续行动，或仍停留在原 beat 的核心交互中 → moved=false；目标必须是给定衔接 beat 列表中真实存在的 node_id，绝不编造。";
+
+/// L-AA 目标承接提交开关。镜像 L-C/L-Y 模式：默认 ON，仅显式 `0/false/off/no` 关。
+/// 关 ⇒ gravity 提示串不含⑤子句（与仅 L-Y 的串字节等价）。
+pub fn nav_objective_commit_enabled() -> bool {
+    !matches!(
+        std::env::var("TRPG_SCENE_NAV_OBJECTIVE_COMMIT")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "0" | "false" | "off" | "no"
+    )
+}
+
+/// 纯函数：构建 content-gravity 导航 system prompt。两个 flag 皆 false ⇒ 返回纯
+/// `SCENE_NAV_SYS_GRAVITY`（字节等价 L-C 基线）；`departure_commit` ⇒ 追加 L-Y ④子句；
+/// `objective_commit` ⇒ 追加 L-AA ⑤子句（按 ④→⑤ 顺序，纯追加不改写基线）。
+/// 便于单测锁定 OFF==基线字节等价 + 各 ON 含对应子句。
+pub fn gravity_nav_system_prompt(departure_commit: bool, objective_commit: bool) -> String {
+    let mut s = SCENE_NAV_SYS_GRAVITY.to_string();
     if departure_commit {
-        format!("{SCENE_NAV_SYS_GRAVITY}\n{SCENE_NAV_DEPARTURE_CLAUSE}")
-    } else {
-        SCENE_NAV_SYS_GRAVITY.to_string()
+        s.push('\n');
+        s.push_str(SCENE_NAV_DEPARTURE_CLAUSE);
     }
+    if objective_commit {
+        s.push('\n');
+        s.push_str(SCENE_NAV_OBJECTIVE_CLAUSE);
+    }
+    s
 }
 
 /// 内容引力提示：在 build_nav_prompt 之上，把『当前场景直接衔接 beat』(node_id | title)
@@ -704,14 +735,14 @@ mod tests {
         assert!(p.contains("叙事正文"), "仍含叙事");
     }
 
-    // L-Y 离场提交：departure_commit=false ⇒ gravity system prompt 字节等价纯
+    // L-Y/L-AA：两 flag 皆 false ⇒ gravity system prompt 字节等价纯
     // SCENE_NAV_SYS_GRAVITY（L-C 基线，OFF==baseline）。
     #[test]
     fn gravity_nav_prompt_departure_off_is_byte_equal_to_baseline() {
         assert_eq!(
-            gravity_nav_system_prompt(false),
+            gravity_nav_system_prompt(false, false),
             SCENE_NAV_SYS_GRAVITY,
-            "departure OFF 必须与纯 gravity system prompt 字节等价"
+            "两 flag OFF 必须与纯 gravity system prompt 字节等价"
         );
     }
 
@@ -719,7 +750,7 @@ mod tests {
     // 且仍保留原①②③内容引力判据（纯追加，不改写基线）。
     #[test]
     fn gravity_nav_prompt_departure_on_appends_clause() {
-        let p = gravity_nav_system_prompt(true);
+        let p = gravity_nav_system_prompt(true, false);
         assert!(
             p.starts_with(SCENE_NAV_SYS_GRAVITY),
             "ON 必须以 gravity 基线为前缀（纯追加）"
@@ -733,7 +764,53 @@ mod tests {
             p.contains("fail-closed") || p.contains("原地观察"),
             "④子句应保留 fail-closed 守卫"
         );
+        assert!(!p.contains("目标承接"), "departure-only 不应含⑤目标承接子句");
         assert!(p.len() > SCENE_NAV_SYS_GRAVITY.len(), "ON 严格更长（追加）");
+    }
+
+    // L-AA 目标承接提交：objective_commit=true ⇒ 在 gravity 基线（+④）之上追加⑤子句，
+    // 仍保留①②③④且仍含 fail-closed 守卫（纯追加，按 ④→⑤ 顺序）。
+    #[test]
+    fn gravity_nav_prompt_objective_on_appends_clause() {
+        let p = gravity_nav_system_prompt(true, true);
+        assert!(
+            p.starts_with(SCENE_NAV_SYS_GRAVITY),
+            "ON 必须以 gravity 基线为前缀（纯追加）"
+        );
+        assert!(p.contains("离场提交"), "应保留④离场提交子句");
+        assert!(p.contains("目标承接"), "ON 应含⑤目标承接子句");
+        assert!(
+            p.find("离场提交").unwrap() < p.find("目标承接").unwrap(),
+            "④必须排在⑤之前（确定性顺序）"
+        );
+        assert!(
+            p.contains("fail-closed") || p.contains("尚未付诸持续行动"),
+            "⑤子句应保留 fail-closed 守卫（仅提及/未付诸行动 → 不动）"
+        );
+        assert!(
+            p.contains("绝不编造"),
+            "⑤子句应保留 in-graph 真实 node_id 约束"
+        );
+    }
+
+    // L-AA 目标承接：objective 单开（departure off）也只追加⑤、不含④，且仍以基线为前缀。
+    #[test]
+    fn gravity_nav_prompt_objective_only_excludes_departure() {
+        let p = gravity_nav_system_prompt(false, true);
+        assert!(p.starts_with(SCENE_NAV_SYS_GRAVITY), "仍以基线为前缀");
+        assert!(p.contains("目标承接"), "应含⑤目标承接子句");
+        assert!(!p.contains("离场提交"), "departure off 不应含④子句");
+    }
+
+    // L-AA flag 默认 ON（未设环境变量时）。同 L-C/L-Y 模式：仅显式 0/false/off/no 关。
+    #[test]
+    fn nav_objective_commit_defaults_on_when_unset() {
+        if std::env::var("TRPG_SCENE_NAV_OBJECTIVE_COMMIT").is_err() {
+            assert!(
+                nav_objective_commit_enabled(),
+                "未设 TRPG_SCENE_NAV_OBJECTIVE_COMMIT ⇒ 默认 ON"
+            );
+        }
     }
 
     // L-Y flag 默认 ON（未设环境变量时）。同 L-C 模式：仅显式 0/false/off/no 关。
