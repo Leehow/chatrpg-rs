@@ -1,0 +1,22 @@
+[package]
+name = "trpg-eval"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The static-transcript arm of the evaluator (蓝图 §九/§十). Complements the
+# DB-grounded live judges in harness/eval/: those need a live session, this
+# reads a frozen 战报 markdown and FAILs it with root-cause + turn evidence.
+
+[lib]
+name = "trpg_eval"
+path = "src/lib.rs"
+
+[[bin]]
+name = "trpg-eval"
+path = "src/main.rs"
+
+[dependencies]
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true

@@ -35,6 +35,18 @@ run_eval.sh  ──>  player_sim.sh (E1, reactive human-like player)
 | `gate_hook.sh` | E6 | thin factory gate (latest session, exit code = verdict) |
 | `finalize_redboard.sh` | E8 | write canonical `EVAL_REDBOARD_v*.md` + sentinel |
 | `test_judges.sh` | — | regression: the known dead run MUST RED all judges |
+| `transcript_eval.sh` | V2-M1 | static-transcript arm → `crates/trpg-eval` bin (`--smoke` = FAIL-FAST tripwire) |
+
+## Two arms
+
+- **Live DB arm** (j1..j4 above): query the database of a live session. Catches a
+  dead/amnesiac runtime, but needs a run to exist first.
+- **Static-transcript arm** (`crates/trpg-eval`, 蓝图 §九/§十): FAIL a *recorded*
+  战报 markdown with root-cause + turn evidence — no DB needed. This is the
+  `negative golden fixtures` path (milestone 1): the two known-bad reports are
+  judged FAIL with all root causes; a clean control PASSES. See the crate README.
+  `transcript_eval.sh --smoke` runs it as the cheap deterministic tripwire the
+  factory runs before any expensive live playthrough.
 
 ## Judges (DB-grounded, thresholds overridable via env)
 

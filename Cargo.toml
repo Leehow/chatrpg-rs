@@ -29,6 +29,7 @@ members = [
   "crates/trpg-cli",
   "crates/trpg-harness",
   "crates/trpg-gm",
+  "crates/trpg-eval",
 ]
 
 [workspace.package]

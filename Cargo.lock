@@ -3480,6 +3480,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "trpg-eval"
+version = "1.20.0"
+dependencies = [
+ "regex",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "trpg-formula"
 version = "1.20.0"
 dependencies = [
