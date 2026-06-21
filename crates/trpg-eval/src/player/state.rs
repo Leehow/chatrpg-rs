@@ -60,6 +60,19 @@ impl ActionKind {
         ActionKind::ChallengeContradiction,
     ];
 
+    /// Coarse intent family — used by the §六 invariance test: a reworded but
+    /// equivalent GM reply must keep the player in the same family.
+    pub fn category(&self) -> &'static str {
+        match self {
+            ActionKind::Investigate | ActionKind::UseAlternative => "INVESTIGATE",
+            ActionKind::AskClarify | ActionKind::ChallengeContradiction => "CLARIFY",
+            ActionKind::Advance => "ADVANCE",
+            ActionKind::Confront => "AGGRESSIVE",
+            ActionKind::Retreat | ActionKind::AbandonPath => "WITHDRAW",
+            ActionKind::AssessRisk => "ASSESS",
+        }
+    }
+
     /// Information fields this action expects the GM to address (§二.3
     /// expected_gm_resolution, links to the §四 Response Contract).
     pub fn expected_contract(&self) -> Vec<IntentField> {
@@ -101,6 +114,11 @@ pub struct PlayerDecision {
     /// True when the GM left the player's question unanswered this turn — feeds
     /// the affective update in [`SimulatedPlayerState::observe`] (§二.4).
     pub gm_unresponsive: bool,
+    /// Perceived risk after folding in remembered dangers (§六 sensitivity/记忆
+    /// observable: rises when a known threat is on screen).
+    pub alert_level: f32,
+    /// A remembered danger entity was recognised this turn (§六 记忆测试).
+    pub belief_alert: bool,
 }
 
 #[derive(Debug, Clone)]

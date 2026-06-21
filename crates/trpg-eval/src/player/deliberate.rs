@@ -15,26 +15,55 @@ const OBSTACLE_MARKERS: &[&str] = &[
     "锁着", "锁住", "无法打开", "纹丝不动", "打不开", "卡住", "拦住", "上锁", "堵住",
 ];
 const OPENING_MARKERS: &[&str] = &["敞开", "畅通", "打开", "敞着", "让开", "通过", "畅行"];
+/// Cues that mark a remembered fact as a *danger* the player should stay alert to
+/// (蓝图 §六 记忆测试). A belief carrying one of these primes higher caution when
+/// its entity reappears.
+const BELIEF_DANGER_CUES: &[&str] =
+    &["帮派", "敌", "危险", "目标", "威胁", "追杀", "通缉", "陷阱", "可疑"];
 
 /// What the player actually understood from the GM reply this turn.
 #[derive(Debug, Clone)]
 pub struct Perception {
     pub facts: Vec<String>,
     pub unclear: Vec<String>,
+    /// Perceived risk after folding in remembered dangers (§六 记忆测试).
     pub threat: f32,
     pub obstacle: bool,
     pub opening: bool,
     /// GM gave no new information (the §四/§五 no-info signal).
     pub no_info: bool,
     pub info_gained: bool,
+    /// A remembered danger entity reappeared in this scene.
+    pub belief_alert: bool,
 }
 
-/// Parse the player-visible GM text into a [`Perception`]. `pending_question`
-/// is whether the player is owed an answer from a previous turn.
-pub fn perceive(gm_text: &str, _pending_question: bool) -> Perception {
+/// The leading entity phrase of a belief like "蓝色货车属于目标帮派" → "蓝色货车".
+fn belief_entity(belief: &str) -> &str {
+    for sep in ["属于", "是", "为", "将", "会"] {
+        if let Some(i) = belief.find(sep) {
+            return &belief[..i];
+        }
+    }
+    belief
+}
+
+/// Parse the player-visible GM text into a [`Perception`], consulting the
+/// player's `beliefs` so a remembered danger raises perceived risk (§六 记忆).
+pub fn perceive(gm_text: &str, beliefs: &[String]) -> Perception {
     let no_info = contains_any(gm_text, NO_INFO_MARKERS).is_some();
     let threat_hits = THREAT_MARKERS.iter().filter(|m| gm_text.contains(*m)).count();
-    let threat = (threat_hits as f32 * 0.3).min(1.0);
+    let mut threat = (threat_hits as f32 * 0.3).min(1.0);
+
+    // Memory: a danger-tagged belief whose entity is on screen raises alertness.
+    let belief_alert = beliefs.iter().any(|b| {
+        let danger = BELIEF_DANGER_CUES.iter().any(|c| b.contains(c));
+        let entity = belief_entity(b);
+        danger && entity.chars().count() >= 2 && gm_text.contains(entity)
+    });
+    if belief_alert {
+        threat = (threat + 0.5).min(1.0);
+    }
+
     let obstacle = OBSTACLE_MARKERS.iter().any(|m| gm_text.contains(m));
     let opening = !obstacle && OPENING_MARKERS.iter().any(|m| gm_text.contains(m));
 
@@ -58,7 +87,7 @@ pub fn perceive(gm_text: &str, _pending_question: bool) -> Perception {
     } else {
         Vec::new()
     };
-    Perception { facts, unclear, threat, obstacle, opening, no_info, info_gained }
+    Perception { facts, unclear, threat, obstacle, opening, no_info, info_gained, belief_alert }
 }
 
 fn b(flag: bool) -> f32 {
@@ -134,7 +163,7 @@ fn rationale(kind: ActionKind, p: &Perception, stuck: bool) -> String {
 /// for reproducible sampling among near-tied candidates (§三 A/B 可复现).
 pub fn deliberate(st: &SimulatedPlayerState, gm_text: &str, seed: u64) -> PlayerDecision {
     let pending = !st.unresolved_questions.is_empty();
-    let p = perceive(gm_text, pending);
+    let p = perceive(gm_text, &st.beliefs);
     let stuck = pending && p.no_info;
     let w = &st.persona.weights;
 
@@ -192,5 +221,7 @@ pub fn deliberate(st: &SimulatedPlayerState, gm_text: &str, seed: u64) -> Player
         repeat_justification,
         confidence,
         gm_unresponsive: stuck || p.no_info,
+        alert_level: p.threat,
+        belief_alert: p.belief_alert,
     }
 }
