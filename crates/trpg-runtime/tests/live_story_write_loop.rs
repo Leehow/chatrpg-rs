@@ -148,7 +148,7 @@ async fn full_chain_rejection_persist_then_selector_drops() {
     commit_story_writes(&db, &session, &[rejection_proposal("thr_b")], &[], "t1")
         .await
         .expect("commit_story_writes (ON) persists the rejection");
-    std::env::remove_var("TRPG_STORY_WRITE_LOOP");
+    std::env::set_var("TRPG_STORY_WRITE_LOOP", "0"); // M1: default ON ⇒ pin OFF explicitly
 
     // Reload: the persisted rejection is present.
     let after = db.load_story_state(&session).await.unwrap().unwrap();
@@ -225,7 +225,7 @@ async fn thread_opened_floors_dormant_to_introduced() {
     commit_story_writes(&db, &session, &[], &["fact_relic".to_string()], "t1")
         .await
         .expect("commit_story_writes (ON) floors the dormant thread");
-    std::env::remove_var("TRPG_STORY_WRITE_LOOP");
+    std::env::set_var("TRPG_STORY_WRITE_LOOP", "0"); // M1: default ON ⇒ pin OFF explicitly
 
     let after = db.load_story_state(&session).await.unwrap().unwrap();
     let dormant = after
@@ -280,7 +280,7 @@ async fn off_writes_no_thread_events() {
     let Some(db) = connect_or_skip().await else {
         return;
     };
-    std::env::remove_var("TRPG_STORY_WRITE_LOOP");
+    std::env::set_var("TRPG_STORY_WRITE_LOOP", "0"); // M1: default ON ⇒ pin OFF explicitly
 
     let session = format!("sess_sw_noev_{}", uuid::Uuid::new_v4().simple());
     purge(&db, &session).await;
@@ -321,7 +321,7 @@ async fn off_is_baseline_no_write() {
         return;
     };
     // Ensure OFF regardless of test ordering.
-    std::env::remove_var("TRPG_STORY_WRITE_LOOP");
+    std::env::set_var("TRPG_STORY_WRITE_LOOP", "0"); // M1: default ON ⇒ pin OFF explicitly
 
     let session = format!("sess_sw_off_{}", uuid::Uuid::new_v4().simple());
     purge(&db, &session).await;

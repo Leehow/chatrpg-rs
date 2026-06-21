@@ -2686,13 +2686,24 @@ impl GmLoop {
         // (2) reveal 提名提交（终审 Allow only）。
         let allow = !ctx.presentation_gate.is_block();
         let nominations = std::mem::take(&mut ctx.nominated_reveals);
+        // M1: the fact_ids revealed (made player-known) THIS turn are exactly the newly-known facts
+        // that floor a matching Dormant story thread `Dormant → Introduced` (a reveal IS the
+        // PlayerLearnedFact edge `apply_thread_opened` keys on). Snapshot the ids BEFORE the move,
+        // and only on a committed (Allow) turn — a Blocked reveal never becomes player-known, so it
+        // floors nothing (same gate discipline as the reveal commit itself).
+        let newly_known_fact_ids: Vec<String> = if allow {
+            nominations.iter().map(|n| n.fact_id.clone()).collect()
+        } else {
+            Vec::new()
+        };
         self.commit_nominated_reveals(request, nominations, allow)
             .await;
         // (3) P6 revision (§二十四-#13)：drain 本回合玩家拒绝提名 → commit_story_writes 持久化。
         // 这是 commit_story_writes 的真正 per-turn 生产调用方（不再 dead-by-tests）。终审 Allow 时
-        // 才提交（Block 回合的整段叙事被拦，拒绝信号一并丢弃，与 reveal 同口径）。
+        // 才提交（Block 回合的整段叙事被拦，拒绝信号一并丢弃，与 reveal 同口径）。M1 起同时把本回合
+        // 真实揭示的 fact ids 接进去，关闭 `&[]` 占位（StoryThreadOpened floor 终于由真实揭示触发）。
         let rejections = std::mem::take(&mut ctx.rejected_nominations);
-        self.commit_story_rejections(request, rejections, allow)
+        self.commit_story_rejections(request, rejections, &newly_known_fact_ids, allow)
             .await;
     }
 
@@ -2705,9 +2716,13 @@ impl GmLoop {
         &self,
         request: &ContextRequest,
         rejections: Vec<crate::tools::RejectionNomination>,
+        newly_known_fact_ids: &[String],
         allow: bool,
     ) {
-        if !allow || rejections.is_empty() {
+        // Nothing to commit when blocked, or when neither a rejection nor a newly-known fact landed
+        // (avoids a needless story_state load on a quiet turn). The flag gate still lives inside
+        // `commit_story_writes` (OFF ⇒ Ok no-op), so OFF stays byte-identical baseline regardless.
+        if !allow || (rejections.is_empty() && newly_known_fact_ids.is_empty()) {
             return;
         }
         let proposals: Vec<trpg_model::PlayerInterestSignal> = rejections
@@ -2718,7 +2733,7 @@ impl GmLoop {
             &self.engine.db,
             &request.session_id,
             &proposals,
-            &[],
+            newly_known_fact_ids,
             &request.turn_id,
         )
         .await

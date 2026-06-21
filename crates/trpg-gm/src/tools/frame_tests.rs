@@ -549,6 +549,7 @@ fn combat_manifest_loads_with_frame_tools_and_tight_tempo() {
         "filter must NOT select unrelated entries: {filter:?}"
     );
     // for_mode 真组装：基础 15 + 两个 frame 工具在尾部（schema 确定性）。
+    std::env::set_var("TRPG_STORY_WRITE_LOOP", "0"); // M1: default ON ⇒ pin OFF for the frozen 15/17 baseline
     let registry =
         ToolRegistry::for_mode(&data_dir, Some("combat")).expect("combat extra tools must resolve");
     let schemas = registry.schemas();

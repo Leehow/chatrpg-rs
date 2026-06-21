@@ -30,15 +30,17 @@ use trpg_model::{
     DomainEvent, DomainEventKind, PlayerInterestSignal, StoryState, StoryThreadStatus,
 };
 
-/// Flag gate for the whole story_state WRITE loop. Default OFF ⇒ NO story_state writes from
-/// the P6.8a path (byte-identical to the P5 baseline, whose LOAD side is untouched). ON ⇒ the
-/// rejection-persist + StoryThreadOpened commits run. Mirrors the `env_bool` semantics used by
-/// the Director packet flag (`1`/`true`/`yes`/`on`, case-insensitive).
+/// Flag gate for the whole story_state WRITE loop. **Default ON** — story persistence is live for
+/// a normal session, so play actually remembers (the amnesia cure). It is a KILL-SWITCH: only an
+/// explicit `0`/`false`/`off`/`no` (case-insensitive) disables it, and that OFF branch is still a
+/// byte-identical baseline (the LOAD side is untouched and `commit_story_writes` early-returns).
+/// Mirrors [`crate::relationship_extraction::relationship_extraction_enabled`] (also default-ON,
+/// disabled only on the same explicit tokens) so the two memory write loops share one discipline.
 pub fn story_write_loop_enabled() -> bool {
-    std::env::var("TRPG_STORY_WRITE_LOOP")
-        .ok()
-        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false)
+    !matches!(
+        std::env::var("TRPG_STORY_WRITE_LOOP").ok().as_deref(),
+        Some("0") | Some("false") | Some("off") | Some("no")
+    )
 }
 
 /// Fold rejection PROPOSALS into a loaded story's `player_interests`, returning the updated
@@ -385,6 +387,26 @@ mod tests {
             ..Default::default()
         };
         assert!(thread_status_events(&story, &story, "s", "t").is_empty());
+    }
+
+    // M1 kill-switch: default ON (cures amnesia by default); OFF only on explicit disable tokens.
+    // Restores OFF at the end so it never leaks ON into a sibling test in this binary.
+    #[test]
+    fn story_write_loop_default_on_kill_switch() {
+        std::env::remove_var("TRPG_STORY_WRITE_LOOP");
+        assert!(
+            story_write_loop_enabled(),
+            "unset ⇒ default ON (story persistence live for a normal session)"
+        );
+        for off in ["0", "false", "off", "no"] {
+            std::env::set_var("TRPG_STORY_WRITE_LOOP", off);
+            assert!(!story_write_loop_enabled(), "{off:?} ⇒ kill-switch OFF");
+        }
+        for on in ["1", "true", "yes", "on", "whatever"] {
+            std::env::set_var("TRPG_STORY_WRITE_LOOP", on);
+            assert!(story_write_loop_enabled(), "{on:?} ⇒ ON");
+        }
+        std::env::set_var("TRPG_STORY_WRITE_LOOP", "0"); // leak-safe OFF for sibling tests
     }
 
     // No newly-known facts ⇒ no change.

@@ -1761,7 +1761,7 @@ async fn presentation_commit_drains_rejection_then_persists_for_next_turn_select
     }];
     ctx.presentation_gate = PresentationGate::Allow;
     gm.presentation_commit_boundary(&mut ctx, &request).await;
-    std::env::remove_var("TRPG_STORY_WRITE_LOOP");
+    std::env::set_var("TRPG_STORY_WRITE_LOOP", "0"); // M1: default ON ⇒ pin OFF explicitly
 
     // PERSISTED: the rejection is now durable and is the NEXT turn's selector input.
     let after = gm
@@ -1779,6 +1779,124 @@ async fn presentation_commit_drains_rejection_then_persists_for_next_turn_select
     );
 }
 
+/// M1: the REVEAL fact_ids committed this turn are threaded into `commit_story_writes` as the
+/// newly-known facts (closing the old `&[]` placeholder), so a Dormant story thread whose
+/// `related_fact_ids` includes a freshly-revealed fact floors `Dormant → Introduced` through the
+/// real PresentationCommit path — the StoryThreadOpened floor finally fires from live reveals.
+#[tokio::test]
+async fn presentation_commit_reveal_floors_dormant_thread_to_introduced() {
+    use trpg_model::{StoryState, StoryThread, StoryThreadStatus};
+
+    let session = format!("s_reveal_floor_{}", uuid::Uuid::new_v4().simple());
+    let Some((mut gm, request)) = real_gm(&session).await else {
+        eprintln!("SKIP: DATABASE_URL unset");
+        return;
+    };
+    gm.engine
+        .db
+        .create_session(&session, "call_of_cthulhu_7e", None)
+        .await
+        .expect("create_session");
+    // A Dormant thread keyed on fact "f_clue" — the floor lifts it only once that fact is learned.
+    let seed = StoryState {
+        active_threads: vec![StoryThread {
+            thread_id: "thr_dormant".into(),
+            status: StoryThreadStatus::Dormant,
+            related_fact_ids: vec!["f_clue".into()],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    gm.engine
+        .db
+        .upsert_story_state(&session, &seed, "t0")
+        .await
+        .unwrap();
+
+    // THIS TURN: the GM revealed fact "f_clue" (a player-known reveal nomination). On a committed
+    // (Allow) turn its fact_id becomes a newly-known fact threaded into commit_story_writes.
+    std::env::set_var("TRPG_STORY_WRITE_LOOP", "1");
+    let mut ctx = TurnContext::new();
+    ctx.nominated_reveals = vec![crate::tools::RevealNomination {
+        fact_id: "f_clue".into(),
+        reason: None,
+    }];
+    ctx.presentation_gate = PresentationGate::Allow;
+    gm.presentation_commit_boundary(&mut ctx, &request).await;
+    std::env::set_var("TRPG_STORY_WRITE_LOOP", "0"); // M1: default ON ⇒ pin OFF explicitly
+
+    let after = gm
+        .engine
+        .db
+        .load_story_state(&session)
+        .await
+        .unwrap()
+        .unwrap();
+    let thread = after
+        .active_threads
+        .iter()
+        .find(|t| t.thread_id == "thr_dormant")
+        .expect("seeded thread persists");
+    assert_eq!(
+        thread.status,
+        StoryThreadStatus::Introduced,
+        "the revealed fact floored the Dormant thread to Introduced via the real turn path"
+    );
+}
+
+/// OFF==baseline: a revealed fact must NOT floor any thread when the kill-switch is OFF — the
+/// story_state stays byte-identical to the seed (commit_story_writes early-returns).
+#[tokio::test]
+async fn presentation_commit_reveal_off_is_baseline_no_floor() {
+    use trpg_model::{StoryState, StoryThread, StoryThreadStatus};
+
+    let session = format!("s_reveal_off_{}", uuid::Uuid::new_v4().simple());
+    let Some((mut gm, request)) = real_gm(&session).await else {
+        eprintln!("SKIP: DATABASE_URL unset");
+        return;
+    };
+    gm.engine
+        .db
+        .create_session(&session, "call_of_cthulhu_7e", None)
+        .await
+        .expect("create_session");
+    let seed = StoryState {
+        active_threads: vec![StoryThread {
+            thread_id: "thr_dormant".into(),
+            status: StoryThreadStatus::Dormant,
+            related_fact_ids: vec!["f_clue".into()],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    gm.engine
+        .db
+        .upsert_story_state(&session, &seed, "t0")
+        .await
+        .unwrap();
+
+    std::env::set_var("TRPG_STORY_WRITE_LOOP", "0"); // kill-switch OFF ⇒ byte-identical baseline
+    let mut ctx = TurnContext::new();
+    ctx.nominated_reveals = vec![crate::tools::RevealNomination {
+        fact_id: "f_clue".into(),
+        reason: None,
+    }];
+    ctx.presentation_gate = PresentationGate::Allow;
+    gm.presentation_commit_boundary(&mut ctx, &request).await;
+
+    let after = gm
+        .engine
+        .db
+        .load_story_state(&session)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after, seed,
+        "OFF: revealed fact floors nothing — story_state byte-identical to seed"
+    );
+}
+
 /// OFF==baseline: with the flag OFF, draining a rejection nomination is a complete no-op —
 /// story_state is byte-identical to the seed (the producer never persists anything).
 #[tokio::test]
@@ -1786,7 +1904,7 @@ async fn presentation_commit_rejection_off_is_baseline_no_write() {
     use trpg_model::{StoryState, StoryThread, StoryThreadStatus};
     use trpg_runtime::director_brief::rejected_thread_ids;
 
-    std::env::remove_var("TRPG_STORY_WRITE_LOOP"); // ensure OFF regardless of ordering
+    std::env::set_var("TRPG_STORY_WRITE_LOOP", "0"); // M1: default ON ⇒ pin OFF (ensure OFF regardless of ordering)
     let session = format!("s_reject_off_{}", uuid::Uuid::new_v4().simple());
     let Some((mut gm, request)) = real_gm(&session).await else {
         eprintln!("SKIP: DATABASE_URL unset");
@@ -1875,7 +1993,7 @@ async fn presentation_commit_rejection_block_drops() {
     }];
     ctx.presentation_gate = block_gate(); // 终审 Block
     gm.presentation_commit_boundary(&mut ctx, &request).await;
-    std::env::remove_var("TRPG_STORY_WRITE_LOOP");
+    std::env::set_var("TRPG_STORY_WRITE_LOOP", "0"); // M1: default ON ⇒ pin OFF explicitly
 
     let after = gm
         .engine

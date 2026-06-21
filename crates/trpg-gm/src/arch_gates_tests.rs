@@ -26,7 +26,7 @@ use trpg_model::{AssetEnvelope, BindingPlan, DomainEvent, DomainEventKind, Execu
 /// 本门会伪红（数到 16）。OFF 分支即"LLM 看到的冻结基线"。
 #[test]
 fn standard_registry_has_fifteen_tools() {
-    std::env::remove_var("TRPG_STORY_WRITE_LOOP"); // 钉死 flag-OFF 基线，免受环境 flag 干扰
+    std::env::set_var("TRPG_STORY_WRITE_LOOP", "0"); // M1: default ON ⇒ 显式钉死 flag-OFF 基线
     let schemas = crate::tools::ToolRegistry::standard().schemas();
     assert_eq!(
         schemas.len(),

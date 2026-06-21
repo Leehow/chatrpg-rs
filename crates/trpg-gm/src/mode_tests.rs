@@ -210,6 +210,7 @@ fn for_mode_unknown_extra_tool_is_config_error() {
 
 #[test]
 fn base_registry_has_fourteen_tools_with_mode_tools_at_tail() {
+    std::env::set_var("TRPG_STORY_WRITE_LOOP", "0"); // M1: default ON ⇒ pin OFF for the frozen 15-tool baseline
     let schemas = ToolRegistry::standard().schemas();
     assert_eq!(
         schemas.len(),

@@ -560,7 +560,7 @@ mod tests {
         // Knowledge P0a 尾部追加 reveal_fact → 基础 15。测试名保留（历史），
         // 断言更新到真实顺序。P6 revision：note_player_rejection 仅 story-write loop ON 时追加，
         // 这里显式 OFF 钉死 15-tool 基线（OFF==baseline 字节稳定）。
-        std::env::remove_var("TRPG_STORY_WRITE_LOOP");
+        std::env::set_var("TRPG_STORY_WRITE_LOOP", "0"); // M1: default ON ⇒ pin OFF explicitly
         let names = crate::tools::ToolRegistry::standard()
             .schemas()
             .into_iter()
@@ -624,7 +624,7 @@ mod tests {
     /// process-global env mutation tightly scoped.
     #[test]
     fn note_player_rejection_registered_only_when_story_write_loop_on() {
-        std::env::remove_var("TRPG_STORY_WRITE_LOOP");
+        std::env::set_var("TRPG_STORY_WRITE_LOOP", "0"); // M1: default ON ⇒ pin OFF explicitly
         let off: Vec<String> = crate::tools::ToolRegistry::standard()
             .schemas()
             .into_iter()
@@ -652,7 +652,7 @@ mod tests {
                     .to_string()
             })
             .collect();
-        std::env::remove_var("TRPG_STORY_WRITE_LOOP");
+        std::env::set_var("TRPG_STORY_WRITE_LOOP", "0"); // M1: default ON ⇒ pin OFF explicitly
 
         assert_eq!(on.len(), 16, "ON ⇒ producer tool appended");
         assert_eq!(

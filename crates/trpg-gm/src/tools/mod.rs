@@ -559,7 +559,7 @@ mod capability_guard_tests {
     /// (`note_player_rejection`) 令 12/15 计数伪红。
     #[test]
     fn standard_has_exactly_three_readonly_twelve_mutating() {
-        std::env::remove_var("TRPG_STORY_WRITE_LOOP"); // 钉死 flag-OFF 基线
+        std::env::set_var("TRPG_STORY_WRITE_LOOP", "0"); // M1: default ON ⇒ 显式钉死 flag-OFF 基线
         let reg = ToolRegistry::standard();
         let mut readonly: Vec<&str> = reg
             .tools
@@ -687,7 +687,7 @@ mod schema_stability_tests {
     fn mode_switch_changes_tool_schema_bytes() {
         // for_mode 派生自 standard()，故同样受 TRPG_STORY_WRITE_LOOP 影响（ON ⇒ 多一个 base 工具
         // → 16/18）。显式 OFF 钉死 15/17 计数基线，免受环境 flag 干扰。
-        std::env::remove_var("TRPG_STORY_WRITE_LOOP");
+        std::env::set_var("TRPG_STORY_WRITE_LOOP", "0"); // M1: default ON ⇒ pin OFF explicitly
         let dir = temp_data_dir_with_manifest(
             "combat",
             r#"{"mode_id":"combat","frame_kind":"combat","extra_tools":["open_combat_frame","close_frame"]}"#,
