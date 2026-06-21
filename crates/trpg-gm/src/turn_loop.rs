@@ -1192,11 +1192,19 @@ impl GmLoop {
         // byte-identical baseline (project's 3rd arg was always `&[]`). The reactive narrowing/regen
         // ladder downstream stays the backstop.
         let scene_forbidden = ctx.scene_forbidden_reveals().to_vec();
+        // M3 决策#3:故事情绪 carrier。默认 OFF ⇒ 空 tokens ⇒ carrier 空 ⇒ 字节等价基线。ON(opt-in)
+        // 时取**玩家已感知层**的连续性散文作为氛围定调来源——绝不含 Story/Director 记忆(零 telegraph)。
+        let story_mood_tokens = if narrator_story_mood_enabled() {
+            player_safe_scene_context(input)
+        } else {
+            Vec::new()
+        };
         let narration = crate::packet::NarrationPacket::project(&adj, "", &scene_forbidden)
             .with_scene_context(&player_safe_scene_context(input))
             .with_scene_establishing(&scene_establishing)
             .with_character_context(&character_context)
-            .with_director_plan(&director_plan_tokens);
+            .with_director_plan(&director_plan_tokens)
+            .with_story_mood(&story_mood_tokens);
         let private_tokens = ctx.ledger.private_roll_tokens();
         // P7.3：P1 Narrator 派发经 NarratorPort 适配器（GmLoopNarratorAdapter 仅委托
         // `GmLoop::run_narrator`）——dispatch 间接，byte-identical（无行为变更）。
@@ -3076,6 +3084,18 @@ fn player_safe_scene_context(input: &GmTurnInput<'_>) -> Vec<String> {
     }
 }
 
+/// M3 决策#3:Narrator 故事情绪 carrier 的 opt-in 开关。**默认 OFF**(零 telegraph 风险;carrier
+/// 留着但空)——仅显式 `1`/`true`/`on`/`yes` 开。OFF ⇒ `with_story_mood` 收空 ⇒ 字节等价基线。
+pub(crate) fn narrator_story_mood_enabled() -> bool {
+    matches!(
+        std::env::var("TRPG_NARRATOR_STORY_MOOD")
+            .ok()
+            .map(|v| v.to_ascii_lowercase())
+            .as_deref(),
+        Some("1") | Some("true") | Some("on") | Some("yes")
+    )
+}
+
 /// G1（§6 大考）：env-gated「场景感兜底」。`sensory_floor==true` 且本回合真饿
 /// （facts 与 player_perceivable_facts 皆空、scene 非空）时，向 user 消息**追加**一段
 /// 兜底子句，许可 Narrator 仅把**已知当前场景文本**重新组织成近景描写（绝不新增事实）。
@@ -3187,6 +3207,21 @@ fn build_narrator_messages(
              你的角色能力档案(玩家自知;仅供你让念白贴合 PC 的强项/弱项,绝不逐字罗列数值):\n{character}\n\
              指令:当与该回合行动相关时,可让叙述自然体现 PC 的能力倾向(如擅长观察者更易留意细节、\
              体格强者动作更具压迫感);**绝不**报数值、**绝不**罗列技能清单、**绝不**发明档案外的能力。"
+        )
+    };
+    // M3 决策#3:append the player-safe STORY MOOD when present (runtime fills it only when
+    // TRPG_NARRATOR_STORY_MOOD is ON; default OFF ⇒ carrier empty ⇒ zero extra bytes ⇒ byte-equal).
+    // Player-perceived atmosphere ONLY — never plot/clue/foreshadow (zero telegraph). The Narrator
+    // lets the felt tone color the prose; it must NOT state mood as fact or invent beyond it.
+    let mood = packet.story_mood.join("；");
+    let user = if mood.trim().is_empty() {
+        user
+    } else {
+        format!(
+            "{user}\n\n\
+             此刻的情绪/氛围(玩家已感知的基调,仅供你为念白定调,绝不当作事实陈述、绝不据此发明线索):\n{mood}\n\
+             指令:让上述氛围自然渗入你的第二人称散文(光影/气息/节奏/体感),**绝不**直接断言\"气氛很X\"、\
+             **绝不**揭示任何未在机械事实或玩家可感知信息中出现的情节/线索/伏笔。"
         )
     };
     // Q-1/Q-4 (§2a.1/§2b.1): append GM-craft overlay when TRPG_GM_CRAFT ON; OFF ⇒ byte-equal.

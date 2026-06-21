@@ -124,6 +124,37 @@ fn a2_empty_scene_context_is_graceful() {
     assert!(user.contains("我四处张望"));
 }
 
+/// M3 决策#3：story_mood 为空(默认 OFF)时,build_narrator_messages 与不带该 carrier 的装配**字节等价**;
+/// 非空(opt-in ON)时,氛围短串注入 user 消息。
+#[test]
+fn m3_story_mood_empty_is_byte_equal_nonempty_injects() {
+    let base = NarrationPacket {
+        player_input: "我推开门".to_string(),
+        ..Default::default()
+    };
+    let off_user = build_narrator_messages(&base, false, false)[1]["content"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let on = base.clone().with_story_mood(&["潮湿的霉味".to_string()]);
+    let on_user = build_narrator_messages(&on, false, false)[1]["content"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // 空 carrier ⇒ 渲染零新增字节（OFF 字节等价）。
+    let empty = base.clone().with_story_mood(&[]);
+    let empty_user = build_narrator_messages(&empty, false, false)[1]["content"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(empty_user, off_user, "空 story_mood 必须字节等价基线");
+    // 非空 ⇒ 注入且区别于基线。
+    assert!(on_user.contains("潮湿的霉味"), "ON story_mood 必须注入 user：{on_user}");
+    assert_ne!(on_user, off_user);
+}
+
 // ───────────────── A3: OmittedVisibleResult ON-only 修复谓词 ─────────────────
 
 fn result_with_kinds(kinds: &[VerifierFindingKind]) -> NarrationVerifierResult {

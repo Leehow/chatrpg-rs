@@ -113,6 +113,13 @@ pub async fn load_world_reaction_set(
 /// [`render_world_reaction_block`]; the [`WorldReactionSet`] is the typed World view used
 /// for action-intent derivation. Same fail-closed discipline as
 /// [`load_world_reaction_set`] (per-NPC skip; empty ⇒ commit nothing).
+///
+/// M3 decision #4 (memory-wiring): the World layer reads WORLD memory only — per-NPC profiles /
+/// mind / behavior guidance — and **never reads story pressure** (StoryState threads/promises/
+/// beats). The only story-adjacent input is `player_known_fact_ids`, used purely as a SECRET GATE
+/// (withhold what the player has not learned), not as story steering. story→world influence flows
+/// one-way through the Director, never directly. Enforced structurally: this signature carries no
+/// `StoryState`/story_state argument and the module references none.
 pub async fn load_world_reaction_plans(
     db: &Db,
     session_id: &str,

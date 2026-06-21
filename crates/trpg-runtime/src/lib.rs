@@ -84,6 +84,7 @@ pub mod scene_plan_emit;
 pub mod story_events;
 pub mod story_observer;
 pub mod story_write;
+pub mod memory_guard;
 pub mod world;
 pub use director_brief::{
     apply_story_proposals, build_director_block, build_director_plan_post_adjudication,
@@ -3149,7 +3150,10 @@ impl RuntimeEngine {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(8),
             viewer: request.viewer.clone(),
-            layers: vec![], // M2: monolithic (un-layered) retrieval — byte-identical baseline (M3 wires per-layer)
+            // M3: the per-turn memory set feeds the Adjudicator-facing context; it is allowed every
+            // layer EXCEPT Story (decision #5). The guard (kill-switch, default ON) enforces this on
+            // the assembled blocks below — empty layers (guard OFF) ⇒ identity ⇒ byte-equal baseline.
+            layers: crate::memory_guard::adjudicator_memory_layers(),
         };
         let retrieved = self.db.retrieve_memory(&memory_query).await?;
         if !retrieved.facts.is_empty() || !retrieved.events.is_empty() {
@@ -3159,7 +3163,9 @@ impl RuntimeEngine {
                 &retrieved,
             ));
         }
-        Ok(blocks)
+        // M3 decision #5: fail-closed strip of any Story/Director-layer block before the Adjudicator
+        // can read it. No-op on the real corpus (seam emits only Mechanical kinds) ⇒ byte-equal.
+        Ok(crate::memory_guard::guard_adjudicator_memory(blocks))
     }
 
     async fn rule_steward_prefix_blocks_for_turn(

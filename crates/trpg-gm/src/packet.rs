@@ -100,6 +100,13 @@ pub struct NarrationPacket {
     /// 原文/world candidate/secret(reveal 仍是 proposal、forbidden_reveals 仍单独流向 Narrator)。
     #[serde(default)]
     pub director_plan: Vec<String>,
+    /// M3 (decision #3)：player-safe **故事情绪/氛围** carrier —— 仅承载玩家已感知层 (PlayerPerceived)
+    /// 蒸馏出的氛围/基调短串 (例:"雨后的潮湿"/"压抑的沉默"),供 Narrator 让念白贴合此刻的"感觉"。
+    /// **绝不**承载 Story/Director 记忆 (线索/伏笔/未来转向 ⇒ 零 telegraph)。`project` 恒置空
+    /// (carrier 留着但空 ⇒ 默认 OFF ⇒ 字节等价),仅当 `TRPG_NARRATOR_STORY_MOOD` ON 经
+    /// `with_story_mood` 注入 (日后 opt-in)。
+    #[serde(default)]
+    pub story_mood: Vec<String>,
 }
 
 fn roll_is_player_visible(visibility: RollVisibility) -> bool {
@@ -225,6 +232,8 @@ impl NarrationPacket {
             character_context: Vec::new(),
             // L6.1：project 恒置空(OFF 字节等价)；仅 spine ON 经 with_director_plan 注入。
             director_plan: Vec::new(),
+            // M3 决策#3：project 恒置空(carrier 留着但空 ⇒ 默认 OFF 字节等价)；仅经 with_story_mood 注入。
+            story_mood: Vec::new(),
         }
     }
 
@@ -271,6 +280,19 @@ impl NarrationPacket {
     /// 等价)。与 `with_scene_establishing`/`with_character_context` 行为一致(trim+drop empties)。
     pub fn with_director_plan(mut self, tokens: &[String]) -> Self {
         self.director_plan = tokens
+            .iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        self
+    }
+
+    /// M3(链式 builder,决策#3):注入 player-safe **故事情绪/氛围** 短串。调用方保证 `tokens` 来自
+    /// **玩家已感知层**(PlayerPerceived)的蒸馏,绝不含 Story/Director 记忆(零 telegraph)。空 tokens
+    /// (`TRPG_NARRATOR_STORY_MOOD` OFF/无来源)⇒ 字段为空 ⇒ 渲染侧零新增字节(OFF 字节等价)。
+    /// 与其它 carrier 行为一致(trim + drop empties)。
+    pub fn with_story_mood(mut self, mood: &[String]) -> Self {
+        self.story_mood = mood
             .iter()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
@@ -732,5 +754,27 @@ mod tests {
         // Empty slices ⇒ field stays empty ⇒ render adds zero bytes.
         let empty = NarrationPacket::project(&adj, "", &[]).with_director_plan(&[]);
         assert!(empty.director_plan.is_empty());
+    }
+
+    #[test]
+    fn story_mood_project_empty_builder_injects_m3() {
+        // M3 decision #3: project() leaves story_mood empty (carrier kept but empty ⇒ default OFF ⇒
+        // byte-equal, zero telegraph risk); with_story_mood injects player-perceived mood tokens,
+        // trimming/filtering empties exactly like the other carriers.
+        let adj = AdjudicationPacket::project("环顾", &TurnLedgerSnapshot::default(), &[], "", None);
+        let base = NarrationPacket::project(&adj, "", &[]);
+        assert!(base.story_mood.is_empty(), "project must leave it empty (OFF byte-equal)");
+
+        let injected = NarrationPacket::project(&adj, "", &[]).with_story_mood(&[
+            "  雨后的潮湿  ".to_string(),
+            "   ".to_string(), // blank → filtered
+            "压抑的沉默".to_string(),
+        ]);
+        assert_eq!(
+            injected.story_mood,
+            vec!["雨后的潮湿".to_string(), "压抑的沉默".to_string()]
+        );
+        let empty = NarrationPacket::project(&adj, "", &[]).with_story_mood(&[]);
+        assert!(empty.story_mood.is_empty());
     }
 }
