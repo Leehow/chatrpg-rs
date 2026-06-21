@@ -4,8 +4,9 @@
 //! critical→heavy 串行，字节等价旧逻辑）。复用父模块的 build_nav_prompt / validate_transition /
 //! extract_module_scenes / prefetch_frontier / SCENE_NAV_SYS。
 use super::{
-    build_nav_prompt, extract_module_scenes, prefetch_frontier, resolve_offgraph_to_neighbor,
-    validate_transition, SCENE_NAV_SYS,
+    build_nav_prompt, build_nav_prompt_with_exits, extract_module_scenes,
+    nav_content_gravity_enabled, prefetch_frontier, resolve_offgraph_to_neighbor,
+    validate_transition, SCENE_NAV_SYS, SCENE_NAV_SYS_GRAVITY,
 };
 use serde_json::json;
 use tracing::info;
@@ -49,18 +50,42 @@ pub async fn scene_navigate_critical(
         .map(|s| format!("{} | {} | {}", s.node_id, s.node_type, s.title))
         .collect::<Vec<_>>()
         .join("\n");
-    let cur_title = graph
-        .scenes
-        .iter()
-        .find(|s| s.node_id == current)
-        .map(|s| s.title.as_str())
-        .unwrap_or("(未定)");
-    let usr = build_nav_prompt(&current, cur_title, &list, player_input, narration);
-    let decision = match llm
-        .complete_json(
-            vec![trpg_llm::system(SCENE_NAV_SYS), trpg_llm::user(&usr)],
-            0.0,
+    let cur_node = graph.scenes.iter().find(|s| s.node_id == current);
+    let cur_title = cur_node.map(|s| s.title.as_str()).unwrap_or("(未定)");
+    // L-C content-gravity（理念§4/§7，flag 默认 ON / OFF 字节等价）：把当前场景的真实直接
+    // 衔接 beat（去重、in-graph、≠current）作为软推进上下文喂给导航器，并换用追加了「软推进」
+    // 许可的 system prompt。OFF ⇒ 走原 SCENE_NAV_SYS + 裸 build_nav_prompt（提示串字节等价基线）。
+    let gravity = nav_content_gravity_enabled();
+    let (sys, usr) = if gravity {
+        let mut seen = std::collections::HashSet::new();
+        let exits = cur_node
+            .map(|node| {
+                node.links
+                    .iter()
+                    .filter_map(|link| {
+                        let to = link.to_node_id.trim();
+                        if to.is_empty() || to == current || !seen.insert(to.to_string()) {
+                            return None;
+                        }
+                        let t = graph.scenes.iter().find(|s| s.node_id == to)?;
+                        Some(format!("{} | {}", t.node_id, t.title))
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default();
+        (
+            SCENE_NAV_SYS_GRAVITY,
+            build_nav_prompt_with_exits(&current, cur_title, &exits, &list, player_input, narration),
         )
+    } else {
+        (
+            SCENE_NAV_SYS,
+            build_nav_prompt(&current, cur_title, &list, player_input, narration),
+        )
+    };
+    let decision = match llm
+        .complete_json(vec![trpg_llm::system(sys), trpg_llm::user(&usr)], 0.0)
         .await
     {
         Ok(v) => v,

@@ -15,6 +15,53 @@ const SCENE_NAV_SYS: &str = "你是模组场景导航器。给定『当前场景
 不要按标题字面猜。输出 JSON：{\"moved\": bool, \"target_node_id\": string|null, \"reason\": string}。\
 fail-closed：不确定、没有明确移动、或目标不在列表里 → moved=false。target_node_id 必须是给定列表中的 node_id，绝不编造。";
 
+/// L-C 内容引力（理念§4 content-gravity / §7 导演选焦不强制）：在保留全部 fail-closed
+/// 语义判定基础上，**额外**追加一条「软推进」许可——当玩家持续聚焦/深入处理本场景核心对象
+/// 或某个可推进抓手、且叙事张力明确指向某个衔接 beat 时，可判 moved 到该 beat。仍是语义裁定，
+/// 不确定就留（绝不强拽玩家、绝不编造目标）。仅在 `nav_content_gravity_enabled()` 时使用。
+const SCENE_NAV_SYS_GRAVITY: &str = "你是模组场景导航器。给定『当前场景』『当前场景的直接衔接 beat 列表』\
+『模组全部场景列表(node_id|kind|title)』『玩家输入』『本回合 GM 叙事』，综合语义判断玩家党\
+是否离开当前场景、走到列表里另一个真实存在的场景。判 moved=true 的依据（按语义，不按标题字面猜）：\
+① 玩家明确说出移动意图（如「我去 X」）；② GM 叙事描述了到达新地点；③ **内容引力**——玩家已持续\
+聚焦或深入处理本场景核心对象/可推进抓手（如直接与关键 NPC 对话、解决本场景的核心冲突/谜题），\
+且叙事张力自然指向某个『直接衔接 beat』，则可判 moved 到该 beat 的 node_id（这是顺着玩家的投入软推进剧情，\
+不是强行搬人）。输出 JSON：{\"moved\": bool, \"target_node_id\": string|null, \"reason\": string}。\
+fail-closed：不确定、玩家只是在原地观察/试探、或目标不在列表里 → moved=false；target_node_id 必须是\
+给定列表中的真实 node_id，绝不编造，优先取『直接衔接 beat』。";
+
+/// L-C content-gravity 开关。镜像 BUG-1/L-E/L-G 模式：默认 ON，仅显式 `0/false/off/no` 关。
+/// 关 ⇒ scene_navigate_critical 走原 SCENE_NAV_SYS + 不附衔接 beat ⇒ 提示串字节等价基线。
+pub fn nav_content_gravity_enabled() -> bool {
+    !matches!(
+        std::env::var("TRPG_SCENE_NAV_CONTENT_GRAVITY")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "0" | "false" | "off" | "no"
+    )
+}
+
+/// 内容引力提示：在 build_nav_prompt 之上，把『当前场景直接衔接 beat』(node_id | title)
+/// 作为一节前置上下文。exits 为空 ⇒ 退回裸 build_nav_prompt（字节等价）。
+pub fn build_nav_prompt_with_exits(
+    current: &str,
+    cur_title: &str,
+    exits: &str,
+    scene_list: &str,
+    player_input: &str,
+    narration: &str,
+) -> String {
+    if exits.trim().is_empty() {
+        return build_nav_prompt(current, cur_title, scene_list, player_input, narration);
+    }
+    format!(
+        "当前场景: {current} ({cur_title})\n当前场景的直接衔接 beat（顺着玩家投入可软推进到这些）:\n{exits}\n\n模组全部场景:\n{scene_list}\n\n玩家输入:\n{}\n\n本回合 GM 叙事:\n{}",
+        player_input.chars().take(500).collect::<String>(),
+        narration.chars().take(2000).collect::<String>(),
+    )
+}
+
 /// Deep-extract the module's scenes that satisfy `only`, then re-persist the
 /// upgraded ModuleGraph into the same `parsed_bundles` row. Shared core behind
 /// both `continue_module_extraction` (only=None → all SkeletonOnly scenes) and
@@ -582,6 +629,45 @@ mod tests {
             "叙事应在 prompt 中"
         );
         assert!(prompt.contains("当前场景: sc01"), "当前场景应在");
+    }
+
+    // L-C content-gravity：空 exits ⇒ with_exits 与裸 build_nav_prompt 字节等价（OFF/无衔接
+    // beat 路径与历史基线一致）。
+    #[test]
+    fn nav_prompt_with_empty_exits_is_byte_equal_to_base() {
+        let base = build_nav_prompt(
+            "sc01",
+            "入口",
+            "sc01 | l | 入口\nsc02 | l | 内厅",
+            "我观察四周",
+            "叙事正文",
+        );
+        let with_empty = build_nav_prompt_with_exits(
+            "sc01",
+            "入口",
+            "   ",
+            "sc01 | l | 入口\nsc02 | l | 内厅",
+            "我观察四周",
+            "叙事正文",
+        );
+        assert_eq!(base, with_empty, "空 exits 必须与裸 prompt 字节等价");
+    }
+
+    // L-C content-gravity：非空 exits ⇒ 衔接 beat 节出现，且仍含玩家输入/叙事/全场景列表。
+    #[test]
+    fn nav_prompt_with_exits_includes_beat_section() {
+        let p = build_nav_prompt_with_exits(
+            "sc01",
+            "入口",
+            "sc02 | 内厅\nsc03 | 后巷",
+            "sc01 | l | 入口\nsc02 | l | 内厅\nsc03 | l | 后巷",
+            "我推门走向内厅深处",
+            "叙事正文",
+        );
+        assert!(p.contains("直接衔接 beat"), "应含衔接 beat 节标题");
+        assert!(p.contains("sc02 | 内厅"), "应列出衔接 beat");
+        assert!(p.contains("我推门走向内厅深处"), "仍含玩家输入");
+        assert!(p.contains("叙事正文"), "仍含叙事");
     }
 
     // R5 Task1a 边界测试：编译级断言 critical/heavy 两个新公开异步函数的存在与签名
