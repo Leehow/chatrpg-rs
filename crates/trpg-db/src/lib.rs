@@ -3266,6 +3266,41 @@ impl Db {
         Ok(out)
     }
 
+    /// L-W: list this turn's RESOLVED checks paired with their outcome degree token.
+    /// Joins `check_contracts` to `check_results` (only resolved checks appear) and returns
+    /// `(CheckContract, degree)` where `degree` is `check_results.outcome_json->>'degree'`
+    /// (e.g. `"success"` / `"failure"`). Used by the engine to project committed
+    /// `CheckResolved(success)` events into durable source-backed world_facts. Read-only.
+    pub async fn list_resolved_check_outcomes_for_turn(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+    ) -> Result<Vec<(CheckContract, String)>> {
+        let rows = sqlx::query(
+            r#"
+            select cc.contract_json as contract_json,
+                   coalesce(cr.outcome_json->>'degree', '') as degree
+            from check_contracts cc
+            join check_results cr on cr.check_id = cc.check_id
+            where cc.session_id = $1 and cc.turn_id = $2
+            order by cr.created_at asc
+            "#,
+        )
+        .bind(session_id)
+        .bind(turn_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::new();
+        for row in rows {
+            let v: serde_json::Value = row.get("contract_json");
+            let degree: String = row.get("degree");
+            if let Ok(contract) = serde_json::from_value::<CheckContract>(v) {
+                out.push((contract, degree));
+            }
+        }
+        Ok(out)
+    }
+
     /// Return the latest check contract that has not yet produced a check_result.
     /// Used by the turn/API `/roll` path to bind a naked `/roll` command to
     /// the most recent mechanical question instead of creating an orphan die.

@@ -114,6 +114,7 @@ pub use truthgraph::{
     context_surfaced_events_for_scene, player_exposed_events_for_scene_narration,
 };
 
+pub mod check_outcome_facts;
 pub mod relationship_extraction;
 pub use relationship_extraction::{
     build_relationship_messages, parse_relationship_triples, relationship_facts_from_inputs,
@@ -1486,6 +1487,72 @@ impl RuntimeEngine {
                 rejected = report.rejected(),
                 skipped = report.skipped(),
                 "relationship triples committed to memory_facts via proposal pipeline"
+            );
+        }
+        written
+    }
+
+    /// L-W: 把本回合 kernel 已判 SUCCESS 的检定投射成 durable source-backed world_facts。
+    ///
+    /// 理念 §二.1/§二.3/§二.8:CheckResolved 已落账(权威),这里只把那条**已决定**事件投射成
+    /// 一条 world_fact(用检定自身 `stakes.success_public`,无 LLM/无发明)。修复 J2 真根——普通
+    /// 技能检定 SUCCESS 不进 committed_patches 且无 proposer 写 world_facts ⇒ 后果蒸发进念白。
+    ///
+    /// flag `TRPG_CHECK_OUTCOME_WORLD_FACT` 默认 ON;OFF ⇒ 无派生 = 基线字节等价。world_facts 行
+    /// 的实际落盘仍由 `TRPG_KNOWLEDGE_KERNEL`(shadow/enforce)在 commit 管线门控:kernel Off ⇒
+    /// 提案只落 memory_facts(基线),不写 world_facts/knowledge_edge。fail-soft:任何 DB/commit
+    /// 错误只 warn、返回 0,绝不影响已发的 TurnComplete(D2)。
+    pub async fn extract_check_outcome_world_facts(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+    ) -> usize {
+        if !check_outcome_facts::check_outcome_world_fact_enabled() {
+            return 0;
+        }
+        let resolved = match self
+            .db
+            .list_resolved_check_outcomes_for_turn(session_id, turn_id)
+            .await
+        {
+            Ok(rows) => rows,
+            Err(err) => {
+                tracing::warn!(error = %err, session_id, turn_id, "check-outcome world_fact: list resolved checks failed (fail-soft)");
+                return 0;
+            }
+        };
+        let proposals: Vec<_> = resolved
+            .iter()
+            .filter_map(|(contract, degree)| {
+                check_outcome_facts::world_fact_from_check(contract, degree, turn_id)
+            })
+            .collect();
+        if proposals.is_empty() {
+            return 0;
+        }
+        let report = match memory_proposal::review_and_commit_proposals(
+            &self.db,
+            &memory_proposal::CommitContext {
+                session_id,
+                turn_id,
+            },
+            &proposals,
+        )
+        .await
+        {
+            Ok(report) => report,
+            Err(err) => {
+                tracing::warn!(error = %err, session_id, turn_id, "check-outcome world_fact commit failed (fail-soft)");
+                return 0;
+            }
+        };
+        let written = report.committed();
+        if written > 0 {
+            tracing::info!(
+                session_id,
+                turn_id,
+                committed = written,
+                "check-outcome world_facts committed via proposal pipeline"
             );
         }
         written

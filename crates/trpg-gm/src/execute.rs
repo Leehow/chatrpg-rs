@@ -472,6 +472,13 @@ fn spawn_heavy(
                 fallback_scene_id,
             )
             .await;
+        // L-W：把本回合 kernel 已判 SUCCESS 的检定投射成 durable source-backed world_facts
+        // （理念 §二.1/§二.3/§二.8：已落账的 CheckResolved 投成 world_fact，非发明）。修复 J2 真根——
+        // 普通技能检定 SUCCESS 不进 committed_patches、无 proposer 写 world_facts ⇒ 后果蒸发进念白。
+        // flag 门控、fail-soft、OFF==字节等价；world_facts 实际落盘仍由 KNOWLEDGE_KERNEL 门控。
+        gm.engine
+            .extract_check_outcome_world_facts(&req.request.session_id, &req.request.turn_id)
+            .await;
         // 到场深抽 + frontier（仅 critical 真切了场景时）。
         if let (Some(commit), Some(module_id)) = (&scene_commit, req.module_id.as_deref()) {
             gm.phase_scene_navigate_heavy(&commit.to, module_id).await;
