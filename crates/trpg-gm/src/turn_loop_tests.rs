@@ -2231,3 +2231,32 @@ fn l61_player_safe_director_plan_tokens_carry_only_steering_not_secrets() {
     let minimal = player_safe_director_plan_tokens(&DirectorPlan::default());
     assert_eq!(minimal, vec!["beat:respond".to_string()]);
 }
+
+// L4.3 — the proactive forbidden-reveal set stashed on ctx flows into the narrator's
+// NarrationPacket.forbidden_reveals, EXACTLY as `run_narrator_phase` composes it. OFF (empty ctx
+// set) ⇒ project's forbidden is empty, byte-identical to the prior `&[]` baseline.
+#[test]
+fn l43_scene_forbidden_reveals_plumbs_into_narration_packet() {
+    use crate::packet::{AdjudicationPacket, NarrationPacket};
+    use trpg_agent::TurnLedgerSnapshot;
+
+    let adj = AdjudicationPacket::project("环顾四周", &TurnLedgerSnapshot::default(), &[], "", None);
+
+    // OFF baseline: empty ctx forbidden ⇒ empty packet forbidden (the prior `&[]` behavior).
+    let ctx_off = TurnContext::new();
+    let off = NarrationPacket::project(&adj, "", &ctx_off.scene_forbidden_reveals().to_vec());
+    assert!(off.forbidden_reveals.is_empty(), "OFF ⇒ no proactive forbidden (byte-equal baseline)");
+
+    // ON: a scene's still-building facts stashed on ctx flow into the packet's forbidden_reveals.
+    let mut ctx_on = TurnContext::new();
+    ctx_on.test_set_scene_forbidden_reveals(vec![
+        "secret_clue_a".to_string(),
+        "secret_clue_b".to_string(),
+    ]);
+    let on = NarrationPacket::project(&adj, "", &ctx_on.scene_forbidden_reveals().to_vec());
+    assert_eq!(
+        on.forbidden_reveals,
+        vec!["secret_clue_a".to_string(), "secret_clue_b".to_string()],
+        "ON ⇒ the scene's proactive forbidden facts reach the Narrator packet"
+    );
+}

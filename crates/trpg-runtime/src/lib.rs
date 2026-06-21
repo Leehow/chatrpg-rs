@@ -97,7 +97,9 @@ pub use knowledge_leak_verifier::{
 pub use story_write::{
     apply_thread_opened, merge_rejections, rejection_proposal, story_write_loop_enabled,
 };
-pub use scene_plan_emit::{build_scene_plan_emission, emit_scene_plan_on_change};
+pub use scene_plan_emit::{
+    build_scene_plan_emission, emit_scene_plan_on_change, scene_forbidden_reveals,
+};
 
 pub mod verifier_private_view;
 pub use verifier_private_view::{build_verifier_private_view, VerifierPrivateView};

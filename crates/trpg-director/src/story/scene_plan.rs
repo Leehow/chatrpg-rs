@@ -46,6 +46,11 @@ pub struct ScenePlan {
     pub fail_forward_options: Vec<String>,
     /// Turn budget, tightened by thread load + urgency (never a constant 4).
     pub pacing_budget_turns: u32,
+    /// L4.3 — facts the scene wants kept hidden PROACTIVELY: the `related_fact_ids` of live threads
+    /// still BUILDING toward payoff (status not yet `ReadyForPayoff`). These are the scene's
+    /// secrets-in-waiting — the Narrator must not reveal them as new until the owning thread ripens.
+    /// Plumbed into `NarrationPacket.forbidden_reveals` (L4.3); the reactive gate stays the backstop.
+    pub forbidden_fact_ids: Vec<String>,
 }
 
 /// True when a thread is still "live" — eligible to anchor a scene. Terminal/dormant threads do
@@ -137,6 +142,19 @@ pub fn derive_scene_plan(
     }
     let pacing_budget_turns = budget.clamp(2, 6);
 
+    // L4.3 proactive forbidden set: a live thread still BUILDING toward its payoff (any live status
+    // except ReadyForPayoff) keeps its facts hidden — they are the scene's secrets-in-waiting. A
+    // ripe (ReadyForPayoff) thread's facts are NOT forbidden (the scene is here to pay them off).
+    // Order-stable, de-duplicated; empty when no building thread has facts (fail-closed no-op).
+    let mut forbidden_fact_ids: Vec<String> = Vec::new();
+    for t in live.iter().filter(|t| t.status != StoryThreadStatus::ReadyForPayoff) {
+        for f in &t.related_fact_ids {
+            if !forbidden_fact_ids.contains(f) {
+                forbidden_fact_ids.push(f.clone());
+            }
+        }
+    }
+
     ScenePlan {
         scene_id: scene_id.to_string(),
         scene_purpose,
@@ -145,6 +163,7 @@ pub fn derive_scene_plan(
         exit_conditions,
         fail_forward_options: fail_forward_for(scene_purpose),
         pacing_budget_turns,
+        forbidden_fact_ids,
     }
 }
 
@@ -277,6 +296,39 @@ mod tests {
         assert_eq!(sfp.exit_conditions, plan.exit_conditions);
         assert_eq!(sfp.fail_forward_options, plan.fail_forward_options);
         assert_eq!(sfp.pacing_budget_turns, Some(plan.pacing_budget_turns));
+    }
+
+    // L4.3 — a BUILDING thread's facts are proactively forbidden; a RIPE thread's facts are not.
+    #[test]
+    fn forbidden_facts_from_building_threads_only() {
+        let plan = derive_scene_plan(
+            "s",
+            &[
+                thread("t_build", StoryThreadStatus::Active, 0.3, &["secret_a", "secret_b"]),
+                thread("t_ripe", StoryThreadStatus::ReadyForPayoff, 0.3, &["payoff_c"]),
+                thread("t_dorm", StoryThreadStatus::Dormant, 0.9, &["dormant_d"]),
+            ],
+            None,
+        );
+        // Building thread's facts are forbidden; ripe thread's payoff fact is NOT; dormant (not
+        // live) contributes nothing.
+        assert_eq!(
+            plan.forbidden_fact_ids,
+            vec!["secret_a".to_string(), "secret_b".to_string()]
+        );
+        assert!(!plan.forbidden_fact_ids.contains(&"payoff_c".to_string()));
+        assert!(!plan.forbidden_fact_ids.contains(&"dormant_d".to_string()));
+    }
+
+    // No building thread with facts ⇒ empty forbidden set (fail-closed no-op).
+    #[test]
+    fn no_building_facts_yields_empty_forbidden() {
+        let plan = derive_scene_plan(
+            "s",
+            &[thread("t_ripe", StoryThreadStatus::ReadyForPayoff, 0.3, &["payoff"])],
+            None,
+        );
+        assert!(plan.forbidden_fact_ids.is_empty());
     }
 
     // Module config contributes derived signals (scene facts ⇒ reveal; pressure ⇒ extra signal).

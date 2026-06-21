@@ -87,6 +87,42 @@ pub async fn emit_scene_plan_on_change(
     }
 }
 
+/// L4.3 production seam: the PROACTIVE forbidden-reveal set for the session's CURRENT scene. Flag-
+/// gated by `TRPG_DIRECTOR_SCENE_PLAN` (default OFF ⇒ returns an EMPTY vec immediately, zero reads,
+/// byte-identical baseline). ON ⇒ loads the current scene id + persisted [`StoryState`] + module
+/// director config (all fail-soft), derives the [`ScenePlan`], and returns its `forbidden_fact_ids`
+/// (the facts of still-building threads). Composed into `NarrationPacket.forbidden_reveals` at the
+/// narrator phase; the reactive narrowing/regen ladder stays the backstop. Never errors —
+/// proactive guarding must never break a turn (a failure fail-closes to an EMPTY proactive set,
+/// leaving the reactive gate fully in charge).
+pub async fn scene_forbidden_reveals(
+    db: &Db,
+    session_id: &str,
+    module_id: Option<&str>,
+) -> Vec<String> {
+    if !trpg_director::scene_plan_enabled() {
+        return Vec::new();
+    }
+    let Some(scene_id) = db.load_session_scene(session_id).await.ok().flatten() else {
+        return Vec::new();
+    };
+    if scene_id.is_empty() {
+        return Vec::new();
+    }
+    let story = db
+        .load_story_state(session_id)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let module_cfg = match module_id {
+        Some(mid) => db.load_module_config(mid).await,
+        None => None,
+    };
+    let director_cfg = module_cfg.as_ref().and_then(|m| m.director.as_ref());
+    derive_scene_plan(&scene_id, &story.active_threads, director_cfg).forbidden_fact_ids
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

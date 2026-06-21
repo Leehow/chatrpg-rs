@@ -11,7 +11,7 @@
 
 use trpg_db::Db;
 use trpg_model::{DomainEventKind, StoryState, StoryThread, StoryThreadStatus};
-use trpg_runtime::emit_scene_plan_on_change;
+use trpg_runtime::{emit_scene_plan_on_change, scene_forbidden_reveals};
 
 async fn connect_or_skip() -> Option<Db> {
     let url = std::env::var("DATABASE_URL").ok()?;
@@ -128,5 +128,59 @@ async fn on_scene_change_emits_exactly_one_idempotent_plan_event() {
     );
     assert_eq!(events[0].event_id, format!("de_scene_{session}_scene_market_created"));
     assert_eq!(events[0].data["scene_id"], "scene_market");
+    purge(&db, &session).await;
+}
+
+/// L4.3 — the PROACTIVE forbidden-reveal set is derived from REAL persisted state: a building
+/// thread's secret fact is forbidden; OFF ⇒ empty (the reactive gate stays in full charge). The
+/// behavioral "the LLM does not reveal it" assertion is LV.1 condition #4; here we prove the set
+/// fed to the Narrator is correctly computed from live story + the session's current scene.
+#[tokio::test]
+async fn forbidden_reveals_derived_from_live_building_thread() {
+    let Some(db) = connect_or_skip().await else {
+        return;
+    };
+    let session = format!("sess_sp_fbd_{}", uuid::Uuid::new_v4().simple());
+    purge(&db, &session).await;
+    prepare(&db, &session).await;
+
+    // A still-building (Active, not ReadyForPayoff) thread carrying a secret fact, plus a ripe
+    // thread whose payoff fact must NOT be forbidden.
+    let story = StoryState {
+        active_threads: vec![
+            StoryThread {
+                thread_id: "thr_build".into(),
+                status: StoryThreadStatus::Active,
+                related_fact_ids: vec!["secret_cult_meeting".into()],
+                ..Default::default()
+            },
+            StoryThread {
+                thread_id: "thr_ripe".into(),
+                status: StoryThreadStatus::ReadyForPayoff,
+                related_fact_ids: vec!["payoff_confront".into()],
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    db.upsert_story_state(&session, &story, "t0").await.unwrap();
+    db.set_session_scene(&session, "scene_temple").await.unwrap();
+
+    // OFF: empty proactive set — the reactive gate stays fully in charge (byte-identical baseline).
+    std::env::remove_var("TRPG_DIRECTOR_SCENE_PLAN");
+    assert!(
+        scene_forbidden_reveals(&db, &session, None).await.is_empty(),
+        "OFF ⇒ no proactive forbidden set"
+    );
+
+    // ON: the building thread's secret is forbidden; the ripe thread's payoff fact is NOT.
+    std::env::set_var("TRPG_DIRECTOR_SCENE_PLAN", "1");
+    let forbidden = scene_forbidden_reveals(&db, &session, None).await;
+    std::env::remove_var("TRPG_DIRECTOR_SCENE_PLAN");
+    assert_eq!(
+        forbidden,
+        vec!["secret_cult_meeting".to_string()],
+        "ON ⇒ building thread's secret forbidden; ripe payoff fact excluded"
+    );
     purge(&db, &session).await;
 }

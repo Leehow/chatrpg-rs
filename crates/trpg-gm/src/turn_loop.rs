@@ -243,6 +243,11 @@ pub(crate) struct TurnContext {
     // §2 composition rule it is delivered to narration via a new NarrationPacket carrier (L6.1),
     // NOT the pre-adjudication BP3 tail. OFF ⇒ 恒 None ⇒ 字节等价基线。
     post_adjudication_plan: Option<DirectorPlan>,
+    // L4.3 — the PROACTIVE forbidden-reveal set for the current scene (the still-building threads'
+    // facts), derived from the scene's ScenePlan at `resolution_commit_boundary` and composed into
+    // the narrator's `NarrationPacket.forbidden_reveals`. Gated by `TRPG_DIRECTOR_SCENE_PLAN` ⇒ OFF
+    // 恒空 ⇒ 字节等价基线 (run_narrator_phase passes an empty set, exactly as before).
+    scene_forbidden_reveals: Vec<String>,
 }
 impl TurnContext {
     pub(crate) fn new() -> Self {
@@ -274,6 +279,7 @@ impl TurnContext {
             post_adjudication_results: Vec::new(),
             world_candidates: Vec::new(),
             post_adjudication_plan: None,
+            scene_forbidden_reveals: Vec::new(),
         }
     }
 
@@ -314,6 +320,20 @@ impl TurnContext {
     #[allow(dead_code)]
     pub(crate) fn post_adjudication_plan(&self) -> Option<&DirectorPlan> {
         self.post_adjudication_plan.as_ref()
+    }
+
+    /// L4.3 read-only accessor: the proactive forbidden-reveal set for the current scene (the
+    /// still-building threads' facts). Empty when `TRPG_DIRECTOR_SCENE_PLAN` is OFF ⇒ the narrator
+    /// composes an empty forbidden set, byte-identical to baseline.
+    pub(crate) fn scene_forbidden_reveals(&self) -> &[String] {
+        &self.scene_forbidden_reveals
+    }
+
+    /// Test-only: seed the L4.3 proactive forbidden-reveal set so the narrator-phase plumb can be
+    /// exercised without a live scene-plan derivation.
+    #[cfg(test)]
+    pub(crate) fn test_set_scene_forbidden_reveals(&mut self, v: Vec<String>) {
+        self.scene_forbidden_reveals = v;
     }
 
     pub(crate) fn heavy_assistant_output(&self) -> String {
@@ -1166,7 +1186,13 @@ impl GmLoop {
             .post_adjudication_plan()
             .map(player_safe_director_plan_tokens)
             .unwrap_or_default();
-        let narration = crate::packet::NarrationPacket::project(&adj, "", &[])
+        // L4.3: compose the PROACTIVE forbidden-reveal set (still-building threads' facts, derived
+        // from the scene's ScenePlan at resolution_commit_boundary) into the packet's
+        // forbidden_reveals ALONGSIDE the carriers. Empty when `TRPG_DIRECTOR_SCENE_PLAN` is OFF ⇒
+        // byte-identical baseline (project's 3rd arg was always `&[]`). The reactive narrowing/regen
+        // ladder downstream stays the backstop.
+        let scene_forbidden = ctx.scene_forbidden_reveals().to_vec();
+        let narration = crate::packet::NarrationPacket::project(&adj, "", &scene_forbidden)
             .with_scene_context(&player_safe_scene_context(input))
             .with_scene_establishing(&scene_establishing)
             .with_character_context(&character_context)
@@ -2615,6 +2641,18 @@ impl GmLoop {
             }
             ctx.post_adjudication_plan = plan;
         }
+        // L4.3: derive the current scene's PROACTIVE forbidden-reveal set (still-building threads'
+        // facts) and stash it for the narrator phase to compose into NarrationPacket.forbidden_reveals
+        // ALONGSIDE the carriers. Flag-gated by `TRPG_DIRECTOR_SCENE_PLAN` (the helper returns empty
+        // when OFF ⇒ ctx field stays empty ⇒ the narrator composes an empty set ⇒ byte-identical
+        // baseline). Runs here (before the Narrator phase, execute.rs:242→251) so the set is ready;
+        // fail-soft (never errors) — the reactive gate stays the backstop.
+        ctx.scene_forbidden_reveals = trpg_runtime::scene_forbidden_reveals(
+            &self.engine.db,
+            &request.session_id,
+            request.module_id.as_deref(),
+        )
+        .await;
         // P3.7 BeforeCommit 重定位：从 save_turn 前迁到 AgentLoop 结束这一真正的
         // 机械结算后检查点（advisory/trace-only，本期不阻断）。
         self.run_advisory_trace_hook(ctx, request, crate::plugin::PluginHook::BeforeCommit, None)
