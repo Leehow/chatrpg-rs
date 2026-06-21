@@ -305,6 +305,28 @@ pub(crate) fn narrator_state_persistence_enabled() -> bool {
 pub(crate) const NARRATOR_STATE_PERSISTENCE: &str = "\
 【既成状态忠实 · 持久不复活、不反转】本回合叙述里任何已被「连续性锚」或「本回合机械事实」确立的世界/环境/物体状态——它的有无、开关、通断、冷热温度、运转/停止、明灭、损坏/完好、在场/离场——都必须与既成事实**保持一致**,不得在叙述里被悄悄改写成不符的样子。这有**两个方向**都要守:① **不把已完成的变更倒回旧状态**:既成事实记录某状态已**变更/终止**(供电切断、电流/嗡鸣/震动停止、灯熄、火灭、门开、设备关停、警报消音、某物被破坏移除)后,就按其**新状态**续写,绝不再把它**变更前的旧状态**当作仍在持续而复活(既定「供电已切断、粗缆嗡鸣停止」后就不要再写那根缆'仍有低沉电流嗡鸣传来')。② **不把仍持续的既成状态反转**:既成事实确立某状态**仍在持续**(粗缆仍在发热、设备仍在运转、某门仍开着)时,就不要在叙述里把它写成它的反面(既定粗缆'仍从设备暗处带出热量、正在发热'就不要写成'隔着布料仍能感觉到外皮硬冷')。残留的**物理痕迹**可以如实描写(切断后的缆线仍有余温、焦味、断口),但不要借此把**已终止的活动状态**(通电、运转、发声)写成死灰复燃,也不要拿它否定一个**仍持续的状态**。若确有一个**另外的、新的**来源产生类似现象(更深处另有一台仍通电的设备),须明确叙述为一个**区别于既成那个状态的新来源**,而非让旧状态本身复活或反转;且不得为此凭空捏造既成事实之外的来源。世界状态只朝既成事实记录的方向走,绝不在叙述里被无声地倒回或反转。";
 
+/// L-X 不复述场景定场 · 从玩家当前所在处续写(理念§二.8 Narrator 表达已决定不发明、§4 把冲突带到玩家所在处不挪玩家):
+/// aliveFull30LW full-run census 实证(t9–t12,**同一 J1 子类连续 4 次硬位置失忆**)——玩家 t5–t8 已自述钻入仓库通风道、
+/// 沿缆线向**仓库内部**潜行(既成当前位置=通风道内),但 Narrator 在 t9 起**每回合以场景到达定场框架重新开篇**
+/// (「警笛把你引到这座小仓库外」「警车横在建筑两侧」=入口场景 `scene_warehouse_arrival` 的**到达/外景定场图景**),
+/// 把玩家从既成的通风道内位置**逐回合冲刷回仓库外/门口**,直到 t13 player-sim 自身也被带回门口。根因=连续性锚的权威内容
+/// 是上两回合 GM 散文(lib.rs:1003),而 GM 习惯于每回合用场景到达定场图景开篇 ⇒ 该外景框架被当作"当前局面"逐回合累积、
+/// 压过玩家已确立的内部潜入。这是 L-O 地点忠实在**"每回合重painting场景到达定场框架"**维度的同构残面——L-O 治"凭空写进新房间",
+/// L-X 治"把开篇重置回场景的到达/入口定场图景"。**默认 ON**(eval 不设 ⇒ 自动吃到),OFF 字节等价,零 ruleset 分支。
+pub(crate) fn narrator_no_scene_reestablish_enabled() -> bool {
+    !matches!(
+        std::env::var("TRPG_NARRATOR_NO_SCENE_REESTABLISH")
+            .ok()
+            .map(|v| v.to_ascii_lowercase())
+            .as_deref(),
+        Some("0") | Some("false") | Some("off") | Some("no")
+    )
+}
+
+/// L-X 不复述场景定场纪律(追加在 NARRATOR_STATE_PERSISTENCE 之后)。直击 aliveFull30LW t9–t12:每回合用入口场景外景到达图景开篇,把玩家冲刷回仓库外。
+pub(crate) const NARRATOR_NO_SCENE_REESTABLISH: &str = "\
+【不复述场景定场 · 从玩家当前所在处续写】场景的**到达/入口定场图景**(玩家如何抵达此地、初见此地的那幅固定外景/环境画面——例如「警笛把你引到小仓库外、警车横在建筑两侧、地上倒着人影」这类**首次进入时**铺陈的定场描写)**只在玩家首次进入该场景时铺陈一次**,绝不在其后的每个回合开篇被重新painting。本回合的叙述必须**从「连续性锚」与玩家自己最近一次声明所确立的当前所在位置继续向前**,而不是把开篇重置回场景的到达/入口图景。具体:① 若玩家已自述移动到场景内部更深处(钻进通风道、进入内室、绕到建筑另一侧、深入走廊),就以其**当前的内部/纵深位置**为准续写,绝不在开篇又把镜头拉回入口外景、把玩家写成仍在/又回到入口或建筑外;② 入口处的固定景物(门外的警车、外墙、街道、到场时的人影)不要每回合重复铺陈成「此刻就在眼前」——除非玩家本回合确实回到了那个位置;③ 推进氛围靠描写玩家**当前所在处**此刻的新感官与新变化,而不是靠复述那幅已交付过的到达定场图景。一句话:开场定场只念一次,之后每回合都从玩家此刻真正所在的地方往前讲。";
+
 /// Append the narrator craft overlay when `craft_on`. OFF ⇒ returns `base` unchanged (byte-equal).
 /// 全部追加 flag 关时 ⇒ `base\n{NARRATOR_CRAFT}`(历史基线字节等价)。
 pub(crate) fn narrator_system(base: String, craft_on: bool) -> String {
@@ -331,6 +353,10 @@ pub(crate) fn narrator_system(base: String, craft_on: bool) -> String {
     if narrator_state_persistence_enabled() {
         out.push('\n');
         out.push_str(NARRATOR_STATE_PERSISTENCE);
+    }
+    if narrator_no_scene_reestablish_enabled() {
+        out.push('\n');
+        out.push_str(NARRATOR_NO_SCENE_REESTABLISH);
     }
     out
 }
@@ -415,6 +441,7 @@ mod tests {
         let prev_lf = std::env::var("TRPG_NARRATOR_LOCATION_FIDELITY").ok();
         let prev_df = std::env::var("TRPG_NARRATOR_DIALOGUE_FIDELITY").ok();
         let prev_sp = std::env::var("TRPG_NARRATOR_STATE_PERSISTENCE").ok();
+        let prev_re = std::env::var("TRPG_NARRATOR_NO_SCENE_REESTABLISH").ok();
         // 默认 ON(未设)⇒ craft_on 路径在 NARRATOR_CRAFT 之后追加单步推进纪律。
         std::env::remove_var("TRPG_NARRATOR_SINGLE_ADVANCE");
         assert!(narrator_single_advance_enabled(), "未设 ⇒ 默认 ON");
@@ -430,6 +457,7 @@ mod tests {
         std::env::set_var("TRPG_NARRATOR_LOCATION_FIDELITY", "off");
         std::env::set_var("TRPG_NARRATOR_DIALOGUE_FIDELITY", "off");
         std::env::set_var("TRPG_NARRATOR_STATE_PERSISTENCE", "off");
+        std::env::set_var("TRPG_NARRATOR_NO_SCENE_REESTABLISH", "off");
         assert!(!narrator_single_advance_enabled(), "off ⇒ OFF");
         let off = narrator_system("BASE".to_string(), true);
         assert_eq!(off, format!("BASE\n{NARRATOR_CRAFT}"), "OFF 须与历史 craft overlay 字节等价");
@@ -458,6 +486,42 @@ mod tests {
         match prev_sp {
             Some(v) => std::env::set_var("TRPG_NARRATOR_STATE_PERSISTENCE", v),
             None => std::env::remove_var("TRPG_NARRATOR_STATE_PERSISTENCE"),
+        }
+        match prev_re {
+            Some(v) => std::env::set_var("TRPG_NARRATOR_NO_SCENE_REESTABLISH", v),
+            None => std::env::remove_var("TRPG_NARRATOR_NO_SCENE_REESTABLISH"),
+        }
+    }
+
+    #[test]
+    fn narrator_no_scene_reestablish_flag_and_overlay() {
+        let _g = env_guard();
+        let prev = std::env::var("TRPG_NARRATOR_NO_SCENE_REESTABLISH").ok();
+        std::env::remove_var("TRPG_NARRATOR_NO_SCENE_REESTABLISH");
+        assert!(narrator_no_scene_reestablish_enabled(), "未设 ⇒ 默认 ON");
+        let on = narrator_system("BASE".to_string(), true);
+        assert!(on.contains("不复述场景定场 · 从玩家当前所在处续写"), "ON 应追加不复述场景定场纪律: {on}");
+        assert!(
+            on.contains("只在玩家首次进入该场景时铺陈一次"),
+            "ON 应含'到达定场只念一次'子句(直击每回合重painting开篇)"
+        );
+        assert!(
+            on.contains("以其**当前的内部/纵深位置**为准续写"),
+            "ON 应含'玩家已深入内部则按内部续写'子句(直击 t9–t12 把玩家冲刷回仓库外)"
+        );
+        assert!(
+            on.contains("推进氛围靠描写玩家**当前所在处**此刻的新感官与新变化"),
+            "ON 应含'靠当前位置新感官推进而非复述到达图景'子句(不伤氛围推进)"
+        );
+
+        std::env::set_var("TRPG_NARRATOR_NO_SCENE_REESTABLISH", "off");
+        assert!(!narrator_no_scene_reestablish_enabled(), "off ⇒ OFF");
+        let off = narrator_system("BASE".to_string(), true);
+        assert!(!off.contains("不复述场景定场 · 从玩家当前所在处续写"), "OFF 不得追加不复述场景定场纪律");
+
+        match prev {
+            Some(v) => std::env::set_var("TRPG_NARRATOR_NO_SCENE_REESTABLISH", v),
+            None => std::env::remove_var("TRPG_NARRATOR_NO_SCENE_REESTABLISH"),
         }
     }
 
