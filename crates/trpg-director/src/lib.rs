@@ -6,8 +6,10 @@ use trpg_model::*;
 use uuid::Uuid;
 
 mod clock;
+mod service;
 mod spotlight;
 mod story;
+pub use service::{BeatPlanInputs, DirectorUnsupported, StoryDirectorService};
 pub use spotlight::SpotlightParticipant;
 pub use story::{
     build_director_brief_packet, fallback_beat_plan, pick_spotlight_target,

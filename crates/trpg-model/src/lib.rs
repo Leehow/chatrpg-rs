@@ -50,6 +50,10 @@ pub mod story;
 pub use story::*;
 pub mod director_plan;
 pub use director_plan::*;
+pub mod director_request;
+pub use director_request::*;
+pub mod mechanical_result;
+pub use mechanical_result::*;
 pub mod materialization_affordance;
 pub use materialization_affordance::*;
 
