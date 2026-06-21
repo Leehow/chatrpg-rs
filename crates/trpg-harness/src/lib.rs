@@ -10,6 +10,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// L2.x story-quality checkpoints (pure, provider-free; extends the mechanics-checkpoint families
+/// in this module). Checkpoint #1 = the post-adjudication Beat reflects the committed result.
+pub mod story_quality;
+
 pub fn default_stream_format() -> String {
     "jsonl".to_string()
 }
