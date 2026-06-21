@@ -98,6 +98,24 @@ pub enum DomainEventKind {
     /// 这样「retry-advance 到同一 value」幂等（同一 clock_id+value 折叠成一行），而真正推进
     /// 到不同 value 落新行。**不**用 uuid、**不**镜像 world_event_{uuid}（那不会让重试推进幂等）。
     ClockAdvanced,
+    /// L3.1（设计§五 story 事件账本）：某 [`crate::StoryThread`] 从 `Dormant` 被开启
+    /// （首次 floor 到 `Introduced`，见 `story_write::apply_thread_opened`）后写穿的领域事件。
+    /// 加性 + fail-soft：story_state 快照仍是单一真相源（R2 promotion OutOfScope），此事件只
+    /// 补 append-only 账本可观测性。data 带 thread_id / new_status。
+    ///
+    /// 幂等键 codex 模式（同 ClockAdvanced）：键在**结算后的线程状态**上——
+    /// `de_thread_{session}_{thread_id}_{new_status}`。同一开启的重放折叠成一行，真推进到
+    /// 不同 status 落新行。
+    StoryThreadOpened,
+    /// L3.1：某 StoryThread 状态**前进**（非开启、非解决、非休眠的任意前向迁移，如
+    /// `Introduced→Active`、`Active→Escalating`/`ReadyForPayoff`）后写穿的领域事件。当前
+    /// 确定性写循环尚不产生此迁移（P6.8b 推进 OutOfScope）；变体作为 Story Observer（L7.1）
+    /// 的词汇先行落地，由通用 status-diff 派生，绝不按 ruleset 分支。
+    StoryThreadAdvanced,
+    /// L3.1：某 StoryThread 迁移到 `Resolved` 后写穿的领域事件（同上由通用 diff 派生）。
+    StoryThreadResolved,
+    /// L3.1：某 StoryThread 从非 `Dormant` 迁移**回** `Dormant`（休眠）后写穿的领域事件。
+    StoryThreadDormant,
 }
 
 impl DomainEventKind {
@@ -124,6 +142,10 @@ impl DomainEventKind {
             DomainEventKind::ResourceChanged => "ResourceChanged",
             DomainEventKind::NpcActionResolved => "NpcActionResolved",
             DomainEventKind::ClockAdvanced => "ClockAdvanced",
+            DomainEventKind::StoryThreadOpened => "StoryThreadOpened",
+            DomainEventKind::StoryThreadAdvanced => "StoryThreadAdvanced",
+            DomainEventKind::StoryThreadResolved => "StoryThreadResolved",
+            DomainEventKind::StoryThreadDormant => "StoryThreadDormant",
         }
     }
 
@@ -148,6 +170,10 @@ impl DomainEventKind {
             "ResourceChanged" => DomainEventKind::ResourceChanged,
             "NpcActionResolved" => DomainEventKind::NpcActionResolved,
             "ClockAdvanced" => DomainEventKind::ClockAdvanced,
+            "StoryThreadOpened" => DomainEventKind::StoryThreadOpened,
+            "StoryThreadAdvanced" => DomainEventKind::StoryThreadAdvanced,
+            "StoryThreadResolved" => DomainEventKind::StoryThreadResolved,
+            "StoryThreadDormant" => DomainEventKind::StoryThreadDormant,
             _ => DomainEventKind::TurnStarted,
         }
     }
@@ -456,6 +482,73 @@ mod tests {
             DomainEventKind::NpcActionResolved,
             DomainEventKind::ClockAdvanced
         );
+        // fail-closed 未知回退不受影响。
+        assert_eq!(
+            DomainEventKind::from_str_token("Bogus"),
+            DomainEventKind::TurnStarted
+        );
+    }
+
+    #[test]
+    fn story_thread_kinds_token_and_serde_roundtrip() {
+        // L3.1：4 个 StoryThread 账本事件。token 稳定契约 + serde 闭环 + 与既有 17 variant 区分
+        // （不碰旧 token——上方 round-trip 守卫锁死它们）。
+        let new_kinds = [
+            DomainEventKind::StoryThreadOpened,
+            DomainEventKind::StoryThreadAdvanced,
+            DomainEventKind::StoryThreadResolved,
+            DomainEventKind::StoryThreadDormant,
+        ];
+        for k in new_kinds {
+            assert_eq!(DomainEventKind::from_str_token(k.as_str()), k);
+            let v = serde_json::to_value(k).unwrap();
+            assert_eq!(v.as_str(), Some(k.as_str()), "serde token 必与 as_str 一致");
+            let back: DomainEventKind = serde_json::from_value(v).unwrap();
+            assert_eq!(back, k);
+        }
+        // 钉死 token 字面量，防日后改名悄悄破坏 db 兼容。
+        assert_eq!(DomainEventKind::StoryThreadOpened.as_str(), "StoryThreadOpened");
+        assert_eq!(
+            DomainEventKind::StoryThreadAdvanced.as_str(),
+            "StoryThreadAdvanced"
+        );
+        assert_eq!(
+            DomainEventKind::StoryThreadResolved.as_str(),
+            "StoryThreadResolved"
+        );
+        assert_eq!(
+            DomainEventKind::StoryThreadDormant.as_str(),
+            "StoryThreadDormant"
+        );
+        // 4 个新 token 必与既有 17 个全部不相交，且彼此互不相同。
+        for existing in [
+            "TurnStarted",
+            "TurnFinalized",
+            "TurnFailed",
+            "SceneTransitioned",
+            "DiceRolled",
+            "CheckResolved",
+            "EntitySurfaced",
+            "ContextSurfaced",
+            "PlayerExposed",
+            "PlayerLearnedFact",
+            "NpcLearnedFact",
+            "ClientDisconnected",
+            "FactRevealed",
+            "RelationshipChanged",
+            "ResourceChanged",
+            "NpcActionResolved",
+            "ClockAdvanced",
+        ] {
+            for k in new_kinds {
+                assert_ne!(k.as_str(), existing, "新 story token 必与既有 17 个不同");
+            }
+        }
+        for i in 0..new_kinds.len() {
+            for j in (i + 1)..new_kinds.len() {
+                assert_ne!(new_kinds[i], new_kinds[j], "4 个 story 变体互不相同");
+            }
+        }
         // fail-closed 未知回退不受影响。
         assert_eq!(
             DomainEventKind::from_str_token("Bogus"),

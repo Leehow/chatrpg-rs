@@ -200,7 +200,22 @@ pub async fn commit_story_writes(
     if !merged_changed && !opened_changed {
         return Ok(());
     }
-    apply_story_proposals(db, session_id, after, updated_turn).await
+    // L3.1: derive the additive StoryThread ledger events from the committed status diff BEFORE
+    // `after` is moved into the upsert. Snapshot stays the source of truth; the events only add
+    // append-only observability.
+    let thread_events =
+        crate::story_write::thread_status_events(&before, &after, session_id, updated_turn);
+    apply_story_proposals(db, session_id, after, updated_turn).await?;
+    // Additive + fail-soft write-through (mirrors the `ClockAdvanced` pattern): the story_state
+    // upsert above is the committed source of truth; appending the ledger rows must NEVER reverse
+    // it, so a per-event failure only warns. Whole block is inside the `TRPG_STORY_WRITE_LOOP` ON
+    // path (the early return above keeps OFF byte-identical — zero new events).
+    for ev in &thread_events {
+        if let Err(err) = db.append_domain_event(ev).await {
+            tracing::warn!(error = %err, event_id = %ev.event_id, "append StoryThread domain event failed (non-fatal)");
+        }
+    }
+    Ok(())
 }
 
 /// L1.2 SPINE — build the POST-adjudication typed [`DirectorPlan`]: the first build that sees the

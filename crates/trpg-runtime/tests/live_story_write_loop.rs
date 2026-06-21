@@ -19,7 +19,7 @@
 use trpg_db::Db;
 use trpg_director::{build_director_brief_packet, DirectorMode};
 use trpg_model::{
-    NpcActionIntent, NpcActionKind, StoryState, StoryThread, StoryThreadStatus,
+    DomainEventKind, NpcActionIntent, NpcActionKind, StoryState, StoryThread, StoryThreadStatus,
     WorldReactionCandidate,
 };
 use trpg_runtime::director_brief::rejected_thread_ids;
@@ -52,6 +52,7 @@ async fn prepare(db: &Db, session: &str) {
 
 async fn purge(db: &Db, session: &str) {
     for sql in [
+        "delete from domain_events where session_id=$1",
         "delete from story_state where session_id=$1",
         "delete from sessions where session_id=$1",
     ] {
@@ -246,6 +247,67 @@ async fn thread_opened_floors_dormant_to_introduced() {
         already.status,
         StoryThreadStatus::Active,
         "already-open thread is NOT advanced (P6.8b OutOfScope)"
+    );
+
+    // L3.1: the floor wrote through a StoryThreadOpened domain event keyed on the resulting
+    // status. Exactly one (for the dormant thread that floored); the already-open thread is
+    // untouched ⇒ no event for it.
+    let events = db.list_domain_events(&session, 100).await.unwrap();
+    let opened: Vec<_> = events
+        .iter()
+        .filter(|e| e.kind == DomainEventKind::StoryThreadOpened)
+        .collect();
+    assert_eq!(
+        opened.len(),
+        1,
+        "exactly one StoryThreadOpened event in the ledger (only the dormant thread floored)"
+    );
+    assert_eq!(
+        opened[0].event_id,
+        format!("de_thread_{}_thr_dormant_Introduced", session),
+        "idempotent key on the resulting status"
+    );
+    assert_eq!(opened[0].data["thread_id"], "thr_dormant");
+    assert_eq!(opened[0].data["new_status"], "Introduced");
+
+    purge(&db, &session).await;
+}
+
+/// L3.1 OFF==baseline for the ledger: with the flag unset, the floor write-loop is a no-op, so
+/// NO StoryThread domain events are appended (the append lives strictly inside the ON path).
+#[tokio::test]
+async fn off_writes_no_thread_events() {
+    let Some(db) = connect_or_skip().await else {
+        return;
+    };
+    std::env::remove_var("TRPG_STORY_WRITE_LOOP");
+
+    let session = format!("sess_sw_noev_{}", uuid::Uuid::new_v4().simple());
+    purge(&db, &session).await;
+    prepare(&db, &session).await;
+
+    let story = StoryState {
+        active_threads: vec![StoryThread {
+            thread_id: "thr_dormant".into(),
+            status: StoryThreadStatus::Dormant,
+            related_fact_ids: vec!["fact_relic".into()],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    db.upsert_story_state(&session, &story, "t0").await.unwrap();
+
+    // Flag OFF ⇒ commit is a no-op ⇒ no thread events written.
+    commit_story_writes(&db, &session, &[], &["fact_relic".to_string()], "t1")
+        .await
+        .expect("commit_story_writes (OFF) is a no-op Ok");
+
+    let events = db.list_domain_events(&session, 100).await.unwrap();
+    assert!(
+        events
+            .iter()
+            .all(|e| e.kind != DomainEventKind::StoryThreadOpened),
+        "OFF: no StoryThread ledger events"
     );
 
     purge(&db, &session).await;
