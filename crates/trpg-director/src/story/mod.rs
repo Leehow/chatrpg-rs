@@ -23,12 +23,14 @@
 //! The emitted plan carries only ids / enums / short generic structural strings — NEVER
 //! secret prose or fact bodies. Reveals are by `fact_id`, not fact text.
 
+pub mod campaign;
 pub mod fallback;
 pub mod render;
 pub mod outcome;
 pub mod scene_plan;
 pub mod select;
 
+pub use campaign::{campaign_plan_enabled, classify_campaign, should_run_campaign, CampaignPlan};
 pub use fallback::{fallback_beat_plan, pick_spotlight_target};
 pub use scene_plan::{derive_scene_plan, scene_plan_enabled, ScenePlan};
 pub use outcome::{
