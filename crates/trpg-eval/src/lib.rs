@@ -10,8 +10,10 @@ pub mod model;
 pub mod parser;
 pub mod probes;
 pub mod report;
+pub mod score;
 
 pub use aggregate::evaluate;
 pub use model::{EvalFinding, RootCause, Severity, Transcript, Turn, Verdict};
 pub use parser::parse_transcript;
 pub use report::redboard;
+pub use score::{score_card, Dimension, DimensionScore, ScoreCard};

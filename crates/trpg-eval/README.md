@@ -39,6 +39,24 @@ looped scene is paraphrased each render (char-trigram overlap ≈ 0.01) yet shar
 turn-1's establishing entities. Generic recurrence is NOT enough — that would
 flag legitimate continuity callbacks (蓝图 §五.5 callback ≠ 重演初始场景).
 
+## Soft-weighted quality score (蓝图 §七, deterministic)
+
+Above the hard 门槛 (PASS/FAIL), the verdict carries a 0-100 quality number whose
+dimension weights are the blueprint's — **语言表现 is the LOWEST (5)**, mechanics the
+highest (25). This fixes the inversion §七 names: the old harness rewarded prose
+length, so a long repetitive report read as "真叙事". Now it cannot:
+
+| fixture | score | reading |
+|---|---|---|
+| `clean_min.md` | **100/100 ±5** | full credit; the ±5 is the un-probed 语言 band |
+| `coc_semantic_shell.md` | **65/100** | concentrated failure — responsiveness + progression zeroed, rules/world intact |
+| `cyber_repetition.md` | **20/100** | deep failure — rules/world/responsiveness/player-sim all zeroed; long prose buys nothing |
+
+Each `RootCause` debits one dimension; a hard breach zeros it, quality issues erode
+it multiplicatively (monotone in severity — proven by `tests/soft_score.rs`). 语言
+has no deterministic probe in the static arm, so its 5 points are granted but
+surfaced as the **uncertainty band** (`±N 不确定`) rather than overclaimed.
+
 ## Run
 
 ```bash
@@ -54,8 +72,9 @@ src/model.rs        Transcript/Turn + RootCause/Severity/EvalFinding/Verdict (�
 src/parser.rs       战报 markdown → Transcript (GM raw fence + audience + 体检)
 src/probes/         repetition.rs · semantic.rs · debt.rs (the 6 root-cause probes)
 src/aggregate.rs    probes → Verdict (硬门槛: any High/Hard finding ⇒ FAIL)
-src/report.rs       evidenced red-board (蓝图 §八 格式)
-src/main.rs         CLI gate
+src/score.rs        软加权质量分 (蓝图 §七): 6 dims, 语言 weight lowest, uncertainty band
+src/report.rs       evidenced red-board (蓝图 §八 格式) + score section
+src/main.rs         CLI gate (--json emits verdict + score)
 ```
 
 ## Not yet built (later blueprint phases — see AcceptanceLedger)

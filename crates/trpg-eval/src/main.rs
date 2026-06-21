@@ -23,7 +23,11 @@ fn main() -> ExitCode {
     let verdict = trpg_eval::evaluate(&transcript);
 
     if args.iter().any(|a| a == "--json") {
-        println!("{}", serde_json::to_string_pretty(&verdict).unwrap());
+        let out = serde_json::json!({
+            "verdict": verdict,
+            "score": trpg_eval::score_card(&verdict),
+        });
+        println!("{}", serde_json::to_string_pretty(&out).unwrap());
     } else {
         print!("{}", trpg_eval::redboard(&transcript, &verdict));
     }
