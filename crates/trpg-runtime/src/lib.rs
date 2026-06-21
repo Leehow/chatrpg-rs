@@ -495,6 +495,84 @@ impl RuntimeEngine {
             .map(|s| s.title.clone())
     }
 
+    /// L-P Q3 OPENING-SCENE DELIVERY (flag `TRPG_OPENING_SCENE_DELIVERY`, default ON).
+    ///
+    /// Before the player's FIRST action, surface the module ENTRY scene's player-safe
+    /// establishing narration (spoiler-redacted `read_aloud`; anthology/spine modules →
+    /// prep-packet fallback). This makes the player — real `trpg play` shell OR the eval
+    /// harness sim — enter from a GM-set opening instead of a vacuum. Q3 root cause: a
+    /// vacuum opening lets the player assert an off-module landing point (a self-invented
+    /// "home/apartment") that the engine can never reclaim ⇒ location split/confusion =
+    /// HARD amnesia. Surfacing the authored entry establishing first removes that root.
+    ///
+    /// This is NOT a committed turn: it mutates no state and consumes no player action —
+    /// it is pure scene-setting read BEFORE turn 1. Reuses the SAME source-backed material
+    /// (`collect_scene_establishing`) the split Narrator already weaves on a normal turn.
+    ///
+    /// Returns `Ok(None)` — i.e. no pre-turn opening, byte-equal baseline — when: the flag
+    /// is OFF (`0/false/off/no`), no module is bound, the session already has ≥1 committed
+    /// turn (a resumed/in-progress session never re-delivers), or there is no establishing
+    /// material. fail-soft: any DB/load error degrades to `Ok(None)` (vacuum start, never a
+    /// hard error at the session door).
+    pub async fn opening_scene_delivery(
+        &self,
+        session_id: &str,
+        ruleset_id: &str,
+        module_id: Option<&str>,
+    ) -> Result<Option<String>> {
+        if !opening_scene_delivery_enabled() {
+            return Ok(None);
+        }
+        let Some(mid) = module_id else {
+            return Ok(None);
+        };
+        // Only at the true start (0 committed turns); resume never re-surfaces the opening.
+        if self
+            .db
+            .count_session_turns(session_id)
+            .await
+            .unwrap_or(0)
+            > 0
+        {
+            return Ok(None);
+        }
+        // Entry scene was activated at session init (ensure_session_initialized); self-heal
+        // path in prepare_turn_context covers stale sessions, but for a fresh session this is
+        // already set. Fall back to module graph entry if the session row has no scene yet.
+        let mut scene_id = self.db.load_session_scene(session_id).await.ok().flatten();
+        if scene_id.as_deref().map(str::trim).unwrap_or("").is_empty() {
+            if let Ok(Some(graph)) = self.db.load_module_graph(mid).await {
+                scene_id = module_entry_scene_id(&graph);
+            }
+        }
+        let project = match self.db.load_project_bundle_for_ruleset(ruleset_id).await {
+            Ok(Some(p)) => Some(p),
+            _ => self.db.load_latest_project_bundle().await.ok().flatten(),
+        };
+        let Some(project) = project else {
+            return Ok(None);
+        };
+        // Same source-backed collector the per-turn path uses (NON-secret read_aloud,
+        // spoiler-redacted); anthology/spine modules with no scene node fall back to the
+        // prep-packet's player-facing establishing fields.
+        let mut parts = scene_establishing::collect_scene_establishing(
+            &project.modules,
+            Some(mid),
+            scene_id.as_deref(),
+        );
+        if parts.is_empty() {
+            if let Ok(Some(csp)) = self.db.load_module_prep_packet_session(mid).await {
+                parts = scene_establishing::prep_packet_establishing(&csp);
+            }
+        }
+        let text = parts.join("\n\n");
+        let text = text.trim();
+        if text.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(text.to_string()))
+    }
+
     pub async fn prepare_turn_context(
         &self,
         request: &ContextRequest,
@@ -697,12 +775,23 @@ impl RuntimeEngine {
             // 等价基线。注:首入近似为"会话首回合";场景切换后新场景开场的再投留待 L-C(场景真推进)后细化。
             let read_aloud_already_delivered =
                 scene_projection::scene_read_aloud_first_entry_only_enabled()
-                    && self
+                    && (self
                         .db
                         .count_session_turns(&request.session_id)
                         .await
                         .unwrap_or(0)
-                        > 0;
+                        > 0
+                        // L-P Q3: the pre-turn opening delivery already surfaced the entry
+                        // scene's read_aloud BEFORE turn 1, so turn 1 (count==0) must not
+                        // re-deliver it. Gated by the SAME flag (default ON) + a bound module;
+                        // when `TRPG_OPENING_SCENE_DELIVERY=off` this term is false ⇒ the gate
+                        // reduces to the original `count>0` ⇒ byte-equal baseline.
+                        || (opening_scene_delivery_enabled()
+                            && request
+                                .module_id
+                                .as_deref()
+                                .or(state.module_id.as_deref())
+                                .is_some()));
             let scene_need = trpg_need::Need::Scene(trpg_need::SceneNeed {
                 scopes: trpg_need::NeedScopes {
                     ruleset_id: request.ruleset_id.clone(),
@@ -5637,6 +5726,21 @@ fn kernel_dicecore_is_source_enabled() -> bool {
         .unwrap_or(true)
 }
 
+/// L-P Q3 opening-scene delivery kill-switch (`TRPG_OPENING_SCENE_DELIVERY`, default ON).
+/// OFF (`0/false/off/no`) ⇒ no pre-turn opening surfaced AND the L-G read_aloud first-entry
+/// gate reverts to its original turn-count condition ⇒ byte-equal baseline. Pure decision in
+/// `opening_delivery_flag_on` (env-free, unit-tested) to avoid env-race in tests.
+fn opening_delivery_flag_on(raw: Option<&str>) -> bool {
+    !matches!(
+        raw.map(|v| v.to_ascii_lowercase()).as_deref(),
+        Some("0") | Some("false") | Some("off") | Some("no")
+    )
+}
+
+fn opening_scene_delivery_enabled() -> bool {
+    opening_delivery_flag_on(std::env::var("TRPG_OPENING_SCENE_DELIVERY").ok().as_deref())
+}
+
 /// A kernel `dice_core` is *typed* (a real resolution rule, not an empty stub)
 /// when it declares both a non-empty `dice` expression AND a non-empty `compare`
 /// rule. Generic over rulesets: no ruleset_id / module_id branching.
@@ -5687,6 +5791,33 @@ fn real_materialization_enabled() -> bool {
 }
 
 // NOTE: module_scene_proj_tests moved to scene_projection.rs
+
+#[cfg(test)]
+mod opening_delivery_flag_tests {
+    use super::opening_delivery_flag_on;
+
+    #[test]
+    fn unset_defaults_on() {
+        assert!(opening_delivery_flag_on(None), "未设 ⇒ 默认 ON");
+    }
+
+    #[test]
+    fn explicit_off_values_disable() {
+        for off in ["0", "false", "off", "no", "FALSE", "Off", "NO"] {
+            assert!(
+                !opening_delivery_flag_on(Some(off)),
+                "{off} ⇒ OFF (byte-equal baseline)"
+            );
+        }
+    }
+
+    #[test]
+    fn non_off_values_enable() {
+        for on in ["1", "true", "on", "yes", "whatever"] {
+            assert!(opening_delivery_flag_on(Some(on)), "{on} ⇒ ON (非关值即开)");
+        }
+    }
+}
 
 #[cfg(test)]
 mod module_scene_proj_tests_REMOVED_SEE_SCENE_PROJECTION_PLACEHOLDER {

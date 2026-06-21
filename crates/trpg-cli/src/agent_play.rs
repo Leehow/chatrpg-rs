@@ -52,6 +52,20 @@ pub async fn play_cli_agent(
     let mut history: Vec<ChatMessage> = Vec::new();
     let mut recent: Option<String> = None;
 
+    // L-P Q3 开场投递：玩家首个动作之前，GM 先投递模组入口场景的开场念白（read_aloud
+    // establishing）。让真玩家从「有 GM 设场的开场」进入，而非真空自创落点（Q3 根因：真空
+    // 开场→自创模组外落点→引擎收不回→位置失忆）。flag `TRPG_OPENING_SCENE_DELIVERY` 默认 ON；
+    // OFF ⇒ 返回 None ⇒ 不投 ⇒ 字节等价旧行为。已开局会话（count_session_turns>0）engine 返回
+    // None，绝不复投。把开场 seed 进连续性锚（recent），turn1 续写而非复述开场。fail-soft：任何
+    // 错误降级为不投，绝不在门口硬失败。
+    if let Ok(Some(opening)) = engine
+        .opening_scene_delivery(&session_id, ruleset, module)
+        .await
+    {
+        println!("\n{opening}\n");
+        recent = Some(format!("\nGM: {opening}\n"));
+    }
+
     loop {
         print!("\n[chatrpg]> ");
         io::stdout().flush().ok();

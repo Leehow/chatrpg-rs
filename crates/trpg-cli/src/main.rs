@@ -87,6 +87,20 @@ enum Commands {
     /// Run exactly one GM turn without opening the interactive play shell.
     /// Useful for pipes, regression tests, scripts, and LLM-driven debugging.
     Turn(TurnArgs),
+    /// L-P Q3: Deliver the module ENTRY scene's opening establishing narration for a
+    /// session, BEFORE the player's first action. Prints the player-safe read_aloud
+    /// opening to stdout (no committed turn, no player action consumed). The eval harness
+    /// and any front-end consume this so the player enters from a GM-set opening, not a
+    /// vacuum. Flag `TRPG_OPENING_SCENE_DELIVERY` (default ON); OFF / no establishing ⇒
+    /// prints nothing (exit 0).
+    Opening {
+        #[arg(long)]
+        ruleset: String,
+        #[arg(long)]
+        module: Option<String>,
+        #[arg(long)]
+        session_id: String,
+    },
     /// Dump a turn's Flight-Recorder trace (phases, Need source refs, BP hashes, failure/warnings).
     Explain {
         #[arg(long)]
@@ -629,6 +643,11 @@ async fn main() -> Result<()> {
             session_id,
         } => agent_play::play_cli_agent(&ruleset, module.as_deref(), session_id.as_deref()).await,
         Commands::Turn(args) => turn_cli(args).await,
+        Commands::Opening {
+            ruleset,
+            module,
+            session_id,
+        } => opening_cli(&ruleset, module.as_deref(), &session_id).await,
         Commands::Explain { session, turn } => explain_cli(&session, &turn).await,
         Commands::Coverage { session } => coverage_cli(&session).await,
         Commands::Rg(args) => search_query_cli(args).await,
@@ -1008,6 +1027,23 @@ async fn grow_cli(
             "bucket": bucket, "id": id, "op": op, "amount": amount, "value": text
         })
     );
+    Ok(())
+}
+
+/// L-P Q3 opening-scene delivery: print the module entry scene's pre-turn establishing
+/// narration to stdout (empty when the flag is off / no module / no establishing material).
+/// Search-free runtime — opening delivery only reads the DB. Never opens a turn.
+async fn opening_cli(ruleset: &str, module: Option<&str>, session_id: &str) -> Result<()> {
+    let db = connect_db().await?;
+    db.migrate().await?;
+    let engine = RuntimeEngine::new(db.clone());
+    if let Some(text) = engine
+        .opening_scene_delivery(session_id, ruleset, module)
+        .await?
+    {
+        print!("{text}");
+        io::stdout().flush().ok();
+    }
     Ok(())
 }
 
