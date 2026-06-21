@@ -320,6 +320,43 @@ pub fn relationship_extraction_enabled() -> bool {
     )
 }
 
+/// L-H(PC↔NPC):合成「玩家角色」实体端点。让最基本的记忆——玩家与本场景在场 NPC 的关系/
+/// 认知——在单 NPC(甚至隐名)场景也能成三元组(pc.current, predicate, npc)。零规则集/模组硬编码:
+/// id 用通用 actor id `pc.current`,kind 通用 `pc`,名字/简介通用不含任何模组名。
+pub fn pc_entity_ref() -> EntityRef {
+    EntityRef {
+        id: "pc.current".to_string(),
+        kind: "pc".to_string(),
+        name: "玩家角色".to_string(),
+        prose: "本局由玩家操作的主角(player character)。".to_string(),
+    }
+}
+
+/// L-H:把当前回合「在场 active NPC」(由 scene.referenced_npc_ids 派生,见 npc_activation)
+/// 解析成带名字/简介的 [`EntityRef`]。复用 [`resolve_entity_refs`](统一 fail-soft:图谱里找不到/
+/// 名字简介都空 → 跳过)。这些是玩家此刻真实面对的 NPC,不是名字匹配浮现集(故隐名无人机也算端点)。
+pub fn resolve_active_npc_refs(active_npc_ids: &[String], graph: &ModuleGraph) -> Vec<EntityRef> {
+    let pairs: Vec<(String, String)> = active_npc_ids
+        .iter()
+        .filter(|id| !id.trim().is_empty())
+        .map(|id| (id.clone(), "npc".to_string()))
+        .collect();
+    resolve_entity_refs(&pairs, graph)
+}
+
+/// L-H 开关 `TRPG_PC_NPC_RELATIONSHIP`(默认 ON;仅 0/false/off/no 关)。关 ⇒ 不做 PC↔NPC
+/// 兜底增广,关系抽取与历史 NPC↔NPC 路径字节等价。镜像 BUG-1/L-E/L-G/L-C 模式。
+pub fn pc_npc_relationship_enabled() -> bool {
+    !matches!(
+        std::env::var("TRPG_PC_NPC_RELATIONSHIP")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "0" | "false" | "off" | "no"
+    )
+}
+
 /// 写入阈值 `TRPG_RELATIONSHIP_MIN_CONFIDENCE`（默认 0.6）。低于即丢（fail-closed）。
 pub fn relationship_min_confidence() -> f32 {
     std::env::var("TRPG_RELATIONSHIP_MIN_CONFIDENCE")

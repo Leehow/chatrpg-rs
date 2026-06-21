@@ -1173,6 +1173,7 @@ impl RuntimeEngine {
         narration: &str,
         active_npc_ids: &[String],
         player_input: &str,
+        scene_id: Option<&str>,
     ) -> usize {
         if !relationship_extraction::relationship_extraction_enabled()
             || narration.trim().is_empty()
@@ -1185,7 +1186,34 @@ impl RuntimeEngine {
             .list_surfaced_entities(session_id)
             .await
             .unwrap_or_default();
-        if surfaced.len() < 2 {
+        // L-H(PC↔NPC)端点喂入修复:Enforce 模式下调用方 `state.active_npc_ids` 恒空(每回合派生集
+        // 落在 GM compiled ctx 而非 RuntimeState)。当 PC↔NPC flag 开且调用方集为空时,退回当前场景的
+        // `referenced_npc_ids`——与 PlayerExposed / npc_activation 同一 source-backed 派生——使单 NPC
+        // 在场场景也能成 (pc, predicate, npc) 端点对。flag OFF 或调用方集非空 ⇒ 不派生 = 基线字节等价。
+        let derived_active: Vec<String> = if relationship_extraction::pc_npc_relationship_enabled()
+            && active_npc_ids.is_empty()
+        {
+            match self.db.load_module_graph(module_id).await {
+                Ok(Some(g)) => scene_id
+                    .and_then(|sid| g.scenes.iter().find(|s| s.node_id == sid))
+                    .map(|n| n.referenced_npc_ids.clone())
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        };
+        let active_npc_ids: &[String] = if derived_active.is_empty() {
+            active_npc_ids
+        } else {
+            &derived_active
+        };
+        // L-H(PC↔NPC):当玩家已暴露实体不足 2,但本回合有在场 active NPC 且 flag 开,允许用
+        // 「PC + 在场 NPC」做端点(下方增广),故此处不早退。OFF / 无 active NPC ⇒ 条件退化为
+        // `surfaced.len() < 2` = 历史基线(字节等价)。
+        let lh_pc_npc =
+            relationship_extraction::pc_npc_relationship_enabled() && !active_npc_ids.is_empty();
+        if surfaced.len() < 2 && !lh_pc_npc {
             return 0; // 关系至少需要两个已知端点。
         }
         // TC-D3-04 社交闸：在「本回合 surface 了新实体」之外，再放行「有 active NPC 在场 +
@@ -1220,7 +1248,20 @@ impl RuntimeEngine {
                 return 0;
             }
         };
-        let entities = relationship_extraction::resolve_entity_refs(&surfaced, &graph);
+        let mut entities = relationship_extraction::resolve_entity_refs(&surfaced, &graph);
+        // L-H(PC↔NPC)兜底:NPC↔NPC 端点不足 2(典型:入口隐名单 NPC 场景,玩家暴露集 <2)时,
+        // 若有在场 active NPC + flag 开,改用「在场 NPC + 合成 PC 端点」抽 (pc, predicate, npc)
+        // 关系——这是玩家与所遇 NPC 的最基本记忆,不依赖场景推进/不依赖玩家上 spine。memory_fact
+        // 为 GmOnly(不直出玩家,隐名 NPC 不剧透)。flag OFF / 无在场 NPC ⇒ 此块跳过 = 基线字节等价。
+        if entities.len() < 2 && relationship_extraction::pc_npc_relationship_enabled() {
+            let active_refs =
+                relationship_extraction::resolve_active_npc_refs(active_npc_ids, &graph);
+            if !active_refs.is_empty() {
+                let mut augmented = active_refs;
+                augmented.push(relationship_extraction::pc_entity_ref());
+                entities = augmented; // PC + ≥1 在场 NPC ⇒ ≥2 端点
+            }
+        }
         if entities.len() < 2 {
             return 0;
         }

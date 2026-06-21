@@ -198,6 +198,44 @@ fn resolve_maps_names_and_skips_unknown() {
 }
 
 #[test]
+fn lh_pc_npc_endpoints_resolve_and_extract() {
+    // L-H：入口隐名单 NPC 场景。玩家暴露集 <2，但在场 active NPC = [npc_athena]。
+    // 用「在场 NPC + 合成 PC」做端点 ⇒ 可抽 (pc.current, predicate, npc_athena) 三元组。
+    let graph = ModuleGraph {
+        npcs: vec![json!({"id":"npc_athena","name":"Athena","summary":"失控无人机"})],
+        ..Default::default()
+    };
+    let active_refs = resolve_active_npc_refs(&["npc_athena".to_string()], &graph);
+    assert_eq!(active_refs.len(), 1, "在场 NPC 解析成端点");
+    let mut ents = active_refs;
+    ents.push(pc_entity_ref());
+    assert_eq!(ents.len(), 2, "PC + 1 在场 NPC = 2 端点");
+    assert!(ents.iter().any(|e| e.id == "pc.current" && e.kind == "pc"));
+
+    // 抽取器接受 (pc.current → npc_athena) 三元组（两端均在已知集）。
+    let raw = json!({"triples":[{"subject":"pc.current","predicate":"confronts",
+        "object":"npc_athena","summary":"玩家直面失控无人机","confidence":0.9}]});
+    let facts = parse_relationship_triples(&raw, "sess_lh", "turn1", &ents, 0.6);
+    assert_eq!(facts.len(), 1, "PC↔NPC 三元组被接受");
+    assert_eq!(facts[0].subject, "pc.current");
+    assert_eq!(facts[0].object, json!("npc_athena"));
+}
+
+#[test]
+fn lh_resolve_active_npc_refs_skips_empty_and_unknown() {
+    let graph = ModuleGraph {
+        npcs: vec![json!({"id":"npc_athena","name":"Athena","summary":"drone"})],
+        ..Default::default()
+    };
+    let refs = resolve_active_npc_refs(
+        &["".to_string(), "ghost".to_string(), "npc_athena".to_string()],
+        &graph,
+    );
+    assert_eq!(refs.len(), 1, "空 id 跳过、图谱外 ghost 跳过");
+    assert_eq!(refs[0].id, "npc_athena");
+}
+
+#[test]
 fn build_messages_include_narration_and_entities() {
     let msgs = build_relationship_messages("Raul handed over the letter.", &ents());
     assert!(msgs.len() >= 2, "system + user");

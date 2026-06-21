@@ -468,6 +468,8 @@ fn spawn_heavy(
                 // 互动（威胁/讨价/帮助…）的回合也能抽关系；普通非社交回合仍跳过。
                 &req.state.active_npc_ids,
                 &req.user_input,
+                // L-H：当前场景（PlayerExposed 同一 fallback）供 PC↔NPC 端点派生。
+                fallback_scene_id,
             )
             .await;
         // 到场深抽 + frontier（仅 critical 真切了场景时）。

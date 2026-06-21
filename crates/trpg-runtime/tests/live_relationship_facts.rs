@@ -162,6 +162,7 @@ async fn relationship_triple_written_and_gated_by_new_surface() {
             // 本测专测「新实体 surface」成本闸：社交信号置空，确保只由 surfaced_new 驱动。
             &[],
             "",
+            None,
         )
         .await;
     assert_eq!(
@@ -234,6 +235,7 @@ async fn relationship_triple_written_and_gated_by_new_surface() {
             "Raul slid the bloody letter across the counter, hand trembling.",
             &[],
             "",
+            None,
         )
         .await;
     assert_eq!(
@@ -270,6 +272,7 @@ async fn relationship_triple_written_and_gated_by_new_surface() {
             "Raul slid the bloody letter across the counter, hand trembling.",
             &[],
             "",
+            None,
         )
         .await;
     assert_eq!(
