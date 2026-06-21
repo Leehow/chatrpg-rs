@@ -1770,6 +1770,10 @@ impl GmLoop {
                 // Proposal 仅在 HeavyPostprocess hook 产出；即便误挂到此 hook 也只记 trace
                 // （上方已 push）、不应用、绝不落库（propose-not-commit），fail-safe no-op。
                 crate::plugin::PluginContributionKind::Proposal(_) => {}
+                // L9.2 BeatWeight：Director MATERIAL（评分时择用），非 prompt/filter；此应用
+                // 站点只记 trace（上方已 push）、不在此应用，fail-safe no-op。内置 always-on host
+                // 不注册任何 BeatWeight emitter ⇒ 此臂在 OFF 基线永不命中（字节等价）。
+                crate::plugin::PluginContributionKind::BeatWeight(_) => {}
             }
         }
         // ContextFilter 应用（fail-soft）：删命中块 + 经 runtime 同渲染路径重算受影响 band

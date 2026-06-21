@@ -131,7 +131,34 @@ pub struct SecretTerm {
     pub fact_id: Option<String>,
 }
 
-/// 贡献载荷（4 类：防剧透三段 + HeavyPostprocess 提案）。
+/// L9.2 — 一条对某个候选 beat 的**重权提议**（pacing/foreshadowing 插件用）。
+///
+/// 纯结构数据：`beat_kind` + 一个加性 `weight_delta`（正=拉向选中，负=推离）。插件只
+/// **提议**，绝不持有核心 story state、绝不直接改 DirectorPlan/StoryState；Director 在
+/// 评分时**可**折入这些 delta（propose-not-commit，§十四）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct BeatWeightTerm {
+    /// 被重权的候选 beat 种类（通用枚举，无规则集/模组名分支 §二-⑪）。
+    pub beat_kind: trpg_model::BeatKind,
+    /// 加性权重增量（典型 -1.0..=1.0；Director 折入线性评分时叠加，越界由 Director 夹取）。
+    pub weight_delta: f32,
+}
+
+/// L9.2 — pacing/foreshadowing 插件的**提议载荷**：重权候选 beat + 可选场景约束。
+///
+/// 插件不持有核心 story state（§十四）：它只读 `PluginContext` 快照、产出这份提议；
+/// host 收集、Director 评分时择用。`rationale` 仅审计用的通用结构 token，绝不夹带秘密正文。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct BeatWeightProposal {
+    /// 每个候选 beat 的重权项（空=不重权）。
+    pub beat_weights: Vec<BeatWeightTerm>,
+    /// 可选场景约束（通用结构 token，如 `relieve_tension` / `hold_scene`）。
+    pub scene_constraints: Vec<String>,
+    /// 审计用通用理由 token（非秘密正文）。
+    pub rationale: String,
+}
+
+/// 贡献载荷（5 类：防剧透三段 + HeavyPostprocess 提案 + L9.2 beat 重权提议）。
 ///
 /// 不派生 `Serialize`：`ContextBlock` / `VerifierFinding` 用 trace 摘要落
 /// Flight Recorder（见 `PluginContribution::to_trace`），契约本身只需 `Clone+Debug`。
@@ -144,6 +171,9 @@ pub enum PluginContributionKind {
     /// WorldFact / KnowledgeUpdate / NpcRelationshipDelta / MemoryFact 候选。插件只
     /// 提案，不落库；runtime 验证后才落事件/投影（propose-not-commit）。
     Proposal(trpg_model::MemoryExtractionProposal),
+    /// L9.2 **beat 重权提议**：pacing/foreshadowing 插件提议如何重权候选 beat /
+    /// 约束场景计划。Director 评分时择用，插件不持核心状态、不落库（propose-not-commit）。
+    BeatWeight(BeatWeightProposal),
 }
 
 impl PluginContributionKind {
@@ -154,6 +184,7 @@ impl PluginContributionKind {
             PluginContributionKind::ContextFilter(_) => "context_filter",
             PluginContributionKind::VerifierFinding(_) => "verifier_finding",
             PluginContributionKind::Proposal(_) => "proposal",
+            PluginContributionKind::BeatWeight(_) => "beat_weight",
         }
     }
 
@@ -173,8 +204,22 @@ impl PluginContributionKind {
                 .and_then(|v| v.as_str().map(|s| s.to_string()))
                 .unwrap_or_else(|| format!("{:?}", vf.kind)),
             PluginContributionKind::Proposal(p) => proposal_summary(p),
+            // 安全结构摘要：只露重权项数 + 约束数 + 各 beat 种类 token，绝不夹带秘密正文。
+            PluginContributionKind::BeatWeight(bw) => beat_weight_summary(bw),
         }
     }
+}
+
+/// beat 重权提议的安全摘要：只露稳定的 beat 种类 token + 计数，绝不回显 rationale 正文
+/// （rationale 虽为插件自产审计 token，摘要仍只走结构计数，与 proposal_summary 同纪律）。
+fn beat_weight_summary(bw: &BeatWeightProposal) -> String {
+    let kinds: Vec<&str> = bw.beat_weights.iter().map(|t| t.beat_kind.as_str()).collect();
+    format!(
+        "beat_weight:{} term(s)[{}],{} constraint(s)",
+        bw.beat_weights.len(),
+        kinds.join("|"),
+        bw.scene_constraints.len()
+    )
 }
 
 /// 提案的安全摘要：只暴露 proposal_kind + 稳定身份 id，绝不回显事实正文。

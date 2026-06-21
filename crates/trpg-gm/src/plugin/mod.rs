@@ -15,6 +15,7 @@
 
 pub mod builtin_no_mechanical;
 pub mod builtin_no_spoiler;
+pub mod builtin_pacing;
 pub mod builtin_player_agency;
 pub mod builtin_scene_boundary;
 pub mod builtin_source_backed;
@@ -24,6 +25,7 @@ pub mod types;
 
 pub use builtin_no_mechanical::NoMechanicalInvention;
 pub use builtin_no_spoiler::NoSpoilerGuard;
+pub use builtin_pacing::PacingPlugin;
 pub use builtin_player_agency::PlayerAgencyGuard;
 pub use builtin_scene_boundary::SceneBoundaryGuard;
 pub use builtin_source_backed::SourceBackedRulesGuard;
@@ -32,8 +34,9 @@ pub use spoiler_source::{
     derive_scene_block_view, harvest_module_secret_terms, scene_node_id_from_block,
 };
 pub use types::{
-    ContextFilterSpec, ContributionMeta, FailPolicy, PluginContext, PluginContribution,
-    PluginContributionKind, PluginHook, PrivateBlockView, SafetyClass, SecretTerm,
+    BeatWeightProposal, BeatWeightTerm, ContextFilterSpec, ContributionMeta, FailPolicy,
+    PluginContext, PluginContribution, PluginContributionKind, PluginHook, PrivateBlockView,
+    SafetyClass, SecretTerm,
 };
 
 use std::sync::LazyLock;
