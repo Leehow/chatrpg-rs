@@ -127,6 +127,24 @@ pub(crate) fn scene_static_framing_subordinate_enabled() -> bool {
     )
 }
 
+/// L-M 位置失忆结构杠杆(主管 Q1_ANSWER 批准的「committed-scene 与玩家叙事位置背离时背景化冻结
+/// 场景定场/NPC 支配」的彻底版):L-I 只把冻结场景的 `gm_notes`(开场战斗布置散文)/NPC 到场散文
+/// **降格**为背景参考——但全文仍每回合注入,GM 仍据此把仓库交火现场与玩家既定位置**叠加**(smokeK7
+/// 实证 4/4 回合「GM 把玩家位置同时写成仓库前和家门口」=硬位置失忆)。本杠杆在 subordinate 路径上
+/// **彻底压制**这些静态散文正文:gm_notes 正文/NPC 到场散文不再投放(其可机械化部分由 `scene_mechanics`
+/// 块另投,不丢;NPC 仅留名册名),只留一行「以连续性锚为位置权威」指令 ⇒ GM 上下文里不再有可被复述/
+/// 叠加的仓库交火正文。**默认 ON**(eval profile 不设 ⇒ 自动吃到),OFF ⇒ 退回 L-I 降格行为(字节等价)。
+/// 零 ruleset 分支。durable 机制(grab/cut-power/hack)经 scene_mechanics 投,J2 不回退。
+pub(crate) fn scene_frozen_framing_suppress_enabled() -> bool {
+    !matches!(
+        std::env::var("TRPG_SCENE_FROZEN_FRAMING_SUPPRESS")
+            .ok()
+            .map(|v| v.to_ascii_lowercase())
+            .as_deref(),
+        Some("0") | Some("false") | Some("off") | Some("no")
+    )
+}
+
 pub(crate) fn scene_node_to_blocks(
     module_id: &str,
     n: &ScenarioNode,
@@ -155,6 +173,9 @@ pub(crate) fn scene_node_to_blocks_with_opts(
     // L-I:首进已交付后(include_read_aloud=false)且 flag 开 ⇒ 把开场战斗布置/到场散文降格为
     // 从属于连续性锚的持久背景参考(防位置失忆)。OFF 或首进路径 ⇒ subordinate=false ⇒ 字节等价。
     let subordinate = !include_read_aloud && scene_static_framing_subordinate_enabled();
+    // L-M:subordinate 路径上彻底压制冻结场景静态散文(gm_notes 正文/NPC 到场散文),只留位置权威
+    // 指令——OFF ⇒ suppress=false ⇒ 退回 L-I 降格行为(字节等价)。
+    let suppress = subordinate && scene_frozen_framing_suppress_enabled();
     let mut body = String::new();
     if let Some(ra) = &n.read_aloud {
         if !ra.trim().is_empty() {
@@ -183,19 +204,29 @@ pub(crate) fn scene_node_to_blocks_with_opts(
     }
     if let Some(g) = &n.gm_notes {
         if !g.trim().is_empty() {
-            body.push_str(if subordinate {
-                "\n【GM · 场景持久参考（背景设定，非当前时刻）】\n"
+            if suppress {
+                // L-M:不投 gm_notes 开场布置散文正文(其可机械化部分由 scene_mechanics 块另投);
+                // 仅留一行——彻底移除可被 GM 复述/与玩家既定位置叠加的仓库交火正文。
+                body.push_str(
+                    "\n【GM · 本场景开场布置/注记已于首次进入时交付，其可机械化部分由「场景机制」块投放；此处不复述正文。玩家当前所在位置与既成局面一律以「连续性锚」为准；若本场景核心冲突需要介入，按§4 让冲突主动来到玩家当前所在处，绝不把玩家挪回此场景的到场/开场点位。】\n",
+                );
             } else {
-                "\n【GM】\n"
-            });
-            body.push_str(g);
-            body.push('\n');
+                body.push_str(if subordinate {
+                    "\n【GM · 场景持久参考（背景设定，非当前时刻）】\n"
+                } else {
+                    "\n【GM】\n"
+                });
+                body.push_str(g);
+                body.push('\n');
+            }
         }
     }
     if subordinate && !n.referenced_npc_ids.is_empty() {
-        body.push_str(
-            "\n[场景角色名册 · 持久参考；谁在场、与玩家的距离/关系一律以当前既成局面（连续性锚）为准]",
-        );
+        body.push_str(if suppress {
+            "\n[场景角色名册 · 仅备名；谁在场/与玩家的距离/关系一律以当前既成局面（连续性锚）为准，勿据下表把任何 NPC 重新拉到玩家面前]"
+        } else {
+            "\n[场景角色名册 · 持久参考；谁在场、与玩家的距离/关系一律以当前既成局面（连续性锚）为准]"
+        });
     }
     for id in &n.referenced_npc_ids {
         if let Some(v) = npcs
@@ -206,8 +237,13 @@ pub(crate) fn scene_node_to_blocks_with_opts(
             // Deep-extracted entities (reader DEEP_SYS) carry prose in `body`
             // (or the locale-variant key `正文`, env-gated); shallow/index
             // entities use `summary`. Single source: entity_body_prose.
-            let sum = entity_body_prose(v).unwrap_or("");
-            body.push_str(&format!("\n[NPC] {name}: {sum}"));
+            if suppress {
+                // L-M:仅留 NPC 名,不投到场散文正文(防 GM 据散文把 NPC 拉回玩家面前 / 叠加场景)。
+                body.push_str(&format!("\n[NPC] {name}"));
+            } else {
+                let sum = entity_body_prose(v).unwrap_or("");
+                body.push_str(&format!("\n[NPC] {name}: {sum}"));
+            }
         }
     }
     // §Phase4 出口投影：把本场景 links 解析成『目标场景标题 → 通往理由』，让 GM
@@ -475,6 +511,9 @@ mod module_scene_proj_tests {
     #[test]
     fn read_aloud_first_entry_gate_suppresses_prose_but_keeps_reference() {
         let _g = DeepZoneEnvGuard::unset();
+        // 本测专验 L-G 定场文门控保留 gm_notes/NPC 参考 ⇒ 关 L-M 彻底压制(否则散文被抹)。
+        let prev_lm = std::env::var("TRPG_SCENE_FROZEN_FRAMING_SUPPRESS").ok();
+        std::env::set_var("TRPG_SCENE_FROZEN_FRAMING_SUPPRESS", "off");
         let mut n = ScenarioNode::default();
         n.node_id = "loc1".into();
         n.title = "加油站".into();
@@ -500,6 +539,10 @@ mod module_scene_proj_tests {
         assert!(text.contains("请勿复述"), "应留锚提示防 GM 重述: {text}");
         assert!(text.contains("拉斯"), "NPC 参考仍每回合在: {text}");
         assert!(text.contains("钥匙"), "gm_notes 仍每回合在: {text}");
+        match prev_lm {
+            Some(v) => std::env::set_var("TRPG_SCENE_FROZEN_FRAMING_SUPPRESS", v),
+            None => std::env::remove_var("TRPG_SCENE_FROZEN_FRAMING_SUPPRESS"),
+        }
     }
 
     /// L-G flag 默认 ON;仅显式关值 OFF(镜像 BUG-1/L-E)。env 进程级 ⇒ 串行 set/remove 并复原。
@@ -530,6 +573,9 @@ mod module_scene_proj_tests {
     fn static_framing_subordinate_flag_and_behavior() {
         let _lock = N3_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("TRPG_SCENE_STATIC_FRAMING_SUBORDINATE").ok();
+        // 本测专验 L-I 降格(保留 gm_notes/NPC 散文)语义 ⇒ 关 L-M 彻底压制,否则散文被 L-M 抹掉。
+        let prev_lm = std::env::var("TRPG_SCENE_FROZEN_FRAMING_SUPPRESS").ok();
+        std::env::set_var("TRPG_SCENE_FROZEN_FRAMING_SUPPRESS", "off");
         let mut n = ScenarioNode::default();
         n.node_id = "loc1".into();
         n.title = "仓库".into();
@@ -569,6 +615,73 @@ mod module_scene_proj_tests {
         assert!(off_t.contains("请勿复述"), "OFF 仍保留 L-G read_aloud 锚提示: {off_t}");
 
         match prev {
+            Some(v) => std::env::set_var("TRPG_SCENE_STATIC_FRAMING_SUBORDINATE", v),
+            None => std::env::remove_var("TRPG_SCENE_STATIC_FRAMING_SUBORDINATE"),
+        }
+        match prev_lm {
+            Some(v) => std::env::set_var("TRPG_SCENE_FROZEN_FRAMING_SUPPRESS", v),
+            None => std::env::remove_var("TRPG_SCENE_FROZEN_FRAMING_SUPPRESS"),
+        }
+    }
+
+    /// L-M(主管批准的位置失忆结构杠杆彻底版):subordinate 路径默认 ON ⇒ **彻底压制** gm_notes 开场
+    /// 散文正文 + NPC 到场散文(防 GM 把仓库交火与玩家既定位置叠加=硬失忆);仅留 NPC 名 + 位置权威
+    /// 指令。显式 OFF ⇒ 退回 L-I 降格(保留散文)字节等价。durable 机制经 scene_mechanics 投,不验此。
+    #[test]
+    fn frozen_framing_suppress_flag_and_behavior() {
+        let _lock = N3_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("TRPG_SCENE_FROZEN_FRAMING_SUPPRESS").ok();
+        let prev_sub = std::env::var("TRPG_SCENE_STATIC_FRAMING_SUBORDINATE").ok();
+        // subordinate 必须 ON(L-M 仅在 subordinate 路径生效);用默认 ON。
+        std::env::remove_var("TRPG_SCENE_STATIC_FRAMING_SUBORDINATE");
+        let mut n = ScenarioNode::default();
+        n.node_id = "loc1".into();
+        n.title = "仓库".into();
+        n.read_aloud = Some("警笛把你引向第四街的小仓库……".into());
+        n.gm_notes = Some("开场战斗:无人机被警方围攻，PC 别无选择只能应战。".into());
+        n.extraction_status = SceneExtractionStatus::DeepExtracted;
+        n.referenced_npc_ids = vec!["npc1".into()];
+        let npcs = vec![serde_json::json!({"id":"npc1","name":"雅典娜","summary":"失控无人机"})];
+
+        // 默认 ON(未设)⇒ 压制:gm_notes 开场散文 + NPC 到场散文均不投,仅留 NPC 名 + 位置权威。
+        std::env::remove_var("TRPG_SCENE_FROZEN_FRAMING_SUPPRESS");
+        assert!(scene_frozen_framing_suppress_enabled(), "未设 ⇒ 默认 ON");
+        let on = scene_node_to_blocks_with_opts("mod1", &n, &npcs, &[], false);
+        let on_t = on[0].content.render_text();
+        assert!(
+            !on_t.contains("别无选择只能应战"),
+            "L-M ON 应彻底压制 gm_notes 开场散文正文: {on_t}"
+        );
+        assert!(
+            !on_t.contains("失控无人机"),
+            "L-M ON 应彻底压制 NPC 到场散文正文: {on_t}"
+        );
+        assert!(on_t.contains("雅典娜"), "L-M ON 仍留 NPC 名(名册): {on_t}");
+        assert!(
+            on_t.contains("连续性锚"),
+            "L-M ON 应留位置权威指令(以连续性锚为准): {on_t}"
+        );
+        assert!(
+            on_t.contains("此处不复述正文"),
+            "L-M ON 应留不复述指令: {on_t}"
+        );
+
+        // OFF ⇒ 退回 L-I 降格:gm_notes/NPC 散文保留。
+        std::env::set_var("TRPG_SCENE_FROZEN_FRAMING_SUPPRESS", "off");
+        assert!(!scene_frozen_framing_suppress_enabled(), "off ⇒ OFF");
+        let off = scene_node_to_blocks_with_opts("mod1", &n, &npcs, &[], false);
+        let off_t = off[0].content.render_text();
+        assert!(
+            off_t.contains("别无选择只能应战"),
+            "L-M OFF 应退回 L-I 保留 gm_notes 散文: {off_t}"
+        );
+        assert!(off_t.contains("失控无人机"), "L-M OFF 应退回 L-I 保留 NPC 散文: {off_t}");
+
+        match prev {
+            Some(v) => std::env::set_var("TRPG_SCENE_FROZEN_FRAMING_SUPPRESS", v),
+            None => std::env::remove_var("TRPG_SCENE_FROZEN_FRAMING_SUPPRESS"),
+        }
+        match prev_sub {
             Some(v) => std::env::set_var("TRPG_SCENE_STATIC_FRAMING_SUBORDINATE", v),
             None => std::env::remove_var("TRPG_SCENE_STATIC_FRAMING_SUBORDINATE"),
         }

@@ -273,6 +273,58 @@ pub(crate) fn render_continuity_anchor(tail: &str) -> String {
     )
 }
 
+/// L-D 开场收敛锚开关。**默认 ON**(eval profile 不设 ⇒ 自动吃到),OFF 字节等价基线
+/// (开场回合不注入收敛块)。仅显式 `0`/`false`/`off`/`no` 关。与 continuity anchor 同模
+/// (默认 ON / OFF baseline)。
+pub(crate) fn gm_opening_convergence_enabled() -> bool {
+    !matches!(
+        std::env::var("TRPG_GM_OPENING_CONVERGENCE")
+            .ok()
+            .map(|v| v.to_ascii_lowercase())
+            .as_deref(),
+        Some("0") | Some("false") | Some("off") | Some("no")
+    )
+}
+
+/// L-D:开场/归乡到达收敛指令(纯函数,易测)。continuity anchor 的对称物——锚治 turn>1
+/// (禁把玩家挪回入口),本指令治本局**开场回合**:玩家在毫无前序念白的真空里凭 objective
+/// 自创"回家/回街区"动作,GM 会另起一个**模组之外的独立"家"地点**、又同时投入口场景定场文
+/// ⇒ turn1 念白把玩家**一分为二**(既在仓库又在家)= 硬位置失忆根(Q2 DB 实证)。
+/// 本指令把玩家开场声明的"归乡/回家/前往某处"**收敛到模组开场场景所在地**:其归乡所见 =
+/// 本开场场景此刻的处境(§3 浮现 + §4 把玩家框定带到内容处,非 railroad——玩家在场景内仍自由)。
+/// `scene_hint` = 开场场景标题(可空;空则泛指"本开场场景")。
+pub(crate) fn render_opening_convergence(scene_hint: Option<&str>) -> String {
+    let where_ = match scene_hint {
+        Some(t) if !t.trim().is_empty() => format!("本模组的开场场景「{}」", t.trim()),
+        _ => "本模组的开场场景".to_string(),
+    };
+    format!(
+        "【开场收敛锚 · 本回合是本局的开场/到达（权威）】\n\
+         本回合是玩家这一局的**第一幕**。玩家此刻正“到达/归乡”进入{where_}\
+         （其开场定场文已于本回合首次进入投放）。\n\
+         ⚠️ 把玩家本回合声明的“回家／回到街区／前往某处”一律解析为**到达本开场场景所在地**——\
+         玩家的归乡所见 = 本开场场景此刻正在发生的处境：\n\
+         - **绝不**另起一个本开场场景之外、模组未背书的独立“家／别处”地点，使玩家位置一分为二；\n\
+         - **绝不**把玩家同时写在两个地方；以本开场场景为其当前**唯一**所在；\n\
+         - 若玩家声明前往一个模组未背书的去处，按§4 把其落点**收敛到本场景**：\
+           他/她到达的正是这里此刻发生的事，而非一处空白别处；\n\
+         - 从本场景的既成处境**向前**叙述一次，不要把开场拆成“先到家、又在别处”的叠加。",
+    )
+}
+
+/// L-D:构造 GmOnly 开场收敛锚块(复用 BlockKind::RecentTranscript,不新增 db block_kind 词表)。
+pub(crate) fn opening_convergence_block(scene_hint: Option<&str>) -> ContextBlock {
+    let mut block = dynamic_text_block(
+        "runtime.opening_convergence",
+        BlockKind::RecentTranscript,
+        "Opening Convergence",
+        &render_opening_convergence(scene_hint),
+        vec!["recent_transcript", "opening_convergence"],
+    );
+    block.load_reason = Some("gm_opening_convergence".into());
+    block
+}
+
 /// L-E:构造 GmOnly 连续性锚块(复用 BlockKind::RecentTranscript,不新增 db block_kind 词表)。
 pub(crate) fn continuity_anchor_block(tail: &str) -> ContextBlock {
     let mut block = dynamic_text_block(
@@ -371,6 +423,71 @@ mod continuity_anchor_tests {
         assert_eq!(b.stability, Stability::TurnDynamic);
         assert!(b.tags.iter().any(|t| t == "continuity_anchor"));
         assert!(b.content.render_text().contains("局面"));
+    }
+}
+
+#[cfg(test)]
+mod opening_convergence_tests {
+    use super::*;
+
+    /// 默认 ON;仅显式关值才 OFF。env 进程级全局 ⇒ 单测内串行 set/remove 并复原。
+    #[test]
+    fn flag_defaults_on_and_only_explicit_off_disables() {
+        let prev = std::env::var("TRPG_GM_OPENING_CONVERGENCE").ok();
+        std::env::remove_var("TRPG_GM_OPENING_CONVERGENCE");
+        assert!(gm_opening_convergence_enabled(), "未设 ⇒ 默认 ON");
+        for off in ["0", "false", "OFF", "no"] {
+            std::env::set_var("TRPG_GM_OPENING_CONVERGENCE", off);
+            assert!(!gm_opening_convergence_enabled(), "{off} ⇒ OFF");
+        }
+        for on in ["1", "true", "on", "garbage"] {
+            std::env::set_var("TRPG_GM_OPENING_CONVERGENCE", on);
+            assert!(gm_opening_convergence_enabled(), "{on} ⇒ ON(非关值即开)");
+        }
+        match prev {
+            Some(v) => std::env::set_var("TRPG_GM_OPENING_CONVERGENCE", v),
+            None => std::env::remove_var("TRPG_GM_OPENING_CONVERGENCE"),
+        }
+    }
+
+    #[test]
+    fn render_converges_homecoming_and_forbids_split_location() {
+        let r = render_opening_convergence(None);
+        assert!(r.contains("开场收敛锚"), "含锚标题");
+        assert!(r.contains("第一幕"), "标明这是开场回合");
+        assert!(
+            r.contains("到达本开场场景所在地"),
+            "把回家解析为到达开场场景"
+        );
+        assert!(
+            r.contains("绝不") && r.contains("一分为二"),
+            "禁位置一分为二(turn1 叠加根)"
+        );
+        assert!(r.contains("唯一"), "强调唯一所在");
+        assert!(r.contains("§4"), "引 §4 relocation-toward-player(非 railroad)");
+    }
+
+    #[test]
+    fn render_grounds_on_scene_title_when_present() {
+        let with = render_opening_convergence(Some("第四街仓库到达"));
+        assert!(with.contains("第四街仓库到达"), "有标题时锚定具体场景");
+        assert!(with.contains("开场场景「第四街仓库到达」"), "标题嵌入文案");
+        // 空白标题退回泛指,不产出空书名号。
+        let blank = render_opening_convergence(Some("   "));
+        assert!(!blank.contains("「"), "空白标题不产出空书名号");
+        assert!(blank.contains("本模组的开场场景"), "退回泛指");
+    }
+
+    #[test]
+    fn block_is_gmonly_dynamic_with_stable_id() {
+        let b = opening_convergence_block(Some("场景X"));
+        assert_eq!(b.block_id, "runtime.opening_convergence");
+        assert_eq!(b.visibility, Visibility::GmOnly, "收敛锚是 GmOnly 内部上下文");
+        assert_eq!(b.kind, BlockKind::RecentTranscript, "复用既有 block_kind 词表");
+        assert_eq!(b.stability, Stability::TurnDynamic);
+        assert!(b.tags.iter().any(|t| t == "opening_convergence"));
+        assert_eq!(b.load_reason.as_deref(), Some("gm_opening_convergence"));
+        assert!(b.content.render_text().contains("场景X"));
     }
 }
 

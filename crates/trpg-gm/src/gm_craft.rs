@@ -237,10 +237,33 @@ pub(crate) fn narrator_system(base: String, craft_on: bool) -> String {
     }
 }
 
+/// L-K 玩家位置主权(§4 relocation-toward-player,GM 核心守则层):观测到即便有连续性锚 + L-I
+/// 场景降格两道 §4 软指令,GM 仍会在单回合里**替玩家移动**到模组核心冲突处(smoke8 turn3:玩家在
+/// 老陈家门前等待,GM 擅自叙述其下楼潜行靠近仓库交火)⇒ 位置失忆 + 下游连锁。此守则把「玩家只声明
+/// 意图、GM 绝不替玩家声明结果」扩展到**移动/位置**:玩家选择留在原地就留在原地;beat 在别处则按§4
+/// 把压力搬到玩家处,不把玩家搬到 beat 处。**默认 ON**(eval 不设 ⇒ 自动吃到),OFF 字节等价。零 ruleset 分支。
+pub(crate) fn gm_no_relocate_player_enabled() -> bool {
+    !matches!(
+        std::env::var("TRPG_GM_NO_RELOCATE_PLAYER")
+            .ok()
+            .map(|v| v.to_ascii_lowercase())
+            .as_deref(),
+        Some("0") | Some("false") | Some("off") | Some("no")
+    )
+}
+
+/// L-K 守则(追加在 ADJUDICATOR_CRAFT 之后)。直击 smoke8 turn3:GM 替玩家移动到仓库交火处。
+pub(crate) const ADJUDICATOR_NO_RELOCATE: &str = "\
+[玩家位置主权 · §4] 「绝不替玩家声明结果」同样适用于**移动与位置**:玩家声明意图，你绝不替他声明未经其声明的移动、潜行、前往或位置改变。玩家选择留在原地、观察、等待或停在某门前时，就让他**留在其当前所在处**，绝不擅自把他下楼、绕路、靠近或瞬移到剧情冲突/核心 beat 的发生地。若模组核心 beat 或冲突在别处而本回合需要推进，按§4 让那股压力**主动波及玩家当前所在处**（消息、声响、NPC 闯入、势力或时钟外溢到此地）——把 beat 搬到玩家处，绝不把玩家搬到 beat 处。";
+
 /// Append the adjudicator craft overlay when `craft_on`. OFF ⇒ returns `base` unchanged.
 pub(crate) fn adjudicator_system(base: String, craft_on: bool) -> String {
     if craft_on {
-        format!("{base}\n\n{ADJUDICATOR_CRAFT}")
+        if gm_no_relocate_player_enabled() {
+            format!("{base}\n\n{ADJUDICATOR_CRAFT}\n{ADJUDICATOR_NO_RELOCATE}")
+        } else {
+            format!("{base}\n\n{ADJUDICATOR_CRAFT}")
+        }
     } else {
         base
     }
@@ -276,6 +299,29 @@ mod tests {
         match prev {
             Some(v) => std::env::set_var("TRPG_NARRATOR_SINGLE_ADVANCE", v),
             None => std::env::remove_var("TRPG_NARRATOR_SINGLE_ADVANCE"),
+        }
+    }
+
+    #[test]
+    fn gm_no_relocate_flag_and_overlay() {
+        let prev = std::env::var("TRPG_GM_NO_RELOCATE_PLAYER").ok();
+        std::env::remove_var("TRPG_GM_NO_RELOCATE_PLAYER");
+        assert!(gm_no_relocate_player_enabled(), "未设 ⇒ 默认 ON");
+        let on = adjudicator_system("BASE".to_string(), true);
+        assert!(on.contains("玩家位置主权"), "ON 应追加位置主权守则: {on}");
+        assert!(on.contains("把 beat 搬到玩家处"), "ON 应含§4 relocation-toward-player");
+        assert!(on.contains(ADJUDICATOR_CRAFT), "ON 仍保留既有 ADJUDICATOR_CRAFT");
+
+        std::env::set_var("TRPG_GM_NO_RELOCATE_PLAYER", "off");
+        assert!(!gm_no_relocate_player_enabled(), "off ⇒ OFF");
+        let off = adjudicator_system("BASE".to_string(), true);
+        assert_eq!(off, format!("BASE\n\n{ADJUDICATOR_CRAFT}"), "OFF 须与历史 adjudicator overlay 字节等价");
+        assert!(!off.contains("玩家位置主权"), "OFF 不得追加位置主权守则");
+        assert_eq!(adjudicator_system("B2".to_string(), false), "B2", "craft OFF 永远 base");
+
+        match prev {
+            Some(v) => std::env::set_var("TRPG_GM_NO_RELOCATE_PLAYER", v),
+            None => std::env::remove_var("TRPG_GM_NO_RELOCATE_PLAYER"),
         }
     }
 

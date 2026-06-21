@@ -159,7 +159,8 @@ mod spotlight_roster;
 use context_blocks::{
     actionable_situation_block, clue_board_block, continuity_anchor_block, continuity_anchor_tail,
     dynamic_text_block, engine_protocol_block, engine_protocol_block_agent_loop,
-    gm_continuity_anchor_enabled, memory_snapshot_block, retrieved_memory_block,
+    gm_continuity_anchor_enabled, gm_opening_convergence_enabled, memory_snapshot_block,
+    opening_convergence_block, retrieved_memory_block,
     world_events_since_block, world_state_block, world_time_block,
 };
 
@@ -472,6 +473,26 @@ impl RuntimeEngine {
                 tracing::warn!(error = %err, npc_id = %npc_id, "M2: thin profile upsert failed (fail-soft)");
             }
         }
+    }
+
+    /// L-D best-effort:取开场/当前场景标题作为开场收敛锚的 grounding hint。任何缺失(无模组/
+    /// 图谱加载失败/找不到节点)⇒ None(锚仍泛指"本开场场景")。纯读 module graph 快照,不新增
+    /// DB 写;零 ruleset 名分支。
+    async fn opening_scene_title(
+        &self,
+        module_id: Option<&str>,
+        scene_id: Option<&str>,
+    ) -> Option<String> {
+        let mid = module_id?;
+        let graph = self.db.load_module_graph(mid).await.ok().flatten()?;
+        let sid = scene_id
+            .map(str::to_string)
+            .or_else(|| module_entry_scene_id(&graph))?;
+        graph
+            .scenes
+            .iter()
+            .find(|s| s.node_id == sid)
+            .map(|s| s.title.clone())
     }
 
     pub async fn prepare_turn_context(
@@ -853,6 +874,28 @@ impl RuntimeEngine {
                     blocks.push(continuity_anchor_block(&tail));
                 }
             }
+        }
+        // L-D 开场收敛锚:本局**开场回合**(尚无已落库回合 ⇒ 无连续性锚可投)注入,把玩家在真空里
+        // 凭 objective 自创的"归乡/回家/前往某处"声明**收敛到模组开场场景所在地**,防 GM 另起一个
+        // 模组之外的独立"家"地点、造成 turn1 念白把玩家一分为二(既在仓库又在家)= 硬位置失忆根
+        // (Q2 DB+逐字 transcript 实证)。continuity anchor 的对称物(锚治 turn>1,本指令治 turn1)。
+        // flag OFF / 非开场回合 / DB 失败 ⇒ 不注入 ⇒ 字节等价基线;零 ruleset 名分支(场景标题取自
+        // module graph,无硬编码)。
+        if gm_opening_convergence_enabled()
+            && self
+                .db
+                .count_session_turns(&request.session_id)
+                .await
+                .unwrap_or(1)
+                == 0
+        {
+            let scene_hint = self
+                .opening_scene_title(
+                    request.module_id.as_deref().or(state.module_id.as_deref()),
+                    state.scene_id.as_deref(),
+                )
+                .await;
+            blocks.push(opening_convergence_block(scene_hint.as_deref()));
         }
         if let Some(input) = current_input {
             blocks.push(dynamic_text_block(
