@@ -96,11 +96,41 @@ pub(crate) fn scene_deep_block_cache_zone() -> CacheZone {
     }
 }
 
+/// L-G 失忆锚:场景开场定场文(read_aloud/可念)是否只在玩家**首次进入该场景**时投放。
+/// **默认 ON**(eval profile 不设 ⇒ 自动吃到),OFF 字节等价基线(恒投 read_aloud=旧行为)。
+/// 仅显式 `0/false/off/no` 关。与 BUG-1 dice_core / L-E continuity anchor 同模(默认 ON / OFF baseline)。
+/// 病灶:read_aloud 是 SceneStable 块,玩家在同一场景的每个回合都被复投 ⇒ GM 每回合重述开场、把玩家
+/// 挪回场景入口 ⇒ player-sim 判 AMNESIA。首进才投 ⇒ 后续回合 GM 续写既成局面(NPC/出口/GM 注记仍每
+/// 回合在,durable 参考不丢)。
+pub(crate) fn scene_read_aloud_first_entry_only_enabled() -> bool {
+    !matches!(
+        std::env::var("TRPG_SCENE_READ_ALOUD_FIRST_ENTRY_ONLY")
+            .ok()
+            .map(|v| v.to_ascii_lowercase())
+            .as_deref(),
+        Some("0") | Some("false") | Some("off") | Some("no")
+    )
+}
+
 pub(crate) fn scene_node_to_blocks(
     module_id: &str,
     n: &ScenarioNode,
     npcs: &[serde_json::Value],
     scenes: &[ScenarioNode],
+) -> Vec<ContextBlock> {
+    // 默认 include_read_aloud=true ⇒ 与历史行为字节等价(所有既有调用方/单测不变)。
+    scene_node_to_blocks_with_opts(module_id, n, npcs, scenes, true)
+}
+
+/// L-G:同 `scene_node_to_blocks`,但 `include_read_aloud=false` 时**跳过开场定场文(可念)正文**,
+/// 改投一行非剧透锚提示(让 GM 知道开场已交付、勿复述),其余(GM 注记/NPC/出口/机制意图)原样每回合在。
+/// `include_read_aloud=true` 与 `scene_node_to_blocks` 字节等价。整块仍 GmOnly,锚提示不进玩家可见输出。
+pub(crate) fn scene_node_to_blocks_with_opts(
+    module_id: &str,
+    n: &ScenarioNode,
+    npcs: &[serde_json::Value],
+    scenes: &[ScenarioNode],
+    include_read_aloud: bool,
 ) -> Vec<ContextBlock> {
     if n.extraction_status != SceneExtractionStatus::DeepExtracted {
         // N2: SkeletonOnly（及其他非 DeepExtracted 状态）产出轻量降级块，
@@ -110,9 +140,16 @@ pub(crate) fn scene_node_to_blocks(
     let mut body = String::new();
     if let Some(ra) = &n.read_aloud {
         if !ra.trim().is_empty() {
-            body.push_str("【可念】\n");
-            body.push_str(ra);
-            body.push('\n');
+            if include_read_aloud {
+                body.push_str("【可念】\n");
+                body.push_str(ra);
+                body.push('\n');
+            } else {
+                // L-G 已交付开场:不复投定场文正文,仅留一行锚提示(防 GM 重述/把玩家挪回入口)。
+                body.push_str(
+                    "【场景开场定场文已于首次进入时交付，请勿复述；从玩家当前既成局面续写】\n",
+                );
+            }
         }
     }
     if let Some(g) = &n.gm_notes {
@@ -393,6 +430,59 @@ mod module_scene_proj_tests {
         assert!(text.contains("拉斯"), "在场 NPC 应被并入: {text}");
         assert!(text.contains("褪色的广告牌"), "read_aloud 应并入: {text}");
         assert!(text.contains("钥匙"), "gm_notes 应并入: {text}");
+    }
+
+    /// L-G:include_read_aloud=true 与裸 scene_node_to_blocks 字节等价(基线保护);false ⇒ 跳过
+    /// 定场文正文、改投锚提示,但 NPC/GM 注记/出口照常(durable 参考不丢)。
+    #[test]
+    fn read_aloud_first_entry_gate_suppresses_prose_but_keeps_reference() {
+        let _g = DeepZoneEnvGuard::unset();
+        let mut n = ScenarioNode::default();
+        n.node_id = "loc1".into();
+        n.title = "加油站".into();
+        n.read_aloud = Some("你们看到一个褪色的广告牌……".into());
+        n.gm_notes = Some("老板拉斯藏着钥匙。".into());
+        n.extraction_status = SceneExtractionStatus::DeepExtracted;
+        n.referenced_npc_ids = vec!["npc1".into()];
+        let npcs = vec![serde_json::json!({"id":"npc1","name":"拉斯","summary":"老板"})];
+
+        // include=true 字节等价裸函数(OFF/首进路径 = 历史行为)。
+        let base = scene_node_to_blocks("mod1", &n, &npcs, &[]);
+        let incl = scene_node_to_blocks_with_opts("mod1", &n, &npcs, &[], true);
+        assert_eq!(
+            serde_json::to_vec(&base[0]).unwrap(),
+            serde_json::to_vec(&incl[0]).unwrap(),
+            "include_read_aloud=true 必须与 scene_node_to_blocks 字节等价"
+        );
+
+        // include=false ⇒ 定场文正文消失,锚提示出现,durable 参考保留。
+        let gated = scene_node_to_blocks_with_opts("mod1", &n, &npcs, &[], false);
+        let text = gated[0].content.render_text();
+        assert!(!text.contains("褪色的广告牌"), "已交付场景不得复投定场文正文: {text}");
+        assert!(text.contains("请勿复述"), "应留锚提示防 GM 重述: {text}");
+        assert!(text.contains("拉斯"), "NPC 参考仍每回合在: {text}");
+        assert!(text.contains("钥匙"), "gm_notes 仍每回合在: {text}");
+    }
+
+    /// L-G flag 默认 ON;仅显式关值 OFF(镜像 BUG-1/L-E)。env 进程级 ⇒ 串行 set/remove 并复原。
+    #[test]
+    fn read_aloud_first_entry_flag_defaults_on() {
+        let _lock = N3_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("TRPG_SCENE_READ_ALOUD_FIRST_ENTRY_ONLY").ok();
+        std::env::remove_var("TRPG_SCENE_READ_ALOUD_FIRST_ENTRY_ONLY");
+        assert!(scene_read_aloud_first_entry_only_enabled(), "未设 ⇒ 默认 ON");
+        for off in ["0", "false", "OFF", "no"] {
+            std::env::set_var("TRPG_SCENE_READ_ALOUD_FIRST_ENTRY_ONLY", off);
+            assert!(!scene_read_aloud_first_entry_only_enabled(), "{off} ⇒ OFF");
+        }
+        for on in ["1", "true", "on", "garbage"] {
+            std::env::set_var("TRPG_SCENE_READ_ALOUD_FIRST_ENTRY_ONLY", on);
+            assert!(scene_read_aloud_first_entry_only_enabled(), "{on} ⇒ ON");
+        }
+        match prev {
+            Some(v) => std::env::set_var("TRPG_SCENE_READ_ALOUD_FIRST_ENTRY_ONLY", v),
+            None => std::env::remove_var("TRPG_SCENE_READ_ALOUD_FIRST_ENTRY_ONLY"),
+        }
     }
 
     #[test]

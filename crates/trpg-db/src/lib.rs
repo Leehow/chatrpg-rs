@@ -1296,6 +1296,16 @@ impl Db {
         Ok(())
     }
 
+    /// L-G 失忆锚:本会话已落库的回合数。prepare_turn_context 据此判"开场是否已交付"
+    /// (>0 ⇒ 玩家已在本会话有回合 ⇒ 跳过场景 read_aloud 正文复投)。零回合/出错 → 0(fail-soft)。
+    pub async fn count_session_turns(&self, session_id: &str) -> Result<i64> {
+        let row: (i64,) = sqlx::query_as("select count(*) from turns where session_id = $1")
+            .bind(session_id)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(row.0)
+    }
+
     /// P1-2：拼接会话最近 N 回合的对白成单段 transcript（旧→新时间序），供 API
     /// ServerRecent 历史策略注入 prepare_turn_context——前端只传 user_input 时
     /// 第二回合不再丢上下文（与 CLI play 循环 `Player: …\nGM: …` 约定一致）。

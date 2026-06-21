@@ -12,18 +12,21 @@ use trpg_db::Db;
 use trpg_model::{ContextBlock, ScenarioNode, SceneExtractionStatus};
 use trpg_need::{Need, NeedKind, NeedOutcome, NeedResolver, SceneNeed};
 
-use crate::scene_projection::scene_node_to_blocks;
+use crate::scene_projection::{scene_node_to_blocks, scene_node_to_blocks_with_opts};
 use crate::spoiler_guard::guard_scene;
 
 /// 纯函数包装：给定已选中的 node + graph.npcs + graph.scenes，
 /// 产出与 scene_node_to_blocks 字节等价的块。单独提取便于测试隔离。
+/// `include_read_aloud=false`(L-G 开场已交付) ⇒ 跳过定场文正文复投,仅留锚提示。
 pub(crate) fn resolve_scene_blocks(
     module_id: &str,
     node: &ScenarioNode,
     npcs: &[serde_json::Value],
     scenes: &[ScenarioNode],
+    include_read_aloud: bool,
 ) -> Vec<ContextBlock> {
-    let blocks = scene_node_to_blocks(module_id, node, npcs, scenes);
+    let blocks =
+        scene_node_to_blocks_with_opts(module_id, node, npcs, scenes, include_read_aloud);
     if !blocks.is_empty() {
         tracing::info!(
             target: "module_scene",
@@ -109,7 +112,15 @@ impl NeedResolver for SceneNeedResolver {
         .map(|p| p.revealed_fact_ids)
         .unwrap_or_default();
         let (guarded_node, guarded_npcs) = guard_scene(node, &graph.npcs, &revealed);
-        let blocks = resolve_scene_blocks(module_id, &guarded_node, &guarded_npcs, &graph.scenes);
+        // L-G 失忆锚:开场已交付 ⇒ 跳过 read_aloud 正文复投(仅锚提示),其余场景参考照常每回合在。
+        let include_read_aloud = !scene_need.read_aloud_already_delivered;
+        let blocks = resolve_scene_blocks(
+            module_id,
+            &guarded_node,
+            &guarded_npcs,
+            &graph.scenes,
+            include_read_aloud,
+        );
         // A1 (G-1): emit a real SourceRef for the bound scene node so the need-binding trace
         // shows genuine grounding (page/anchor) instead of an empty `Partial`/0-source_refs
         // signal. Pure observability (source_refs只进 NeedResolutionTrace),不改 blocks/叙事。
@@ -180,8 +191,8 @@ mod tests {
 
         // 旧直调路径
         let expected = scene_node_to_blocks("mod1", &n, &npcs, &scenes);
-        // resolver 内纯函数路径（等价调用）
-        let actual = resolve_scene_blocks("mod1", &n, &npcs, &scenes);
+        // resolver 内纯函数路径（等价调用：include_read_aloud=true ⇒ 与旧直调字节等价）
+        let actual = resolve_scene_blocks("mod1", &n, &npcs, &scenes, true);
 
         let e_bytes: Vec<_> = expected
             .iter()
@@ -208,7 +219,7 @@ mod tests {
         n.title = "未深抽场景".into();
         n.extraction_status = SceneExtractionStatus::SkeletonOnly;
         let expected = scene_node_to_blocks("mod1", &n, &[], &[]);
-        let actual = resolve_scene_blocks("mod1", &n, &[], &[]);
+        let actual = resolve_scene_blocks("mod1", &n, &[], &[], true);
         let e_bytes: Vec<_> = expected
             .iter()
             .map(|b| serde_json::to_vec(b).unwrap())

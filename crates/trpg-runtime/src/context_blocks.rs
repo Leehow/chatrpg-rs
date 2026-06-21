@@ -223,6 +223,63 @@ pub(crate) fn world_state_block(state: &RuntimeState) -> ContextBlock {
     block
 }
 
+/// L-E 失忆锚:GM 连续性锚开关。**默认 ON**(eval profile 不设 ⇒ 自动吃到),OFF 字节等价基线
+/// (调用方未传 recent_transcript 的回合不再注入服务端回载锚块)。仅显式 `0`/`false`/`off`/`no`
+/// 关。与 BUG-1 的 dice_core source 开关同模(默认 ON / OFF baseline)。
+pub(crate) fn gm_continuity_anchor_enabled() -> bool {
+    !matches!(
+        std::env::var("TRPG_GM_CONTINUITY_ANCHOR")
+            .ok()
+            .map(|v| v.to_ascii_lowercase())
+            .as_deref(),
+        Some("0") | Some("false") | Some("off") | Some("no")
+    )
+}
+
+/// 字符安全尾截:取 `text` 末尾至多 `max_chars` 个字符(按 char 边界,不切多字节)。
+pub(crate) fn continuity_anchor_tail(text: &str, max_chars: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+    let tail: String = trimmed
+        .chars()
+        .rev()
+        .take(max_chars)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    tail.trim_start().to_string()
+}
+
+/// L-E:把"上一回合已向玩家交付的局面"渲染成连续性锚指令(纯函数,易测)。
+/// 来源 = `turns` 表已落库的 Player/GM 散文(已对玩家可见、已脱敏)⇒ 零新增泄漏面。
+/// 指令禁止 GM 重述场景开场定场文或把玩家挪回入口/改写已确立位置 —— 直击失忆病灶。
+pub(crate) fn render_continuity_anchor(tail: &str) -> String {
+    format!(
+        "【连续性锚 · 上一回合已向玩家交付的局面（权威，按此续写）】\n{tail}\n\n\
+         ⚠️ 本回合必须从以上**已确立的当前局面**继续：\n\
+         - 保持玩家**当前所在位置**、在场人物与既成事实与上文一致；\n\
+         - 不要重述场景的开场定场文（read_aloud），那只在玩家首次进入该场景时念一次；\n\
+         - 不要把玩家挪回场景入口，不要改写或混同其已确立的位置；\n\
+         - 若玩家已离开开场点位，就以其当前点位为准向前推进。",
+    )
+}
+
+/// L-E:构造 GmOnly 连续性锚块(复用 BlockKind::RecentTranscript,不新增 db block_kind 词表)。
+pub(crate) fn continuity_anchor_block(tail: &str) -> ContextBlock {
+    let mut block = dynamic_text_block(
+        "runtime.continuity_anchor",
+        BlockKind::RecentTranscript,
+        "Continuity Anchor",
+        &render_continuity_anchor(tail),
+        vec!["recent_transcript", "continuity_anchor"],
+    );
+    block.load_reason = Some("gm_continuity_anchor".into());
+    block
+}
+
 pub(crate) fn dynamic_text_block(
     block_id: &str,
     kind: BlockKind,
@@ -246,6 +303,64 @@ pub(crate) fn dynamic_text_block(
     );
     block.tags = tags.into_iter().map(str::to_string).collect();
     block
+}
+
+#[cfg(test)]
+mod continuity_anchor_tests {
+    use super::*;
+
+    /// 默认 ON;仅显式关值才 OFF。env 进程级全局 ⇒ 单测内串行 set/remove 并复原。
+    #[test]
+    fn flag_defaults_on_and_only_explicit_off_disables() {
+        let prev = std::env::var("TRPG_GM_CONTINUITY_ANCHOR").ok();
+        std::env::remove_var("TRPG_GM_CONTINUITY_ANCHOR");
+        assert!(gm_continuity_anchor_enabled(), "未设 ⇒ 默认 ON");
+        for off in ["0", "false", "OFF", "no"] {
+            std::env::set_var("TRPG_GM_CONTINUITY_ANCHOR", off);
+            assert!(!gm_continuity_anchor_enabled(), "{off} ⇒ OFF");
+        }
+        for on in ["1", "true", "on", "garbage"] {
+            std::env::set_var("TRPG_GM_CONTINUITY_ANCHOR", on);
+            assert!(gm_continuity_anchor_enabled(), "{on} ⇒ ON(非关值即开)");
+        }
+        match prev {
+            Some(v) => std::env::set_var("TRPG_GM_CONTINUITY_ANCHOR", v),
+            None => std::env::remove_var("TRPG_GM_CONTINUITY_ANCHOR"),
+        }
+    }
+
+    #[test]
+    fn tail_is_char_safe_and_bounded() {
+        let short = "短文本";
+        assert_eq!(continuity_anchor_tail(short, 10), "短文本");
+        // 多字节字符:取末尾 3 char 不切字节。
+        let s = "一二三四五";
+        let t = continuity_anchor_tail(s, 3);
+        assert_eq!(t.chars().count(), 3);
+        assert_eq!(t, "三四五");
+        assert_eq!(continuity_anchor_tail("   边距裁剪   ", 100), "边距裁剪");
+    }
+
+    #[test]
+    fn render_carries_tail_and_anti_amnesia_instruction() {
+        let tail = "GM: 你站在通宵杂货铺的柜台前。";
+        let rendered = render_continuity_anchor(tail);
+        assert!(rendered.contains(tail), "必须含上一回合局面原文");
+        assert!(rendered.contains("连续性锚"), "含锚标题");
+        assert!(rendered.contains("不要重述场景的开场定场文"), "含禁重述开场指令");
+        assert!(rendered.contains("不要把玩家挪回场景入口"), "含禁挪回入口指令");
+    }
+
+    #[test]
+    fn anchor_block_is_gmonly_dynamic_with_stable_id() {
+        let b = continuity_anchor_block("GM: 局面");
+        assert_eq!(b.block_id, "runtime.continuity_anchor");
+        assert_eq!(b.visibility, Visibility::GmOnly, "锚是 GmOnly 内部上下文");
+        assert_eq!(b.kind, BlockKind::RecentTranscript, "复用既有 block_kind 词表");
+        assert_eq!(b.stability, Stability::TurnDynamic);
+        assert!(b.tags.iter().any(|t| t == "continuity_anchor"));
+        assert!(b.content.render_text().contains("局面"));
+    }
 }
 
 #[cfg(test)]

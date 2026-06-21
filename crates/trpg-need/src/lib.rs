@@ -63,6 +63,10 @@ pub struct SceneNeed {
     /// project.modules 中所有 module_id 列表，用于 resolver 做成员校验（防跨 project 泄漏）。
     /// 由 prepare_turn_context 在构造 Need 时填入（project 已在调用方加载）。
     pub project_module_ids: Vec<String>,
+    /// L-G 失忆锚:本回合玩家**是否已在当前场景有过回合**(开场定场文已交付)。true ⇒ resolver
+    /// 跳过 read_aloud 正文复投(防 GM 每回合重述开场把玩家挪回入口=AMNESIA)。默认 false ⇒
+    /// 投开场=历史行为字节等价;由 prepare_turn_context 据 flag+回合数计算填入。
+    pub read_aloud_already_delivered: bool,
 }
 
 #[derive(Debug, Clone)]

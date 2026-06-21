@@ -85,7 +85,8 @@ fn need_kind_covers_five_variants() {
     assert_eq!(
         Need::Scene(SceneNeed {
             scopes: scopes(),
-            project_module_ids: vec![]
+            project_module_ids: vec![],
+            read_aloud_already_delivered: false,
         })
         .kind(),
         NeedKind::Scene
@@ -141,6 +142,7 @@ async fn unclaimed_kind_is_skipped_not_errored() {
     bus.emit(Need::Scene(SceneNeed {
         scopes: scopes(),
         project_module_ids: vec![],
+        read_aloud_already_delivered: false,
     }));
     let outcomes = bus.resolve_all().await;
     assert_eq!(

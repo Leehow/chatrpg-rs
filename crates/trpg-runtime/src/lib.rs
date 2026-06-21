@@ -157,8 +157,9 @@ mod context_blocks;
 
 mod spotlight_roster;
 use context_blocks::{
-    actionable_situation_block, clue_board_block, dynamic_text_block, engine_protocol_block,
-    engine_protocol_block_agent_loop, memory_snapshot_block, retrieved_memory_block,
+    actionable_situation_block, clue_board_block, continuity_anchor_block, continuity_anchor_tail,
+    dynamic_text_block, engine_protocol_block, engine_protocol_block_agent_loop,
+    gm_continuity_anchor_enabled, memory_snapshot_block, retrieved_memory_block,
     world_events_since_block, world_state_block, world_time_block,
 };
 
@@ -669,6 +670,18 @@ impl RuntimeEngine {
                 .iter()
                 .map(|m| m.module_id.clone())
                 .collect();
+            // L-G 失忆锚:开场定场文(read_aloud)只在玩家**首次在当前会话有回合**时投放。flag ON
+            // (默认)且本会话已有≥1回合 ⇒ 视为开场已交付 ⇒ resolver 跳过 read_aloud 正文复投,GM 续写
+            // 既成局面(NPC/出口/GM注记仍每回合在)。flag OFF / DB 失败 / 零回合 ⇒ false ⇒ 投开场=字节
+            // 等价基线。注:首入近似为"会话首回合";场景切换后新场景开场的再投留待 L-C(场景真推进)后细化。
+            let read_aloud_already_delivered =
+                scene_projection::scene_read_aloud_first_entry_only_enabled()
+                    && self
+                        .db
+                        .count_session_turns(&request.session_id)
+                        .await
+                        .unwrap_or(0)
+                        > 0;
             let scene_need = trpg_need::Need::Scene(trpg_need::SceneNeed {
                 scopes: trpg_need::NeedScopes {
                     ruleset_id: request.ruleset_id.clone(),
@@ -681,6 +694,7 @@ impl RuntimeEngine {
                     scene_id: state.scene_id.clone(),
                 },
                 project_module_ids,
+                read_aloud_already_delivered,
             });
             let mut scene_bus = trpg_need::NeedBus::new();
             scene_bus.register(Box::new(SceneNeedResolver {
@@ -828,6 +842,17 @@ impl RuntimeEngine {
                 transcript,
                 vec!["recent_transcript"],
             ));
+        } else if gm_continuity_anchor_enabled() {
+            // L-E 失忆锚:调用方未传 transcript（CLI/eval 路 = None）时,服务端从 `turns`
+            // 表回载最近回合的 Player/GM 散文,注入 GmOnly 连续性锚——直击"GM 每回合重述
+            // 开场定场文、把玩家挪回入口"的失忆病灶(J1 AMNESIA→0)。flag OFF ⇒ 此分支不跑
+            // ⇒ 字节等价基线;DB 失败/无回合 ⇒ fail-soft 不注入(不阻断回合)。
+            if let Ok(Some(history)) = self.db.load_recent_transcript(&request.session_id, 2).await {
+                let tail = continuity_anchor_tail(&history, 1500);
+                if !tail.is_empty() {
+                    blocks.push(continuity_anchor_block(&tail));
+                }
+            }
         }
         if let Some(input) = current_input {
             blocks.push(dynamic_text_block(
