@@ -315,6 +315,23 @@ cat prompts/evaluation/trpg_product_evaluator.md
 - The parser only produces text but no usable character/module/rule structures.
 - A ruleset works only because of Cyberpunk-specific hardcoded defaults.
 
+## Automated blocking gate (EVAL-HARNESS)
+
+This skill's mindset is enforced at runtime by `harness/eval/` — a DB-grounded
+gate that FAILS dead/amnesiac games instead of trusting narration. Prefer it
+over a hand-rolled green self-check:
+
+```bash
+bash harness/eval/run_eval.sh --ruleset cyberpunk_red \
+     --module cyberpunk_red.homecoming --turns 30 --judge   # play + gate
+bash harness/eval/aggregate.sh --session <sid> --redboard /tmp/board.md
+bash harness/eval/test_judges.sh                              # regression proof
+```
+
+Four blocking, DB-grounded judges (memory-continuity, consequence/agency,
+progression, check→narration coherence) plus a reactive anomaly-detecting
+player-sim. ANY judge RED ⇒ verdict FAIL. See `harness/eval/README.md`.
+
 ## Final rule
 
 A passing evaluation must show that the system is playable by a normal user, not just that the code emits expected phase names.

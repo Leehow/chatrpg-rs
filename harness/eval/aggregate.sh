@@ -38,8 +38,10 @@ J4="$(run_judge j4_check_coherence.sh)"
 # player-sim run-level signals (STUCK / AMNESIA) — context, not a 5th judge
 stuck=0; amnesia=0
 if [[ -n "$SIGNALS" && -f "$SIGNALS" ]]; then
-  stuck=$(grep -c '"kind":"STUCK"' "$SIGNALS" 2>/dev/null || echo 0)
-  amnesia=$(grep -c '"kind":"AMNESIA"' "$SIGNALS" 2>/dev/null || echo 0)
+  # grep -c prints "0" AND exits 1 on no-match; capture once, default on failure
+  # (a bare `|| echo 0` would emit a SECOND line -> invalid --argjson later).
+  stuck=$(grep -c '"kind":"STUCK"' "$SIGNALS" 2>/dev/null) || stuck=0
+  amnesia=$(grep -c '"kind":"AMNESIA"' "$SIGNALS" 2>/dev/null) || amnesia=0
 fi
 
 ALL="$(jq -nc --argjson a "$J1" --argjson b "$J2" --argjson c "$J3" --argjson d "$J4" '[$a,$b,$c,$d]')"

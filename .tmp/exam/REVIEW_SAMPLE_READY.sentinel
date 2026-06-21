@@ -1,0 +1,5 @@
+redboard=/Users/haoli/leehow/code/chatrpgv2/chatrpg-rs-v1.20-formula/.worktrees/eval-harness/.tmp/exam/EVAL_REDBOARD_v1.md
+session=session_e7baseline1782009550
+run_dir=.tmp/exam/runs/e7baseline_20260621_103910
+verdict=FAIL
+engine=3ae0dd0
