@@ -382,7 +382,35 @@ impl RuntimeEngine {
             // 跳过激活，导致整局 current_scene_id=NULL 而无任何线索。
             match self.db.load_module_graph(mid).await {
                 Ok(Some(graph)) => match module_entry_scene_id(&graph) {
-                    Some(entry) => { let _ = self.db.set_session_scene(&session_id, &entry).await; }
+                    Some(entry) => {
+                        let _ = self.db.set_session_scene(&session_id, &entry).await;
+                        // L-R durable seed — RELOCATED here (A2b-U / Q4 FLAG-TRAP fix). It used to
+                        // live only inside `opening_scene_delivery` (CLI-only) so the API/engine
+                        // product path never seeded durable memory. Running it at session-init
+                        // (every transport — start_session / CLI / API / create-character) makes
+                        // memory_facts>=1 hold from turn 0 on EVERY path. source-backed (only the
+                        // module's own established opening encounter), idempotent (stable mf_open_*
+                        // id), flag `TRPG_OPENING_DURABLE_SEED` default ON / OFF == no write
+                        // (byte-equal). fail-soft: any upsert miss only warns.
+                        if relationship_extraction::opening_durable_seed_enabled() {
+                            let npc_ids: Vec<String> = graph
+                                .scenes
+                                .iter()
+                                .find(|s| s.node_id == entry)
+                                .map(|n| n.referenced_npc_ids.clone())
+                                .unwrap_or_default();
+                            let facts = relationship_extraction::opening_seed_facts(
+                                session_id,
+                                Some(entry.as_str()),
+                                &npc_ids,
+                            );
+                            for f in &facts {
+                                if let Err(err) = self.db.upsert_memory_fact(f).await {
+                                    tracing::warn!(error = %err, "opening durable seed upsert failed (fail-soft)");
+                                }
+                            }
+                        }
+                    }
                     None => tracing::warn!(module_id = mid, "module graph has no scenes; entry scene not activated — re-run parse-all with the module reader enabled"),
                 },
                 Ok(None) => tracing::warn!(module_id = mid, "no module graph found; entry scene not activated — run parse-all for this module first"),
@@ -570,29 +598,15 @@ impl RuntimeEngine {
         if text.is_empty() {
             return Ok(None);
         }
-        // L-R 开场 durable 种子(J1-durable 根修):把模组入口场景确立的 NPC 遭遇确定性地落成
-        // memory_facts,让任何涌现路径(含单人潜入空内场/冷骰全败探索局)从 turn 0 起 durable≥1。
-        // source-backed(只持久化模组自身确立的开场遭遇,不造新事实);幂等(稳定 fact_id);
-        // flag `TRPG_OPENING_DURABLE_SEED` 默认 ON,OFF ⇒ 与 L-P 纯念白投递字节等价;fail-soft。
-        if relationship_extraction::opening_durable_seed_enabled() {
-            let npc_ids: Vec<String> = match self.db.load_module_graph(mid).await {
-                Ok(Some(graph)) => scene_id
-                    .as_deref()
-                    .and_then(|sid| graph.scenes.iter().find(|s| s.node_id == sid))
-                    .map(|n| n.referenced_npc_ids.clone())
-                    .unwrap_or_default(),
-                _ => Vec::new(),
-            };
-            let facts = relationship_extraction::opening_seed_facts(
-                session_id,
-                scene_id.as_deref(),
-                &npc_ids,
-            );
-            for f in &facts {
-                if let Err(err) = self.db.upsert_memory_fact(f).await {
-                    tracing::warn!(error = %err, "opening durable seed upsert failed (fail-soft)");
-                }
-            }
+        // A2b-U (Q4): the L-R durable seed is now written at session-init
+        // (`ensure_session_initialized`) on EVERY transport, not here — so the API/engine
+        // product path also seeds durable memory. This method now only DELIVERS the opening
+        // narration (CLI pre-turn) and records that ACTUAL delivery, so the L-G first-entry
+        // gate can suppress turn-1 read_aloud re-delivery from a real fact (not an inferred
+        // `flag_on && module_bound` that wrongly suppressed the un-delivered API path).
+        // fail-soft: a marker write miss only warns (gate then surfaces the opening — safe).
+        if let Err(err) = self.db.mark_opening_delivered(session_id).await {
+            tracing::warn!(error = %err, "mark_opening_delivered failed (fail-soft)");
         }
         Ok(Some(text.to_string()))
     }
@@ -797,25 +811,29 @@ impl RuntimeEngine {
             // (默认)且本会话已有≥1回合 ⇒ 视为开场已交付 ⇒ resolver 跳过 read_aloud 正文复投,GM 续写
             // 既成局面(NPC/出口/GM注记仍每回合在)。flag OFF / DB 失败 / 零回合 ⇒ false ⇒ 投开场=字节
             // 等价基线。注:首入近似为"会话首回合";场景切换后新场景开场的再投留待 L-C(场景真推进)后细化。
+            //
+            // A2b-U (Q4 FLAG-TRAP fix): turn-1 (count==0) 抑制现在键于**真实投递事实**
+            // (`opening_delivered`，仅 CLI 开场钩子投出非空念白后写),不再从
+            // `opening_scene_delivery_enabled() && module_bound` 推断。旧推断在 API/引擎路径
+            // (无任何预投递)误判"已交付"⇒静默吞掉 turn-1 开场=回归 below baseline。改后:CLI 预投
+            // ⇒ marker=true ⇒ 抑制复投(无双开场);API 路径无预投 ⇒ marker=false ⇒ turn-1 浮现开场。
+            // marker 仅在 count==0 时查(count>0 短路),OFF/无投递 ⇒ false ⇒ 退回 count>0 字节等价。
             let read_aloud_already_delivered =
-                scene_projection::scene_read_aloud_first_entry_only_enabled()
-                    && (self
+                if scene_projection::scene_read_aloud_first_entry_only_enabled() {
+                    let turns = self
                         .db
                         .count_session_turns(&request.session_id)
                         .await
-                        .unwrap_or(0)
-                        > 0
-                        // L-P Q3: the pre-turn opening delivery already surfaced the entry
-                        // scene's read_aloud BEFORE turn 1, so turn 1 (count==0) must not
-                        // re-deliver it. Gated by the SAME flag (default ON) + a bound module;
-                        // when `TRPG_OPENING_SCENE_DELIVERY=off` this term is false ⇒ the gate
-                        // reduces to the original `count>0` ⇒ byte-equal baseline.
-                        || (opening_scene_delivery_enabled()
-                            && request
-                                .module_id
-                                .as_deref()
-                                .or(state.module_id.as_deref())
-                                .is_some()));
+                        .unwrap_or(0);
+                    turns > 0
+                        || self
+                            .db
+                            .opening_delivered(&request.session_id)
+                            .await
+                            .unwrap_or(false)
+                } else {
+                    false
+                };
             let scene_need = trpg_need::Need::Scene(trpg_need::SceneNeed {
                 scopes: trpg_need::NeedScopes {
                     ruleset_id: request.ruleset_id.clone(),

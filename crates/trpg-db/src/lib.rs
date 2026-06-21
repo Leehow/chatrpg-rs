@@ -112,6 +112,9 @@ impl Db {
             // 0040 story_state 表（StoryState 持久化，P5.5）。幂等 create table if not exists +
             // upsert on conflict(session_id)。纯加性，非破坏性迁移，无 hard-stop。
             include_str!("../../../migrations/0040_story_state.sql"),
+            // 0041 sessions.opening_delivered（A2b-U Q4 FLAG-TRAP fix）。幂等 add column if not
+            // exists，default false。纯加性，重放安全。
+            include_str!("../../../migrations/0041_session_opening_delivered.sql"),
         ];
         // 在单一事务内先取事务级顾问锁，串行化所有并发/跨进程 migrate() 调用。
         // 0033 等迁移用 drop-then-add 重建命名 CHECK 约束（非幂等的两段式 DDL），
@@ -1261,6 +1264,32 @@ impl Db {
                 .fetch_optional(&self.pool)
                 .await?;
         Ok(row.and_then(|r| r.0).filter(|s| !s.trim().is_empty()))
+    }
+
+    /// A2b-U (Q4)：标记本会话的开场定场念白已被 **实际投递**（仅 CLI 开场钩子在投出非空
+    /// 念白后调用）。L-G 首入门控据此真实事实抑制 turn-1 read_aloud 复投，而非从
+    /// `flag_on && module_bound` 推断（后者错误抑制了 API/引擎路径——那里无任何预投递）。
+    /// 幂等、纯加性、fail-soft（调用方忽略错误）。
+    pub async fn mark_opening_delivered(&self, session_id: &str) -> Result<()> {
+        sqlx::query(
+            "update sessions set opening_delivered = true, updated_at = now() where session_id = $1",
+        )
+        .bind(session_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// A2b-U (Q4)：本会话的开场念白是否已实际投递。缺列/缺行/出错 → false（fail-soft，
+    /// 安全方向 = 视为未投递 ⇒ turn-1 浮现开场，绝不静默吞掉开场）。
+    pub async fn opening_delivered(&self, session_id: &str) -> Result<bool> {
+        let row: Option<(bool,)> = sqlx::query_as(
+            "select coalesce(opening_delivered, false) from sessions where session_id = $1",
+        )
+        .bind(session_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| r.0).unwrap_or(false))
     }
 
     pub async fn save_turn(
