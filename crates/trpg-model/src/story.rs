@@ -63,6 +63,36 @@ pub struct StoryThread {
     pub unresolved_consequences: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_touched_turn: Option<String>,
+    // ── L3.3 §五 field parity (additive, serde(default); old snapshots deserialize cleanly) ──
+    /// Short human-facing label for the thread (free-form). Empty when absent.
+    #[serde(default)]
+    pub title: String,
+    /// Where this thread came from (provenance). Fail-closed default `Unspecified`.
+    #[serde(default)]
+    pub origin: StoryThreadOrigin,
+    /// The module [`NarrativeAnchor`](crate) id that seeded this thread, if any (L8.x). `None`
+    /// for emergent/player-driven threads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module_anchor: Option<String>,
+    /// Candidate payoff descriptors/ids this thread could pay off into (director MATERIAL, not a
+    /// script). Empty when none proposed.
+    #[serde(default)]
+    pub payoff_candidates: Vec<String>,
+}
+
+/// Where a [`StoryThread`] originated. `Unspecified` is the fail-closed default — an absent
+/// origin never asserts a concrete provenance. Generic (NOT branched on ruleset/module, §二-⑪).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StoryThreadOrigin {
+    #[default]
+    Unspecified,
+    /// Seeded from a parsed module narrative anchor (L8.x).
+    ModuleAnchor,
+    /// Emerged from a player action / expressed interest.
+    PlayerDriven,
+    /// Surfaced by world dynamics / the Director (not authored, not player-initiated).
+    Emergent,
 }
 
 /// Lifecycle of a [`StoryThread`]. `Dormant` is the fail-closed default (an unknown /
@@ -97,6 +127,38 @@ pub struct StoryPromise {
     pub maturity: f32,
     #[serde(default)]
     pub payoff_candidate_fact_ids: Vec<String>,
+    // ── L3.3 §五 field parity (additive, serde(default); old snapshots deserialize cleanly) ──
+    /// The owning [`StoryThread`] id, if this promise belongs to a thread. Empty when free-floating.
+    #[serde(default)]
+    pub thread_id: String,
+    /// Free-form description of the setup that planted this promise. Empty when absent.
+    #[serde(default)]
+    pub setup: String,
+    /// The earliest turn id at which this promise should be eligible to pay off (a soft floor),
+    /// if known. `None` ⇒ no floor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub earliest_payoff_turn: Option<String>,
+    /// What happens to the promise once it is overdue. Fail-closed default `Never` — a setup is
+    /// never silently dropped unless an explicit policy says so.
+    #[serde(default)]
+    pub expiry_policy: ExpiryPolicy,
+    /// The domain-event id that actually paid this promise off, once it has. `None` while unpaid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payoff_event_id: Option<String>,
+}
+
+/// What happens to a [`StoryPromise`] once it passes its `earliest_payoff_turn` without being
+/// paid off. `Never` is the fail-closed default — we never silently drop a planted setup unless
+/// an explicit policy says so. Generic (NOT branched on ruleset/module, §二-⑪).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExpiryPolicy {
+    #[default]
+    Never,
+    /// Past due it loses maturity/pressure but persists (a soft fade, still payable).
+    Soft,
+    /// Past due it breaks (transitions toward `PromiseStatus::Broken`).
+    Hard,
 }
 
 /// The shape a promise's payoff is expected to take. `Unspecified` is the fail-closed

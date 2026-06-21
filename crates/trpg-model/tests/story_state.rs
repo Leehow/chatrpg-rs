@@ -25,6 +25,86 @@ fn enums_default_fail_closed() {
 }
 
 #[test]
+fn l33_new_field_parity_enums_default_fail_closed() {
+    // L3.3: new §五 origin/expiry enums default to the fail-closed neutral value.
+    assert_eq!(StoryThreadOrigin::default(), StoryThreadOrigin::Unspecified);
+    assert_eq!(ExpiryPolicy::default(), ExpiryPolicy::Never);
+    assert_eq!(
+        serde_json::to_string(&StoryThreadOrigin::ModuleAnchor).unwrap(),
+        "\"module_anchor\""
+    );
+    assert_eq!(
+        serde_json::to_string(&ExpiryPolicy::Soft).unwrap(),
+        "\"soft\""
+    );
+}
+
+#[test]
+fn l33_old_thread_snapshot_deserializes_with_new_field_defaults() {
+    // An OLD persisted StoryThread (pre-L3.3, missing title/origin/module_anchor/payoff_candidates)
+    // must still deserialize — the fail-soft load_story_state path depends on this back-compat.
+    let old = serde_json::json!({
+        "thread_id": "thr_legacy",
+        "status": "active",
+        "related_fact_ids": ["f1"]
+    });
+    let t: StoryThread = serde_json::from_value(old).unwrap();
+    assert_eq!(t.thread_id, "thr_legacy");
+    assert_eq!(t.status, StoryThreadStatus::Active);
+    // new fields default cleanly:
+    assert_eq!(t.title, "");
+    assert_eq!(t.origin, StoryThreadOrigin::Unspecified);
+    assert_eq!(t.module_anchor, None);
+    assert!(t.payoff_candidates.is_empty());
+}
+
+#[test]
+fn l33_old_promise_snapshot_deserializes_with_new_field_defaults() {
+    // An OLD persisted StoryPromise (pre-L3.3) must still deserialize with the new fields defaulted.
+    let old = serde_json::json!({
+        "promise_id": "prm_legacy",
+        "status": "ripe",
+        "maturity": 0.8
+    });
+    let p: StoryPromise = serde_json::from_value(old).unwrap();
+    assert_eq!(p.promise_id, "prm_legacy");
+    assert_eq!(p.status, PromiseStatus::Ripe);
+    assert_eq!(p.maturity, 0.8);
+    // new fields default cleanly:
+    assert_eq!(p.thread_id, "");
+    assert_eq!(p.setup, "");
+    assert_eq!(p.earliest_payoff_turn, None);
+    assert_eq!(p.expiry_policy, ExpiryPolicy::Never);
+    assert_eq!(p.payoff_event_id, None);
+}
+
+#[test]
+fn l33_new_fields_round_trip() {
+    // A thread+promise carrying the new fields round-trips exactly.
+    let mut state = StoryState::default();
+    state.active_threads.push(StoryThread {
+        thread_id: "thr_x".into(),
+        title: "The Missing Heir".into(),
+        origin: StoryThreadOrigin::ModuleAnchor,
+        module_anchor: Some("anchor_42".into()),
+        payoff_candidates: vec!["confront_baron".into()],
+        ..Default::default()
+    });
+    state.promises.push(StoryPromise {
+        promise_id: "prm_x".into(),
+        thread_id: "thr_x".into(),
+        setup: "the locket was shown".into(),
+        earliest_payoff_turn: Some("t12".into()),
+        expiry_policy: ExpiryPolicy::Hard,
+        payoff_event_id: None,
+        ..Default::default()
+    });
+    let json = serde_json::to_string(&state).unwrap();
+    let back: StoryState = serde_json::from_str(&json).unwrap();
+    assert_eq!(state, back);
+}
+
+#[test]
 fn enums_serialize_snake_case() {
     assert_eq!(
         serde_json::to_string(&StoryThreadStatus::ReadyForPayoff).unwrap(),
@@ -53,6 +133,10 @@ fn full_state_round_trips() {
             unresolved_questions: vec!["where is the will?".into()],
             unresolved_consequences: vec!["civil war".into()],
             last_touched_turn: Some("turn_12".into()),
+            title: "the missing heir".into(),
+            origin: StoryThreadOrigin::ModuleAnchor,
+            module_anchor: Some("anchor_heir".into()),
+            payoff_candidates: vec!["unmask_the_steward".into()],
         }],
         promises: vec![StoryPromise {
             promise_id: "promise_1".into(),
@@ -61,6 +145,11 @@ fn full_state_round_trips() {
             status: PromiseStatus::Ripe,
             maturity: 0.8,
             payoff_candidate_fact_ids: vec!["fact_y".into()],
+            thread_id: "thread_1".into(),
+            setup: "the will was hidden".into(),
+            earliest_payoff_turn: Some("turn_20".into()),
+            expiry_policy: ExpiryPolicy::Soft,
+            payoff_event_id: None,
         }],
         character_arcs: vec![CharacterArcState {
             character_id: "pc_1".into(),
