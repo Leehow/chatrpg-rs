@@ -518,8 +518,15 @@ impl ContestService {
         roll: &DiceRollRecord,
         model: &CheckResolutionModel,
     ) -> Vec<CheckModifier> {
-        // Guard 2: non-opposed static DV path only.
-        if !matches!(model, CheckResolutionModel::StaticTargetNumber { .. }) {
+        // Guard 2: roll-high "1d10 + competence >= number" paths — the non-opposed
+        // static DV path, plus (L-T, flag-gated) the attack-vs-defense path, which is
+        // the same `total >= defense_value` composition. OpposedRoll/DicePool bind
+        // their actor values elsewhere and are intentionally excluded. OFF flag ⇒
+        // attack path drops out ⇒ baseline byte-equal.
+        let model_eligible = matches!(model, CheckResolutionModel::StaticTargetNumber { .. })
+            || (attack_roll_competence_enabled()
+                && matches!(model, CheckResolutionModel::AttackVsDefense { .. }));
+        if !model_eligible {
             return vec![];
         }
         // Guard 3: bare system die only (no double-add).
@@ -890,6 +897,28 @@ fn infer_ruleset_default_model(contract: &CheckContract) -> CheckResolutionModel
 
 fn env_i32(key: &str) -> Option<i32> {
     std::env::var(key).ok().and_then(|v| v.parse().ok())
+}
+
+/// L-T: in a roll-high (meet_or_beat) ruleset an attack is `1d10 + STAT + SKILL
+/// >= defense` — the SAME competence composition D1 already applies on the static
+/// DV path. Without it an `AttackVsDefense` roll is a bare `1d10` vs a `defense_value`
+/// of 13–14, which a max die (10) cannot meet: a competent PC is mathematically
+/// unable to win, so every attack/contested-tech turn fails → no consequence (J2)
+/// and the player grinds the same beat in place (J3 scene-freeze). Binding the
+/// attacker's tested STAT/SKILL to the attack expression mirrors `resolve_roll_high`
+/// for the static path. **Default ON** (eval doesn't set it ⇒ inherited); OFF
+/// (`0`/`false`/`off`/`no`) drops the attack path from the guard ⇒ baseline
+/// byte-equal. Gated on the same `meet_or_beat` kernel signal inside the guard, so
+/// CoC (roll_under) / Triangle (count_faces) and every all-OFF run stay identical;
+/// zero ruleset_id name-branching.
+fn attack_roll_competence_enabled() -> bool {
+    !matches!(
+        std::env::var("TRPG_ATTACK_ROLL_COMPETENCE")
+            .ok()
+            .map(|v| v.to_ascii_lowercase())
+            .as_deref(),
+        Some("0") | Some("false") | Some("off") | Some("no")
+    )
 }
 
 fn is_attack_contract(contract: &CheckContract) -> bool {

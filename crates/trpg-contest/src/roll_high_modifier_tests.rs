@@ -164,3 +164,45 @@ fn player_reported_modes_block_double_add() {
     let reported_components = roll_with_result(json!({"mode":"reported_components","die":8,"components":[6,4],"total":18}));
     assert!(!roll_is_bare_system_die(&reported_components), "reported_components 禁止再加");
 }
+
+// ─── L-T: attack-vs-defense 也走 "1d10 + competence >= defense" 组合 ───
+// 根因(aliveFull30v2 实证):attack_vs_defense 检定丢了 actor STAT/SKILL,裸 1d10 对
+// defense 14 数学不可达(max die 10 < 14)⇒ 能力 PC 必败 ⇒ 无后果(J2)+ 原地磨同一 beat
+// (J3 场景冻结)。组合算术与静态 DV 路径同构,这里钉死。
+#[test]
+fn attack_vs_defense_bare_die_cannot_meet_dv14_but_competence_passes() {
+    let model = CheckResolutionModel::AttackVsDefense {
+        attack_expression: "1d10".into(),
+        defender_actor_id: Some("npc.opposition".into()),
+        defense_label: "DV".into(),
+        defense_value: 14,
+    };
+    // 旧行为:裸骰 10(满骰)对 defense 14 仍败 → 能力 PC 数学上不可能赢。
+    let (_t, bare_success, _d, _a) = resolve_against_model(&model, 10, &[]);
+    assert_eq!(bare_success, Some(false), "旧行为:裸 1d10=10 < defense 14 必败(结构性不可达)");
+
+    // 新行为:10 + Basic Tech 8 = 18 >= 14 → 通过(攻击/竞技检定不再必败)。
+    let m = skill_modifier_from_label(&cyber_mech_flat(), "Basic Tech")
+        .expect("Basic Tech 在卡上必须解析出 modifier");
+    let (composed, success) = compose_and_resolve(&model, 10, std::slice::from_ref(&m), &[]);
+    assert_eq!(composed, 18, "10 + Basic Tech 8 = 18");
+    assert_eq!(success, Some(true), "新行为:18 >= defense 14 → 攻击命中");
+}
+
+// ─── L-T flag:默认 ON,OFF==baseline(只静态路径) ───
+#[test]
+fn attack_roll_competence_flag_defaults_on_and_off_excludes_attack_path() {
+    let prev = std::env::var("TRPG_ATTACK_ROLL_COMPETENCE").ok();
+    std::env::remove_var("TRPG_ATTACK_ROLL_COMPETENCE");
+    assert!(attack_roll_competence_enabled(), "默认(未设)= ON,eval 自动吃到");
+    for off in ["0", "false", "off", "no", "OFF"] {
+        std::env::set_var("TRPG_ATTACK_ROLL_COMPETENCE", off);
+        assert!(!attack_roll_competence_enabled(), "OFF 形态 `{off}` 须关闭 attack 竞技绑定(字节等价)");
+    }
+    std::env::set_var("TRPG_ATTACK_ROLL_COMPETENCE", "1");
+    assert!(attack_roll_competence_enabled(), "显式 1 = ON");
+    match prev {
+        Some(v) => std::env::set_var("TRPG_ATTACK_ROLL_COMPETENCE", v),
+        None => std::env::remove_var("TRPG_ATTACK_ROLL_COMPETENCE"),
+    }
+}
