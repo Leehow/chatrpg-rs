@@ -267,7 +267,7 @@ fn score_thread(t: &StoryThread, story: &StoryState, rejected_thread_ids: &[Stri
     let player_interest = t.player_interest;
     let urgency = t.urgency;
     let payoff_value = ripe_payoff_signal(t, story);
-    let character_relevance = if t.participant_ids.is_empty() { 0.0 } else { 0.6 };
+    let character_relevance = character_relevance(t, story);
     let genre_fit = 0.5; // GENERIC neutral prior (no ruleset branch).
     let novelty = novelty_signal(t, story);
     let repetition = 1.0 - novelty;
@@ -290,6 +290,40 @@ fn score_thread(t: &StoryThread, story: &StoryState, rejected_thread_ids: &[Stri
         - W_SPOILER_RISK * spoiler_risk
         - W_RAILROADING_RISK * railroading_risk
         - W_PLAUSIBILITY_COST * plausibility_cost
+}
+
+/// L5.2 — arc-aware `character_relevance` term (0..=1), de-stubbing the old constant
+/// `if participants.is_empty() { 0.0 } else { 0.6 }`. A thread's character relevance rises when a
+/// participating (or explicitly thread-linked) character is OVERDUE for spotlight
+/// (`CharacterArcState.spotlight_debt`). Generic — keyed only on typed arc data, NO ruleset/module
+/// name-branch (§二-⑪).
+///
+/// CONTINUOUS WITH THE BASELINE: with no relevant arc data (the OFF / arc-less case) it returns the
+/// exact old prior (`0.0` / `0.6`), and a relevant arc at the default `spotlight_debt = 0.0` also
+/// yields `0.6` — so existing director-ON selections are unchanged until a populated spotlight debt
+/// lifts the term. Debt `d ∈ 0..=1` lifts relevance linearly from `0.6` toward `1.0`.
+fn character_relevance(t: &StoryThread, story: &StoryState) -> f32 {
+    let relevant_debt = story
+        .character_arcs
+        .iter()
+        .filter(|a| {
+            t.participant_ids.iter().any(|p| p == &a.character_id)
+                || a.related_thread_ids.iter().any(|r| r == &t.thread_id)
+        })
+        .map(|a| a.spotlight_debt)
+        .fold(None::<f32>, |acc, d| Some(acc.map_or(d, |m| m.max(d))));
+    match relevant_debt {
+        // No arc data for this thread ⇒ unchanged structural prior (continuous with the old stub).
+        None => {
+            if t.participant_ids.is_empty() {
+                0.0
+            } else {
+                0.6
+            }
+        }
+        // Relevant arc(s): base 0.6 lifted toward 1.0 by the max spotlight debt among them.
+        Some(debt) => (0.6 + 0.4 * debt.clamp(0.0, 1.0)).clamp(0.0, 1.0),
+    }
 }
 
 /// Map thread lifecycle to a current-relevance prior (0..=1). `Dormant`/terminal states

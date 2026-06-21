@@ -6,8 +6,9 @@
 
 use trpg_director::{build_director_brief_packet, DirectorMode};
 use trpg_model::{
-    BeatKind, DirectorPlan, NpcActionIntent, NpcActionKind, PlayerInterestSignal, SpotlightState,
-    StoryState, StoryThread, StoryThreadStatus, WorldCandidateRef, WorldReactionCandidate,
+    BeatKind, CharacterArcState, DirectorPlan, NpcActionIntent, NpcActionKind, PlayerInterestSignal,
+    SpotlightState, StoryState, StoryThread, StoryThreadStatus, WorldCandidateRef,
+    WorldReactionCandidate,
 };
 
 fn cand(npc: &str, events: Vec<&str>, action: Option<NpcActionKind>) -> WorldReactionCandidate {
@@ -377,4 +378,56 @@ fn packet_carries_only_structural_strings() {
     assert!(plan.dramatic_function.chars().all(|c| c.is_ascii()));
     assert!(!plan.dramatic_function.contains(' '));
     assert!(!plan.desired_change.contains(' '));
+}
+
+// ── L5.2: arc-aware character_relevance flips selection vs the stubbed constant ────
+#[test]
+fn l52_arc_spotlight_debt_flips_primary_pick() {
+    let pool = vec![
+        cand("npc_low", vec!["e1"], Some(NpcActionKind::Speak)),
+        cand("npc_high", vec!["e2"], Some(NpcActionKind::Speak)),
+    ];
+    // Two threads identical in every scored term except their id/participant ⇒ a TIE that the
+    // deterministic tiebreak (thread_id asc) resolves to "t_aaa".
+    let mut story = StoryState::default();
+    story.active_threads.push(thread("t_aaa", "npc_low", 0.5));
+    story.active_threads.push(thread("t_zzz", "npc_high", 0.5));
+    let baseline = build_director_brief_packet(
+        DirectorMode::OnDemand,
+        &pool,
+        &story,
+        None,
+        None,
+        &[],
+        &[],
+        "pc_1",
+    );
+    assert_eq!(
+        baseline.primary_thread_id.as_deref(),
+        Some("t_aaa"),
+        "no arc data ⇒ both character_relevance terms equal (old stub) ⇒ tiebreak picks t_aaa"
+    );
+
+    // L5.2: npc_high is badly overdue for spotlight. The arc-weighted term lifts t_zzz's score
+    // above the tie and FLIPS the primary pick — provably different from the stubbed baseline.
+    story.character_arcs.push(CharacterArcState {
+        character_id: "npc_high".into(),
+        spotlight_debt: 1.0,
+        ..Default::default()
+    });
+    let arc_weighted = build_director_brief_packet(
+        DirectorMode::OnDemand,
+        &pool,
+        &story,
+        None,
+        None,
+        &[],
+        &[],
+        "pc_1",
+    );
+    assert_eq!(
+        arc_weighted.primary_thread_id.as_deref(),
+        Some("t_zzz"),
+        "high spotlight_debt lifts character_relevance and flips the primary pick to t_zzz"
+    );
 }
