@@ -80,6 +80,7 @@ pub use npc_behavior::{
 };
 pub mod director_brief;
 pub mod knowledge_leak_verifier;
+pub mod scene_plan_emit;
 pub mod story_events;
 pub mod story_observer;
 pub mod story_write;
@@ -96,6 +97,7 @@ pub use knowledge_leak_verifier::{
 pub use story_write::{
     apply_thread_opened, merge_rejections, rejection_proposal, story_write_loop_enabled,
 };
+pub use scene_plan_emit::{build_scene_plan_emission, emit_scene_plan_on_change};
 
 pub mod verifier_private_view;
 pub use verifier_private_view::{build_verifier_private_view, VerifierPrivateView};

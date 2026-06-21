@@ -2874,11 +2874,25 @@ impl GmLoop {
         )
         .await
         {
-            Ok(Some(c)) => Some(SceneTransitionInfo {
-                from: c.from,
-                to: c.to,
-                reason: c.reason,
-            }),
+            Ok(Some(c)) => {
+                // L4.2 — on a COMMITTED scene change, derive the scene's ScenePlan from the live
+                // story threads (+ module director config) and emit exactly one ScenePlanCreated
+                // ledger event. Flag-gated (`TRPG_DIRECTOR_SCENE_PLAN`, default OFF ⇒ immediate
+                // no-op, byte-identical baseline); additive + fail-soft (never reverses the switch).
+                trpg_runtime::scene_plan_emit::emit_scene_plan_on_change(
+                    &self.engine.db,
+                    &input.request.session_id,
+                    module_id,
+                    &input.request.turn_id,
+                    &c.to,
+                )
+                .await;
+                Some(SceneTransitionInfo {
+                    from: c.from,
+                    to: c.to,
+                    reason: c.reason,
+                })
+            }
             Ok(None) => None,
             Err(err) => {
                 tracing::warn!(error = %err, "agent path scene_navigate_critical failed");
