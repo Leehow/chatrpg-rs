@@ -3506,6 +3506,7 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "trpg-agent",
  "trpg-combat",
  "trpg-db",

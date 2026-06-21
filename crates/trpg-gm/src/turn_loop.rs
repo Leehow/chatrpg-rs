@@ -2585,6 +2585,24 @@ impl GmLoop {
                     &results,
                 )
                 .await;
+            // L1.3 SPINE observability: emit the post-adjudication plan summary so a live turn
+            // can PROVE the beat reflects the committed result (target `director_spine`, only
+            // under the flag ⇒ never fires OFF ⇒ baseline unchanged). The committed disposition is
+            // summarized from the projected results (the very signal the overlay keyed on).
+            if let Some(p) = plan.as_ref() {
+                let committed: Vec<String> = results
+                    .iter()
+                    .map(|r| format!("{}:{:?}", r.check_id, r.outcome))
+                    .collect();
+                tracing::info!(
+                    target: "director_spine",
+                    turn_id = %request.turn_id,
+                    beat_kind = ?p.beat_kind,
+                    desired_change = %p.desired_change,
+                    committed_results = ?committed,
+                    "post-adjudication DirectorPlan built (spine: beat reflects committed result)"
+                );
+            }
             ctx.post_adjudication_plan = plan;
         }
         // P3.7 BeforeCommit 重定位：从 save_turn 前迁到 AgentLoop 结束这一真正的
