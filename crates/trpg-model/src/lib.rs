@@ -54,6 +54,8 @@ pub mod director_request;
 pub use director_request::*;
 pub mod mechanical_result;
 pub use mechanical_result::*;
+pub mod narrative_anchor;
+pub use narrative_anchor::*;
 pub mod materialization_affordance;
 pub use materialization_affordance::*;
 
@@ -4947,6 +4949,11 @@ pub struct DirectorModuleConfig {
     /// Fallback place summary when state has no location_id.
     #[serde(default)]
     pub place_summary_fallback: Option<String>,
+    /// L8.1 — deterministic module-extracted narrative MATERIAL (potential threads / reveals /
+    /// climax conditions / setup→payoff / scene functions). Additive; empty serializes away so
+    /// pre-L8.1 bundles stay byte-identical. Director treats these as raw material, never a script.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub narrative_anchors: Vec<NarrativeAnchor>,
 }
 
 /// Lightweight module-level engine config. Lives in the module bundle; every

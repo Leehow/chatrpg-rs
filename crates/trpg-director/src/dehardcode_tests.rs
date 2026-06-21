@@ -57,6 +57,7 @@ fn legacy_homecoming_director_config() -> DirectorModuleConfig {
         open_question: Some("你们优先救人、控制威胁、追查源头、获取资源，还是撤离保命？".into()),
         open_question_points_to: vec!["rescue".into(), "control".into(), "source".into(), "loot".into(), "retreat".into()],
         place_summary_fallback: Some("当前地点：Cyberpunk RED Homecoming 开场附近；一个高压现场正在等待玩家选择目标。".into()),
+        narrative_anchors: Vec::new(),
     }
 }
 

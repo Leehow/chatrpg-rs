@@ -33,6 +33,20 @@ pub fn facilitation_enabled() -> bool {
         .unwrap_or(true)
 }
 
+/// L8.1 narrative-anchor extraction gate: **default OFF** (additive, opt-in). ON ⇒ a deterministic
+/// pure pass attaches `NarrativeAnchor`s to the module's `DirectorModuleConfig`. OFF ⇒ never run ⇒
+/// the parsed bundle is byte-identical. `TRPG_MODULE_ANCHORS=1/true/on/yes` enables.
+pub fn narrative_anchors_enabled() -> bool {
+    std::env::var("TRPG_MODULE_ANCHORS")
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "on" | "yes"
+            )
+        })
+        .unwrap_or(false)
+}
+
 /// 从已解析 readout 的入口场景(idx)语义抽取模组级引导事实。见模块文档。
 pub async fn extract_facilitation_facts(
     client: &dyn LlmClient,

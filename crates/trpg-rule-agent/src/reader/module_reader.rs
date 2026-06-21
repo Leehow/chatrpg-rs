@@ -460,6 +460,21 @@ pub async fn run_module_reader(
             "facilitation facts extraction done"
         );
     }
+    // L8.1 — deterministic narrative-anchor extraction (additive MATERIAL; flag-gated, default OFF
+    // via TRPG_MODULE_ANCHORS). Pure/idempotent over the parsed scenes (no LLM, no name-branch);
+    // attaches anchors onto the module's DirectorModuleConfig so L8.2 can seed threads from them.
+    // OFF ⇒ never run ⇒ byte-identical bundle.
+    if super::facilitation::narrative_anchors_enabled() {
+        let anchors = trpg_model::extract_narrative_anchors(&out.scenes);
+        if !anchors.is_empty() {
+            let cfg = out.facilitation_facts.get_or_insert_with(Default::default);
+            cfg.narrative_anchors = anchors;
+            tracing::info!(
+                target: "module_reader", phase = "narrative_anchors",
+                count = cfg.narrative_anchors.len(), "narrative anchors extracted (deterministic)"
+            );
+        }
+    }
     // Pass B 失败 → 入口保持 SkeletonOnly（fail-closed），已得骨架照常返回。
     Ok(out)
 }
