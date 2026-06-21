@@ -273,6 +273,74 @@ async fn thread_opened_floors_dormant_to_introduced() {
     purge(&db, &session).await;
 }
 
+/// M5 / J1 — the AMNESIA CURE, proven LIVE and BY DEFAULT. Every other test in this file flips
+/// `TRPG_STORY_WRITE_LOOP` ON explicitly; this one asserts that with NO env set (a normal session),
+/// the write loop is already live (M1's kill-switch default-ON) AND that a fact learned on one turn
+/// is REMEMBERED across the turn boundary: the dormant thread it opens persists and is recalled by
+/// the next turn's `load_story_state`. That cross-turn recall — with zero configuration — is exactly
+/// what "失忆 (story_state 活跑写0)" was missing.
+#[tokio::test]
+async fn live_by_default_cross_turn_memory_continuity() {
+    let Some(db) = connect_or_skip().await else {
+        return;
+    };
+    // Normal session: the player set NOTHING. Persistence must already be live (M1 default-ON).
+    std::env::remove_var("TRPG_STORY_WRITE_LOOP");
+    assert!(
+        trpg_runtime::story_write_loop_enabled(),
+        "M1: story persistence must be LIVE BY DEFAULT (the amnesia cure) — no env required"
+    );
+
+    let session = format!("sess_sw_continuity_{}", uuid::Uuid::new_v4().simple());
+    purge(&db, &session).await;
+    prepare(&db, &session).await;
+
+    // TURN t0 — a dramatic thread is latent (Dormant), keyed on a fact the player has not learned.
+    let story = StoryState {
+        active_threads: vec![StoryThread {
+            thread_id: "thr_ledger".into(),
+            status: StoryThreadStatus::Dormant,
+            related_fact_ids: vec!["fact_the_truth".into()],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    db.upsert_story_state(&session, &story, "t0").await.unwrap();
+
+    // TURN t1 — the player LEARNS the fact. With no env set, the default-live write loop persists
+    // the consequence (the thread opens). This is the WRITE the dead game never performed.
+    commit_story_writes(&db, &session, &[], &["fact_the_truth".to_string()], "t1")
+        .await
+        .expect("default-live commit_story_writes persists the opened thread");
+
+    // TURN t2 (a LATER turn) — the next turn loads story_state fresh. The game REMEMBERS: the thread
+    // the player opened a turn ago is still Introduced (not amnesiacally back to Dormant/empty).
+    let recalled = db.load_story_state(&session).await.unwrap().unwrap();
+    assert!(!recalled.is_empty(), "story_state is non-empty across turns (no amnesia)");
+    let thread = recalled
+        .active_threads
+        .iter()
+        .find(|t| t.thread_id == "thr_ledger")
+        .expect("the opened thread is recalled on a later turn");
+    assert_eq!(
+        thread.status,
+        StoryThreadStatus::Introduced,
+        "J1 continuity: a consequence from a prior turn is remembered, not forgotten"
+    );
+
+    // The consequence is also durably observable in the event ledger (J2 — consequences land).
+    let events = db.list_domain_events(&session, 100).await.unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| e.kind == DomainEventKind::StoryThreadOpened
+                && e.data["thread_id"] == "thr_ledger"),
+        "J2: the prior-turn consequence is recorded in the durable ledger"
+    );
+
+    purge(&db, &session).await;
+}
+
 /// L3.1 OFF==baseline for the ledger: with the flag unset, the floor write-loop is a no-op, so
 /// NO StoryThread domain events are appended (the append lives strictly inside the ON path).
 #[tokio::test]
