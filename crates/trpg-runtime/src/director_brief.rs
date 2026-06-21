@@ -205,6 +205,12 @@ pub async fn commit_story_writes(
     // append-only observability.
     let thread_events =
         crate::story_write::thread_status_events(&before, &after, session_id, updated_turn);
+    // L3.2: derive the additive StoryPromise ledger events from the same committed diff. The
+    // production promise-advancement source is the Story Observer (L7.1); until then `before`/
+    // `after` carry identical promises ⇒ this is an empty (fail-closed no-op) vector. Wired here
+    // so the write-through seam is in place the moment promises actually move.
+    let promise_events =
+        crate::story_events::promise_status_events(&before, &after, session_id, updated_turn);
     apply_story_proposals(db, session_id, after, updated_turn).await?;
     // Additive + fail-soft write-through (mirrors the `ClockAdvanced` pattern): the story_state
     // upsert above is the committed source of truth; appending the ledger rows must NEVER reverse
@@ -213,6 +219,13 @@ pub async fn commit_story_writes(
     for ev in &thread_events {
         if let Err(err) = db.append_domain_event(ev).await {
             tracing::warn!(error = %err, event_id = %ev.event_id, "append StoryThread domain event failed (non-fatal)");
+        }
+    }
+    // L3.2: same additive + fail-soft write-through for the promise diff (empty until L7.1 moves a
+    // promise; appending here can never reverse the committed snapshot).
+    for ev in &promise_events {
+        if let Err(err) = db.append_domain_event(ev).await {
+            tracing::warn!(error = %err, event_id = %ev.event_id, "append StoryPromise domain event failed (non-fatal)");
         }
     }
     Ok(())

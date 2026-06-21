@@ -116,6 +116,24 @@ pub enum DomainEventKind {
     StoryThreadResolved,
     /// L3.1：某 StoryThread 从非 `Dormant` 迁移**回** `Dormant`（休眠）后写穿的领域事件。
     StoryThreadDormant,
+    /// L3.2：一条 [`crate::StoryPromise`] 被首次种下（在 story_state 中新出现）后写穿的领域事件。
+    /// 加性 + fail-soft，快照仍是单一真相源。data 带 promise_id / thread_id / status。
+    /// 幂等键在结算后状态上：`de_promise_{session}_{promise}_created`。
+    StoryPromiseCreated,
+    /// L3.2：一条 StoryPromise 的成熟度被推进/被再次铺垫（maturity 上升或 status 前进但未 PaidOff）
+    /// 后写穿的领域事件。幂等键带结算后 status：`de_promise_{session}_{promise}_{status}`。
+    StoryPromiseReinforced,
+    /// L3.2：一条 StoryPromise 迁移到 `PaidOff` 后写穿的领域事件。data 可带 payoff_event_id。
+    StoryPromisePaidOff,
+    /// L3.2：一个场景计划（ScenePlan，L4.x）在场景起始被创建后写穿的领域事件。emit 站点在
+    /// L4.2（SceneChanged 触发）；本 lane 先落词汇 + 构造器。data 带 scene_id。
+    ScenePlanCreated,
+    /// L3.2：一个 beat 被规划（post-adjudication DirectorPlan 产出）后写穿的领域事件。emit 站点
+    /// 在 L6.x narrator 组合路径；本 lane 先落词汇 + 构造器。data 带 thread_id / beat_kind。
+    BeatPlanned,
+    /// L3.2：一个已规划 beat 在回合中被实际演出/记录（[`crate::BeatRecord`]）后写穿的领域事件。
+    /// emit 站点在 Story Observer（L7.x）。data 带 turn_id / thread_id / beat_kind。
+    BeatObserved,
 }
 
 impl DomainEventKind {
@@ -146,6 +164,12 @@ impl DomainEventKind {
             DomainEventKind::StoryThreadAdvanced => "StoryThreadAdvanced",
             DomainEventKind::StoryThreadResolved => "StoryThreadResolved",
             DomainEventKind::StoryThreadDormant => "StoryThreadDormant",
+            DomainEventKind::StoryPromiseCreated => "StoryPromiseCreated",
+            DomainEventKind::StoryPromiseReinforced => "StoryPromiseReinforced",
+            DomainEventKind::StoryPromisePaidOff => "StoryPromisePaidOff",
+            DomainEventKind::ScenePlanCreated => "ScenePlanCreated",
+            DomainEventKind::BeatPlanned => "BeatPlanned",
+            DomainEventKind::BeatObserved => "BeatObserved",
         }
     }
 
@@ -174,6 +198,12 @@ impl DomainEventKind {
             "StoryThreadAdvanced" => DomainEventKind::StoryThreadAdvanced,
             "StoryThreadResolved" => DomainEventKind::StoryThreadResolved,
             "StoryThreadDormant" => DomainEventKind::StoryThreadDormant,
+            "StoryPromiseCreated" => DomainEventKind::StoryPromiseCreated,
+            "StoryPromiseReinforced" => DomainEventKind::StoryPromiseReinforced,
+            "StoryPromisePaidOff" => DomainEventKind::StoryPromisePaidOff,
+            "ScenePlanCreated" => DomainEventKind::ScenePlanCreated,
+            "BeatPlanned" => DomainEventKind::BeatPlanned,
+            "BeatObserved" => DomainEventKind::BeatObserved,
             _ => DomainEventKind::TurnStarted,
         }
     }
@@ -550,6 +580,63 @@ mod tests {
             }
         }
         // fail-closed 未知回退不受影响。
+        assert_eq!(
+            DomainEventKind::from_str_token("Bogus"),
+            DomainEventKind::TurnStarted
+        );
+    }
+
+    #[test]
+    fn story_promise_and_scene_beat_kinds_token_and_serde_roundtrip() {
+        // L3.2：6 个 promise/scene/beat 账本事件。token 稳定 + serde 闭环 + 与既有 21 variant 区分。
+        let new_kinds = [
+            DomainEventKind::StoryPromiseCreated,
+            DomainEventKind::StoryPromiseReinforced,
+            DomainEventKind::StoryPromisePaidOff,
+            DomainEventKind::ScenePlanCreated,
+            DomainEventKind::BeatPlanned,
+            DomainEventKind::BeatObserved,
+        ];
+        for k in new_kinds {
+            assert_eq!(DomainEventKind::from_str_token(k.as_str()), k);
+            let v = serde_json::to_value(k).unwrap();
+            assert_eq!(v.as_str(), Some(k.as_str()), "serde token 必与 as_str 一致");
+            let back: DomainEventKind = serde_json::from_value(v).unwrap();
+            assert_eq!(back, k);
+        }
+        // 与既有 21 个全部不相交（17 原始 + 4 个 L3.1 thread 变体），且彼此互不相同。
+        for existing in [
+            "TurnStarted",
+            "TurnFinalized",
+            "TurnFailed",
+            "SceneTransitioned",
+            "DiceRolled",
+            "CheckResolved",
+            "EntitySurfaced",
+            "ContextSurfaced",
+            "PlayerExposed",
+            "PlayerLearnedFact",
+            "NpcLearnedFact",
+            "ClientDisconnected",
+            "FactRevealed",
+            "RelationshipChanged",
+            "ResourceChanged",
+            "NpcActionResolved",
+            "ClockAdvanced",
+            "StoryThreadOpened",
+            "StoryThreadAdvanced",
+            "StoryThreadResolved",
+            "StoryThreadDormant",
+        ] {
+            for k in new_kinds {
+                assert_ne!(k.as_str(), existing, "新 promise/scene/beat token 必与既有 21 个不同");
+            }
+        }
+        for i in 0..new_kinds.len() {
+            for j in (i + 1)..new_kinds.len() {
+                assert_ne!(new_kinds[i], new_kinds[j], "6 个变体互不相同");
+            }
+        }
         assert_eq!(
             DomainEventKind::from_str_token("Bogus"),
             DomainEventKind::TurnStarted
