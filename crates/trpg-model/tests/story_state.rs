@@ -105,6 +105,48 @@ fn l33_new_fields_round_trip() {
 }
 
 #[test]
+fn l34_old_arc_snapshot_deserializes_with_new_field_defaults() {
+    // An OLD persisted CharacterArcState (pre-L3.4, only the original 7 fields) must still
+    // deserialize — the new fields default cleanly (back-compat for load_story_state fail-soft).
+    let old = serde_json::json!({
+        "character_id": "pc_legacy",
+        "arc_premise": "coward to hero",
+        "current_stage": "refusal",
+        "progress": 0.3,
+        "want": "safety",
+        "need": "courage",
+        "related_thread_ids": ["thread_1"]
+    });
+    let a: CharacterArcState = serde_json::from_value(old).unwrap();
+    assert_eq!(a.character_id, "pc_legacy");
+    assert_eq!(a.progress, 0.3);
+    // new fields default cleanly:
+    assert_eq!(a.spotlight_debt, 0.0);
+    assert!(a.expressed_desires.is_empty());
+    assert!(a.unresolved_personal_hooks.is_empty());
+    assert!(a.important_relationship_ids.is_empty());
+    assert!(a.recent_choices.is_empty());
+    assert!(a.recurring_conflicts.is_empty());
+    assert_eq!(a.emotional_direction, "");
+}
+
+#[test]
+fn l34_spotlight_debt_clamped_by_validated() {
+    // validated() clamps the new spotlight_debt to 0..=1 (consistent with progress), leaving the
+    // original fields' behavior unchanged.
+    let mut state = StoryState::default();
+    state.character_arcs.push(CharacterArcState {
+        character_id: "pc_x".into(),
+        spotlight_debt: 5.0,
+        progress: -2.0,
+        ..Default::default()
+    });
+    let v = state.validated();
+    assert_eq!(v.character_arcs[0].spotlight_debt, 1.0);
+    assert_eq!(v.character_arcs[0].progress, 0.0);
+}
+
+#[test]
 fn enums_serialize_snake_case() {
     assert_eq!(
         serde_json::to_string(&StoryThreadStatus::ReadyForPayoff).unwrap(),
@@ -159,6 +201,13 @@ fn full_state_round_trips() {
             want: "safety".into(),
             need: "courage".into(),
             related_thread_ids: vec!["thread_1".into()],
+            spotlight_debt: 0.4,
+            expressed_desires: vec!["go home".into()],
+            unresolved_personal_hooks: vec!["the debt to the gang".into()],
+            important_relationship_ids: vec!["npc_a".into()],
+            recent_choices: vec!["fled the ambush".into()],
+            recurring_conflicts: vec!["duty vs fear".into()],
+            emotional_direction: "hardening".into(),
         }],
         recent_beats: vec![BeatRecord {
             beat_kind: BeatKind::Complicate,

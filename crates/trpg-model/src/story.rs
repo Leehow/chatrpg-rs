@@ -211,6 +211,29 @@ pub struct CharacterArcState {
     pub need: String,
     #[serde(default)]
     pub related_thread_ids: Vec<String>,
+    // ── L3.4 §五 CharacterArcState rebuild (additive, serde(default); old snapshots deserialize) ──
+    /// How overdue this character is for spotlight (a debt magnitude, normalized `0.0..=1.0` by
+    /// `validated()`). High ⇒ the Director should weight this character up (L5.2).
+    #[serde(default)]
+    pub spotlight_debt: f32,
+    /// Desires the character has expressed in play (free-form). Material for beat selection.
+    #[serde(default)]
+    pub expressed_desires: Vec<String>,
+    /// Personal hooks raised but not yet resolved (free-form).
+    #[serde(default)]
+    pub unresolved_personal_hooks: Vec<String>,
+    /// Relationship ids the Director should treat as load-bearing for this character.
+    #[serde(default)]
+    pub important_relationship_ids: Vec<String>,
+    /// Recent meaningful choices this character made (free-form, newest-last by convention).
+    #[serde(default)]
+    pub recent_choices: Vec<String>,
+    /// Conflicts that keep recurring for this character (free-form).
+    #[serde(default)]
+    pub recurring_conflicts: Vec<String>,
+    /// Coarse emotional-direction token (e.g. `hardening`); free-form, snake_case at the producer.
+    #[serde(default)]
+    pub emotional_direction: String,
 }
 
 /// A record of one narrative beat that recently played. Provenance only — no resolution.
@@ -324,6 +347,7 @@ impl StoryState {
         self.character_arcs.retain(|a| !a.character_id.is_empty());
         for a in &mut self.character_arcs {
             a.progress = clamp_unit(a.progress);
+            a.spotlight_debt = clamp_unit(a.spotlight_debt); // L3.4: new field, default 0.0
         }
         self.player_interests.retain(|s| !s.thread_id.is_empty());
         for s in &mut self.player_interests {
