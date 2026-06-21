@@ -43,7 +43,8 @@
 //! (P5⑤#3). OFF ⇒ no story_state writes (byte-identical baseline). ON ⇒ it persists player
 //! thread-REJECTION proposals (§二十四-#13 commit half) and StoryThreadOpened status floors,
 //! routed through [`apply_story_proposals`]. The pure derivations live in
-//! [`crate::story_write`]; advancement semantics (P6.8b) are deliberately NOT implemented.
+//! [`crate::story_write`]; thread/promise ADVANCEMENT (the former P6.8b OutOfScope limit) is now
+//! the L7.1 Story Observer ([`crate::story_observer`]), also ON-path-gated and fail-closed.
 
 use trpg_db::Db;
 use trpg_director::{
@@ -194,10 +195,25 @@ pub async fn commit_story_writes(
     let (after, opened_changed) =
         crate::story_write::apply_thread_opened(after, newly_known_fact_ids);
 
+    // L7.1 Story Observer: advance OPENED threads along the status ladder + mature promises from
+    // the turn's committed signals (the de-stub of the P6.8b advancement limit). Runs BEFORE the
+    // event diff below so an advancement lands a StoryThreadAdvanced/StoryPromise* ledger row.
+    // Pure/forward-only/fail-closed; engagement comes from the persisted positive `player_interests`
+    // (read inside `observe_story`) — turn-level engagement + explicit payoff-event signals are
+    // L7.2/live sources, so today this only advances a thread the player has a standing positive
+    // interest in and matures a promise whose payoff candidates have become known.
+    let (after, observed_changed) = crate::story_observer::observe_story(
+        after,
+        &crate::story_observer::ObserverSignal {
+            known_fact_ids: newly_known_fact_ids.to_vec(),
+            ..Default::default()
+        },
+    );
+
     // Skip the upsert on a pure no-op (a quiet turn must not churn the row). `validated()`
     // is idempotent, so compare the would-be-committed snapshot against the loaded one.
     let merged_changed = after != before;
-    if !merged_changed && !opened_changed {
+    if !merged_changed && !opened_changed && !observed_changed {
         return Ok(());
     }
     // L3.1: derive the additive StoryThread ledger events from the committed status diff BEFORE

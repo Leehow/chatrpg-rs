@@ -81,6 +81,7 @@ pub use npc_behavior::{
 pub mod director_brief;
 pub mod knowledge_leak_verifier;
 pub mod story_events;
+pub mod story_observer;
 pub mod story_write;
 pub mod world;
 pub use director_brief::{
