@@ -202,10 +202,36 @@ pub(crate) fn synthesize_offstage_from_ledger(
     out
 }
 
+/// L-J 防回合内复述/单步推进:观测到 Narrator 在**同一回合内**把同一段经过(到达/移动/发讯/
+/// 敲门)反复描述 2–3 遍 + 偶发时间倒退 ⇒ player-sim 判位置/连续性 AMNESIA。此 flag 开时给
+/// Narrator overlay 追加「向前讲一次、禁回合内复述、时间单向」纪律。**默认 ON**(eval 不设 ⇒ 自动吃到),
+/// 仅显式关值 OFF ⇒ 与既有 NARRATOR_CRAFT 字节等价。零 ruleset 分支。
+pub(crate) fn narrator_single_advance_enabled() -> bool {
+    !matches!(
+        std::env::var("TRPG_NARRATOR_SINGLE_ADVANCE")
+            .ok()
+            .map(|v| v.to_ascii_lowercase())
+            .as_deref(),
+        Some("0") | Some("false") | Some("off") | Some("no")
+    )
+}
+
+/// L-J 单步推进纪律(追加在 NARRATOR_CRAFT 之后)。直击观测失败模式:回合内同一段经过被讲 2–3 遍。
+pub(crate) const NARRATOR_SINGLE_ADVANCE: &str = "\
+【单步推进 · 禁回合内复述】本回合只把玩家声明的动作与世界的回应**向前讲一次**：\n\
+- 凡你在**本回合内**已经叙述过的动作、到达、移动、发讯、敲门、检定结果等经过，绝不在同一回合里再描述第二遍，也绝不把玩家拉回去把它重做一遍；\n\
+- 从「连续性锚」给出的既成局面**向前**续写，不要回头重新铺陈已经发生过的事，叙述要收束于一个清晰的当前结果；\n\
+- 一次只解决玩家本回合真正声明的动作及其直接后果，不要为凑篇幅而循环复述同一段经过；\n\
+- 时间线只向前推进：绝不把场景时间倒回更早的时段(如已是夜晚就不要写回傍晚)。";
+
 /// Append the narrator craft overlay when `craft_on`. OFF ⇒ returns `base` unchanged (byte-equal).
 pub(crate) fn narrator_system(base: String, craft_on: bool) -> String {
     if craft_on {
-        format!("{base}\n{NARRATOR_CRAFT}")
+        if narrator_single_advance_enabled() {
+            format!("{base}\n{NARRATOR_CRAFT}\n{NARRATOR_SINGLE_ADVANCE}")
+        } else {
+            format!("{base}\n{NARRATOR_CRAFT}")
+        }
     } else {
         base
     }
@@ -223,6 +249,35 @@ pub(crate) fn adjudicator_system(base: String, craft_on: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn narrator_single_advance_flag_and_overlay() {
+        let prev = std::env::var("TRPG_NARRATOR_SINGLE_ADVANCE").ok();
+        // 默认 ON(未设)⇒ craft_on 路径在 NARRATOR_CRAFT 之后追加单步推进纪律。
+        std::env::remove_var("TRPG_NARRATOR_SINGLE_ADVANCE");
+        assert!(narrator_single_advance_enabled(), "未设 ⇒ 默认 ON");
+        let on = narrator_system("BASE".to_string(), true);
+        assert!(on.contains("单步推进 · 禁回合内复述"), "ON 应追加单步推进纪律: {on}");
+        assert!(on.contains("不要回头重新铺陈"), "ON 应含禁复述子句");
+        assert!(on.contains("时间线只向前推进"), "ON 应含时间单向子句");
+        assert!(on.contains(NARRATOR_CRAFT), "ON 仍保留既有 NARRATOR_CRAFT");
+
+        // 显式 OFF ⇒ 与既有 NARRATOR_CRAFT 字节等价(不追加单步推进)。
+        std::env::set_var("TRPG_NARRATOR_SINGLE_ADVANCE", "off");
+        assert!(!narrator_single_advance_enabled(), "off ⇒ OFF");
+        let off = narrator_system("BASE".to_string(), true);
+        assert_eq!(off, format!("BASE\n{NARRATOR_CRAFT}"), "OFF 须与历史 craft overlay 字节等价");
+        assert!(!off.contains("单步推进 · 禁回合内复述"), "OFF 不得追加单步推进");
+
+        // craft_on=false ⇒ 永远 base(我 flag 不触此路径)。
+        std::env::remove_var("TRPG_NARRATOR_SINGLE_ADVANCE");
+        assert_eq!(narrator_system("B2".to_string(), false), "B2", "craft OFF 永远 base");
+
+        match prev {
+            Some(v) => std::env::set_var("TRPG_NARRATOR_SINGLE_ADVANCE", v),
+            None => std::env::remove_var("TRPG_NARRATOR_SINGLE_ADVANCE"),
+        }
+    }
 
     #[test]
     fn off_is_byte_identical_baseline() {
