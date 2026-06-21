@@ -263,6 +263,26 @@ pub(crate) fn narrator_location_fidelity_enabled() -> bool {
 pub(crate) const NARRATOR_LOCATION_FIDELITY: &str = "\
 【地点忠实 · 只渲染既定场景】本回合叙述里玩家所处的地点、空间与周遭环境,必须忠于「连续性锚」与当前 committed 场景所确立的所在(玩家此刻在哪、在什么掩护/位置)。绝不在散文里凭空把玩家**写进一个既定场景尚未确立的新房间、内部空间、设备间、走廊或区域**(例如既定他仍在仓库外墙掩体后,就不要叙述成他已身处「狭窄的设备间里」);也不要因为剧情想推进就让叙述擅自把玩家带进/穿过一道门或一处内部。地点的改变只能来自既成的场景转移——当场景确实已转入新地点时按新地点渲染,否则一律把玩家留在其既定所在处续写。";
 
+/// L-Q NPC 既定台词忠实(理念§二.8 Narrator 表达已决定的、不发明/不改写既成事实):smokeq3(L-P 引擎开场投递
+/// 后)实证,player-sim 拿到权威开场 NPC 台词后,Narrator 在后续回合**复述同一句既定台词时改写其措辞或身份指称**
+/// (t3「你听见长官怎么说了」→「你听见局长怎么说了」改身份指称;t4「弗兰基,滚出去!」→「弗兰基!滚出来!」改措辞)
+/// ⇒ player-sim 判 AMNESIA(与既定台词正面不一致)。这是 L-O 地点忠实在**口语台词**维度的同构残面——
+/// 既定 NPC 台词与其说话者身份是已确立事实,复述须忠实引用,不得改写;推进只能靠让 NPC 说**新台词**。
+/// **默认 ON**(eval 不设 ⇒ 自动吃到),OFF 字节等价,零 ruleset 分支。
+pub(crate) fn narrator_dialogue_fidelity_enabled() -> bool {
+    !matches!(
+        std::env::var("TRPG_NARRATOR_DIALOGUE_FIDELITY")
+            .ok()
+            .map(|v| v.to_ascii_lowercase())
+            .as_deref(),
+        Some("0") | Some("false") | Some("off") | Some("no")
+    )
+}
+
+/// L-Q 台词忠实纪律(追加在 NARRATOR_LOCATION_FIDELITY 之后)。直击 smokeq3 t3/t4:复述既定 NPC 喊话时改写措辞/指称。
+pub(crate) const NARRATOR_DIALOGUE_FIDELITY: &str = "\
+【台词忠实 · 既定台词与说话者不改写】当本回合需要**回指或复述一句此前已经说出口的 NPC 台词**(开场念白里 NPC 喊的话、连续性锚或前文已确立的对白)时,必须**忠实保留其原措辞与说话者的身份指称**——既定的称谓、用词、语气不得在复述里被换成近义的另一种说法(例如既定喊的是「长官」就不要复述成「局长」,既定是「滚出去!」就不要改写成「滚出来!」),也不要把同一个说话者改换成另一身份。已说出的台词与其说话者是**已确立的事实**,与既定地点同样不可在叙述里被悄悄改写。需要推进对话时,让 NPC 说**一句新的台词**,而不是把那句旧台词重写成不同的版本。";
+
 /// Append the narrator craft overlay when `craft_on`. OFF ⇒ returns `base` unchanged (byte-equal).
 /// 全部追加 flag 关时 ⇒ `base\n{NARRATOR_CRAFT}`(历史基线字节等价)。
 pub(crate) fn narrator_system(base: String, craft_on: bool) -> String {
@@ -281,6 +301,10 @@ pub(crate) fn narrator_system(base: String, craft_on: bool) -> String {
     if narrator_location_fidelity_enabled() {
         out.push('\n');
         out.push_str(NARRATOR_LOCATION_FIDELITY);
+    }
+    if narrator_dialogue_fidelity_enabled() {
+        out.push('\n');
+        out.push_str(NARRATOR_DIALOGUE_FIDELITY);
     }
     out
 }
@@ -363,6 +387,7 @@ mod tests {
         let prev = std::env::var("TRPG_NARRATOR_SINGLE_ADVANCE").ok();
         let prev_ns = std::env::var("TRPG_NARRATOR_NO_HOLLOW_SUSPENSION").ok();
         let prev_lf = std::env::var("TRPG_NARRATOR_LOCATION_FIDELITY").ok();
+        let prev_df = std::env::var("TRPG_NARRATOR_DIALOGUE_FIDELITY").ok();
         // 默认 ON(未设)⇒ craft_on 路径在 NARRATOR_CRAFT 之后追加单步推进纪律。
         std::env::remove_var("TRPG_NARRATOR_SINGLE_ADVANCE");
         assert!(narrator_single_advance_enabled(), "未设 ⇒ 默认 ON");
@@ -372,10 +397,11 @@ mod tests {
         assert!(on.contains("时间线只向前推进"), "ON 应含时间单向子句");
         assert!(on.contains(NARRATOR_CRAFT), "ON 仍保留既有 NARRATOR_CRAFT");
 
-        // 显式 OFF(三个追加 flag 全关)⇒ 与既有 NARRATOR_CRAFT 字节等价(不追加任何 overlay)。
+        // 显式 OFF(全部追加 flag 关)⇒ 与既有 NARRATOR_CRAFT 字节等价(不追加任何 overlay)。
         std::env::set_var("TRPG_NARRATOR_SINGLE_ADVANCE", "off");
         std::env::set_var("TRPG_NARRATOR_NO_HOLLOW_SUSPENSION", "off");
         std::env::set_var("TRPG_NARRATOR_LOCATION_FIDELITY", "off");
+        std::env::set_var("TRPG_NARRATOR_DIALOGUE_FIDELITY", "off");
         assert!(!narrator_single_advance_enabled(), "off ⇒ OFF");
         let off = narrator_system("BASE".to_string(), true);
         assert_eq!(off, format!("BASE\n{NARRATOR_CRAFT}"), "OFF 须与历史 craft overlay 字节等价");
@@ -396,6 +422,34 @@ mod tests {
         match prev_lf {
             Some(v) => std::env::set_var("TRPG_NARRATOR_LOCATION_FIDELITY", v),
             None => std::env::remove_var("TRPG_NARRATOR_LOCATION_FIDELITY"),
+        }
+        match prev_df {
+            Some(v) => std::env::set_var("TRPG_NARRATOR_DIALOGUE_FIDELITY", v),
+            None => std::env::remove_var("TRPG_NARRATOR_DIALOGUE_FIDELITY"),
+        }
+    }
+
+    #[test]
+    fn narrator_dialogue_fidelity_flag_and_overlay() {
+        let _g = env_guard();
+        let prev = std::env::var("TRPG_NARRATOR_DIALOGUE_FIDELITY").ok();
+        std::env::remove_var("TRPG_NARRATOR_DIALOGUE_FIDELITY");
+        assert!(narrator_dialogue_fidelity_enabled(), "未设 ⇒ 默认 ON");
+        let on = narrator_system("BASE".to_string(), true);
+        assert!(on.contains("台词忠实 · 既定台词与说话者不改写"), "ON 应追加台词忠实纪律: {on}");
+        assert!(
+            on.contains("让 NPC 说**一句新的台词**"),
+            "ON 应含'推进靠新台词而非改写旧台词'子句(不伤对话推进)"
+        );
+
+        std::env::set_var("TRPG_NARRATOR_DIALOGUE_FIDELITY", "off");
+        assert!(!narrator_dialogue_fidelity_enabled(), "off ⇒ OFF");
+        let off = narrator_system("BASE".to_string(), true);
+        assert!(!off.contains("台词忠实 · 既定台词与说话者不改写"), "OFF 不得追加台词忠实纪律");
+
+        match prev {
+            Some(v) => std::env::set_var("TRPG_NARRATOR_DIALOGUE_FIDELITY", v),
+            None => std::env::remove_var("TRPG_NARRATOR_DIALOGUE_FIDELITY"),
         }
     }
 
