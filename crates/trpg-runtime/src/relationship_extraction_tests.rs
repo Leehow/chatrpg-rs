@@ -457,3 +457,70 @@ async fn relationship_gate_preserves_evidence_refs() {
         "proposal preserves source refs"
     );
 }
+
+// ── L-R 开场 durable 种子 ───────────────────────────────────────────────
+#[test]
+fn opening_seed_flag_default_on_and_off_values() {
+    assert!(opening_durable_seed_flag_on(None), "未设 ⇒ 默认 ON");
+    for off in ["0", "false", "off", "no", "FALSE", "Off", "NO"] {
+        assert!(
+            !opening_durable_seed_flag_on(Some(off)),
+            "{off} ⇒ OFF(byte-equal baseline)"
+        );
+    }
+    for on in ["1", "true", "on", "yes", "whatever"] {
+        assert!(opening_durable_seed_flag_on(Some(on)), "{on} ⇒ ON(非关值即开)");
+    }
+}
+
+#[test]
+fn opening_seed_one_fact_per_referenced_npc() {
+    let npcs = vec!["npc_athena".to_string(), "npc_cop".to_string()];
+    let facts = opening_seed_facts("sess_o", Some("scene_warehouse_arrival"), &npcs);
+    assert_eq!(facts.len(), 2, "每个开场 NPC 一条 (pc,encountered,npc)");
+    assert!(facts.iter().all(|f| f.subject == "pc.current"));
+    assert!(facts.iter().all(|f| f.predicate == "encountered"));
+    let objs: Vec<String> = facts
+        .iter()
+        .map(|f| f.object.as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(objs.contains(&"npc_athena".to_string()));
+    assert!(objs.contains(&"npc_cop".to_string()));
+    // 稳定 fact_id + provenance 标签,可幂等 upsert。
+    assert!(facts.iter().all(|f| f.fact_id.starts_with("mf_open_")));
+    assert!(facts
+        .iter()
+        .all(|f| f.tags.contains(&"opening_seed".to_string())));
+}
+
+#[test]
+fn opening_seed_idempotent_stable_ids() {
+    let npcs = vec!["npc_athena".to_string()];
+    let a = opening_seed_facts("sess_o", Some("s1"), &npcs);
+    let b = opening_seed_facts("sess_o", Some("s1"), &npcs);
+    assert_eq!(a[0].fact_id, b[0].fact_id, "同输入 ⇒ 同 fact_id(幂等)");
+}
+
+#[test]
+fn opening_seed_dedup_repeated_npc() {
+    let npcs = vec!["npc_athena".to_string(), "npc_athena".to_string()];
+    let facts = opening_seed_facts("sess_o", Some("s1"), &npcs);
+    assert_eq!(facts.len(), 1, "批内重复 NPC 去重");
+}
+
+#[test]
+fn opening_seed_falls_back_to_scene_when_no_npc() {
+    let facts = opening_seed_facts("sess_o", Some("scene_x"), &[]);
+    assert_eq!(facts.len(), 1, "无 NPC ⇒ 退回单条 (pc,entered,scene)");
+    assert_eq!(facts[0].predicate, "entered");
+    assert_eq!(facts[0].object.as_str(), Some("scene_x"));
+}
+
+#[test]
+fn opening_seed_fail_closed_no_npc_no_scene() {
+    let facts = opening_seed_facts("sess_o", None, &[]);
+    assert!(facts.is_empty(), "无 NPC 且无 scene ⇒ 不凭空造行(fail-closed)");
+    // 空白也算无效。
+    let facts2 = opening_seed_facts("sess_o", Some("   "), &["  ".to_string()]);
+    assert!(facts2.is_empty(), "空白 scene/npc ⇒ 不写");
+}

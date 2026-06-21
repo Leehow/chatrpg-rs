@@ -570,6 +570,30 @@ impl RuntimeEngine {
         if text.is_empty() {
             return Ok(None);
         }
+        // L-R 开场 durable 种子(J1-durable 根修):把模组入口场景确立的 NPC 遭遇确定性地落成
+        // memory_facts,让任何涌现路径(含单人潜入空内场/冷骰全败探索局)从 turn 0 起 durable≥1。
+        // source-backed(只持久化模组自身确立的开场遭遇,不造新事实);幂等(稳定 fact_id);
+        // flag `TRPG_OPENING_DURABLE_SEED` 默认 ON,OFF ⇒ 与 L-P 纯念白投递字节等价;fail-soft。
+        if relationship_extraction::opening_durable_seed_enabled() {
+            let npc_ids: Vec<String> = match self.db.load_module_graph(mid).await {
+                Ok(Some(graph)) => scene_id
+                    .as_deref()
+                    .and_then(|sid| graph.scenes.iter().find(|s| s.node_id == sid))
+                    .map(|n| n.referenced_npc_ids.clone())
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            let facts = relationship_extraction::opening_seed_facts(
+                session_id,
+                scene_id.as_deref(),
+                &npc_ids,
+            );
+            for f in &facts {
+                if let Err(err) = self.db.upsert_memory_fact(f).await {
+                    tracing::warn!(error = %err, "opening durable seed upsert failed (fail-soft)");
+                }
+            }
+        }
         Ok(Some(text.to_string()))
     }
 

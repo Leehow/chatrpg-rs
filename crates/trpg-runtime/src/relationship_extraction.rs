@@ -357,6 +357,95 @@ pub fn pc_npc_relationship_enabled() -> bool {
     )
 }
 
+/// L-R 开关 `TRPG_OPENING_DURABLE_SEED`(默认 ON;仅 0/false/off/no 关)。env-free 纯判定
+/// （可单测、避免 env-race），env 包装见 [`opening_durable_seed_enabled`]。关 ⇒ 开场不落
+/// durable 种子,与 L-P(纯念白投递)字节等价。
+pub fn opening_durable_seed_flag_on(raw: Option<&str>) -> bool {
+    !matches!(
+        raw.map(|v| v.to_ascii_lowercase()).as_deref(),
+        Some("0") | Some("false") | Some("off") | Some("no")
+    )
+}
+
+/// L-R env 包装:读 `TRPG_OPENING_DURABLE_SEED`(默认 ON)。
+pub fn opening_durable_seed_enabled() -> bool {
+    opening_durable_seed_flag_on(std::env::var("TRPG_OPENING_DURABLE_SEED").ok().as_deref())
+}
+
+/// L-R(开场 durable 种子,J1-durable 根修):L-P 引擎开场投递把模组入口场景**确立**给玩家
+/// (无人机 Athena 在警火下/缆线之谜/交火)——这是玩家**目睹的、source-backed 的既成事实**。
+/// 本函数把开场场景 `referenced_npc_ids` 里的每个 NPC 确定性地落成一条记忆三元组
+/// `(pc.current, encountered, npc)` 写入 `memory_facts`,让**任何**涌现路径(含单人潜入空内场、
+/// 冷骰全败的探索局)从 turn 0 起 durable≥1。绝不发明事实(§二.9:只持久化模组自身确立的
+/// 遭遇,不造新实体/谓词)——镜像 L-H 三元组形态,但**确定性种子**(无 LLM、无社交闸),因为
+/// 开场遭遇是模组结构事实而非涌现社交。无 NPC 的开场场景 → 退回单条 `(pc.current, entered,
+/// scene_id)`(玩家进入既定开场场景,仍 source-backed)。fail-closed:`scene_id` 空且无 NPC
+/// → 返回空 Vec(绝不凭空造行)。
+pub fn opening_seed_facts(
+    session_id: &str,
+    scene_id: Option<&str>,
+    npc_ids: &[String],
+) -> Vec<MemoryFact> {
+    let now = Utc::now();
+    let mut out: Vec<MemoryFact> = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let pc = pc_entity_ref();
+    let mk = |subject: &str, predicate: &str, object: &str, summary: String| -> MemoryFact {
+        let fact_id = format!(
+            "mf_open_{}",
+            &sha256_hex(format!("{session_id}|{subject}|{predicate}|{object}"))[..16]
+        );
+        MemoryFact {
+            fact_id,
+            session_id: session_id.to_string(),
+            scope: Scope {
+                scope_type: ScopeType::Session,
+                scope_id: session_id.to_string(),
+            },
+            visibility: Visibility::GmOnly,
+            subject: subject.to_string(),
+            predicate: predicate.to_string(),
+            object: Value::String(object.to_string()),
+            summary,
+            status: MemoryStatus::Active,
+            confidence: 0.9,
+            source_event_ids: vec![format!("de_surfaced_{session_id}_{object}")],
+            tags: vec!["relationship".to_string(), "opening_seed".to_string()],
+            importance: 2,
+            // 开场为「pre-turn 设场」,无既成回合;turn_id 留空(provenance:开场投递)。
+            turn_id: None,
+            created_at: now,
+            updated_at: now,
+        }
+    };
+    for npc in npc_ids.iter().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        let fid = format!(
+            "mf_open_{}",
+            &sha256_hex(format!("{session_id}|{}|encountered|{npc}", pc.id))[..16]
+        );
+        if !seen.insert(fid) {
+            continue;
+        }
+        out.push(mk(
+            &pc.id,
+            "encountered",
+            npc,
+            "开场:玩家目睹并卷入开场场景中此 NPC 所在的局面。".to_string(),
+        ));
+    }
+    if out.is_empty() {
+        if let Some(sid) = scene_id.map(str::trim).filter(|s| !s.is_empty()) {
+            out.push(mk(
+                &pc.id,
+                "entered",
+                sid,
+                "开场:玩家从引擎投递的模组入口场景进入本局。".to_string(),
+            ));
+        }
+    }
+    out
+}
+
 /// 写入阈值 `TRPG_RELATIONSHIP_MIN_CONFIDENCE`（默认 0.6）。低于即丢（fail-closed）。
 pub fn relationship_min_confidence() -> f32 {
     std::env::var("TRPG_RELATIONSHIP_MIN_CONFIDENCE")
