@@ -410,6 +410,13 @@ pub fn resolve_offgraph_to_neighbor(
 mod tiered;
 pub use tiered::{scene_navigate_critical, scene_navigate_heavy, scene_navigator, SceneNavCommit};
 
+// J3 FLOW-LINK CONSUMER（TRPG_NAV_FOLLOW_FLOW_LINKS，默认 OFF）：消费侧脊跟随逻辑（exits
+// 类型排序 + ⑥流转脊优先子句 + flag）。新子模块守 ≤400 行、不改写 navigator；经 pub use 暴露。
+mod flow_links;
+pub use flow_links::{
+    build_nav_exits, is_authored_flow_link, nav_follow_flow_links_enabled, with_flow_link_clause,
+};
+
 /// 前探当前 target 场景的衔接场景（一跳，best-effort）。在 target 已深抽、其出口 links
 /// 已写回 bundle 后调用：重新加载图 → 取 target 的出口 `to_node_id` → 去重 + 限只抽仍
 /// SkeletonOnly 的 + bounded 上限 `FRONTIER_PREFETCH_MAX` → 逐个 `extract_module_scenes(only=exit)`。

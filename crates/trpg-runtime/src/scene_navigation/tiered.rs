@@ -4,9 +4,10 @@
 //! critical→heavy 串行，字节等价旧逻辑）。复用父模块的 build_nav_prompt / validate_transition /
 //! extract_module_scenes / prefetch_frontier / SCENE_NAV_SYS。
 use super::{
-    build_nav_prompt, build_nav_prompt_with_exits, extract_module_scenes, gravity_nav_system_prompt,
-    nav_content_gravity_enabled, nav_departure_commit_enabled, nav_objective_commit_enabled,
-    prefetch_frontier, resolve_offgraph_to_neighbor, validate_transition, SCENE_NAV_SYS,
+    build_nav_exits, build_nav_prompt, build_nav_prompt_with_exits, extract_module_scenes,
+    gravity_nav_system_prompt, nav_content_gravity_enabled, nav_departure_commit_enabled,
+    nav_follow_flow_links_enabled, nav_objective_commit_enabled, prefetch_frontier,
+    resolve_offgraph_to_neighbor, validate_transition, with_flow_link_clause, SCENE_NAV_SYS,
 };
 use serde_json::json;
 use tracing::info;
@@ -57,30 +58,21 @@ pub async fn scene_navigate_critical(
     // 许可的 system prompt。OFF ⇒ 走原 SCENE_NAV_SYS + 裸 build_nav_prompt（提示串字节等价基线）。
     let gravity = nav_content_gravity_enabled();
     let (sys, usr) = if gravity {
-        let mut seen = std::collections::HashSet::new();
-        let exits = cur_node
-            .map(|node| {
-                node.links
-                    .iter()
-                    .filter_map(|link| {
-                        let to = link.to_node_id.trim();
-                        if to.is_empty() || to == current || !seen.insert(to.to_string()) {
-                            return None;
-                        }
-                        let t = graph.scenes.iter().find(|s| s.node_id == to)?;
-                        Some(format!("{} | {}", t.node_id, t.title))
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            })
-            .unwrap_or_default();
-        // L-Y/L-AA：gravity 提示串在 ①②③ 之上按各自 flag 追加④离场提交（首跳地理位移）+
-        // ⑤目标承接（同区域内多回合目标驱动推进）子句（皆默认 ON；皆 OFF ⇒ 纯
-        // SCENE_NAV_SYS_GRAVITY 字节等价 L-C 基线）。
+        // J3 FLOW-LINK CONSUMER（TRPG_NAV_FOLLOW_FLOW_LINKS，默认 OFF）：exits 现经
+        // build_nav_exits 构建——flag ON 时已授权有向脊边（sequential/trigger/branch+anchor）
+        // 排在 spatial 桥之前并标注其 link_type；flag OFF ⇒ 与历史内联逐字节一致（OFF==baseline）。
+        let follow_flow = nav_follow_flow_links_enabled();
+        let exits = build_nav_exits(cur_node, &graph.scenes, &current, follow_flow);
+        // L-Y/L-AA：gravity 串在 ①②③ 之上按各自 flag 追加④离场提交+⑤目标承接（皆默认 ON）；
+        // ⑥流转脊优先（with_flow_link_clause）再按本 flag 叠加（仅玩家驱动才 commit 脊边、反铁路
+        // fail-closed）。三 flag 皆退回基线 ⇒ 纯 SCENE_NAV_SYS_GRAVITY 字节等价 L-C 基线。
         (
-            gravity_nav_system_prompt(
-                nav_departure_commit_enabled(),
-                nav_objective_commit_enabled(),
+            with_flow_link_clause(
+                gravity_nav_system_prompt(
+                    nav_departure_commit_enabled(),
+                    nav_objective_commit_enabled(),
+                ),
+                follow_flow,
             ),
             build_nav_prompt_with_exits(&current, cur_title, &exits, &list, player_input, narration),
         )
