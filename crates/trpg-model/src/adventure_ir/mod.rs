@@ -20,6 +20,9 @@
 mod content_unit;
 mod effect;
 mod hierarchy;
+mod mission_scoring;
+mod mission_template;
+mod mission_text;
 mod objective;
 mod predicate;
 mod progress_signal;
@@ -30,8 +33,17 @@ pub use content_unit::{
 };
 pub use effect::{EffectExpr, ScoreEffect};
 pub use hierarchy::{derive_content_units, project_chapters, unit_kind_for};
+pub use mission_scoring::{
+    parse_aftermath_outcomes, parse_chaos_tracker, parse_optional_objectives,
+};
+pub use mission_template::{
+    campaign_root, induct_missions, mission_content_units, project_missions, MissionPage,
+    MissionSpec,
+};
+pub use mission_text::pages_from_markdown;
 pub use objective::{
-    NormalizationStatus, ObjectiveSpec, ProgressRule, TrackerKind, TrackerRef, TrackerSpec,
+    NormalizationStatus, ObjectiveSpec, ProgressRule, TrackerKind, TrackerRef, TrackerRung,
+    TrackerSpec,
 };
 pub use predicate::{
     EvalContext, EventPattern, IrValue, KnowledgeHolder, ObjectiveStatus, PredicateExpr,

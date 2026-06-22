@@ -44,8 +44,22 @@ pub enum TrackerKind {
     Timer,
 }
 
+/// One rung of an escalating ability ladder (The Vault Chaos budget: each rung is
+/// an Anomaly ability available once enough Chaos is spent). Capturing the rungs
+/// is what keeps a Chaos tracker from being flattened to a bare integer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TrackerRung {
+    /// Chaos/resource cost to use this rung's ability.
+    pub cost: i64,
+    /// The ability/effect name (e.g. "Manifest", "Expand", "Return").
+    pub label: String,
+    /// Verbatim authored description of what the ability does.
+    pub detail: String,
+}
+
 /// A countdown/timer with an authored threshold. `at_threshold` effects fire when
-/// the tracker reaches `threshold` (engine-applied in P1-3).
+/// the tracker reaches `threshold` (engine-applied in P1-3). `rungs` carries an
+/// escalating ability ladder (Vault Chaos) when the tracker is a resource budget.
 /// (No `Eq`: embeds `Vec<SourceRef>`, which is only `PartialEq`.)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct TrackerSpec {
@@ -67,6 +81,10 @@ pub struct TrackerSpec {
     pub visible_to_players: bool,
     #[serde(default)]
     pub source_evidence: Vec<SourceRef>,
+    /// Escalating ability ladder (Vault Chaos budget). Empty for plain
+    /// countdown/timer trackers → skipped on serialize (additive == baseline).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rungs: Vec<TrackerRung>,
 }
 
 /// Whether a [`ProgressRule`]'s guard/effects were fully normalized into
@@ -202,6 +220,63 @@ mod tests {
     }
 
     #[test]
+    fn chaos_tracker_carries_ability_ladder_rungs() {
+        // The Vault Chaos budget is an escalating ability ladder, not a flat int.
+        // Faithfully representing it means the tracker carries its rungs.
+        let t = TrackerSpec {
+            id: "tracker.chaos.springs_eternal".into(),
+            kind: TrackerKind::Countdown,
+            label: "Chaos".into(),
+            start: 0,
+            threshold: 0,
+            anchor: None,
+            at_threshold: vec![],
+            visible_to_players: false,
+            source_evidence: vec![],
+            rungs: vec![
+                TrackerRung {
+                    cost: 2,
+                    label: "Refresh".into(),
+                    detail: "A mundane target's appearance is altered to look years younger".into(),
+                },
+                TrackerRung {
+                    cost: 12,
+                    label: "Return".into(),
+                    detail: "A mundane target is fully under the Anomaly's influence".into(),
+                },
+            ],
+        };
+        assert_eq!(t.rungs.len(), 2);
+        assert_eq!(t.rungs[0].cost, 2);
+        assert_eq!(t.rungs[1].label, "Return");
+    }
+
+    #[test]
+    fn empty_rungs_omitted_off_is_byte_identical() {
+        // Additive field: empty rungs must be skipped on serialize so existing
+        // trackers stay byte-identical to baseline.
+        let t = TrackerSpec {
+            id: "t".into(),
+            kind: TrackerKind::Timer,
+            label: String::new(),
+            start: 0,
+            threshold: 15,
+            anchor: None,
+            at_threshold: vec![],
+            visible_to_players: false,
+            source_evidence: vec![],
+            rungs: vec![],
+        };
+        let json = serde_json::to_value(&t).unwrap();
+        assert!(
+            json.get("rungs").is_none(),
+            "empty rungs must be skipped on serialize (additive == baseline)"
+        );
+        let back: TrackerSpec = serde_json::from_value(json).unwrap();
+        assert_eq!(t, back);
+    }
+
+    #[test]
     fn timer_tracker_models_foxwell() {
         let t = TrackerSpec {
             id: "tracker.scavvs_timer".into(),
@@ -213,6 +288,7 @@ mod tests {
             at_threshold: vec![EffectExpr::Activate("encounter.scavvs".into())],
             visible_to_players: false,
             source_evidence: vec![],
+            rungs: vec![],
         };
         assert_eq!(t.kind, TrackerKind::Timer);
         assert_eq!(t.threshold, 15);

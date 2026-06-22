@@ -136,6 +136,7 @@ mod golden_tests {
             at_threshold: vec![EffectExpr::Activate("encounter.scavvs".into())],
             visible_to_players: false,
             source_evidence: vec![],
+            rungs: vec![],
         };
         let trackers = vec![tracker];
         let program = ProgressionProgram {
