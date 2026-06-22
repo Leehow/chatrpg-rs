@@ -25,14 +25,45 @@
 //! Deferred (their live sources are not yet a clean per-turn signal; wiring lands
 //! with the relay-verified pass): world-time `minutes` → `TimeAdvanced`, and
 //! choice records → `ChoiceRecorded`. They are intentionally NOT guessed here.
-use super::state::ProgressEvent;
-use trpg_model::adventure_ir::IrValue;
+use super::engine::{evaluate, ProgressionProgram};
+use super::state::{ProgressEvent, ProgressionState};
+use trpg_model::adventure_ir::{IrValue, ProgressSignal};
 use trpg_model::{DomainEvent, DomainEventKind};
 
 /// Map one turn's [`DomainEvent`]s to the [`ProgressEvent`]s the engine consumes.
 /// Pure, deterministic, order-preserving; fail-closed (unmappable → dropped).
 pub fn progress_events_from_domain(events: &[DomainEvent]) -> Vec<ProgressEvent> {
     events.iter().filter_map(map_one).collect()
+}
+
+/// Rebuild the runtime [`ProgressionState`] by replaying a session's
+/// [`DomainEvent`]s through the engine **one turn-batch at a time** (preserving
+/// causality: a rule whose guard depends on a later turn's fact must not fire
+/// early). `events` are expected in `seq` order (as [`crate::Db::list_domain_events`]
+/// returns them); consecutive events sharing a `turn_id` form one batch. Returns
+/// the folded state and every [`ProgressSignal`] emitted across the replay.
+///
+/// Pure (no IO/clock/env): the live driver loads the events, this folds them.
+pub fn replay_domain_events(
+    events: &[DomainEvent],
+    program: &ProgressionProgram<'_>,
+) -> (ProgressionState, Vec<ProgressSignal>) {
+    let mut state = ProgressionState::default();
+    let mut signals = Vec::new();
+    let mut i = 0;
+    while i < events.len() {
+        let turn = events[i].turn_id.as_str();
+        let mut j = i;
+        while j < events.len() && events[j].turn_id == turn {
+            j += 1;
+        }
+        let batch = progress_events_from_domain(&events[i..j]);
+        if !batch.is_empty() {
+            signals.extend(evaluate(&mut state, &batch, program));
+        }
+        i = j;
+    }
+    (state, signals)
 }
 
 /// Map a single [`DomainEvent`] to a [`ProgressEvent`], or `None` when it is not a
@@ -75,10 +106,14 @@ mod tests {
     };
 
     fn ev(kind: DomainEventKind, data: serde_json::Value) -> DomainEvent {
+        ev_t(kind, "t", data)
+    }
+
+    fn ev_t(kind: DomainEventKind, turn: &str, data: serde_json::Value) -> DomainEvent {
         DomainEvent {
-            event_id: "e".into(),
+            event_id: format!("e_{turn}_{:?}", kind),
             session_id: "s".into(),
-            turn_id: "t".into(),
+            turn_id: turn.into(),
             kind,
             data,
             source_refs: Vec::new(),
@@ -177,6 +212,88 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// Replay folds a session's events through the engine and surfaces the next
+    /// beat: entering A (via SceneTransitioned) fires the authored ridge A→B.
+    #[test]
+    fn replay_folds_session_and_activates_next() {
+        use trpg_model::adventure_ir::{EffectExpr, PredicateExpr, ProgressRule};
+        let when = PredicateExpr::All(vec![]);
+        let then = vec![EffectExpr::Activate("B".into())];
+        let rule = ProgressRule {
+            id: "rule.flow.A__B".into(),
+            on: EventPattern::Entered("A".into()),
+            when: when.clone(),
+            then: then.clone(),
+            source_evidence: vec![],
+            normalization: ProgressRule::classify(&when, &then),
+        };
+        let rules = vec![rule];
+        let program = ProgressionProgram {
+            rules: &rules,
+            objectives: &[],
+            trackers: &[],
+        };
+        let events = vec![ev_t(
+            DomainEventKind::SceneTransitioned,
+            "t1",
+            json!({"to": "A"}),
+        )];
+        let (state, signals) = replay_domain_events(&events, &program);
+        assert!(state.active_units.contains("B"), "ridge A→B activated B");
+        assert!(signals
+            .iter()
+            .any(|s| s.kind == ProgressSignalKind::BeatActivated && s.id == "B"));
+    }
+
+    /// Causality: a rule fires only if its guard held *at the turn of its ON event*.
+    /// A gate fact learned in a LATER turn must NOT retro-fire the earlier Entered
+    /// rule — which a naive whole-slice (ingest-all-then-match) map would wrongly do.
+    #[test]
+    fn replay_respects_per_turn_causality() {
+        use trpg_model::adventure_ir::{EffectExpr, IrValue, PredicateExpr, ProgressRule};
+        let when = PredicateExpr::FactEquals {
+            fact: "gate".into(),
+            value: IrValue::Bool(true),
+        };
+        let then = vec![EffectExpr::Activate("secret".into())];
+        let rule = ProgressRule {
+            id: "rule.gated".into(),
+            on: EventPattern::Entered("A".into()),
+            when: when.clone(),
+            then: then.clone(),
+            source_evidence: vec![],
+            normalization: ProgressRule::classify(&when, &then),
+        };
+        let rules = vec![rule];
+        let program = ProgressionProgram {
+            rules: &rules,
+            objectives: &[],
+            trackers: &[],
+        };
+        let events = vec![
+            // Turn 1: enter A — but the gate is not yet true.
+            ev_t(DomainEventKind::SceneTransitioned, "t1", json!({"to": "A"})),
+            // Turn 2: gate becomes true — but there is no Entered(A) event this turn.
+            ev_t(DomainEventKind::PlayerLearnedFact, "t2", json!({"fact_id": "gate"})),
+        ];
+        let (state, _) = replay_domain_events(&events, &program);
+        assert!(
+            !state.active_units.contains("secret"),
+            "gate learned after entering must not retro-fire the Entered rule"
+        );
+    }
+
+    #[test]
+    fn replay_empty_is_default_state() {
+        let program = ProgressionProgram {
+            rules: &[],
+            objectives: &[],
+            trackers: &[],
+        };
+        let (state, signals) = replay_domain_events(&[], &program);
+        assert!(state.active_units.is_empty() && signals.is_empty());
     }
 
     /// Integration: the adapter's output is engine-consumable and drives real

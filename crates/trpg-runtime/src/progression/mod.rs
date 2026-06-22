@@ -13,11 +13,13 @@
 mod adapter;
 mod engine;
 mod frontier;
+mod program;
 mod state;
 
-pub use adapter::progress_events_from_domain;
+pub use adapter::{progress_events_from_domain, replay_domain_events};
 pub use engine::{evaluate, ProgressionProgram};
 pub use frontier::{compute_frontier, AdvancementFrontier};
+pub use program::{program_from_module_graph, OwnedProgram};
 pub use state::{ProgressEvent, ProgressionState};
 
 /// Whether the runtime ProgressionEngine is active. Default OFF → today's behavior

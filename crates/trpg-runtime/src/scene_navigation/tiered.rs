@@ -4,10 +4,15 @@
 //! critical→heavy 串行，字节等价旧逻辑）。复用父模块的 build_nav_prompt / validate_transition /
 //! extract_module_scenes / prefetch_frontier / SCENE_NAV_SYS。
 use super::{
-    build_nav_exits, build_nav_prompt, build_nav_prompt_with_exits, extract_module_scenes,
-    gravity_nav_system_prompt, nav_content_gravity_enabled, nav_departure_commit_enabled,
-    nav_follow_flow_links_enabled, nav_objective_commit_enabled, prefetch_frontier,
-    resolve_offgraph_to_neighbor, validate_transition, with_flow_link_clause, SCENE_NAV_SYS,
+    build_frontier_block, build_nav_exits, build_nav_prompt, build_nav_prompt_with_exits,
+    extract_module_scenes, gravity_nav_system_prompt, nav_content_gravity_enabled,
+    nav_departure_commit_enabled, nav_follow_flow_links_enabled, nav_objective_commit_enabled,
+    prefetch_frontier, resolve_offgraph_to_neighbor, validate_transition,
+    with_flow_link_clause, with_frontier_focus_clause, SCENE_NAV_SYS,
+};
+use crate::progression::{
+    compute_frontier, evaluate, program_from_module_graph, progression_engine_enabled,
+    replay_domain_events, ProgressEvent,
 };
 use serde_json::json;
 use tracing::info;
@@ -57,7 +62,7 @@ pub async fn scene_navigate_critical(
     // 衔接 beat（去重、in-graph、≠current）作为软推进上下文喂给导航器，并换用追加了「软推进」
     // 许可的 system prompt。OFF ⇒ 走原 SCENE_NAV_SYS + 裸 build_nav_prompt（提示串字节等价基线）。
     let gravity = nav_content_gravity_enabled();
-    let (sys, usr) = if gravity {
+    let (mut sys, mut usr) = if gravity {
         // J3 FLOW-LINK CONSUMER（TRPG_NAV_FOLLOW_FLOW_LINKS，默认 OFF）：exits 现经
         // build_nav_exits 构建——flag ON 时已授权有向脊边（sequential/trigger/branch+anchor）
         // 排在 spatial 桥之前并标注其 link_type；flag OFF ⇒ 与历史内联逐字节一致（OFF==baseline）。
@@ -82,6 +87,41 @@ pub async fn scene_navigate_critical(
             build_nav_prompt(&current, cur_title, &list, player_input, narration),
         )
     };
+    // ADVANCEMENT-FRONTIER CONSUMER (TRPG_PROGRESSION_ENGINE, 默认 OFF)：用本 session 的
+    // DomainEvents 重建运行时 ProgressionState，seed 当前场景，把**合法 frontier** 喂给导演（仅
+    // 在其中选焦/搬内容，反铁路绝不 teleport）。OFF ⇒ 整块跳过 ⇒ sys/usr 字节等价基线。
+    // 全程 fail-closed：取事件失败/空 ⇒ 空 frontier ⇒ 不追加（绝不乱跳、绝不编造）。
+    if progression_engine_enabled() {
+        let events = db.list_domain_events(session_id, 5000).await.unwrap_or_default();
+        let program = program_from_module_graph(&graph);
+        let (mut state, _hist) = replay_domain_events(&events, &program.borrow());
+        // 焦点此刻就在当前场景（权威 session 状态，非猜测）：seed Entered(current)，让从它出发
+        // 的已授权 ridge 填充 frontier。
+        let step_signals = if current.trim().is_empty() {
+            Vec::new()
+        } else {
+            evaluate(
+                &mut state,
+                &[ProgressEvent::Entered(current.clone())],
+                &program.borrow(),
+            )
+        };
+        let frontier = compute_frontier(&state, &program.objectives, &program.trackers);
+        let block = build_frontier_block(&frontier, &graph.scenes);
+        if !block.is_empty() {
+            usr.push_str("\n\n");
+            usr.push_str(&block);
+        }
+        sys = with_frontier_focus_clause(sys, true);
+        info!(
+            session_id,
+            frontier_active = frontier.active_units.len(),
+            frontier_total = frontier.len(),
+            signals = step_signals.len(),
+            program_rules = program.rules.len(),
+            "progression frontier computed (engine ON)"
+        );
+    }
     let decision = match llm
         .complete_json(vec![trpg_llm::system(&sys), trpg_llm::user(&usr)], 0.0)
         .await

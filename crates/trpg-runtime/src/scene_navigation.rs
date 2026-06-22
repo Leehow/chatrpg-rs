@@ -417,6 +417,9 @@ pub use flow_links::{
     build_nav_exits, is_authored_flow_link, nav_follow_flow_links_enabled, with_flow_link_clause,
 };
 
+mod frontier_focus;
+pub use frontier_focus::{build_frontier_block, with_frontier_clause as with_frontier_focus_clause};
+
 /// 前探当前 target 场景的衔接场景（一跳，best-effort）。在 target 已深抽、其出口 links
 /// 已写回 bundle 后调用：重新加载图 → 取 target 的出口 `to_node_id` → 去重 + 限只抽仍
 /// SkeletonOnly 的 + bounded 上限 `FRONTIER_PREFETCH_MAX` → 逐个 `extract_module_scenes(only=exit)`。
