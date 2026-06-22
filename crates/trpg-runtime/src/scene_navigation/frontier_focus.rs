@@ -27,7 +27,11 @@ pub fn build_frontier_block(frontier: &AdvancementFrontier, scenes: &[ScenarioNo
         return String::new();
     }
     let title_of = |id: &str| scenes.iter().find(|s| s.node_id == id).map(|s| s.title.as_str());
-    let mut out = String::from("【已解锁·可推进内容（运行时 frontier；Rust 已判定合法，导演只在其中选焦/呈现）】");
+    let mut out = String::from(
+        "【已解锁·可推进内容（运行时 frontier；Rust 已判定合法，导演只在其中选焦/呈现）】\
+        \n（内容引力：下列各项是可**就地**送到玩家当前位置的内容功能/Carrier，**非传送目标**——\
+        它们不是玩家此刻要去的地点；玩家未自驱前往前，绝不据此改写玩家位置。）",
+    );
     let mut section = |label: &str, ids: &[String]| {
         if ids.is_empty() {
             return;
@@ -64,7 +68,7 @@ pub fn with_frontier_clause(base: String, enabled: bool) -> String {
 /// 解锁项。**反铁路（绝对）**：frontier 是导演可顺势聚焦的引力、不是轨道——只搬内容/Carrier，
 /// **不搬玩家位置**；玩家若停在原地/朝 frontier 外去，绝不强推、绝不 teleport（moved=false）。
 /// 仍 fail-closed：呈现/切换的目标必须是 frontier 或给定衔接列表里真实存在的 id，绝不编造。
-const FRONTIER_FOCUS_CLAUSE: &str = "⑦ **进度 frontier 选焦（仅在引擎 ON 时）**——运行时 ProgressionEngine 已用确定性 guard 算出『当前合法可推进内容(frontier)』（上方【已解锁·可推进内容】块；空则无新解锁）。导演只在该 frontier 集合内**排序、选焦、决定如何呈现**——优先把 frontier 中与玩家行动语义最匹配的待推进 beat/到期计时/进行中目标的**内容功能/Carrier 搬到玩家眼前**，而不是空转复述静态场景；**绝不**凭空新增 frontier 之外的解锁项（解锁由 Rust 评 guard 决定，不由你猜）。**反铁路（绝对、不可违背）**：frontier 是引力不是轨道——只搬内容/Carrier、**不搬玩家位置**；玩家若停在原地观察/试探、或朝 frontier 外去，绝不把他强推上某条进度线、绝不 teleport，此时 moved=false。仍 fail-closed：呈现或切换的目标必须是 frontier 或给定衔接 beat 列表中真实存在的 node_id，绝不编造。";
+const FRONTIER_FOCUS_CLAUSE: &str = "⑦ **进度 frontier 选焦（仅在引擎 ON 时）**——运行时 ProgressionEngine 已用确定性 guard 算出『当前合法可推进内容(frontier)』（上方【已解锁·可推进内容】块；空则无新解锁）。导演只在该 frontier 集合内**排序、选焦、决定如何呈现**——优先把 frontier 中与玩家行动语义最匹配的待推进 beat/到期计时/进行中目标的**内容功能/Carrier 搬到玩家眼前**，而不是空转复述静态场景；**绝不**凭空新增 frontier 之外的解锁项（解锁由 Rust 评 guard 决定，不由你猜）。**反铁路（绝对、不可违背）**：frontier 是引力不是轨道——只搬内容/Carrier、**不搬玩家位置**；玩家若停在原地观察/试探、或朝 frontier 外去，绝不把他强推上某条进度线、绝不 teleport，此时 moved=false。**叠加而非覆盖（关键）**：本子句叠加在玩家**位置主权**(L-K)与叙述地点忠实之上、绝不凌驾——frontier beat 的**作者地点(locus)≠玩家当前位置**，那是该内容“本来写在哪”，不是玩家此刻所在；**切场(moved=true)仅当玩家本回合输入确实玩家自驱朝该 beat 的 locus 推进**，否则一律 moved=false、按内容引力把该 beat 内容就地送达玩家当前处，绝不把玩家叙述进他没声明的新位置。仍 fail-closed：呈现或切换的目标必须是 frontier 或给定衔接 beat 列表中真实存在的 node_id，绝不编造。";
 
 #[cfg(test)]
 mod tests {
@@ -138,6 +142,39 @@ mod tests {
         assert!(
             p.contains("绝不 teleport") || p.contains("不搬玩家"),
             "surface content, never teleport the player"
+        );
+    }
+
+    // KICK-BACK item-1: 内容引力硬化。frontier 消费必须**叠加在**玩家位置主权(L-K)/叙述地点
+    // 忠实(L-O)/冻结定场压制(L-M)之上,不得覆盖;切场仅当玩家**自驱**朝该 beat 的 locus 推进。
+    #[test]
+    fn clause_subordinates_to_position_sovereignty_and_gates_transition_on_player_drive() {
+        let p = with_frontier_clause("BASE".to_string(), true);
+        assert!(
+            p.contains("位置主权"),
+            "clause must explicitly subordinate to player position sovereignty (L-K)"
+        );
+        assert!(
+            p.contains("作者地点") || p.contains("locus"),
+            "clause must separate the beat's authored location from the player's live position"
+        );
+        assert!(
+            p.contains("玩家自驱") || p.contains("玩家驱动"),
+            "transition (moved=true) only when the player self-drives toward the locus"
+        );
+    }
+
+    #[test]
+    fn block_frames_items_as_in_place_content_gravity_not_destinations() {
+        let f = frontier(&["beat.x"], &[], &[]);
+        let block = build_frontier_block(&f, &[]);
+        assert!(
+            block.contains("就地") || block.contains("搬到玩家当前"),
+            "block must frame frontier items as content to deliver in place (content-gravity)"
+        );
+        assert!(
+            block.contains("非传送目标") || block.contains("不是要去的地点"),
+            "block must say these are NOT travel destinations"
         );
     }
 }
