@@ -2131,6 +2131,13 @@ pub struct ModuleGraph {
     /// `Db::load_module_config` 的 extracted⊕override 合并)。
     #[serde(default)]
     pub director_facilitation: Option<DirectorModuleConfig>,
+    /// P0-2 Adventure IR substrate: the Contains hierarchy (Campaign→Chapter→
+    /// Scene/Procedure→Beat) derived from the flat scene list. The legacy
+    /// `chapters`/`missions`/`scenes` fields stay a compat projection; this is the
+    /// hierarchy fact source. Filled only when `TRPG_CONTENT_UNITS` is ON; empty
+    /// is skipped on serialize → OFF == byte-identical baseline.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub content_units: Vec<adventure_ir::ContentUnit>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]

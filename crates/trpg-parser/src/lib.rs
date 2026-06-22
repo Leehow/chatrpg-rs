@@ -54,6 +54,12 @@ fn rule_steward_first_pass_enabled() -> bool {
     env_bool_default("TRPG_RULE_STEWARD_FIRST_PASS", true)
 }
 
+/// P0-2: gate the Adventure IR ContentUnit hierarchy derivation. Default OFF →
+/// empty `content_units` + empty `chapters` projection == byte-identical baseline.
+fn content_units_enabled() -> bool {
+    env_bool_default("TRPG_CONTENT_UNITS", false)
+}
+
 impl ParserConfig {
     pub fn new(data_dir: impl Into<PathBuf>, force: bool) -> Self {
         let parse_full_chunks = std::env::var("TRPG_PARSE_FULL_CHUNKS")
@@ -1388,6 +1394,26 @@ impl ProjectParseService {
             context_blocks.extend(module_static_blocks(&module_id, r));
         }
 
+        let scenes_vec = readout
+            .as_ref()
+            .map(|r| r.scenes.clone())
+            .unwrap_or_default();
+        // P0-2 Adventure IR: derive the Contains hierarchy (ContentUnit substrate)
+        // from the reader's structural fingerprints. Flag-gated `TRPG_CONTENT_UNITS`
+        // (default OFF) → empty content_units + empty chapters == byte-identical
+        // baseline. `chapters` becomes a compat projection of the derived tier.
+        let content_units = if content_units_enabled() {
+            trpg_model::adventure_ir::derive_content_units(
+                &module_id,
+                &doc.source_id,
+                &doc.title,
+                &scenes_vec,
+            )
+        } else {
+            Vec::new()
+        };
+        let derived_chapters = trpg_model::adventure_ir::project_chapters(&content_units);
+
         let module_graph = ModuleGraph {
             module_id: module_id.clone(),
             ruleset_id: ruleset_id.clone(),
@@ -1398,12 +1424,9 @@ impl ProjectParseService {
                 .map(|r| r.spine.clone())
                 .filter(|s| !s.is_null())
                 .unwrap_or(spine_json),
-            chapters: vec![],
+            chapters: derived_chapters,
             missions: vec![],
-            scenes: readout
-                .as_ref()
-                .map(|r| r.scenes.clone())
-                .unwrap_or_default(),
+            scenes: scenes_vec,
             locations: readout
                 .as_ref()
                 .map(|r| r.locations.clone())
@@ -1431,6 +1454,7 @@ impl ProjectParseService {
                 .unwrap_or_default(),
             // 自动抽取的模组级引导事实(无 reader/未抽到 → None,director 回退通用兜底)。
             director_facilitation: readout.as_ref().and_then(|r| r.facilitation_facts.clone()),
+            content_units,
         };
 
         conversion_trace.push(ConversionTraceEvent::new(

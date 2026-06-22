@@ -19,6 +19,7 @@
 
 mod content_unit;
 mod effect;
+mod hierarchy;
 mod objective;
 mod predicate;
 mod progress_signal;
@@ -28,6 +29,7 @@ pub use content_unit::{
     ContentUnit, DeliveryPolicy, FacetKind, UnitKind, VisibilityPolicy,
 };
 pub use effect::{EffectExpr, ScoreEffect};
+pub use hierarchy::{derive_content_units, project_chapters, unit_kind_for};
 pub use objective::{
     NormalizationStatus, ObjectiveSpec, ProgressRule, TrackerKind, TrackerRef, TrackerSpec,
 };
