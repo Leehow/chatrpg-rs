@@ -10,10 +10,12 @@
 //! (evolving `scene_navigation/flow_links.rs`) and the real-runtime smoke land in a
 //! relay-free pass; until then OFF==baseline is byte-identical (nothing calls it).
 
+mod adapter;
 mod engine;
 mod frontier;
 mod state;
 
+pub use adapter::progress_events_from_domain;
 pub use engine::{evaluate, ProgressionProgram};
 pub use frontier::{compute_frontier, AdvancementFrontier};
 pub use state::{ProgressEvent, ProgressionState};
