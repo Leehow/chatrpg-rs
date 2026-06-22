@@ -8,6 +8,7 @@ pub mod chargen_compile;
 pub mod facilitation;
 pub mod mechanics_compile;
 pub mod mechanics_finalize;
+pub mod module_flow_links;
 pub mod module_graph_build;
 pub mod module_graph_edges;
 pub mod module_graph_validator;

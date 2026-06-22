@@ -428,6 +428,18 @@ pub async fn run_module_reader(
     // 入口兜底连通：纯序幕常无实体共享 → 桥接后仍 0 出边 → 整图从入口不可达。按骨架顺序连下一
     // 场景（Sequential）保证可进入。fail-closed：已有出边/无下一场景 → 不动。
     let entry_patched = ensure_entry_connected(&mut out.scenes, entry_idx);
+    // TRPG_MODULE_FLOW_LINKS（默认 OFF）：生产侧"已授权流转脊"——逐场景从正文抽
+    // sequential/trigger/branch 有向边（每条带摘自原文的 source_anchor），与上面的实体共享
+    // spatial 桥**并存**（桥保留为 fallback）。OFF ⇒ 此 pass 不被调用 ⇒ bundle 字节级不变。
+    if super::module_flow_links::flow_links_enabled() {
+        let typed =
+            super::module_flow_links::extract_flow_links_all(client, &ctx, &mut out).await;
+        tracing::info!(
+            target: "module_reader", phase = "flow_links",
+            typed_authored_links = typed, scenes = out.scenes.len(),
+            "typed inter-scene flow links extracted (producer-side spine)"
+        );
+    }
     // 连通诊断**此刻**才测（入口已深抽+桥接+兜底），反映真实可达性（Pass B 前测会误报 reachable=1）。
     let entry_id = out.scenes[entry_idx].node_id.clone();
     let h = super::module_graph_validator::validate_graph(&out.scenes, &entry_id);
