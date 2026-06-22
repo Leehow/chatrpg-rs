@@ -51,11 +51,23 @@ pub fn compute_frontier(
     // An objective is "open" if it is not terminal. We only surface objectives the
     // engine can reason about: those whose success guard is executable (opaque
     // guards stay GM-facing, never auto-driven), per fail-closed at execution.
+    //
+    // PL-5 scene-scoping: a scene-bound objective (`mission_id = Some(scene)`) only
+    // surfaces when that scene is the CURRENT focus (the last entered location), so
+    // the spine-wide per-scene objectives don't flood the frontier with every
+    // scene's goal at once. Unbound objectives (`mission_id = None`) always surface
+    // — this preserves the PL-1 scene_01 threat objective and all golden objectives.
+    let current_scene = state.ctx.entered_locations.last();
     let open_objectives: Vec<String> = objectives
         .iter()
         .filter(|o| {
             let st = state.objective_status(&o.id);
-            !matches!(st, ObjectiveStatus::Completed | ObjectiveStatus::Failed)
+            let in_scope = match &o.mission_id {
+                None => true,
+                Some(m) => current_scene.map(|c| c == m).unwrap_or(false),
+            };
+            in_scope
+                && !matches!(st, ObjectiveStatus::Completed | ObjectiveStatus::Failed)
                 && o.success_when.eval(&state.ctx) != PredicateValue::NonExecutable
         })
         .map(|o| o.id.clone())

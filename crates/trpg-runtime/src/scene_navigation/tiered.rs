@@ -11,8 +11,8 @@ use super::{
     with_flow_link_clause, with_frontier_focus_clause, SCENE_NAV_SYS,
 };
 use crate::progression::{
-    compute_frontier, derive_threat_objective, evaluate, program_from_module_graph,
-    progression_engine_enabled, replay_domain_events, ProgressEvent,
+    augment_program_with_spine, compute_frontier, derive_threat_objective, evaluate,
+    program_from_module_graph, progression_engine_enabled, replay_domain_events, ProgressEvent,
 };
 use serde_json::json;
 use tracing::info;
@@ -122,6 +122,15 @@ pub async fn scene_navigate_critical(
                 program.rules.push(d.outcome_rule);
             }
         }
+        // PL-5 (PHASE 2 ROUND-2): generalize the per-scene objective/out-edge from
+        // scene_01 to the WHOLE spine — each spine scene gets a structural
+        // `Entered→Activate(next)` rule (frontier non-empty everywhere, not just
+        // scene_01) plus a scene-scoped open objective gated on its own vocab. Pure
+        // structure (page order + each scene's tokens): ZERO ruleset/scene-name
+        // branching; fail-closed (blank vocab ⇒ no objective). Skips ridges already
+        // authored by `program_from_module_graph`. This is the ROUND-2 fix for the
+        // proven "froze at scene_02 (no objective/out-edge)" 1-hop stall.
+        augment_program_with_spine(&mut program, &graph);
         let (mut state, _hist) = replay_domain_events(&events, &program.borrow());
         // 焦点此刻就在当前场景（权威 session 状态，非猜测）：seed Entered(current)，让从它出发
         // 的已授权 ridge 填充 frontier。

@@ -14,6 +14,7 @@ mod adapter;
 mod engine;
 mod frontier;
 mod program;
+mod spine;
 mod state;
 
 pub use adapter::{progress_events_from_domain, replay_domain_events};
@@ -22,6 +23,7 @@ pub use frontier::{compute_frontier, AdvancementFrontier};
 pub use program::{
     derive_threat_objective, program_from_module_graph, ObjectiveDerivation, OwnedProgram,
 };
+pub use spine::augment_program_with_spine;
 pub use state::{ProgressEvent, ProgressionState};
 
 /// Whether the runtime ProgressionEngine is active. Default OFF → today's behavior
