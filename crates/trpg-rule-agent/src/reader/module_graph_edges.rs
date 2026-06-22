@@ -32,25 +32,58 @@ pub fn bridge_edges(scenes: &[ScenarioNode]) -> Vec<(usize, usize, usize)> {
     out
 }
 
-/// 把桥接边就地填进双方 links(双向;按 to_node_id 去重,不覆盖已有边)。返回新增边数。
+/// P0-1 flag:`TRPG_TYPED_COOCCURRENCE`=ON 时实体共现改打 typed
+/// `AssociatedByEntity/RetrievalOnly` Relation(语义清污),默认 OFF=今天的 Spatial 链接行为
+/// (OFF==baseline 字节等价)。镜像既有 TRPG_* flag 习惯。
+fn typed_cooccurrence_enabled() -> bool {
+    std::env::var("TRPG_TYPED_COOCCURRENCE")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes"))
+        .unwrap_or(false)
+}
+
+/// 把桥接边就地填进双方(双向;去重,不覆盖已有)。返回新增条数。
+/// OFF:Spatial `links`(基线);ON:typed `relations`(AssociatedByEntity/RetrievalOnly)。
 pub fn apply_bridge_edges(scenes: &mut Vec<ScenarioNode>) -> usize {
+    apply_bridge_edges_inner(scenes, typed_cooccurrence_enabled())
+}
+
+/// 纯内核:`typed` 决定共现边落 typed relation 还是 Spatial link。分出便于无 env 竞争单测。
+fn apply_bridge_edges_inner(scenes: &mut Vec<ScenarioNode>, typed: bool) -> usize {
     let edges = bridge_edges(scenes);
     let ids: Vec<String> = scenes.iter().map(|s| s.node_id.clone()).collect();
     let mut added = 0;
     for (i, j, shared) in edges {
         for (a, b) in [(i, j), (j, i)] {
             let to = ids[b].clone();
-            if scenes[a].links.iter().any(|l| l.to_node_id == to) {
-                continue;
+            if typed {
+                // 语义清污:共享实体证明相关性而非空间相邻 → AssociatedByEntity/RetrievalOnly,
+                // 永不驱动推进。去重按 (to + AssociatedByEntity)。
+                if scenes[a].relations.iter().any(|r| {
+                    r.to == to
+                        && r.kind == trpg_model::adventure_ir::RelationKind::AssociatedByEntity
+                }) {
+                    continue;
+                }
+                let from = ids[a].clone();
+                scenes[a]
+                    .relations
+                    .push(trpg_model::adventure_ir::Relation::from_entity_cooccurrence(
+                        &from, &to, shared,
+                    ));
+                added += 1;
+            } else {
+                if scenes[a].links.iter().any(|l| l.to_node_id == to) {
+                    continue;
+                }
+                scenes[a].links.push(ScenarioLink {
+                    to_node_id: to,
+                    reason: format!("共享 {shared} 个实体"),
+                    clue_id: None,
+                    link_type: LinkType::Spatial,
+                    source_anchor: None,
+                });
+                added += 1;
             }
-            scenes[a].links.push(ScenarioLink {
-                to_node_id: to,
-                reason: format!("共享 {shared} 个实体"),
-                clue_id: None,
-                link_type: LinkType::Spatial,
-                source_anchor: None,
-            });
-            added += 1;
         }
     }
     added
@@ -268,6 +301,44 @@ mod tests {
         assert_eq!(scenes[0].links[0].link_type, LinkType::Spatial);
         let n2 = apply_bridge_edges(&mut scenes);
         assert_eq!(n2, 0, "重复调用不重复加(去重)");
+    }
+    #[test]
+    fn typed_cooccurrence_records_associated_by_entity_not_spatial() {
+        use trpg_model::adventure_ir::{Enforcement, RelationKind};
+        // P0-1: 实体共现 → AssociatedByEntity/RetrievalOnly typed relation,绝不 Spatial。
+        let mut scenes = vec![scene("a", &["npc1"]), scene("b", &["npc1"])];
+        let n = apply_bridge_edges_inner(&mut scenes, true);
+        assert_eq!(n, 2, "双向各一条 typed relation");
+        // typed 路径不再污染 nav 的 Spatial 出口。
+        assert!(scenes[0].links.is_empty(), "typed 路径不产 Spatial 链接");
+        assert!(scenes[1].links.is_empty());
+        let r = &scenes[0].relations[0];
+        assert_eq!(r.kind, RelationKind::AssociatedByEntity);
+        assert_ne!(r.kind, RelationKind::SpatialAdjacent, "共现 != 空间相邻");
+        assert_eq!(r.enforcement, Enforcement::RetrievalOnly);
+        assert_eq!(r.to, "b");
+        assert!(!r.evidence.is_empty(), "带 evidence");
+        assert!(!r.participates_in_progression(), "retrieval-only 永不驱动推进");
+        // 幂等:重复调用不重复加。
+        let n2 = apply_bridge_edges_inner(&mut scenes, true);
+        assert_eq!(n2, 0, "重复不重复加");
+    }
+    #[test]
+    fn typed_off_is_byte_identical_baseline() {
+        // OFF==baseline:inner(typed=false) 与公开 apply_bridge_edges(flag 默认 OFF)
+        // 产出逐字节相同的 Spatial links,且不产 typed relation。
+        let mut off = vec![scene("a", &["npc1"]), scene("b", &["npc1"])];
+        let mut base = vec![scene("a", &["npc1"]), scene("b", &["npc1"])];
+        let n_off = apply_bridge_edges_inner(&mut off, false);
+        let n_base = apply_bridge_edges(&mut base);
+        assert_eq!(n_off, n_base, "新增边数相同");
+        assert_eq!(
+            serde_json::to_string(&off).unwrap(),
+            serde_json::to_string(&base).unwrap(),
+            "OFF 路径序列化字节与基线相同"
+        );
+        assert!(off[0].relations.is_empty(), "OFF 不产 typed relation");
+        assert_eq!(off[0].links[0].link_type, LinkType::Spatial);
     }
     #[test]
     fn sanitize_key_normalizes() {

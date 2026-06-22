@@ -2088,6 +2088,12 @@ pub struct ScenarioNode {
     /// 揭示态由 revealed-facts 账本按 node_id 控制。空时序列化省略，保旧数据字节不变。
     #[serde(default, skip_serializing_if = "SpoilerMeta::is_empty")]
     pub spoiler: SpoilerMeta,
+    /// P0-1 语义清污:实体共现得到的 typed 关系(AssociatedByEntity/RetrievalOnly)。
+    /// `apply_bridge_edges` 在 `TRPG_TYPED_COOCCURRENCE`=ON 时改打到这里——共享实体证明
+    /// 相关性而非空间相邻,故 RetrievalOnly 永不驱动推进。空时序列化省略,保旧数据字节不变
+    /// (OFF==baseline)。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relations: Vec<adventure_ir::Relation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
