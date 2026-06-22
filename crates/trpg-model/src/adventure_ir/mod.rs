@@ -21,6 +21,7 @@ mod content_unit;
 mod effect;
 mod objective;
 mod predicate;
+mod progress_signal;
 mod relation;
 
 pub use content_unit::{
@@ -34,4 +35,5 @@ pub use predicate::{
     EvalContext, EventPattern, IrValue, KnowledgeHolder, ObjectiveStatus, PredicateExpr,
     PredicateValue,
 };
+pub use progress_signal::{J3Axis, ProgressSignal, ProgressSignalKind};
 pub use relation::{Authority, Enforcement, Relation, RelationKind};

@@ -86,6 +86,9 @@ pub mod story_observer;
 pub mod story_write;
 pub mod memory_guard;
 pub mod world;
+/// Adventure IR runtime ProgressionEngine + AdvancementFrontier (P1-3, flag
+/// `TRPG_PROGRESSION_ENGINE`, default OFF). Additive; consumer wiring deferred.
+pub mod progression;
 pub use director_brief::{
     apply_story_proposals, build_director_block, build_director_plan_post_adjudication,
     commit_story_writes, prepare_director_brief, prepare_director_plan_post_adjudication,
