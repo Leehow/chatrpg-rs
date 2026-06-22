@@ -77,6 +77,14 @@ pub enum PredicateExpr {
     ChoiceMade { key: String, value: String },
     EntityState { entity: String, field: String, value: IrValue },
     ResourceAtLeast { resource: String, amount: i64 },
+    /// True iff SOME known fact's id case-insensitively contains ANY of these
+    /// source-grounded vocabulary tokens. Aligns a GM's free-form `fact_id`
+    /// (e.g. `encounter.hacking_server`) to an authored objective via the
+    /// module's OWN matcher vocabulary (`module_config` npc/tech tokens) — the
+    /// same case-insensitive-substring scheme the module config already uses,
+    /// so the LLM never evaluates the guard (Rust does, deterministically).
+    /// Empty/whitespace-only tokens are skipped → never match-all (fail-closed).
+    AnyFactMatches { tokens: Vec<String> },
     /// Authored condition that could not be normalized. Stored for Director/GM
     /// to read; **never** auto-fires (`eval` → `NonExecutable`).
     OpaqueAuthoredText { raw_text: String },
@@ -212,6 +220,22 @@ impl PredicateExpr {
                 == Some(value)),
             PredicateExpr::ResourceAtLeast { resource, amount } => {
                 b3(ctx.resources.get(resource).copied().unwrap_or(0) >= *amount)
+            }
+            PredicateExpr::AnyFactMatches { tokens } => {
+                // Deterministic case-insensitive substring alignment. Skip
+                // empty/whitespace tokens so an empty vocab never match-alls.
+                let needles: Vec<String> = tokens
+                    .iter()
+                    .map(|t| t.trim().to_lowercase())
+                    .filter(|t| !t.is_empty())
+                    .collect();
+                if needles.is_empty() {
+                    return False;
+                }
+                b3(ctx.facts.keys().any(|k| {
+                    let hay = k.to_lowercase();
+                    needles.iter().any(|n| hay.contains(n.as_str()))
+                }))
             }
             // KEY fail-closed rule: Rust never auto-fires authored opaque text.
             PredicateExpr::OpaqueAuthoredText { .. } => NonExecutable,
@@ -427,6 +451,66 @@ mod tests {
             },
         ]);
         assert!(!nonexec.is_executable());
+    }
+
+    #[test]
+    fn any_fact_matches_aligns_freeform_gm_fact_ids() {
+        // PL-2: a GM emits free-form fact_ids; the scene_01 drone-neutralize
+        // objective is aligned via the module's own case-insensitive-substring
+        // vocabulary (npc.athena_drone + technical_option_table tokens). These
+        // are REAL live homecoming fact_ids pulled from domain_events.
+        let mut c = EvalContext::default();
+        c.facts
+            .insert("encounter.hacking_server".into(), IrValue::Bool(true));
+        c.facts
+            .insert("clue_cable_to_server".into(), IrValue::Bool(true));
+        c.facts.insert("npc_butler".into(), IrValue::Bool(true)); // unrelated module noise
+        let vocab = || {
+            vec![
+                "drone".to_string(),
+                "athena".to_string(),
+                "hack".to_string(),
+                "server".to_string(),
+                "cable".to_string(),
+                "无人机".to_string(),
+            ]
+        };
+        // free-form `encounter.hacking_server` / `clue_cable_to_server` match.
+        assert_eq!(
+            PredicateExpr::AnyFactMatches { tokens: vocab() }.eval(&c),
+            True
+        );
+        // unrelated vocabulary → no known fact matches → deterministic False.
+        assert_eq!(
+            PredicateExpr::AnyFactMatches {
+                tokens: vec!["foxwell".into(), "scavvs".into()]
+            }
+            .eval(&c),
+            False
+        );
+        // empty vocabulary must NOT match-all (fail-closed).
+        assert_eq!(
+            PredicateExpr::AnyFactMatches { tokens: vec![] }.eval(&c),
+            False
+        );
+        // whitespace-only token must NOT substring-match every fact (fail-closed).
+        assert_eq!(
+            PredicateExpr::AnyFactMatches {
+                tokens: vec![" ".into(), "".into()]
+            }
+            .eval(&c),
+            False
+        );
+        // a context with only unrelated facts → False against scene_01 vocab.
+        let mut c2 = EvalContext::default();
+        c2.facts.insert("npc_butler".into(), IrValue::Bool(true));
+        c2.facts.insert("sc_cellar".into(), IrValue::Bool(true));
+        assert_eq!(
+            PredicateExpr::AnyFactMatches { tokens: vocab() }.eval(&c2),
+            False
+        );
+        // executable leaf (no opaque) → participates in is_executable.
+        assert!(PredicateExpr::AnyFactMatches { tokens: vocab() }.is_executable());
     }
 
     #[test]

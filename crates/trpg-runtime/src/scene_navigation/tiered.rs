@@ -11,8 +11,8 @@ use super::{
     with_flow_link_clause, with_frontier_focus_clause, SCENE_NAV_SYS,
 };
 use crate::progression::{
-    compute_frontier, evaluate, program_from_module_graph, progression_engine_enabled,
-    replay_domain_events, ProgressEvent,
+    compute_frontier, derive_threat_objective, evaluate, program_from_module_graph,
+    progression_engine_enabled, replay_domain_events, ProgressEvent,
 };
 use serde_json::json;
 use tracing::info;
@@ -93,7 +93,35 @@ pub async fn scene_navigate_critical(
     // 全程 fail-closed：取事件失败/空 ⇒ 空 frontier ⇒ 不追加（绝不乱跳、绝不编造）。
     if progression_engine_enabled() {
         let events = db.list_domain_events(session_id, 5000).await.unwrap_or_default();
-        let program = program_from_module_graph(&graph);
+        let mut program = program_from_module_graph(&graph);
+        // PL-1 (PHASE 2): give scene_01 an OPEN threat objective so the frontier is
+        // non-empty even before any flow ridge fires (the proven scene_01 starvation:
+        // frontier_total=0 for t01–t14). Vocabulary is source-grounded from the
+        // module's OWN matcher config (npc bindings + technical-option affordances) —
+        // ZERO ruleset/module name branching; fail-closed (no config / blank vocab ⇒
+        // no objective, never invent). The GM's free-form fact_id is aligned via the
+        // same case-insensitive-substring scheme the module config already uses
+        // (PredicateExpr::AnyFactMatches — Rust evaluates the guard, the LLM never).
+        if let Some(cfg) = db.load_module_config(module_id).await {
+            let mut vocab: Vec<String> = Vec::new();
+            for b in &cfg.npc_actor_bindings {
+                vocab.extend(b.matcher.iter().cloned());
+            }
+            if let Some(rows) = &cfg.technical_option_table {
+                for row in rows {
+                    vocab.extend(row.matcher.iter().cloned());
+                }
+            }
+            if let Some(d) = derive_threat_objective(
+                "obj.neutralize_threat",
+                &vocab,
+                "rev.threat_outcome",
+                "module_config: npc_actor_bindings + technical_option_table matchers",
+            ) {
+                program.objectives.push(d.objective);
+                program.rules.push(d.outcome_rule);
+            }
+        }
         let (mut state, _hist) = replay_domain_events(&events, &program.borrow());
         // 焦点此刻就在当前场景（权威 session 状态，非猜测）：seed Entered(current)，让从它出发
         // 的已授权 ridge 填充 frontier。
@@ -117,8 +145,10 @@ pub async fn scene_navigate_critical(
             session_id,
             frontier_active = frontier.active_units.len(),
             frontier_total = frontier.len(),
+            frontier_objectives = frontier.open_objectives.len(),
             signals = step_signals.len(),
             program_rules = program.rules.len(),
+            program_objectives = program.objectives.len(),
             "progression frontier computed (engine ON)"
         );
     }
