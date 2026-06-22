@@ -60,6 +60,11 @@ pub mod memory_layer;
 pub use memory_layer::*;
 pub mod materialization_affordance;
 pub use materialization_affordance::*;
+/// Adventure IR (P0/P1): unified content identity, typed relations, finite guard
+/// AST, effects, objectives/trackers, progress rules. Namespaced (no glob) so the
+/// additive types never collide with existing model names; consumers reference
+/// `trpg_model::adventure_ir::*`.
+pub mod adventure_ir;
 
 pub const PROJECT_SCHEMA_VERSION: &str = "chatrpg.project_bundle.v1";
 pub const RULE_SCHEMA_VERSION: &str = "chatrpg.rule_bundle.v1";
