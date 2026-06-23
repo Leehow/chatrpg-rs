@@ -91,17 +91,20 @@ pub(crate) fn evaluate_gm_audit(
     catalog: &EvidenceAtomCatalog,
     committed_events: &[DomainEvent],
     audit: Option<&EvidenceAudit>,
+    seed: &EvidenceLedger,
 ) -> AuditOutcome {
     let offers = offer_set.len();
 
     // 缺失≠none: the flag is on and offers were made, but the GM produced no audit.
+    // EV-P2: the exact producers' ledger (`seed`) is preserved either way — a missing/
+    // incomplete GM audit never discards already-admitted ExactDomain evidence.
     let Some(audit) = audit else {
-        return fail(offers, ProtocolFailureKind::MissingAudit);
+        return fail(offers, ProtocolFailureKind::MissingAudit, seed);
     };
 
     // The audit must answer THIS turn's exact OfferSet.
     if audit.offer_set_id != offer_set.id() {
-        return fail(offers, ProtocolFailureKind::OfferSetMismatch);
+        return fail(offers, ProtocolFailureKind::OfferSetMismatch, seed);
     }
 
     // Completeness: every offered cap has exactly one decision; no extra/unknown caps.
@@ -110,10 +113,10 @@ pub(crate) fn evaluate_gm_audit(
     let decided: std::collections::BTreeSet<&str> =
         audit.decisions.keys().map(|c| c.as_str()).collect();
     if decided.iter().any(|c| !offered.contains(c)) {
-        return fail(offers, ProtocolFailureKind::ExtraDecisions);
+        return fail(offers, ProtocolFailureKind::ExtraDecisions, seed);
     }
     if offered.iter().any(|c| !decided.contains(c)) {
-        return fail(offers, ProtocolFailureKind::IncompleteDecisions);
+        return fail(offers, ProtocolFailureKind::IncompleteDecisions, seed);
     }
 
     // Complete + well-scoped. Split Observed / NotObserved.
@@ -134,7 +137,8 @@ pub(crate) fn evaluate_gm_audit(
     }
 
     // Reuse the EV-4 gateway UNCHANGED for the Observed decisions (cap+basis only;
-    // Rust resolves cap→atom). NotObserved decisions record no evidence.
+    // Rust resolves cap→atom). NotObserved decisions record no evidence. Seeded with the
+    // exact producers' ledger so a GM claim duplicating an exact observation is rejected.
     let (ledger, decisions) = admit_gm_claims(
         session_id,
         turn_id,
@@ -142,6 +146,7 @@ pub(crate) fn evaluate_gm_audit(
         catalog,
         committed_events,
         &claims,
+        seed,
     );
 
     AuditOutcome {
@@ -157,9 +162,11 @@ pub(crate) fn evaluate_gm_audit(
     }
 }
 
-/// Build a fail-closed outcome: no admission, telemetry carrying the failure kind.
-/// `completeness` is reported 0.0 (the audit is not trustworthy as a whole).
-fn fail(offers: usize, kind: ProtocolFailureKind) -> AuditOutcome {
+/// Build a fail-closed outcome: no GM admission, telemetry carrying the failure kind.
+/// `completeness` is reported 0.0 (the audit is not trustworthy as a whole). EV-P2: the
+/// ledger carries the exact producers' `seed` UNCHANGED — a GM protocol failure never
+/// discards already-admitted ExactDomain evidence.
+fn fail(offers: usize, kind: ProtocolFailureKind, seed: &EvidenceLedger) -> AuditOutcome {
     AuditOutcome {
         telemetry: AuditTelemetry {
             offers,
@@ -168,7 +175,7 @@ fn fail(offers: usize, kind: ProtocolFailureKind) -> AuditOutcome {
             completeness: 0.0,
             protocol_failure: Some(kind),
         },
-        ledger: EvidenceLedger::new(),
+        ledger: seed.clone(),
         decisions: Vec::new(),
     }
 }
@@ -234,6 +241,26 @@ fn render_audit_format(offer_set_id: &str) -> String {
          {{\"status\":\"not_observed\",\"reason\":\"failed\"}}}}}}[/evidence_audit]\n\
          The decisions object MUST contain exactly one entry per capability handle listed \
          above — no more, no fewer. Use the offer_set_id verbatim."
+    )
+}
+
+/// EV-P2 (`progress_exact_projectors_v1`): the short GM-prompt instruction telling the
+/// GM to ALSO emit a `[materialized_content]` reference when it actually presents an
+/// authored clue's content to the player this turn. Carries ONLY the opaque cap handles
+/// + recipient + basis schema — never an atom_id / objective_id / the fact name (Rust
+/// resolves cap→authored fact). Appended only inside the flag guard so OFF prompt bytes
+/// are unchanged. Pure.
+pub(crate) fn render_content_delivery_instruction() -> String {
+    String::from(
+        "AUTHORED-CONTENT DELIVERY (this turn only): if — and ONLY if — you actually \
+         PRESENTED an authored clue's content to the player this turn (you read/showed/told \
+         them what it says, not merely hinted at or referenced it), ALSO emit a GM-only block \
+         citing the clue capability handle it materialized:\n\
+         [materialized_content][{\"delivery_cap\":\"<one of the cap_ handles above>\",\
+         \"recipient\":\"player\",\"basis\":[\"commit:<i>\"]}][/materialized_content]\n\
+         A JSON array, never shown to the player. `delivery_cap` is one of the capability \
+         handles listed above; `basis` cites the committed outcome/commit that presented it. \
+         Omit the block entirely if you presented no authored clue content this turn.",
     )
 }
 
@@ -331,7 +358,7 @@ mod tests {
         let events = vec![learned_event("de_clue_a", CLUE_A)];
         let audit = complete_audit(&set);
 
-        let out = evaluate_gm_audit(SESSION, TURN, &set, &catalog, &events, Some(&audit));
+        let out = evaluate_gm_audit(SESSION, TURN, &set, &catalog, &events, Some(&audit), &EvidenceLedger::new());
 
         assert_eq!(out.ledger.len(), 1, "one observed clue ⇒ one GmWitnessed evidence");
         assert_eq!(out.ledger.entries()[0].authority, EvidenceAuthority::GmWitnessed);
@@ -354,7 +381,7 @@ mod tests {
         let (set, catalog) = two_clue_offer_set();
         let events = vec![learned_event("de_clue_a", CLUE_A)];
 
-        let out = evaluate_gm_audit(SESSION, TURN, &set, &catalog, &events, None);
+        let out = evaluate_gm_audit(SESSION, TURN, &set, &catalog, &events, None, &EvidenceLedger::new());
 
         assert_eq!(out.ledger.len(), 0);
         assert_eq!(out.telemetry.protocol_failure, Some(ProtocolFailureKind::MissingAudit));
@@ -373,7 +400,7 @@ mod tests {
             decisions,
         };
 
-        let out = evaluate_gm_audit(SESSION, TURN, &set, &catalog, &events, Some(&audit));
+        let out = evaluate_gm_audit(SESSION, TURN, &set, &catalog, &events, Some(&audit), &EvidenceLedger::new());
 
         assert_eq!(out.ledger.len(), 0, "incomplete audit ⇒ no admission (fail-closed)");
         assert_eq!(
@@ -392,7 +419,7 @@ mod tests {
             .decisions
             .insert(CapId("cap_never_offered".into()), not_observed(NotObservedReason::Failed));
 
-        let out = evaluate_gm_audit(SESSION, TURN, &set, &catalog, &events, Some(&audit));
+        let out = evaluate_gm_audit(SESSION, TURN, &set, &catalog, &events, Some(&audit), &EvidenceLedger::new());
 
         assert_eq!(out.ledger.len(), 0);
         assert_eq!(out.telemetry.protocol_failure, Some(ProtocolFailureKind::ExtraDecisions));
@@ -405,7 +432,7 @@ mod tests {
         let mut audit = complete_audit(&set);
         audit.offer_set_id = "osid_stale000000".into();
 
-        let out = evaluate_gm_audit(SESSION, TURN, &set, &catalog, &events, Some(&audit));
+        let out = evaluate_gm_audit(SESSION, TURN, &set, &catalog, &events, Some(&audit), &EvidenceLedger::new());
 
         assert_eq!(out.ledger.len(), 0);
         assert_eq!(out.telemetry.protocol_failure, Some(ProtocolFailureKind::OfferSetMismatch));
@@ -420,7 +447,7 @@ mod tests {
         let events: Vec<DomainEvent> = vec![]; // commit:0 resolves to nothing
         let audit = complete_audit(&set);
 
-        let out = evaluate_gm_audit(SESSION, TURN, &set, &catalog, &events, Some(&audit));
+        let out = evaluate_gm_audit(SESSION, TURN, &set, &catalog, &events, Some(&audit), &EvidenceLedger::new());
 
         assert_eq!(out.ledger.len(), 0, "unresolvable basis ⇒ gateway rejects, not admitted");
         assert_eq!(out.telemetry.protocol_failure, None, "protocol was complete");
@@ -452,6 +479,30 @@ mod tests {
     fn empty_offer_set_renders_no_block_baseline() {
         let empty = EvidenceOfferSet::new(TURN);
         assert_eq!(render_gm_audit_block(&empty), "", "empty offers ⇒ no block ⇒ baseline");
+    }
+
+    #[test]
+    fn content_delivery_instruction_off_keeps_prompt_byte_identical_and_never_leaks() {
+        // EV-P2: when the exact-projector flag is OFF the content-delivery instruction is
+        // never appended ⇒ the audit block bytes are identical to the EV-P1 baseline.
+        let (set, _) = two_clue_offer_set();
+        let baseline = render_gm_audit_block(&set);
+        let exact_on = false;
+        let mut block = baseline.clone();
+        if exact_on {
+            block.push_str("\n\n");
+            block.push_str(&render_content_delivery_instruction());
+        }
+        assert_eq!(block, baseline, "OFF ⇒ block bytes identical to EV-P1 baseline");
+
+        // The instruction names only the closed schema fields + opaque handles — never an
+        // atom id, the fact name, or an objective slug.
+        let instr = render_content_delivery_instruction();
+        assert!(instr.contains("materialized_content"), "instructs the sidecar tag");
+        assert!(instr.contains("delivery_cap") && instr.contains("basis"), "names closed fields");
+        assert!(!instr.contains("atom:"), "no atom id leaked");
+        assert!(!instr.contains("obj."), "no objective id slug leaked");
+        assert!(!instr.contains("fact_id"), "the GM never names the authored fact");
     }
 
     #[test]

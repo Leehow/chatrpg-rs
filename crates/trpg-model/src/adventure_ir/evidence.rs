@@ -202,6 +202,14 @@ impl EvidenceAtomCatalog {
         self.atoms.iter().find(|a| a.grounding == grounding)
     }
 
+    /// Resolve any exact `grounding` reference (`fact:<id>` / `location:<id>` /
+    /// `state:<id>`) to its atom (exact match — never fuzzy). EV-P2's
+    /// Location/State exact projectors resolve their committed-event refs through
+    /// this; `resolve_fact` stays a convenience wrapper for the `fact:` prefix.
+    pub fn resolve_grounding(&self, grounding: &str) -> Option<&EvidenceAtomSpec> {
+        self.atoms.iter().find(|a| a.grounding == grounding)
+    }
+
     /// Resolve an [`AtomId`] back to its source-grounded atom (EV-4 gateway uses this
     /// to recover an offered atom's `source_refs`/`bindings` after Rust maps the
     /// opaque cap→atom). An offer whose atom is absent here has no verifiable

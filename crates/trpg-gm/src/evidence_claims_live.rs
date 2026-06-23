@@ -121,6 +121,7 @@ async fn the_vault_main_gm_claim_admits_through_live_pipeline_with_turn_id_align
         &catalog,
         &turn_events,
         &doc.progress_claims,
+        &trpg_model::adventure_ir::EvidenceLedger::new(),
     );
     assert_eq!(ledger.len(), 1, "valid main-GM claim ⇒ one AcceptedEvidence");
     let ev = &ledger.entries()[0];
@@ -153,6 +154,7 @@ async fn the_vault_main_gm_claim_admits_through_live_pipeline_with_turn_id_align
         &catalog,
         &turn_events, // events still carry the REAL turn TURN ≠ turn_999_wrong
         &mis_doc.progress_claims,
+        &trpg_model::adventure_ir::EvidenceLedger::new(),
     );
     assert_eq!(mis_ledger.len(), 0, "misaligned turn ⇒ no admission");
     assert!(

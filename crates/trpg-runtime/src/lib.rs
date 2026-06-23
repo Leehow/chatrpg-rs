@@ -159,6 +159,12 @@ pub use evidence_gateway::{
     EvidenceGateway, GatewayInputs, RejectionReason,
 };
 
+pub mod exact_projectors;
+pub use exact_projectors::{
+    build_location_atom_catalog, build_state_atom_catalog, progress_exact_projectors_enabled,
+    project_content_delivery, project_location_entered, project_state_established,
+};
+
 pub mod clue_surface;
 pub use clue_surface::{
     module_clue_surface_text, render_clue_surface, surface_player_facing_clues, SurfacedClue,

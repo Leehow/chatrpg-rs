@@ -139,6 +139,17 @@ pub(crate) struct TurnDocument {
     /// the GM emitted the tag (only when the flag is ON + the audit instruction was
     /// injected) ⇒ OFF == byte-identical baseline.
     pub evidence_audit: Option<trpg_model::adventure_ir::EvidenceAudit>,
+    /// EV-P2 (`progress_exact_projectors_v1`, default OFF): the main GM's
+    /// `[materialized_content]` sidecar — a JSON array of closed-schema
+    /// [`trpg_model::adventure_ir::ContentDelivery`] (`delivery_cap` + `recipient` +
+    /// `basis` ONLY; CANNOT carry fact_id/atom_id/objective/completed). The GM emits
+    /// this ONLY when it actually presents an authored clue's content to the player;
+    /// Rust (the ContentDeliveryProjector) verifies each entry and produces
+    /// `AcceptedEvidence(FactLearned, ExactDomain)`. Fail-closed: a missing tag,
+    /// non-array inner, or forged/malformed entry is dropped, never guessed. NEVER
+    /// player-visible. Empty unless the GM emitted the tag (only when the flag is ON +
+    /// the instruction was injected) ⇒ OFF == byte-identical baseline.
+    pub materialized_content: Vec<trpg_model::adventure_ir::ContentDelivery>,
 }
 
 impl TurnDocument {

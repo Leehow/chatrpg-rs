@@ -134,6 +134,7 @@ async fn the_vault_main_gm_audit_admits_through_live_pipeline_and_flags_incomple
         &catalog,
         &turn_events,
         doc.evidence_audit.as_ref(),
+        &trpg_model::adventure_ir::EvidenceLedger::new(),
     );
     assert_eq!(out.telemetry.completeness, 1.0, "every offered cap had exactly one decision");
     assert_eq!(out.telemetry.protocol_failure, None, "complete audit ⇒ no protocol failure");
@@ -167,6 +168,7 @@ async fn the_vault_main_gm_audit_admits_through_live_pipeline_and_flags_incomple
         &catalog,
         &turn_events,
         Some(&incomplete),
+        &trpg_model::adventure_ir::EvidenceLedger::new(),
     );
     assert_eq!(inc_out.ledger.len(), 0, "incomplete audit ⇒ no admission (fail-closed)");
     assert_eq!(
@@ -176,7 +178,15 @@ async fn the_vault_main_gm_audit_admits_through_live_pipeline_and_flags_incomple
     );
 
     // ---- and a MISSING audit (None) ⇒ MissingAudit failure (the EV-4R silent-omit, now measured) ----
-    let none_out = evaluate_gm_audit(SESSION, TURN, &offer_set, &catalog, &turn_events, None);
+    let none_out = evaluate_gm_audit(
+        SESSION,
+        TURN,
+        &offer_set,
+        &catalog,
+        &turn_events,
+        None,
+        &trpg_model::adventure_ir::EvidenceLedger::new(),
+    );
     assert_eq!(
         none_out.telemetry.protocol_failure,
         Some(ProtocolFailureKind::MissingAudit),

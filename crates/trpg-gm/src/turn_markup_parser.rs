@@ -36,6 +36,7 @@ const TAGS: &[(&str, WireTag)] = &[
     ("meta", WireTag::Meta),
     ("progress_claims", WireTag::ProgressClaims),
     ("evidence_audit", WireTag::EvidenceAudit),
+    ("materialized_content", WireTag::MaterializedContent),
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -53,6 +54,10 @@ enum WireTag {
     /// EV-P1 `[evidence_audit]` — GM-only sidecar; inner is a single closed-schema JSON
     /// object (EvidenceAudit). Parsed into `TurnDocument.evidence_audit`; NO player block.
     EvidenceAudit,
+    /// EV-P2 `[materialized_content]` — GM-only sidecar; inner is a JSON array of
+    /// closed-schema ContentDelivery. Parsed into `TurnDocument.materialized_content`;
+    /// NO player-visible block.
+    MaterializedContent,
 }
 
 impl WireTag {
@@ -67,6 +72,7 @@ impl WireTag {
             WireTag::Meta => "meta",
             WireTag::ProgressClaims => "progress_claims",
             WireTag::EvidenceAudit => "evidence_audit",
+            WireTag::MaterializedContent => "materialized_content",
         }
     }
 }
@@ -155,6 +161,25 @@ fn push_tag_block(doc: &mut TurnDocument, tag: WireTag, inner: &str) {
                 trimmed.trim(),
             ) {
                 doc.evidence_audit = Some(audit);
+            }
+        }
+        WireTag::MaterializedContent => {
+            // EV-P2: the inner is a JSON array of closed-schema ContentDelivery. Parse
+            // each entry through the `deny_unknown_fields` schema; a forged entry
+            // (extra field), bad recipient, or empty basis is dropped per-entry
+            // (fail-closed). Non-array / malformed inner ⇒ no deliveries. NO
+            // player-visible block ⇒ GM-only, like `[meta]`.
+            if let Ok(serde_json::Value::Array(arr)) =
+                serde_json::from_str::<serde_json::Value>(trimmed.trim())
+            {
+                for entry in arr {
+                    if let Ok(cd) = serde_json::from_value::<
+                        trpg_model::adventure_ir::ContentDelivery,
+                    >(entry)
+                    {
+                        doc.materialized_content.push(cd);
+                    }
+                }
             }
         }
         WireTag::Roll => {
@@ -548,5 +573,58 @@ mod tests {
         // Default GM output (flag OFF / not instructed) leaves evidence_audit None.
         let doc = parse_turn_document("[narration]平平无奇的一回合。[/narration]");
         assert!(doc.evidence_audit.is_none());
+    }
+
+    // ── EV-P2 materialized_content sidecar (progress_exact_projectors_v1) ─────────────────
+    #[test]
+    fn materialized_content_tag_parsed_and_never_player_visible() {
+        // A main-GM `[materialized_content]` tag (JSON array of closed-schema ContentDelivery)
+        // → fills doc.materialized_content; its content NEVER reaches player_text.
+        let doc = parse_turn_document(concat!(
+            "[narration]你把广告分镜递到她面前，逐格讲解。[/narration]",
+            "[materialized_content][{\"delivery_cap\":\"cap_2a0d946812d6\",",
+            "\"recipient\":\"player\",\"basis\":[\"commit:0\"]}][/materialized_content]",
+        ));
+        assert_eq!(doc.materialized_content.len(), 1, "one delivery parsed");
+        assert_eq!(doc.materialized_content[0].delivery_cap.as_str(), "cap_2a0d946812d6");
+        assert_eq!(doc.materialized_content[0].basis.len(), 1);
+        let pt = doc.player_text();
+        assert_eq!(pt, "你把广告分镜递到她面前，逐格讲解。");
+        assert!(!pt.contains("cap_2a0d946812d6"), "cap handle leaked: {pt}");
+        assert!(!pt.contains("materialized_content"), "tag leaked: {pt}");
+    }
+
+    #[test]
+    fn materialized_content_forged_entries_dropped_fail_closed() {
+        // The closed ContentDelivery schema (deny_unknown_fields + closed recipient + non-empty
+        // basis) drops a forged fact_id/objective entry, a bad recipient, and an empty basis;
+        // only the well-formed entry survives.
+        let doc = parse_turn_document(concat!(
+            "[materialized_content][",
+            "{\"delivery_cap\":\"cap_good00000001\",\"recipient\":\"player\",\"basis\":[\"commit:0\"]},",
+            "{\"delivery_cap\":\"cap_forged0002\",\"recipient\":\"player\",\"basis\":[\"commit:1\"],\"fact_id\":\"clue_x\"},",
+            "{\"delivery_cap\":\"cap_forged0003\",\"recipient\":\"npc\",\"basis\":[\"commit:2\"]},",
+            "{\"delivery_cap\":\"cap_forged0004\",\"recipient\":\"player\",\"basis\":[]}",
+            "][/materialized_content]",
+        ));
+        assert_eq!(doc.materialized_content.len(), 1, "forged/bad entries must be dropped");
+        assert_eq!(doc.materialized_content[0].delivery_cap.as_str(), "cap_good00000001");
+    }
+
+    #[test]
+    fn materialized_content_malformed_inner_is_empty_no_panic() {
+        for inner in ["not json at all", "{\"materialized_content\":1}", ""] {
+            let doc =
+                parse_turn_document(&format!("[materialized_content]{inner}[/materialized_content]"));
+            assert!(doc.materialized_content.is_empty(), "inner {inner:?} must yield no deliveries");
+            let pt = doc.player_text();
+            assert!(!pt.contains("materialized_content"), "tag leaked for inner {inner:?}: {pt}");
+        }
+    }
+
+    #[test]
+    fn no_materialized_content_tag_keeps_field_empty_baseline() {
+        let doc = parse_turn_document("[narration]平平无奇的一回合。[/narration]");
+        assert!(doc.materialized_content.is_empty());
     }
 }

@@ -59,8 +59,12 @@ pub(crate) fn admit_gm_claims(
     catalog: &EvidenceAtomCatalog,
     committed_events: &[DomainEvent],
     claims: &[EvidenceClaim],
+    seed: &EvidenceLedger,
 ) -> (EvidenceLedger, Vec<ClaimDecision>) {
-    let mut ledger = EvidenceLedger::new();
+    // EV-P2: start from the shared turn-local ledger (the exact producers ran first),
+    // so a GM-witnessed claim for an observation an exact producer already admitted is
+    // rejected as DuplicateEvidence (no double-emit; ExactDomain wins).
+    let mut ledger = seed.clone();
     let mut decisions = Vec::with_capacity(claims.len());
     for claim in claims {
         // Build inputs in an inner scope so the immutable `&ledger` borrow ends before the
@@ -181,7 +185,7 @@ mod tests {
         let claims = vec![claim_citing(&set, vec![TurnLocalRef::Commit(0)])];
 
         let (ledger, decisions) =
-            admit_gm_claims(SESSION, TURN, &set, &catalog, &events, &claims);
+            admit_gm_claims(SESSION, TURN, &set, &catalog, &events, &claims, &EvidenceLedger::new());
 
         assert_eq!(ledger.len(), 1, "one GmWitnessed evidence admitted");
         assert_eq!(ledger.entries()[0].authority, EvidenceAuthority::GmWitnessed);
@@ -212,7 +216,7 @@ mod tests {
         let claims = vec![claim_citing(&set, vec![TurnLocalRef::Commit(0)])];
 
         let (ledger, decisions) =
-            admit_gm_claims(SESSION, derived, &set, &catalog, &events, &claims);
+            admit_gm_claims(SESSION, derived, &set, &catalog, &events, &claims, &EvidenceLedger::new());
 
         assert_eq!(ledger.len(), 0, "no admission when the cap's turn ≠ the event's turn");
         assert_eq!(
@@ -234,7 +238,7 @@ mod tests {
         };
 
         let (ledger, decisions) =
-            admit_gm_claims(SESSION, TURN, &set, &catalog, &events, &[forged]);
+            admit_gm_claims(SESSION, TURN, &set, &catalog, &events, &[forged], &EvidenceLedger::new());
 
         assert_eq!(ledger.len(), 0);
         assert_eq!(decisions[0].result, Err(RejectionReason::UnknownCapability));

@@ -1175,35 +1175,24 @@ impl GmLoop {
         input: &GmTurnInput<'_>,
         visible_text: &str,
     ) {
-        let Some((offer_set, catalog, turn_id)) = ctx.evidence_admission.take() else {
-            return;
-        };
+        // EV-P2: the exact producers (LocationEntered/StateEstablished/ContentDelivery) run
+        // post-commit BEFORE the GM audit (GPT Pro run order "exact projectors first"), so
+        // most evidence does not depend on the GM's audit compliance. They may be flagged ON
+        // independently of the offer/audit path, so handle the case where no offers were
+        // derived this turn (admission None) but exact projectors are on.
+        let exact_on = trpg_runtime::exact_projectors::progress_exact_projectors_enabled();
+        let admission = ctx.evidence_admission.take();
+        if admission.is_none() && !exact_on {
+            return; // OFF == byte-identical baseline (neither path active)
+        }
         let doc = crate::turn_markup_parser::parse_turn_document(visible_text);
-
-        // EV-P1: in audit-mode evaluate the MANDATORY per-offer EvidenceAudit. A missing/
-        // incomplete/extra/mismatched audit is a logged ProducerProtocolFailure — NEVER a
-        // silent "none" (the EV-4R producer-recall bug). Still SHADOW: no engine, no objective.
-        if trpg_runtime::evidence_gateway::progress_evidence_audit_required_enabled() {
-            let events: Vec<trpg_model::DomainEvent> = self
-                .engine
-                .db
-                .list_domain_events(&input.request.session_id, 5000)
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|e| e.turn_id == turn_id)
-                .collect();
-            self.evaluate_main_gm_audit(input, &turn_id, &offer_set, &catalog, &events, &doc)
-                .await;
-            return;
-        }
-
-        // EV-4R path (audit OFF): the optional `[progress_claims]` sidecar.
-        if doc.progress_claims.is_empty() {
-            return;
-        }
         // THIS turn's committed events only (turn-local ⇒ commit:<i> resolves within the turn;
-        // also reinforces the turn_id alignment the gateway's CausationMismatch enforces).
+        // also reinforces the turn_id alignment the gateway's CausationMismatch enforces). The
+        // turn_id is the turn-start aligned id when offers were derived, else request.turn_id.
+        let turn_id = admission
+            .as_ref()
+            .map(|(_, _, t)| t.clone())
+            .unwrap_or_else(|| input.request.turn_id.clone());
         let events: Vec<trpg_model::DomainEvent> = self
             .engine
             .db
@@ -1213,6 +1202,34 @@ impl GmLoop {
             .into_iter()
             .filter(|e| e.turn_id == turn_id)
             .collect();
+
+        // EV-P2: exact producers FIRST → ONE shared turn-local ledger (ExactDomain). The GM
+        // audit/claims below are seeded with it so a GM-witnessed claim duplicating an exact
+        // observation is rejected (no double-emit; ExactDomain wins). Still SHADOW.
+        let seed = if exact_on {
+            self.project_exact_evidence_shadow(input, &turn_id, admission.as_ref(), &doc, &events)
+                .await
+        } else {
+            trpg_model::adventure_ir::EvidenceLedger::new()
+        };
+
+        let Some((offer_set, catalog, turn_id)) = admission else {
+            return; // exact-only run (no offers this turn): the seed was already logged
+        };
+
+        // EV-P1: in audit-mode evaluate the MANDATORY per-offer EvidenceAudit. A missing/
+        // incomplete/extra/mismatched audit is a logged ProducerProtocolFailure — NEVER a
+        // silent "none" (the EV-4R producer-recall bug). Still SHADOW: no engine, no objective.
+        if trpg_runtime::evidence_gateway::progress_evidence_audit_required_enabled() {
+            self.evaluate_main_gm_audit(input, &turn_id, &offer_set, &catalog, &events, &doc, &seed)
+                .await;
+            return;
+        }
+
+        // EV-4R path (audit OFF): the optional `[progress_claims]` sidecar.
+        if doc.progress_claims.is_empty() {
+            return;
+        }
         let (ledger, decisions) = crate::evidence_claims::admit_gm_claims(
             &input.request.session_id,
             &turn_id,
@@ -1220,6 +1237,7 @@ impl GmLoop {
             &catalog,
             &events,
             &doc.progress_claims,
+            &seed,
         );
         for d in &decisions {
             match &d.result {
@@ -1249,6 +1267,87 @@ impl GmLoop {
         );
     }
 
+    /// EV-P2 (`progress_exact_projectors_v1`) shadow exact producers, run post-commit BEFORE the
+    /// GM audit. Pure Rust LocationEntered (committed `SceneTransitioned` → authored location
+    /// atom) + StateEstablished (committed `WorldFactChanged` → authored-state atom) from the
+    /// module graph, plus the GM-ref ContentDelivery (verified via the reused gateway → FactLearned
+    /// ExactDomain). All append to ONE turn-local ledger (returned as the seed for the GM audit, so
+    /// the same observation never double-records). fail-closed: no graph / no authored atom /
+    /// unresolved ref / non-player-driven nav ⇒ no evidence. SHADOW: engine not consuming; only logs.
+    async fn project_exact_evidence_shadow(
+        &self,
+        input: &GmTurnInput<'_>,
+        turn_id: &str,
+        admission: Option<&(
+            trpg_model::adventure_ir::EvidenceOfferSet,
+            trpg_model::adventure_ir::EvidenceAtomCatalog,
+            String,
+        )>,
+        doc: &crate::turn_document::TurnDocument,
+        events: &[trpg_model::DomainEvent],
+    ) -> trpg_model::adventure_ir::EvidenceLedger {
+        let mut ledger = trpg_model::adventure_ir::EvidenceLedger::new();
+        let mut loc = 0usize;
+        let mut state = 0usize;
+
+        // Location + State: pure Rust, need the module graph (topology + authored-state leaves).
+        if let Some(module_id) = input
+            .request
+            .module_id
+            .as_deref()
+            .filter(|id| !id.trim().is_empty())
+        {
+            if let Ok(Some(graph)) = self.engine.db.load_module_graph(module_id).await {
+                let loc_cat = trpg_runtime::exact_projectors::build_location_atom_catalog(&graph);
+                for ev in trpg_runtime::exact_projectors::project_location_entered(events, &loc_cat)
+                    .entries()
+                {
+                    if ledger.append(ev.clone()) {
+                        loc += 1;
+                    }
+                }
+                let st_cat = trpg_runtime::exact_projectors::build_state_atom_catalog(&graph);
+                for ev in
+                    trpg_runtime::exact_projectors::project_state_established(events, &st_cat)
+                        .entries()
+                {
+                    if ledger.append(ev.clone()) {
+                        state += 1;
+                    }
+                }
+            }
+        }
+
+        // ContentDelivery: the GM's verified `[materialized_content]` refs → FactLearned
+        // ExactDomain. Needs the turn's OfferSet + clue catalog (only present when offers were
+        // derived this turn). Reuses the gateway; appends into the shared ledger.
+        let mut content = 0usize;
+        if let Some((offer_set, catalog, _)) = admission {
+            let before = ledger.len();
+            ledger = trpg_runtime::exact_projectors::project_content_delivery(
+                &doc.materialized_content,
+                &input.request.session_id,
+                turn_id,
+                offer_set,
+                catalog,
+                events,
+                &ledger,
+            );
+            content = ledger.len().saturating_sub(before);
+        }
+
+        tracing::info!(
+            session_id = %input.request.session_id,
+            turn_id = %turn_id,
+            location_entered = loc,
+            state_established = state,
+            content_delivered = content,
+            exact_evidence = ledger.len(),
+            "EV-P2 exact producers ran on MAIN GM (ExactDomain; shadow — engine not consuming, J3 unchanged)"
+        );
+        ledger
+    }
+
     /// EV-P1 shadow evaluation of the MAIN GM's mandatory `[evidence_audit]` sidecar. Enforces
     /// completeness (every offered cap exactly one decision; matching offer_set_id; no extras)
     /// and admits each Observed decision via the reused `EvidenceGateway`. A missing/incomplete/
@@ -1263,6 +1362,7 @@ impl GmLoop {
         catalog: &trpg_model::adventure_ir::EvidenceAtomCatalog,
         events: &[trpg_model::DomainEvent],
         doc: &crate::turn_document::TurnDocument,
+        seed: &trpg_model::adventure_ir::EvidenceLedger,
     ) {
         let outcome = crate::evidence_audit::evaluate_gm_audit(
             &input.request.session_id,
@@ -1271,6 +1371,7 @@ impl GmLoop {
             catalog,
             events,
             doc.evidence_audit.as_ref(),
+            seed,
         );
         for d in &outcome.decisions {
             match &d.result {
@@ -1874,13 +1975,21 @@ impl GmLoop {
         }
         // EV-P1 audit-mode renders the mandatory per-offer audit block (instruction + 5
         // few-shot + closed `[evidence_audit]` format); EV-4R renders the optional claim block.
-        let block = if audit_mode {
+        let mut block = if audit_mode {
             crate::evidence_audit::render_gm_audit_block(&offer_set)
         } else {
             crate::evidence_claims::render_gm_offer_and_claim_block(&offer_set)
         };
         if block.trim().is_empty() {
             return;
+        }
+        // EV-P2: when the exact projectors are ON, additionally ask the GM to emit a
+        // `[materialized_content]` ref for any authored clue whose content it actually
+        // presented this turn (the ContentDeliveryProducer's input). Appended only inside the
+        // flag guard ⇒ OFF prompt bytes unchanged.
+        if trpg_runtime::exact_projectors::progress_exact_projectors_enabled() {
+            block.push_str("\n\n");
+            block.push_str(&crate::evidence_audit::render_content_delivery_instruction());
         }
         tracing::info!(
             session_id = %input.request.session_id,

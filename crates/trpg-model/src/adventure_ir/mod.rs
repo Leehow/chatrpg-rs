@@ -17,6 +17,7 @@
 //! flag-gated producer/consumer lanes (P0-1.. P1-3) wire them in; defining them
 //! here keeps `trpg-model` the leaf that both producer and runtime depend on.
 
+mod content_delivery;
 mod content_unit;
 mod effect;
 mod evidence;
@@ -32,6 +33,7 @@ mod predicate;
 mod progress_signal;
 mod relation;
 
+pub use content_delivery::{ContentDelivery, DeliveryRecipient};
 pub use content_unit::{
     ContentUnit, DeliveryPolicy, FacetKind, UnitKind, VisibilityPolicy,
 };
