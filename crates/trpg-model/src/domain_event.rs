@@ -134,6 +134,16 @@ pub enum DomainEventKind {
     /// L3.2：一个已规划 beat 在回合中被实际演出/记录（[`crate::BeatRecord`]）后写穿的领域事件。
     /// emit 站点在 Story Observer（L7.x）。data 带 turn_id / thread_id / beat_kind。
     BeatObserved,
+    /// EV-1 `mutation_event_bridge_v1`：一条 **GM 世界事实被提交**（`CommitAction::WorldFact` /
+    /// `LegacyFact` 落 `memory_facts`/`world_facts`）后，由 commit 写入口桥接发出的 canonical
+    /// 领域事件。GPT Pro 进度证据层设计 Q4/§5.5 明令：「世界事实提交 ≠ 玩家已知晓」——故此 kind
+    /// **必须**与 [`DomainEventKind::PlayerLearnedFact`]（玩家习得）/ [`DomainEventKind::FactRevealed`]
+    /// （剧透揭示给玩家）语义分开，绝不复用它们冒充世界提交。既有 27 个 kind 无一表「GM 世界事实
+    /// 提交」语义，故 EV-1 铸此新 kind（ledger 记理由）。data 带 fact_id + subject/predicate/object/
+    /// truth_status 供后续 EV-2 精确投影；幂等键 `de_worldfact_{session}_{fact}_{turn}`。
+    /// 当前阶段 progression adapter **尚未**消费它（EV-2 exact projector 的活），故 EV-1 接通后
+    /// 不改任何 ProgressSignal（J3 仍 RED，符合设计预期）。
+    WorldFactChanged,
 }
 
 impl DomainEventKind {
@@ -170,6 +180,7 @@ impl DomainEventKind {
             DomainEventKind::ScenePlanCreated => "ScenePlanCreated",
             DomainEventKind::BeatPlanned => "BeatPlanned",
             DomainEventKind::BeatObserved => "BeatObserved",
+            DomainEventKind::WorldFactChanged => "WorldFactChanged",
         }
     }
 
@@ -204,6 +215,7 @@ impl DomainEventKind {
             "ScenePlanCreated" => DomainEventKind::ScenePlanCreated,
             "BeatPlanned" => DomainEventKind::BeatPlanned,
             "BeatObserved" => DomainEventKind::BeatObserved,
+            "WorldFactChanged" => DomainEventKind::WorldFactChanged,
             _ => DomainEventKind::TurnStarted,
         }
     }
@@ -637,6 +649,62 @@ mod tests {
                 assert_ne!(new_kinds[i], new_kinds[j], "6 个变体互不相同");
             }
         }
+        assert_eq!(
+            DomainEventKind::from_str_token("Bogus"),
+            DomainEventKind::TurnStarted
+        );
+    }
+
+    #[test]
+    fn world_fact_changed_kind_token_and_serde_roundtrip() {
+        // EV-1 mutation_event_bridge_v1: minted kind for "a GM world fact was committed"
+        // (世界事实提交 ≠ 玩家已知晓 — GPT Pro design Q4/§5.5 demands this be distinct from
+        // PlayerLearnedFact / FactRevealed). token 稳定契约 + serde 闭环 + 与既有 27 variant 区分。
+        let k = DomainEventKind::WorldFactChanged;
+        assert_eq!(k.as_str(), "WorldFactChanged");
+        assert_eq!(DomainEventKind::from_str_token("WorldFactChanged"), k);
+        let v = serde_json::to_value(k).unwrap();
+        assert_eq!(
+            v.as_str(),
+            Some("WorldFactChanged"),
+            "serde token 必与 as_str 一致"
+        );
+        let back: DomainEventKind = serde_json::from_value(v).unwrap();
+        assert_eq!(back, k);
+        // 与既有 27 个 variant 全部不相交（不碰旧 token——上方 round-trip 守卫锁死它们），
+        // 尤其与 PlayerLearnedFact / FactRevealed 区分（设计 §5.5 反对的语义混淆）。
+        for existing in [
+            "TurnStarted",
+            "TurnFinalized",
+            "TurnFailed",
+            "SceneTransitioned",
+            "DiceRolled",
+            "CheckResolved",
+            "EntitySurfaced",
+            "ContextSurfaced",
+            "PlayerExposed",
+            "PlayerLearnedFact",
+            "NpcLearnedFact",
+            "ClientDisconnected",
+            "FactRevealed",
+            "RelationshipChanged",
+            "ResourceChanged",
+            "NpcActionResolved",
+            "ClockAdvanced",
+            "StoryThreadOpened",
+            "StoryThreadAdvanced",
+            "StoryThreadResolved",
+            "StoryThreadDormant",
+            "StoryPromiseCreated",
+            "StoryPromiseReinforced",
+            "StoryPromisePaidOff",
+            "ScenePlanCreated",
+            "BeatPlanned",
+            "BeatObserved",
+        ] {
+            assert_ne!(k.as_str(), existing, "WorldFactChanged token 必与既有 27 个不同");
+        }
+        // fail-closed 未知回退不受影响。
         assert_eq!(
             DomainEventKind::from_str_token("Bogus"),
             DomainEventKind::TurnStarted

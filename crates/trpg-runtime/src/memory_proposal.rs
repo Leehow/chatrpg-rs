@@ -90,6 +90,31 @@ use trpg_db::{Db, KnowledgeEdgeInput, WorldFactRow};
 /// midpoint: the proposal asserted the fact (with evidence) but gave no explicit score.
 const WORLD_FACT_DEFAULT_CONFIDENCE: f32 = 0.5;
 
+/// EV-1 `mutation_event_bridge_v1` slice flag (env `TRPG_MUTATION_EVENT_BRIDGE_V1`).
+const MUTATION_EVENT_BRIDGE_V1_ENV: &str = "TRPG_MUTATION_EVENT_BRIDGE_V1";
+/// Master progression-evidence-layer flag (env `TRPG_PROGRESS_EVIDENCE_V1`) wrapping all
+/// evidence-layer slices (GPT Pro design migration order). Either flag arms the bridge.
+const PROGRESS_EVIDENCE_V1_ENV: &str = "TRPG_PROGRESS_EVIDENCE_V1";
+
+/// Pure flag parse (kept separate from env reads so it is testable without mutating the
+/// process-global environment — env-race-free, mirrors [`KnowledgeKernelMode::parse`]).
+fn bridge_flag_on(raw: &str) -> bool {
+    let v = raw.trim().to_ascii_lowercase();
+    v == "1" || v == "true" || v == "on"
+}
+
+/// Whether the EV-1 commit→DomainEvent bridge is active. Default OFF == byte-identical
+/// baseline (no new events, no extra writes). ON when EITHER the master
+/// `progress_evidence_v1` OR the `mutation_event_bridge_v1` slice flag is truthy.
+fn mutation_event_bridge_enabled() -> bool {
+    std::env::var(MUTATION_EVENT_BRIDGE_V1_ENV)
+        .map(|v| bridge_flag_on(&v))
+        .unwrap_or(false)
+        || std::env::var(PROGRESS_EVIDENCE_V1_ENV)
+            .map(|v| bridge_flag_on(&v))
+            .unwrap_or(false)
+}
+
 /// P3 layered-runtime knowledge-kernel mode (env `TRPG_KNOWLEDGE_KERNEL`, default `Off`).
 /// A tri-state instead of a bare bool (codex P3.5 finding) so acceptance + rollback are crisp:
 /// - `Off`   — world-fact commits write ONLY `memory_facts` (byte-equal to baseline; recall
@@ -639,6 +664,14 @@ async fn execute_action(
     ctx: &CommitContext<'_>,
     action: CommitAction,
 ) -> anyhow::Result<ExecOutcome> {
+    // EV-1 mutation_event_bridge_v1: compute the canonical bridge event for this arm BEFORE the
+    // match consumes `action`. Gated OFF by default → `bridge` is None and the trailing append is
+    // skipped → byte-identical baseline (the only new code runs solely when the flag is on).
+    let bridge = if mutation_event_bridge_enabled() {
+        bridge_event_for(&action, ctx)
+    } else {
+        None
+    };
     match action {
         CommitAction::WorldFact {
             memory_fact,
@@ -782,6 +815,19 @@ async fn execute_action(
         }
         CommitAction::Skip { reason } => return Ok(ExecOutcome::Skipped(reason)),
     }
+    // We only reach here AFTER the arm's `upsert_*`/`record_*` succeeded (every mutating arm uses
+    // `?`), so a failed/aborted commit never appends a bridge event. fail-soft like the other
+    // write-through paths: a bridge append error does NOT roll back the state mutation.
+    if let Some(ev) = bridge {
+        if let Err(e) = db.append_domain_event(&ev).await {
+            tracing::warn!(
+                event_id = %ev.event_id,
+                kind = %ev.kind.as_str(),
+                error = %e,
+                "mutation_event_bridge_v1: canonical domain-event append failed (advisory)"
+            );
+        }
+    }
     Ok(ExecOutcome::Done)
 }
 
@@ -836,6 +882,103 @@ fn build_relationship_changed_event(
         trpg_model::DomainEventKind::RelationshipChanged,
         data,
     )
+}
+
+/// EV-1 `mutation_event_bridge_v1` — the commit write-path's single event seam.
+///
+/// Returns the ONE canonical [`DomainEvent`] a mutating arm should append in the same commit,
+/// or `None` when the arm needs no bridge event. Pure (no IO) so every per-arm mapping is unit
+/// testable. Reuses existing [`DomainEventKind`] variants except `WorldFactChanged` (minted for
+/// EV-1 — see its doc: 世界事实提交 ≠ 玩家已知晓). `data` carries the `fact_id` + payload so a
+/// later exact projector (EV-2) can resolve it; `source_refs` stay empty this slice.
+///
+/// The three arms that ALREADY append their canonical event downstream get `None` here so the
+/// bridge never double-emits:
+/// - `PlayerLearned` → `record_revealed_fact` already appends `PlayerLearnedFact`;
+/// - `NpcLearned`   → `record_npc_learned_fact` already appends `NpcLearnedFact`;
+/// - `Relationship` → [`append_relationship_changed_event`] already appends `RelationshipChanged`.
+///
+/// Idempotency keys are deterministic + turn-scoped (`{prefix}_{session}_{ids}_{turn}`): a
+/// same-turn retry folds via `on conflict (event_id) do nothing`; a genuine later-turn mutation
+/// is a new event.
+fn bridge_event_for(
+    action: &CommitAction,
+    ctx: &CommitContext<'_>,
+) -> Option<trpg_model::DomainEvent> {
+    use serde_json::json;
+    use trpg_model::DomainEventKind;
+    let session = ctx.session_id;
+    let turn = ctx.turn_id;
+    let (event_id, kind, data) = match action {
+        // GM world fact committed (memory_facts / world_facts). Minted WorldFactChanged kind:
+        // distinct from player-known (design §5.5). Silent at baseline → bridge supplies it.
+        CommitAction::WorldFact {
+            memory_fact,
+            world_fact,
+            ..
+        } => (
+            format!("de_worldfact_{session}_{}_{turn}", memory_fact.fact_id),
+            DomainEventKind::WorldFactChanged,
+            json!({
+                "fact_id": world_fact.fact_id,
+                "subject": world_fact.subject,
+                "predicate": world_fact.predicate,
+                "object": world_fact.object,
+                "truth_status": world_fact.truth_status,
+                "origin": "world_fact",
+            }),
+        ),
+        // Legacy relationship-triple fact also lands in memory_facts (silent) → same carrier.
+        CommitAction::LegacyFact(f) => (
+            format!("de_worldfact_{session}_{}_{turn}", f.fact_id),
+            DomainEventKind::WorldFactChanged,
+            json!({
+                "fact_id": f.fact_id,
+                "subject": f.subject,
+                "predicate": f.predicate,
+                "origin": "legacy_fact",
+            }),
+        ),
+        // player_party non-true belief edge (silent). PlayerLearnedFact carrier + knowledge_state
+        // in data; distinct `de_pp_edge_*` key never collides with the knows_true reveal path.
+        CommitAction::PlayerPartyEdge { fact_id, state, .. } => (
+            format!("de_pp_edge_{session}_{fact_id}_{turn}"),
+            DomainEventKind::PlayerLearnedFact,
+            json!({
+                "fact_id": fact_id,
+                "knowledge_state": state.as_token(),
+                "holder_kind": "player_party",
+            }),
+        ),
+        // Durable holder (gm/system/pc/faction or non-true npc) edge (silent). FactRevealed reused
+        // as the generic "a fact's knowledge edge was committed" carrier — no read-side spoiler
+        // effect (list_revealed_facts reads knowledge_edges, not domain_events). holder + state
+        // in data for later exact projection.
+        CommitAction::DurableEdge {
+            holder_kind,
+            holder_id,
+            fact_id,
+            state,
+            ..
+        } => (
+            format!("de_durable_edge_{session}_{holder_kind}_{holder_id}_{fact_id}_{turn}"),
+            DomainEventKind::FactRevealed,
+            json!({
+                "fact_id": fact_id,
+                "holder_kind": holder_kind,
+                "holder_id": holder_id,
+                "knowledge_state": state.as_token(),
+            }),
+        ),
+        // Already emit their own canonical event downstream → no bridge event (no double-emit).
+        CommitAction::PlayerLearned { .. }
+        | CommitAction::NpcLearned { .. }
+        | CommitAction::Relationship { .. }
+        | CommitAction::Skip { .. } => return None,
+    };
+    Some(trpg_model::DomainEvent::new(
+        event_id, session, turn, kind, data,
+    ))
 }
 
 #[cfg(test)]
@@ -1313,6 +1456,165 @@ mod tests {
             }
             BatchPlan::Ready(_) => panic!("invalid batch must abort, not be ready"),
         }
+    }
+
+    // ───────── EV-1 mutation_event_bridge_v1 — per-arm canonical event seam ─────────
+    //
+    // The single commit write-path's event seam: `bridge_event_for` decides, for each
+    // mutating arm, the ONE canonical DomainEvent that arm should append. The three arms
+    // that ALREADY emit their canonical event downstream (PlayerLearned→PlayerLearnedFact via
+    // record_revealed_fact; NpcLearned→NpcLearnedFact via record_npc_learned_fact;
+    // Relationship→RelationshipChanged) return None here so the bridge never double-emits.
+
+    /// Build a CommitAction directly from one JSON proposal (single-element batch), bypassing
+    /// the lenient parser so any valid arm is reachable for the pure seam tests.
+    fn action_of(raw: Value) -> CommitAction {
+        match plan_batch(&parse(json!({ "proposals": [raw] })), &ctx()) {
+            BatchPlan::Ready(mut p) => p.remove(0).action,
+            BatchPlan::Aborted(_) => panic!("expected a ready plan"),
+        }
+    }
+
+    #[test]
+    fn bridge_flag_off_by_default_and_parses_truthy() {
+        // Pure parse — no env mutation (env-race-free, mirrors KnowledgeKernelMode::parse).
+        for (val, on) in [
+            ("", false),
+            ("0", false),
+            ("off", false),
+            ("false", false),
+            ("  OFF ", false),
+            ("garbage", false),
+            ("1", true),
+            ("true", true),
+            ("on", true),
+            ("  On ", true),
+        ] {
+            assert_eq!(bridge_flag_on(val), on, "bridge_flag_on({val:?})");
+        }
+    }
+
+    #[test]
+    fn bridge_event_world_fact_emits_one_world_fact_changed() {
+        // WorldFact arm is silent at baseline (upsert_memory_fact appends no event) → the
+        // bridge supplies exactly one canonical WorldFactChanged carrying the fact_id + payload.
+        let action = action_of(json!({
+            "proposal_kind": "world_fact",
+            "fact_id": "f_world_1", "subject": "gate", "predicate": "is", "object": "open",
+            "truth_status": "true", "source_event_ids": ["ev1"]
+        }));
+        let ev = bridge_event_for(&action, &ctx()).expect("WorldFact must bridge one event");
+        assert_eq!(ev.kind, trpg_model::DomainEventKind::WorldFactChanged);
+        assert_eq!(ev.session_id, "sess_commit");
+        assert_eq!(ev.turn_id, "turn_commit");
+        assert_eq!(ev.data["fact_id"], "f_world_1", "adapter-resolvable fact_id");
+        assert_eq!(ev.data["subject"], "gate");
+        assert_eq!(ev.data["truth_status"], "true");
+        // Deterministic, turn-scoped idempotency key (on-conflict-do-nothing folds same mutation).
+        assert_eq!(ev.event_id, "de_worldfact_sess_commit_f_world_1_turn_commit");
+    }
+
+    #[test]
+    fn bridge_event_legacy_fact_emits_world_fact_changed() {
+        // LegacyFact also lands in memory_facts and is silent at baseline → same canonical
+        // "a fact was committed" carrier (WorldFactChanged), keyed by its fact_id.
+        let action = action_of(legacy_memory_fact("sess_commit", "session", "sess_commit"));
+        let ev = bridge_event_for(&action, &ctx()).expect("LegacyFact must bridge one event");
+        assert_eq!(ev.kind, trpg_model::DomainEventKind::WorldFactChanged);
+        assert_eq!(ev.data["fact_id"], "mf_legacy_1");
+        assert_eq!(ev.event_id, "de_worldfact_sess_commit_mf_legacy_1_turn_commit");
+    }
+
+    #[test]
+    fn bridge_event_player_party_edge_emits_player_learned_fact_with_state() {
+        // A non-true player_party belief routes to PlayerPartyEdge (silent at baseline). Bridge
+        // emits PlayerLearnedFact (the player-knowledge carrier the adapter wants) but carries
+        // knowledge_state in data and uses a DISTINCT event_id so it can never collide with the
+        // knows_true reveal path's `de_revealed_*` key.
+        let action = action_of(json!({
+            "proposal_kind": "knowledge_update",
+            "fact_id": "f_susp", "holder": {"holder_kind": "player_party"},
+            "knowledge_state": "suspects", "source_event_ids": ["ev1"]
+        }));
+        assert!(matches!(action, CommitAction::PlayerPartyEdge { .. }));
+        let ev = bridge_event_for(&action, &ctx()).expect("PlayerPartyEdge must bridge one event");
+        assert_eq!(ev.kind, trpg_model::DomainEventKind::PlayerLearnedFact);
+        assert_eq!(ev.data["fact_id"], "f_susp");
+        assert_eq!(ev.data["knowledge_state"], "suspects");
+        assert_eq!(ev.event_id, "de_pp_edge_sess_commit_f_susp_turn_commit");
+        assert_ne!(
+            ev.event_id, "de_revealed_sess_commit_f_susp",
+            "must not collide with the knows_true reveal key"
+        );
+    }
+
+    #[test]
+    fn bridge_event_durable_edge_emits_fact_revealed_with_holder() {
+        // A gm/system/pc/faction (or non-true npc) durable edge is silent at baseline. Bridge
+        // reuses FactRevealed (no read-side spoiler effect — list_revealed_facts reads
+        // knowledge_edges, not domain_events) and records holder + state in data.
+        let action = action_of(json!({
+            "proposal_kind": "knowledge_update",
+            "fact_id": "f_gm", "holder": {"holder_kind": "gm"},
+            "knowledge_state": "suspects", "source_event_ids": ["ev1"]
+        }));
+        assert!(matches!(action, CommitAction::DurableEdge { .. }));
+        let ev = bridge_event_for(&action, &ctx()).expect("DurableEdge must bridge one event");
+        assert_eq!(ev.kind, trpg_model::DomainEventKind::FactRevealed);
+        assert_eq!(ev.data["fact_id"], "f_gm");
+        assert_eq!(ev.data["holder_kind"], "gm");
+        assert_eq!(ev.data["knowledge_state"], "suspects");
+        assert_eq!(ev.event_id, "de_durable_edge_sess_commit_gm__f_gm_turn_commit");
+    }
+
+    #[test]
+    fn bridge_event_none_for_already_emitting_arms() {
+        // No double-emit: PlayerLearned / NpcLearned / Relationship already append their own
+        // canonical event via the DB write-through, so the bridge returns None for them.
+        let player_learned = action_of(json!({
+            "proposal_kind": "knowledge_update",
+            "fact_id": "f1", "holder": {"holder_kind": "player_party"},
+            "knowledge_state": "knows_true", "source_event_ids": ["ev1"]
+        }));
+        assert!(matches!(player_learned, CommitAction::PlayerLearned { .. }));
+        assert!(bridge_event_for(&player_learned, &ctx()).is_none());
+
+        let npc_learned = action_of(json!({
+            "proposal_kind": "knowledge_update",
+            "fact_id": "f1", "holder": {"holder_kind": "npc", "holder_id": "npc_alice"},
+            "knowledge_state": "knows_true", "source_event_ids": ["ev1"]
+        }));
+        assert!(matches!(npc_learned, CommitAction::NpcLearned { .. }));
+        assert!(bridge_event_for(&npc_learned, &ctx()).is_none());
+
+        let relationship = action_of(json!({
+            "proposal_kind": "npc_relationship_delta",
+            "session_id": "sess_commit", "npc_id": "npc_lars",
+            "target": {"target_kind": "player_party"},
+            "delta": {"trust": 10, "evidence_event_ids": ["ev1"]}
+        }));
+        assert!(matches!(relationship, CommitAction::Relationship { .. }));
+        assert!(bridge_event_for(&relationship, &ctx()).is_none());
+    }
+
+    #[test]
+    fn bridge_event_id_is_deterministic_per_mutation() {
+        // Same mutation + same turn → same event_id (on-conflict-do-nothing folds a retry).
+        // A later turn → a new event_id (a genuine new mutation is one new canonical event).
+        let action = action_of(json!({
+            "proposal_kind": "world_fact",
+            "fact_id": "f_det", "subject": "a", "predicate": "b", "object": "c",
+            "source_event_ids": ["ev1"]
+        }));
+        let a = bridge_event_for(&action, &ctx()).unwrap();
+        let b = bridge_event_for(&action, &ctx()).unwrap();
+        assert_eq!(a.event_id, b.event_id, "same mutation+turn ⇒ same idempotent key");
+        let later = CommitContext {
+            session_id: "sess_commit",
+            turn_id: "turn_LATER",
+        };
+        let c = bridge_event_for(&action, &later).unwrap();
+        assert_ne!(a.event_id, c.event_id, "a later turn ⇒ a distinct event");
     }
 
     /// 设计3 §12：关系提交写穿事件的纯构造路径。证明 `build_relationship_changed_event`
