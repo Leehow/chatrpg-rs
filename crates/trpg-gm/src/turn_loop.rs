@@ -1266,7 +1266,13 @@ impl GmLoop {
         // incomplete/extra/mismatched audit is a logged ProducerProtocolFailure — NEVER a
         // silent "none" (the EV-4R producer-recall bug). Still SHADOW: no engine, no objective.
         if trpg_runtime::evidence_gateway::progress_evidence_audit_required_enabled() {
-            self.evaluate_main_gm_audit(input, &turn_id, &offer_set, &catalog, &events, &doc, &seed)
+            let outcome = self
+                .evaluate_main_gm_audit(input, &turn_id, &offer_set, &catalog, &events, &doc, &seed)
+                .await;
+            // EV-P5: the post-turn witness recall backstop (separate focused LLM call), run
+            // when the GM audit was missing/incomplete or complete-but-all-not_observed while
+            // structural candidates exist. flag OFF ⇒ no-op. Still SHADOW.
+            self.run_post_turn_witness(input, &turn_id, &offer_set, &catalog, &events, &doc, &outcome)
                 .await;
             return;
         }
@@ -1408,7 +1414,7 @@ impl GmLoop {
         events: &[trpg_model::DomainEvent],
         doc: &crate::turn_document::TurnDocument,
         seed: &trpg_model::adventure_ir::EvidenceLedger,
-    ) {
+    ) -> crate::evidence_audit::AuditOutcome {
         let outcome = crate::evidence_audit::evaluate_gm_audit(
             &input.request.session_id,
             turn_id,
@@ -1458,6 +1464,107 @@ impl GmLoop {
                 "EV-P1 EvidenceAudit complete on MAIN GM (shadow; engine not consuming; J3 unchanged)"
             ),
         }
+        outcome
+    }
+
+    /// EV-P5 (`progress_post_turn_witness_v1`) — the recall backstop. After the GM audit
+    /// (which the GM is unreliable at filling), run a SEPARATE focused single-task LLM
+    /// witness when the audit was missing/incomplete OR complete-but-all-not_observed
+    /// WHILE deterministic structural candidates exist (a committed success on a
+    /// check-bindable offer this turn). The extractor sees ONLY the
+    /// [`trpg_runtime::WitnessExtractorView`] (no objective/guard/reward), proposes
+    /// cap+basis, and Rust admits via the reused EV-P4 binding / EV-4 gateway UNCHANGED.
+    /// flag OFF ⇒ no second call (byte-identical baseline). Still SHADOW: the engine is
+    /// not consuming the ledger (J3 unchanged).
+    async fn run_post_turn_witness(
+        &self,
+        input: &GmTurnInput<'_>,
+        turn_id: &str,
+        offer_set: &trpg_model::adventure_ir::EvidenceOfferSet,
+        catalog: &trpg_model::adventure_ir::EvidenceAtomCatalog,
+        events: &[trpg_model::DomainEvent],
+        doc: &crate::turn_document::TurnDocument,
+        audit: &crate::evidence_audit::AuditOutcome,
+    ) {
+        if !trpg_runtime::post_turn_witness::progress_post_turn_witness_enabled() {
+            return; // OFF == byte-identical baseline (no second LLM call)
+        }
+        let candidates = trpg_runtime::post_turn_witness::structural_candidates(
+            &input.request.session_id,
+            turn_id,
+            offer_set,
+            events,
+        );
+        let protocol_failed = audit.telemetry.protocol_failure.is_some();
+        let trigger = trpg_runtime::post_turn_witness::witness_trigger(
+            protocol_failed,
+            audit.telemetry.observed,
+            candidates.len(),
+        );
+        if !trigger.fires() {
+            tracing::info!(
+                session_id = %input.request.session_id,
+                turn_id = %turn_id,
+                trigger = trigger.as_str(),
+                structural_candidates = candidates.len(),
+                witness_invoked = 0,
+                "EV-P5 post-turn witness NOT triggered (backstop idle; shadow)"
+            );
+            return;
+        }
+        let materialized_refs: Vec<String> = doc
+            .materialized_content
+            .iter()
+            .map(|c| c.delivery_cap.as_str().to_string())
+            .collect();
+        let view = trpg_runtime::post_turn_witness::build_extractor_view(
+            input.user_input,
+            offer_set,
+            events,
+            materialized_refs,
+            &candidates,
+        );
+        let producer =
+            trpg_runtime::post_turn_witness::LlmWitnessProducer::new(self.llm.clone());
+        let proposals =
+            trpg_runtime::post_turn_witness::EvidenceClaimProducer::propose(&producer, &view).await;
+        let (ledger, admissions) = trpg_runtime::post_turn_witness::admit_witness_proposals(
+            &input.request.session_id,
+            turn_id,
+            offer_set,
+            catalog,
+            events,
+            &proposals,
+            &audit.ledger,
+        );
+        for a in &admissions {
+            match &a.result {
+                Ok(atom) => tracing::info!(
+                    session_id = %input.request.session_id,
+                    turn_id = %turn_id,
+                    cap = %a.cap_id,
+                    atom = %atom,
+                    "EV-P5 post-turn witness ADMITTED evidence (shadow; engine not consuming, J3 unchanged)"
+                ),
+                Err(reason) => tracing::info!(
+                    session_id = %input.request.session_id,
+                    turn_id = %turn_id,
+                    cap = %a.cap_id,
+                    reason = %reason,
+                    "EV-P5 post-turn witness proposal REJECTED (shadow)"
+                ),
+            }
+        }
+        tracing::info!(
+            session_id = %input.request.session_id,
+            turn_id = %turn_id,
+            trigger = trigger.as_str(),
+            structural_candidates = candidates.len(),
+            witness_invoked = 1,
+            witness_proposed = proposals.len(),
+            witness_admitted = ledger.len().saturating_sub(audit.ledger.len()),
+            "EV-P5 post-turn witness complete (recall backstop; shadow — engine not consuming, J3 unchanged)"
+        );
     }
 
     /// P1 Narrator 阶段（TRPG_NARRATOR_SPLIT ON）：从本回合 ctx 投影 NarrationPacket，

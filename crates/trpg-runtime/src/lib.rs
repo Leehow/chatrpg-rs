@@ -172,6 +172,13 @@ pub use exact_projectors::{
     project_content_delivery, project_location_entered, project_state_established,
 };
 
+pub mod post_turn_witness;
+pub use post_turn_witness::{
+    admit_witness_proposals, build_extractor_view, progress_post_turn_witness_enabled,
+    structural_candidates, witness_trigger, EvidenceClaimProducer, LlmWitnessProducer,
+    WitnessExtractorView, WitnessTrigger,
+};
+
 pub mod clue_surface;
 pub use clue_surface::{
     module_clue_surface_text, render_clue_surface, surface_player_facing_clues, SurfacedClue,

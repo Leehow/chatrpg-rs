@@ -120,8 +120,9 @@ pub fn parse_evidence_attempts(value: &Value) -> Vec<CapId> {
 
 /// Whether an offered atom kind is bindable by a check outcome (an action/state the
 /// player *attempts* via a check). Fact* / Location / Choice kinds are NOT — those
-/// have their own exact producers.
-fn is_check_bindable_kind(kind: EvidenceKind) -> bool {
+/// have their own exact producers. Public so the EV-P5 PostTurnWitness candidate
+/// narrowing reuses the SAME predicate (no re-implementation).
+pub fn is_check_bindable_kind(kind: EvidenceKind) -> bool {
     matches!(
         kind,
         EvidenceKind::ActionResolved
@@ -132,8 +133,9 @@ fn is_check_bindable_kind(kind: EvidenceKind) -> bool {
 
 /// Whether a committed event is a `CheckResolved` carrying a success/partial outcome
 /// (the "committed success policy"). Fail-closed: a missing/false/non-object outcome
-/// is NOT a success.
-fn is_committed_success_check(ev: &DomainEvent) -> bool {
+/// is NOT a success. Public so the EV-P5 PostTurnWitness candidate narrowing reuses
+/// the SAME committed-success predicate (no re-implementation).
+pub fn is_committed_success_check(ev: &DomainEvent) -> bool {
     if ev.kind != DomainEventKind::CheckResolved {
         return false;
     }
