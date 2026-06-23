@@ -182,6 +182,41 @@ pub async fn scene_navigate_critical(
             "exact-evidence projector computed (EV-2 ON; engine does not consume yet)"
         );
     }
+    // EV-3 PROGRESS OFFERS (TRPG_PROGRESS_OFFERS_V1 / master TRPG_PROGRESS_EVIDENCE_V1,
+    // default OFF): emit a machine-readable EvidenceOfferSet = the EV-2 catalog ∩ the
+    // current scene's SURFACED clue atoms (conservative — never the whole catalog),
+    // and additively append those capabilities' human-readable meanings to the GM
+    // prompt (the GM is shown "you MAY note cap_X = <meaning> if <basis>"). Each
+    // cap_id is a turn-scoped OPAQUE handle (≠ atom_id, ≠ objective_id). The machine
+    // OfferSet is held turn-local for EV-4; no claims are parsed and the engine is
+    // unchanged here. fail-closed (no surfaced clue / unresolved ref ⇒ no offer).
+    // OFF ⇒ block skipped entirely (no OfferSet, no prompt mutation, no event, no
+    // RNG) ⇒ sys/usr byte-identical baseline; even ON with an empty set the prompt is
+    // unchanged (the append is guarded on a non-empty rendered block).
+    if crate::evidence_offers::progress_offers_enabled() {
+        // Surfaced clues come from page-containment projection (CL-1). Run it on a
+        // CLONE so the offer derivation never mutates the graph the other blocks read.
+        let mut og = graph.clone();
+        let _ = crate::clue_projection::project_clues_onto_scenes(&mut og);
+        let catalog = crate::evidence_projection::build_evidence_atom_catalog(&og);
+        let turn_num = db.count_session_turns(session_id).await.unwrap_or(0);
+        let turn_id = format!("turn_{turn_num}");
+        let offer_set =
+            crate::evidence_offers::derive_offer_set(&og, &catalog, &current, session_id, &turn_id);
+        let block = crate::evidence_offers::render_offer_prompt_block(&offer_set);
+        if !block.is_empty() {
+            usr.push_str("\n\n");
+            usr.push_str(&block);
+        }
+        info!(
+            session_id,
+            turn_id = %turn_id,
+            catalog_atoms = catalog.len(),
+            offers = offer_set.len(),
+            prompt_appended = !block.is_empty(),
+            "progress offers computed (EV-3 ON; GM not consuming claims yet)"
+        );
+    }
     let decision = match llm
         .complete_json(vec![trpg_llm::system(&sys), trpg_llm::user(&usr)], 0.0)
         .await

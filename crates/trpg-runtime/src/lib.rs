@@ -148,6 +148,11 @@ pub use evidence_projection::{
     build_evidence_atom_catalog, exact_evidence_projector_enabled, project_exact_evidence,
 };
 
+pub mod evidence_offers;
+pub use evidence_offers::{
+    derive_offer_set, progress_offers_enabled, render_offer_prompt_block,
+};
+
 pub mod clue_surface;
 pub use clue_surface::{
     module_clue_surface_text, render_clue_surface, surface_player_facing_clues, SurfacedClue,

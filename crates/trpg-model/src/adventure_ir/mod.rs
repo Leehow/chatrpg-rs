@@ -20,6 +20,7 @@
 mod content_unit;
 mod effect;
 mod evidence;
+mod evidence_offer;
 mod hierarchy;
 mod mission_scoring;
 mod mission_template;
@@ -37,6 +38,7 @@ pub use evidence::{
     AcceptedEvidence, AtomId, EvidenceAtomCatalog, EvidenceAtomSpec, EvidenceAuthority,
     EvidenceKind, EvidenceLedger,
 };
+pub use evidence_offer::{BasisKind, CapId, EvidenceOffer, EvidenceOfferSet};
 pub use hierarchy::{derive_content_units, project_chapters, unit_kind_for};
 pub use mission_scoring::{
     parse_aftermath_outcomes, parse_chaos_tracker, parse_optional_objectives,
