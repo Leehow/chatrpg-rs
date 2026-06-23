@@ -66,7 +66,7 @@ impl BasisKind {
 /// [`AtomId`] and NOT an objective id — the GM never sees or emits either
 /// (design §Q2). Same `(session, turn, atom)` ⇒ same handle (deterministic within a
 /// turn); a different turn ⇒ a different handle (single-turn capability).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct CapId(pub String);
 
 impl CapId {
@@ -138,6 +138,20 @@ impl EvidenceOfferSet {
     /// Resolve an opaque handle back to its offer (EV-4 admission entry point).
     pub fn find(&self, cap_id: &str) -> Option<&EvidenceOffer> {
         self.offers.iter().find(|o| o.cap_id.as_str() == cap_id)
+    }
+
+    /// A deterministic id for THIS offer set (EV-P1): folds in the turn + the sorted
+    /// opaque cap handles, so a [`super::EvidenceAudit`] can echo it and Rust can
+    /// reject an audit answering a stale/different OfferSet. Pure derivation — adds NO
+    /// serialized field (OFF byte-identical preserved). Empty set ⇒ stable `osid_…`
+    /// over just the turn.
+    pub fn id(&self) -> String {
+        let mut caps: Vec<&str> = self.offers.iter().map(|o| o.cap_id.as_str()).collect();
+        caps.sort_unstable();
+        let canon = format!("{}|{}", self.turn_id, caps.join(","));
+        let mut h = Sha256::new();
+        h.update(canon.as_bytes());
+        format!("osid_{}", &format!("{:x}", h.finalize())[..12])
     }
 
     pub fn len(&self) -> usize {
@@ -224,6 +238,53 @@ mod tests {
         assert_eq!(set.len(), 1);
         assert!(set.find(cap.as_str()).is_some(), "handle resolves to its offer");
         assert!(set.find("cap_unknown").is_none(), "unknown handle does not resolve");
+    }
+
+    #[test]
+    fn offer_set_id_is_deterministic_and_order_independent() {
+        let a1 = atom("clue_a");
+        let a2 = atom("clue_b");
+        let mk = |order: bool| {
+            let mut set = EvidenceOfferSet::new("turn_1");
+            let mut offers = vec![
+                EvidenceOffer {
+                    cap_id: CapId("cap_zzz".into()),
+                    atom_id: a1.clone(),
+                    kind: EvidenceKind::FactLearned,
+                    meaning: "x".into(),
+                    required_basis: vec![BasisKind::FactCommitted],
+                    expires_at: "turn_1".into(),
+                },
+                EvidenceOffer {
+                    cap_id: CapId("cap_aaa".into()),
+                    atom_id: a2.clone(),
+                    kind: EvidenceKind::FactLearned,
+                    meaning: "y".into(),
+                    required_basis: vec![BasisKind::FactCommitted],
+                    expires_at: "turn_1".into(),
+                },
+            ];
+            if order {
+                offers.reverse();
+            }
+            for o in offers {
+                set.push(o);
+            }
+            set
+        };
+        assert!(mk(false).id().starts_with("osid_"), "opaque osid_ handle");
+        assert_eq!(mk(false).id(), mk(true).id(), "id is independent of push order");
+        // Different turn ⇒ different id.
+        let mut t2 = EvidenceOfferSet::new("turn_2");
+        t2.push(EvidenceOffer {
+            cap_id: CapId("cap_aaa".into()),
+            atom_id: a2.clone(),
+            kind: EvidenceKind::FactLearned,
+            meaning: "y".into(),
+            required_basis: vec![BasisKind::FactCommitted],
+            expires_at: "turn_2".into(),
+        });
+        assert_ne!(mk(false).id(), t2.id(), "different turn ⇒ different id");
     }
 
     #[test]

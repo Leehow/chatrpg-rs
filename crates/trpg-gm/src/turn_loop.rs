@@ -1179,6 +1179,26 @@ impl GmLoop {
             return;
         };
         let doc = crate::turn_markup_parser::parse_turn_document(visible_text);
+
+        // EV-P1: in audit-mode evaluate the MANDATORY per-offer EvidenceAudit. A missing/
+        // incomplete/extra/mismatched audit is a logged ProducerProtocolFailure — NEVER a
+        // silent "none" (the EV-4R producer-recall bug). Still SHADOW: no engine, no objective.
+        if trpg_runtime::evidence_gateway::progress_evidence_audit_required_enabled() {
+            let events: Vec<trpg_model::DomainEvent> = self
+                .engine
+                .db
+                .list_domain_events(&input.request.session_id, 5000)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|e| e.turn_id == turn_id)
+                .collect();
+            self.evaluate_main_gm_audit(input, &turn_id, &offer_set, &catalog, &events, &doc)
+                .await;
+            return;
+        }
+
+        // EV-4R path (audit OFF): the optional `[progress_claims]` sidecar.
         if doc.progress_claims.is_empty() {
             return;
         }
@@ -1227,6 +1247,71 @@ impl GmLoop {
             admitted = ledger.len(),
             "EV-4R shadow admission complete on MAIN GM (engine not consuming; J3 unchanged)"
         );
+    }
+
+    /// EV-P1 shadow evaluation of the MAIN GM's mandatory `[evidence_audit]` sidecar. Enforces
+    /// completeness (every offered cap exactly one decision; matching offer_set_id; no extras)
+    /// and admits each Observed decision via the reused `EvidenceGateway`. A missing/incomplete/
+    /// extra/mismatched audit ⇒ a logged `ProducerProtocolFailure` (telemetry), NEVER a silent
+    /// "none". Telemetry (audit_completeness / observed / not_observed / failure) is logged. Still
+    /// SHADOW: the engine is NOT called and no objective completes (J3 unchanged).
+    async fn evaluate_main_gm_audit(
+        &self,
+        input: &GmTurnInput<'_>,
+        turn_id: &str,
+        offer_set: &trpg_model::adventure_ir::EvidenceOfferSet,
+        catalog: &trpg_model::adventure_ir::EvidenceAtomCatalog,
+        events: &[trpg_model::DomainEvent],
+        doc: &crate::turn_document::TurnDocument,
+    ) {
+        let outcome = crate::evidence_audit::evaluate_gm_audit(
+            &input.request.session_id,
+            turn_id,
+            offer_set,
+            catalog,
+            events,
+            doc.evidence_audit.as_ref(),
+        );
+        for d in &outcome.decisions {
+            match &d.result {
+                Ok(atom) => tracing::info!(
+                    session_id = %input.request.session_id,
+                    turn_id = %turn_id,
+                    cap = %d.cap_id,
+                    atom = %atom,
+                    authority = "GmWitnessed",
+                    "EV-P1 observed decision ADMITTED on MAIN GM (shadow; engine not consuming, J3 unchanged)"
+                ),
+                Err(reason) => tracing::info!(
+                    session_id = %input.request.session_id,
+                    turn_id = %turn_id,
+                    cap = %d.cap_id,
+                    reason = reason.as_str(),
+                    "EV-P1 observed decision REJECTED by gateway on MAIN GM (shadow)"
+                ),
+            }
+        }
+        let t = &outcome.telemetry;
+        match t.protocol_failure {
+            Some(kind) => tracing::warn!(
+                session_id = %input.request.session_id,
+                turn_id = %turn_id,
+                offers = t.offers,
+                audit_completeness = t.completeness,
+                protocol_failure = kind.as_str(),
+                "EV-P1 ProducerProtocolFailure on MAIN GM (audit missing/incomplete — NOT a silent none; shadow)"
+            ),
+            None => tracing::info!(
+                session_id = %input.request.session_id,
+                turn_id = %turn_id,
+                offers = t.offers,
+                audit_completeness = t.completeness,
+                observed = t.observed,
+                not_observed = t.not_observed,
+                admitted = outcome.ledger.len(),
+                "EV-P1 EvidenceAudit complete on MAIN GM (shadow; engine not consuming; J3 unchanged)"
+            ),
+        }
     }
 
     /// P1 Narrator 阶段（TRPG_NARRATOR_SPLIT ON）：从本回合 ctx 投影 NarrationPacket，
@@ -1749,7 +1834,11 @@ impl GmLoop {
     /// empty ⇒ no block. flag OFF ⇒ early return ⇒ ctx fields stay None ⇒ byte-identical
     /// baseline (no graph load, no prompt change, no RNG). NO ruleset/module name-branch.
     async fn derive_evidence_offers(&self, ctx: &mut TurnContext, input: &GmTurnInput<'_>) {
-        if !trpg_runtime::evidence_gateway::progress_claims_on_gm_enabled() {
+        // EV-P1: the mandatory-audit protocol SUPERSEDES the EV-4R optional-claim path. The
+        // OfferSet derivation is identical for both; only the prompt block + the post-LLM
+        // evaluation differ. Both flags OFF ⇒ early return ⇒ ctx fields stay None ⇒ baseline.
+        let audit_mode = trpg_runtime::evidence_gateway::progress_evidence_audit_required_enabled();
+        if !(audit_mode || trpg_runtime::evidence_gateway::progress_claims_on_gm_enabled()) {
             return;
         }
         let Some(module_id) = input
@@ -1783,7 +1872,13 @@ impl GmLoop {
         if offer_set.is_empty() {
             return; // fail-closed: nothing surfaced ⇒ no block ⇒ byte-identical
         }
-        let block = crate::evidence_claims::render_gm_offer_and_claim_block(&offer_set);
+        // EV-P1 audit-mode renders the mandatory per-offer audit block (instruction + 5
+        // few-shot + closed `[evidence_audit]` format); EV-4R renders the optional claim block.
+        let block = if audit_mode {
+            crate::evidence_audit::render_gm_audit_block(&offer_set)
+        } else {
+            crate::evidence_claims::render_gm_offer_and_claim_block(&offer_set)
+        };
         if block.trim().is_empty() {
             return;
         }
@@ -1792,7 +1887,8 @@ impl GmLoop {
             turn_id = %turn_id,
             catalog_atoms = catalog.len(),
             offers = offer_set.len(),
-            "EV-4R progress offers computed for MAIN GM (turn_id aligned to request.turn_id)"
+            audit_mode,
+            "EV-P1/EV-4R progress offers computed for MAIN GM (turn_id aligned to request.turn_id)"
         );
         ctx.evidence_offer_block = Some(block);
         ctx.evidence_admission = Some((offer_set, catalog, turn_id));

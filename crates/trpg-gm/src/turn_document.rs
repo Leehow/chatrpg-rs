@@ -129,6 +129,16 @@ pub(crate) struct TurnDocument {
     /// Empty unless the GM emitted the tag (which it only does when the flag is ON and the
     /// claim instruction was injected) ⇒ OFF == byte-identical baseline.
     pub progress_claims: Vec<trpg_model::adventure_ir::EvidenceClaim>,
+    /// EV-P1 (`progress_evidence_audit_required_v1`, default OFF): the main GM's
+    /// `[evidence_audit]` sidecar — a single closed-schema
+    /// [`trpg_model::adventure_ir::EvidenceAudit`] (`offer_set_id` + per-cap
+    /// observed/not_observed decisions; CANNOT carry objective/atom/completed/reward).
+    /// Fail-closed: a missing tag, a non-object inner, or a forged/malformed audit is
+    /// dropped to `None`, never guessed (the live completeness check then logs a
+    /// `ProducerProtocolFailure` — "缺失≠none"). NEVER player-visible. `None` unless
+    /// the GM emitted the tag (only when the flag is ON + the audit instruction was
+    /// injected) ⇒ OFF == byte-identical baseline.
+    pub evidence_audit: Option<trpg_model::adventure_ir::EvidenceAudit>,
 }
 
 impl TurnDocument {

@@ -40,6 +40,7 @@ use trpg_model::{DomainEvent, DomainEventKind};
 
 const PROGRESS_CLAIMS_SHADOW_V1_ENV: &str = "TRPG_PROGRESS_CLAIMS_SHADOW_V1";
 const PROGRESS_CLAIMS_ON_GM_V1_ENV: &str = "TRPG_PROGRESS_CLAIMS_ON_GM_V1";
+const PROGRESS_EVIDENCE_AUDIT_REQUIRED_V1_ENV: &str = "TRPG_PROGRESS_EVIDENCE_AUDIT_REQUIRED_V1";
 const PROGRESS_EVIDENCE_V1_ENV: &str = "TRPG_PROGRESS_EVIDENCE_V1";
 
 /// Pure flag parse (env-race-free; mirrors the EV-2/EV-3 flags).
@@ -69,6 +70,24 @@ pub fn progress_claims_shadow_enabled() -> bool {
 /// claim loop now lives in ONE place (the main GM adjudication), never the navigation LLM.
 pub fn progress_claims_on_gm_enabled() -> bool {
     std::env::var(PROGRESS_CLAIMS_ON_GM_V1_ENV)
+        .map(|v| flag_on(&v))
+        .unwrap_or(false)
+        || std::env::var(PROGRESS_EVIDENCE_V1_ENV)
+            .map(|v| flag_on(&v))
+            .unwrap_or(false)
+}
+
+/// EV-P1: whether the MAIN GM **mandatory EvidenceAudit** protocol
+/// (`progress_evidence_audit_required_v1`) is active — the GM must return exactly one
+/// observed/not_observed decision for EVERY offered capability (a missing/extra/
+/// malformed decision is a `ProducerProtocolFailure`, never a silent "none"). When
+/// this is ON it SUPERSEDES the EV-4R optional `[progress_claims]` path (the claim
+/// loop lives in ONE place — the audit). Default OFF == byte-identical baseline (the
+/// main GM prompt + output schema + RNG are unchanged). ON when EITHER the master
+/// `progress_evidence_v1` OR the `progress_evidence_audit_required_v1` slice flag is
+/// truthy.
+pub fn progress_evidence_audit_required_enabled() -> bool {
+    std::env::var(PROGRESS_EVIDENCE_AUDIT_REQUIRED_V1_ENV)
         .map(|v| flag_on(&v))
         .unwrap_or(false)
         || std::env::var(PROGRESS_EVIDENCE_V1_ENV)

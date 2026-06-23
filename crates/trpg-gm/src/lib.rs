@@ -1,4 +1,5 @@
 pub mod errata;
+pub(crate) mod evidence_audit;
 pub(crate) mod evidence_claims;
 pub mod execute;
 pub mod gate;
@@ -36,6 +37,12 @@ mod plugin_mechanism_tests;
 #[cfg(test)]
 #[path = "evidence_claims_live.rs"]
 mod evidence_claims_live;
+
+// CL-P1b deterministic live proof (in-crate: drives the pub(crate) main-GM markup parser +
+// audit evaluator on the real the_vault DB). SKIPs without DATABASE_URL.
+#[cfg(test)]
+#[path = "evidence_audit_live.rs"]
+mod evidence_audit_live;
 
 // 层化迁移架构门（P0 护栏，零运行时行为变更）——设计4 §19 Rust 侧基线门 + P6 占位锚。
 #[cfg(test)]

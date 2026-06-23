@@ -20,6 +20,7 @@
 mod content_unit;
 mod effect;
 mod evidence;
+mod evidence_audit;
 mod evidence_claim;
 mod evidence_offer;
 mod hierarchy;
@@ -39,6 +40,7 @@ pub use evidence::{
     AcceptedEvidence, AtomId, EvidenceAtomCatalog, EvidenceAtomSpec, EvidenceAuthority,
     EvidenceKind, EvidenceLedger,
 };
+pub use evidence_audit::{EvidenceAudit, NotObservedReason, WitnessDecision};
 pub use evidence_claim::{EvidenceClaim, NonEmpty, TurnLocalRef};
 pub use evidence_offer::{BasisKind, CapId, EvidenceOffer, EvidenceOfferSet};
 pub use hierarchy::{derive_content_units, project_chapters, unit_kind_for};

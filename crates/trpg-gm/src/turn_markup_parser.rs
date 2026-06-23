@@ -35,6 +35,7 @@ const TAGS: &[(&str, WireTag)] = &[
     ("hide", WireTag::Hide),
     ("meta", WireTag::Meta),
     ("progress_claims", WireTag::ProgressClaims),
+    ("evidence_audit", WireTag::EvidenceAudit),
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -49,6 +50,9 @@ enum WireTag {
     /// EV-4R `[progress_claims]` — GM-only sidecar; inner is a JSON array of closed-schema
     /// EvidenceClaim. Parsed into `TurnDocument.progress_claims`; NO player-visible block.
     ProgressClaims,
+    /// EV-P1 `[evidence_audit]` — GM-only sidecar; inner is a single closed-schema JSON
+    /// object (EvidenceAudit). Parsed into `TurnDocument.evidence_audit`; NO player block.
+    EvidenceAudit,
 }
 
 impl WireTag {
@@ -62,6 +66,7 @@ impl WireTag {
             WireTag::Hide => "hide",
             WireTag::Meta => "meta",
             WireTag::ProgressClaims => "progress_claims",
+            WireTag::EvidenceAudit => "evidence_audit",
         }
     }
 }
@@ -139,6 +144,17 @@ fn push_tag_block(doc: &mut TurnDocument, tag: WireTag, inner: &str) {
                         trpg_runtime::evidence_gateway::parse_progress_claims(&wrapped);
                     doc.progress_claims.extend(claims);
                 }
+            }
+        }
+        WireTag::EvidenceAudit => {
+            // EV-P1: the inner is a single closed-schema EvidenceAudit JSON object.
+            // Fail-closed: a non-object / forged / malformed audit ⇒ `None` (the live
+            // completeness check then logs a ProducerProtocolFailure — never guessed).
+            // NO player-visible block ⇒ GM-only, like `[meta]`. Last well-formed tag wins.
+            if let Ok(audit) = serde_json::from_str::<trpg_model::adventure_ir::EvidenceAudit>(
+                trimmed.trim(),
+            ) {
+                doc.evidence_audit = Some(audit);
             }
         }
         WireTag::Roll => {
@@ -484,5 +500,53 @@ mod tests {
         // The default GM output (no tag, flag OFF / not instructed) leaves progress_claims empty.
         let doc = parse_turn_document("[narration]平平无奇的一回合。[/narration]");
         assert!(doc.progress_claims.is_empty());
+    }
+
+    // ── EV-P1 evidence_audit sidecar (progress_evidence_audit_required_v1) ────────────────
+    #[test]
+    fn evidence_audit_tag_parsed_and_never_player_visible() {
+        // A main-GM `[evidence_audit]` tag (single closed-schema JSON object) → fills
+        // doc.evidence_audit; its content NEVER reaches player_text.
+        let doc = parse_turn_document(concat!(
+            "[narration]终端亮起，储运图谱铺开。[/narration]",
+            "[evidence_audit]{\"offer_set_id\":\"osid_abc123def456\",\"decisions\":",
+            "{\"cap_2a0d946812d6\":{\"status\":\"observed\",\"basis\":[\"commit:0\"]},",
+            "\"cap_bb11cc22dd33\":{\"status\":\"not_observed\",\"reason\":\"merely_implied\"}}}",
+            "[/evidence_audit]",
+        ));
+        let audit = doc.evidence_audit.as_ref().expect("audit parsed");
+        assert_eq!(audit.offer_set_id, "osid_abc123def456");
+        assert_eq!(audit.decisions.len(), 2);
+        let pt = doc.player_text();
+        assert_eq!(pt, "终端亮起，储运图谱铺开。");
+        assert!(!pt.contains("cap_2a0d946812d6"), "cap handle leaked: {pt}");
+        assert!(!pt.contains("evidence_audit"), "tag leaked: {pt}");
+    }
+
+    #[test]
+    fn evidence_audit_forged_or_malformed_inner_is_none_fail_closed() {
+        // A forged conclusion field (closed schema), an Observed without basis, and
+        // non-JSON inner all fail to parse ⇒ None (never guessed), tag still consumed.
+        for inner in [
+            // forged top-level field (deny_unknown_fields)
+            "{\"offer_set_id\":\"osid_x\",\"decisions\":{},\"objective_completed\":\"obj.win\"}",
+            // observed without a basis
+            "{\"offer_set_id\":\"osid_x\",\"decisions\":{\"cap_a\":{\"status\":\"observed\"}}}",
+            // not JSON at all
+            "garbage not json",
+            "",
+        ] {
+            let doc = parse_turn_document(&format!("[evidence_audit]{inner}[/evidence_audit]"));
+            assert!(doc.evidence_audit.is_none(), "inner {inner:?} must yield no audit");
+            let pt = doc.player_text();
+            assert!(!pt.contains("evidence_audit"), "tag leaked for inner {inner:?}: {pt}");
+        }
+    }
+
+    #[test]
+    fn no_evidence_audit_tag_keeps_field_none_baseline() {
+        // Default GM output (flag OFF / not instructed) leaves evidence_audit None.
+        let doc = parse_turn_document("[narration]平平无奇的一回合。[/narration]");
+        assert!(doc.evidence_audit.is_none());
     }
 }
