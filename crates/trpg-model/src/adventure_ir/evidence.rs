@@ -202,6 +202,14 @@ impl EvidenceAtomCatalog {
         self.atoms.iter().find(|a| a.grounding == grounding)
     }
 
+    /// Resolve an [`AtomId`] back to its source-grounded atom (EV-4 gateway uses this
+    /// to recover an offered atom's `source_refs`/`bindings` after Rust maps the
+    /// opaque cap→atom). An offer whose atom is absent here has no verifiable
+    /// provenance → the gateway rejects it (`SourceHashMismatch`).
+    pub fn resolve_atom_id(&self, atom_id: &AtomId) -> Option<&EvidenceAtomSpec> {
+        self.atoms.iter().find(|a| &a.atom_id == atom_id)
+    }
+
     pub fn atoms(&self) -> &[EvidenceAtomSpec] {
         &self.atoms
     }

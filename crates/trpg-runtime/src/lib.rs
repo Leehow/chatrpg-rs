@@ -153,6 +153,12 @@ pub use evidence_offers::{
     derive_offer_set, progress_offers_enabled, render_offer_prompt_block,
 };
 
+pub mod evidence_gateway;
+pub use evidence_gateway::{
+    parse_progress_claims, progress_claims_shadow_enabled, render_claim_instruction,
+    EvidenceGateway, GatewayInputs, RejectionReason,
+};
+
 pub mod clue_surface;
 pub use clue_surface::{
     module_clue_surface_text, render_clue_surface, surface_player_facing_clues, SurfacedClue,

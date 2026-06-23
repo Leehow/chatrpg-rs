@@ -217,6 +217,32 @@ pub async fn scene_navigate_critical(
             "progress offers computed (EV-3 ON; GM not consuming claims yet)"
         );
     }
+    // EV-4 PROGRESS CLAIMS — SHADOW, PREP HALF (TRPG_PROGRESS_CLAIMS_SHADOW_V1 /
+    // master TRPG_PROGRESS_EVIDENCE_V1, default OFF): close the GM↔Rust claim loop in
+    // shadow. We re-derive THIS turn's EvidenceOfferSet (deterministic; same inputs as
+    // the EV-3 block) + catalog, and additively append the short instruction telling
+    // the GM it MAY return a `progress_claims` sidecar for a capability that genuinely
+    // occurred. The OfferSet + catalog are held across the LLM call for the admission
+    // half. OFF ⇒ block skipped entirely (no prompt mutation, no derivation, no RNG)
+    // ⇒ sys/usr byte-identical baseline.
+    let ev4_admission: Option<(
+        trpg_model::adventure_ir::EvidenceOfferSet,
+        trpg_model::adventure_ir::EvidenceAtomCatalog,
+        String,
+    )> = if crate::evidence_gateway::progress_claims_shadow_enabled() {
+        let mut og = graph.clone();
+        let _ = crate::clue_projection::project_clues_onto_scenes(&mut og);
+        let catalog = crate::evidence_projection::build_evidence_atom_catalog(&og);
+        let turn_num = db.count_session_turns(session_id).await.unwrap_or(0);
+        let turn_id = format!("turn_{turn_num}");
+        let offer_set =
+            crate::evidence_offers::derive_offer_set(&og, &catalog, &current, session_id, &turn_id);
+        usr.push_str("\n\n");
+        usr.push_str(&crate::evidence_gateway::render_claim_instruction());
+        Some((offer_set, catalog, turn_id))
+    } else {
+        None
+    };
     let decision = match llm
         .complete_json(vec![trpg_llm::system(&sys), trpg_llm::user(&usr)], 0.0)
         .await
@@ -227,6 +253,61 @@ pub async fn scene_navigate_critical(
             return Ok(None);
         }
     };
+    // EV-4 PROGRESS CLAIMS — SHADOW, ADMISSION HALF: parse the GM's `progress_claims`
+    // sidecar from the decision (closed schema, fail-closed), then run each claim
+    // through the EvidenceGateway against this turn's OfferSet + committed DomainEvents
+    // + catalog. **Shadow**: every admission decision is only LOGGED — the engine is
+    // NOT called and no objective is completed (J3 unchanged). Rust resolves cap→atom
+    // from the OfferSet; the LLM never names the atom.
+    if let Some((offer_set, catalog, turn_id)) = ev4_admission {
+        let claims = crate::evidence_gateway::parse_progress_claims(&decision);
+        if !claims.is_empty() {
+            let events = db.list_domain_events(session_id, 5000).await.unwrap_or_default();
+            let mut ledger = trpg_model::adventure_ir::EvidenceLedger::new();
+            let mut admitted = 0usize;
+            for claim in &claims {
+                let inp = crate::evidence_gateway::GatewayInputs {
+                    session_id,
+                    turn_id: &turn_id,
+                    offer_set: &offer_set,
+                    committed_events: &events,
+                    catalog: &catalog,
+                    ledger: &ledger,
+                };
+                match crate::evidence_gateway::EvidenceGateway::admit(claim, &inp) {
+                    Ok(ev) => {
+                        info!(
+                            session_id,
+                            turn_id = %turn_id,
+                            cap = %claim.cap_id.as_str(),
+                            atom = %ev.atom_id.as_str(),
+                            authority = "GmWitnessed",
+                            "EV-4 claim ADMITTED (shadow; engine not consuming, J3 unchanged)"
+                        );
+                        ledger.append(ev);
+                        admitted += 1;
+                    }
+                    Err(reason) => {
+                        info!(
+                            session_id,
+                            turn_id = %turn_id,
+                            cap = %claim.cap_id.as_str(),
+                            reason = reason.as_str(),
+                            "EV-4 claim REJECTED (shadow)"
+                        );
+                    }
+                }
+            }
+            info!(
+                session_id,
+                turn_id = %turn_id,
+                claims = claims.len(),
+                admitted,
+                ledger = ledger.len(),
+                "EV-4 shadow admission complete (engine not consuming; J3 unchanged)"
+            );
+        }
+    }
     let target = match validate_transition(&decision, &graph.scenes, &current) {
         Some(t) => t,
         None => {
