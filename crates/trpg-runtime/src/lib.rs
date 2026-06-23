@@ -138,6 +138,11 @@ use npc_activation::apply_npc_activation;
 pub mod clue_affordance;
 pub use clue_affordance::{clue_reveal_candidates, ClueRevealCandidate, ResolvedCheck};
 
+pub mod clue_projection;
+pub use clue_projection::{
+    clue_projection_enabled, project_clues_onto_scenes, ClueProjectionReport, CLUE_PROJECTION_ENV,
+};
+
 pub mod clue_surface;
 pub use clue_surface::{
     module_clue_surface_text, render_clue_surface, surface_player_facing_clues, SurfacedClue,

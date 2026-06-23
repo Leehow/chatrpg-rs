@@ -2774,7 +2774,13 @@ impl GmLoop {
         nominated_reveals: &mut Vec<crate::tools::RevealNomination>,
         gating_on: bool,
     ) {
-        let mode = trpg_model::MaterializationAffordanceMode::from_env();
+        // CL-2(b) DP-C: this is the clue-affordance path — reached only with a module
+        // loaded below, i.e. a **module-bound** session. Use the module-bound-aware mode
+        // so an unset env defaults to Enforce for module play (Q4 DP-C), while an explicit
+        // env value still wins in both directions (non-module/unset stays byte-baseline:
+        // the function early-returns when no module is bound). gating闸 (reveal-gating)
+        // remains an independent precondition — both闸 must be ON for a player-visible reveal.
+        let mode = trpg_model::MaterializationAffordanceMode::from_env_for_session(true);
         // 模式闸 + gating 闸：任一关 ⇒ 严格无操作（与纯函数双闸一致，省去无谓 graph 加载）。
         if !mode.is_enforce() || !gating_on {
             return;
@@ -2790,10 +2796,18 @@ impl GmLoop {
         else {
             return;
         };
-        let graph = match self.engine.db.load_module_graph(&module_id).await {
+        let mut graph = match self.engine.db.load_module_graph(&module_id).await {
             Ok(Some(g)) => g,
             _ => return, // 无图谱 → fail-closed（线索能供不揭）。
         };
+        // CL-1: clue→scene projection (flag-gated, default OFF == byte-baseline). When ON,
+        // project each module clue onto the scene whose [page_start, page_end] contains its
+        // page, populating `referenced_clue_ids` so `clue_reveal_candidates` has clues to
+        // resolve. Fail-closed (no page / out-of-range / ambiguous → skipped). The persisted
+        // graph is never mutated — this only augments the in-memory copy for this turn.
+        if trpg_runtime::clue_projection_enabled() {
+            let _ = trpg_runtime::project_clues_onto_scenes(&mut graph);
+        }
         let Some(scene) = graph.scenes.iter().find(|s| s.node_id == scene_id) else {
             return;
         };
