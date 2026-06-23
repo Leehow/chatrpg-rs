@@ -143,6 +143,11 @@ pub use clue_projection::{
     clue_projection_enabled, project_clues_onto_scenes, ClueProjectionReport, CLUE_PROJECTION_ENV,
 };
 
+pub mod evidence_projection;
+pub use evidence_projection::{
+    build_evidence_atom_catalog, exact_evidence_projector_enabled, project_exact_evidence,
+};
+
 pub mod clue_surface;
 pub use clue_surface::{
     module_clue_surface_text, render_clue_surface, surface_player_facing_clues, SurfacedClue,

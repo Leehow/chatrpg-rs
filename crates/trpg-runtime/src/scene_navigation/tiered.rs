@@ -161,6 +161,27 @@ pub async fn scene_navigate_critical(
             "progression frontier computed (engine ON)"
         );
     }
+    // EV-2 EXACT-EVIDENCE PROJECTOR (TRPG_EXACT_EVIDENCE_PROJECTOR_V1 / master
+    // TRPG_PROGRESS_EVIDENCE_V1, default OFF): project this session's committed
+    // DomainEvents into an AcceptedEvidence ledger via the deterministic Rust
+    // exact path (no LLM) — an authored-clue PlayerLearnedFact/FactRevealed whose
+    // fact_id resolves to a catalog atom AND whose knowledge_state is player-known-
+    // true. fail-closed (synthetic wf_chk_* / non-true belief / unresolved ref all
+    // skip). The engine does NOT consume the ledger yet (EV-6); this block only
+    // builds + logs it. OFF ⇒ block skipped entirely (no prompt mutation, no event,
+    // no RNG) ⇒ sys/usr byte-identical baseline.
+    if crate::evidence_projection::exact_evidence_projector_enabled() {
+        let events = db.list_domain_events(session_id, 5000).await.unwrap_or_default();
+        let catalog = crate::evidence_projection::build_evidence_atom_catalog(&graph);
+        let ledger = crate::evidence_projection::project_exact_evidence(&events, &catalog);
+        info!(
+            session_id,
+            catalog_atoms = catalog.len(),
+            domain_events = events.len(),
+            accepted_evidence = ledger.len(),
+            "exact-evidence projector computed (EV-2 ON; engine does not consume yet)"
+        );
+    }
     let decision = match llm
         .complete_json(vec![trpg_llm::system(&sys), trpg_llm::user(&usr)], 0.0)
         .await
