@@ -24,6 +24,8 @@ use crate::turn_document::{TurnBlock, TurnBlockKind, TurnDocument};
 
 /// The seven recognized wire tags. Attributes (`[roll check_id="…"]`) are tolerated: we match the
 /// opening `[tag` prefix and scan to the closing `]` of the opening tag.
+// Longest-name-first within shared prefixes is not required (we confirm the next char is `]`
+// or whitespace), but `progress_claims` must precede nothing it prefixes — it stands alone.
 const TAGS: &[(&str, WireTag)] = &[
     ("narration", WireTag::Narration),
     ("dialogue", WireTag::Dialogue),
@@ -32,6 +34,7 @@ const TAGS: &[(&str, WireTag)] = &[
     ("choice", WireTag::Choice),
     ("hide", WireTag::Hide),
     ("meta", WireTag::Meta),
+    ("progress_claims", WireTag::ProgressClaims),
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -43,6 +46,9 @@ enum WireTag {
     Choice,
     Hide,
     Meta,
+    /// EV-4R `[progress_claims]` — GM-only sidecar; inner is a JSON array of closed-schema
+    /// EvidenceClaim. Parsed into `TurnDocument.progress_claims`; NO player-visible block.
+    ProgressClaims,
 }
 
 impl WireTag {
@@ -55,6 +61,7 @@ impl WireTag {
             WireTag::Choice => "choice",
             WireTag::Hide => "hide",
             WireTag::Meta => "meta",
+            WireTag::ProgressClaims => "progress_claims",
         }
     }
 }
@@ -118,6 +125,22 @@ fn push_tag_block(doc: &mut TurnDocument, tag: WireTag, inner: &str) {
         WireTag::Meta => doc
             .blocks
             .push(TurnBlock::new(TurnBlockKind::InternalMeta, trimmed)),
+        WireTag::ProgressClaims => {
+            // EV-4R: the inner is a JSON array of closed-schema EvidenceClaim. Reuse the EV-4
+            // fail-closed per-entry parser (`evidence_gateway::parse_progress_claims`, which
+            // filters forged/empty-basis entries via the `deny_unknown_fields` schema) by
+            // wrapping the array under the `progress_claims` key it expects. Non-array /
+            // malformed inner ⇒ no claims (fail-closed). NO player-visible block is pushed ⇒
+            // the tag is consumed but never reaches `player_text` (GM-only, like `[meta]`).
+            if let Ok(arr) = serde_json::from_str::<serde_json::Value>(trimmed.trim()) {
+                if arr.is_array() {
+                    let wrapped = serde_json::json!({ "progress_claims": arr });
+                    let claims =
+                        trpg_runtime::evidence_gateway::parse_progress_claims(&wrapped);
+                    doc.progress_claims.extend(claims);
+                }
+            }
+        }
         WireTag::Roll => {
             if inner_is_malformed_roll(inner) {
                 // R-1 (Q-5 guard extension): a roll that "fired" but whose target/result is
@@ -401,5 +424,65 @@ mod tests {
         // `[rollback]` must NOT be parsed as a `[roll]` open tag.
         let doc = parse_turn_document("系统执行 [rollback] 操作");
         assert_eq!(doc.player_text(), "系统执行 [rollback] 操作");
+    }
+
+    // ── EV-4R progress_claims sidecar (progress_claims_on_gm_v1) ─────────────────────────
+    #[test]
+    fn progress_claims_tag_parsed_and_never_player_visible() {
+        // A main-GM `[progress_claims]` tag whose inner is a JSON array of closed-schema
+        // EvidenceClaim → fills doc.progress_claims; its content NEVER reaches player_text.
+        let doc = parse_turn_document(concat!(
+            "[narration]你撬开终端，数据流泻出。[/narration]",
+            "[progress_claims][{\"cap_id\":\"cap_2a0d946812d6\",\"basis\":[\"commit:0\"]}][/progress_claims]",
+        ));
+        assert_eq!(doc.progress_claims.len(), 1, "one claim parsed");
+        assert_eq!(doc.progress_claims[0].cap_id.as_str(), "cap_2a0d946812d6");
+        assert_eq!(doc.progress_claims[0].basis.len(), 1);
+        // Player text is the narration only — the cap handle / JSON never leaks.
+        let pt = doc.player_text();
+        assert_eq!(pt, "你撬开终端，数据流泻出。");
+        assert!(!pt.contains("cap_2a0d946812d6"), "cap handle leaked: {pt}");
+        assert!(!pt.contains("progress_claims"), "tag leaked: {pt}");
+    }
+
+    #[test]
+    fn progress_claims_forged_conclusion_fields_dropped_fail_closed() {
+        // The closed EvidenceClaim schema (deny_unknown_fields) means a forged entry carrying
+        // a progress CONCLUSION (completed / atom_id / objective_id / reward) fails to parse and
+        // is dropped per-entry — never guessed (LLM output ∩ ProgressSignal = ∅).
+        let doc = parse_turn_document(concat!(
+            "[progress_claims][",
+            "{\"cap_id\":\"cap_good00000001\",\"basis\":[\"commit:0\"]},",
+            "{\"cap_id\":\"cap_forged0002\",\"basis\":[\"commit:1\"],\"completed\":true},",
+            "{\"cap_id\":\"cap_forged0003\",\"basis\":[\"commit:2\"],\"atom_id\":\"atom:xyz\"},",
+            "{\"cap_id\":\"cap_forged0004\",\"basis\":[]}",
+            "][/progress_claims]",
+        ));
+        // Only the well-formed entry survives; the three forged ones are dropped.
+        assert_eq!(doc.progress_claims.len(), 1, "forged entries must be dropped");
+        assert_eq!(doc.progress_claims[0].cap_id.as_str(), "cap_good00000001");
+    }
+
+    #[test]
+    fn progress_claims_malformed_json_inner_is_empty_no_panic() {
+        // Non-array / malformed inner → fail-closed empty, no panic, tag still consumed
+        // (not leaked into narration).
+        for inner in ["not json at all", "{\"progress_claims\":1}", ""] {
+            let doc = parse_turn_document(&format!("[progress_claims]{inner}[/progress_claims]"));
+            assert!(doc.progress_claims.is_empty(), "inner {inner:?} must yield no claims");
+            // The tag is consumed (no player block) ⇒ neither the tag nor a non-empty inner leaks.
+            let pt = doc.player_text();
+            assert!(!pt.contains("progress_claims"), "tag leaked for inner {inner:?}: {pt}");
+            if !inner.is_empty() {
+                assert!(!pt.contains(inner), "inner {inner:?} leaked to player: {pt}");
+            }
+        }
+    }
+
+    #[test]
+    fn no_progress_claims_tag_keeps_field_empty_baseline() {
+        // The default GM output (no tag, flag OFF / not instructed) leaves progress_claims empty.
+        let doc = parse_turn_document("[narration]平平无奇的一回合。[/narration]");
+        assert!(doc.progress_claims.is_empty());
     }
 }

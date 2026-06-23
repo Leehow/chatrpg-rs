@@ -222,6 +222,18 @@ pub(crate) struct TurnContext {
     // `TRPG_DIRECTOR_PACKET` 默认 OFF ⇒ 恒 None ⇒ 不写块 ⇒ 字节等价基线。仅入 [gm] BP3，
     // 绝不入玩家可见 narration。
     director_packet_block: Option<String>,
+    // EV-4R (`progress_claims_on_gm_v1`, default OFF): the rendered EvidenceOffer capability
+    // list + claim instruction, derived at `phase_context_assembly` from THIS turn's surfaced
+    // clue atoms, folded into DynamicTailInput.evidence_offer_block. `evidence_admission` holds
+    // the machine OfferSet + catalog + turn_id (= request.turn_id, the alignment fix) across the
+    // LLM call, so `run_agent_loop` can admit the GM's `[progress_claims]` against this turn's
+    // committed events. flag OFF ⇒ both stay None ⇒ no block, no admission ⇒ byte-identical.
+    evidence_offer_block: Option<String>,
+    evidence_admission: Option<(
+        trpg_model::adventure_ir::EvidenceOfferSet,
+        trpg_model::adventure_ir::EvidenceAtomCatalog,
+        String,
+    )>,
     // P6.7 reveal-gating 提名（agent_loop 内 reveal_fact 在 TRPG_REVEAL_GATING ON 时填，
     // PresentationCommit 边界在终审 Allow 后排序提交）。OFF ⇒ 恒空（reveal_fact 即时落库，基线）。
     nominated_reveals: Vec<crate::tools::RevealNomination>,
@@ -274,6 +286,8 @@ impl TurnContext {
             visible_text: String::new(),
             awaiting_gate: None,
             director_packet_block: None,
+            evidence_offer_block: None,
+            evidence_admission: None,
             nominated_reveals: Vec::new(),
             rejected_nominations: Vec::new(),
             post_adjudication_results: Vec::new(),
@@ -1140,8 +1154,79 @@ impl GmLoop {
                 Err(err) => tracing::warn!(error = %err, "agent loop forced-prose stream failed"),
             }
         }
+        // EV-4R: admit the MAIN GM's `[progress_claims]` sidecar against THIS turn's committed
+        // events (shadow). Parses `visible_text` BEFORE verify_after_stream may rewrite it, using
+        // the OfferSet/catalog/turn_id held from turn-start. flag OFF ⇒ ctx.evidence_admission is
+        // None ⇒ no-op ⇒ byte-identical baseline.
+        self.admit_main_gm_progress_claims(ctx, input, &visible_text).await;
         ctx.visible_text = visible_text;
         crate::execute::AgentSignal::Narration
+    }
+
+    /// EV-4R shadow admission of the main GM's `[progress_claims]` sidecar. Parses the GM prose
+    /// for the closed-schema claims, then reuses `EvidenceGateway::admit` over THIS turn's
+    /// committed DomainEvents (turn-local, so each `commit:<i>` basis resolves within the turn)
+    /// with `turn_id = request.turn_id` (alignment). SHADOW: every decision is only logged — the
+    /// engine is NOT called and no objective is completed (J3 unchanged). flag OFF ⇒
+    /// `ctx.evidence_admission` is None (derivation never ran) ⇒ immediate no-op.
+    async fn admit_main_gm_progress_claims(
+        &self,
+        ctx: &mut TurnContext,
+        input: &GmTurnInput<'_>,
+        visible_text: &str,
+    ) {
+        let Some((offer_set, catalog, turn_id)) = ctx.evidence_admission.take() else {
+            return;
+        };
+        let doc = crate::turn_markup_parser::parse_turn_document(visible_text);
+        if doc.progress_claims.is_empty() {
+            return;
+        }
+        // THIS turn's committed events only (turn-local ⇒ commit:<i> resolves within the turn;
+        // also reinforces the turn_id alignment the gateway's CausationMismatch enforces).
+        let events: Vec<trpg_model::DomainEvent> = self
+            .engine
+            .db
+            .list_domain_events(&input.request.session_id, 5000)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| e.turn_id == turn_id)
+            .collect();
+        let (ledger, decisions) = crate::evidence_claims::admit_gm_claims(
+            &input.request.session_id,
+            &turn_id,
+            &offer_set,
+            &catalog,
+            &events,
+            &doc.progress_claims,
+        );
+        for d in &decisions {
+            match &d.result {
+                Ok(atom) => tracing::info!(
+                    session_id = %input.request.session_id,
+                    turn_id = %turn_id,
+                    cap = %d.cap_id,
+                    atom = %atom,
+                    authority = "GmWitnessed",
+                    "EV-4R claim ADMITTED on MAIN GM (shadow; engine not consuming, J3 unchanged)"
+                ),
+                Err(reason) => tracing::info!(
+                    session_id = %input.request.session_id,
+                    turn_id = %turn_id,
+                    cap = %d.cap_id,
+                    reason = reason.as_str(),
+                    "EV-4R claim REJECTED on MAIN GM (shadow)"
+                ),
+            }
+        }
+        tracing::info!(
+            session_id = %input.request.session_id,
+            turn_id = %turn_id,
+            claims = doc.progress_claims.len(),
+            admitted = ledger.len(),
+            "EV-4R shadow admission complete on MAIN GM (engine not consuming; J3 unchanged)"
+        );
     }
 
     /// P1 Narrator 阶段（TRPG_NARRATOR_SPLIT ON）：从本回合 ctx 投影 NarrationPacket，
@@ -1614,9 +1699,14 @@ impl GmLoop {
             }
         }
         let npc_guidance = self.build_npc_behavior_guidance(ctx, input).await;
+        // EV-4R: derive THIS turn's EvidenceOfferSet (turn-start, with turn_id = request.turn_id)
+        // and stash the rendered capability+claim block + the machine OfferSet/catalog/turn_id on
+        // ctx. flag OFF ⇒ both stay None ⇒ no block ⇒ byte-identical baseline.
+        self.derive_evidence_offers(ctx, input).await;
         // P5.6: the Director packet was stashed on ctx by build_npc_behavior_guidance (flag OFF
         // ⇒ None ⇒ no block ⇒ byte-identical). Mirror npc_guidance: pass as Option<&str>.
         let director_packet = ctx.director_packet_block.clone();
+        let evidence_offer = ctx.evidence_offer_block.clone();
         let tail = DynamicTailInput {
             user_input: input.user_input,
             resolved_gate_facts: &ctx.resolved_gate_facts,
@@ -1624,6 +1714,7 @@ impl GmLoop {
             obligations_block: ctx.obligations_block.as_deref(),
             npc_guidance_block: npc_guidance.as_deref(),
             director_packet_block: director_packet.as_deref(),
+            evidence_offer_block: evidence_offer.as_deref(),
         };
         ctx.messages = Some(TurnMessages::assemble(
             &ctx.compiled,
@@ -1646,6 +1737,65 @@ impl GmLoop {
             .and_then(|m| m.tempo.effect_closure_per_cluster)
             .unwrap_or(false);
         Ok(())
+    }
+
+    /// EV-4R (`progress_claims_on_gm_v1`, default OFF): derive THIS turn's EvidenceOfferSet from
+    /// the current scene's surfaced clue atoms and stash (a) the rendered GM prompt block and
+    /// (b) the machine OfferSet + catalog + turn_id on `ctx` for post-LLM admission. The turn_id
+    /// is `request.turn_id` — the SAME value stamped on this turn's committed DomainEvents (the
+    /// alignment fix: a derived `turn_{count}` would make the gateway reject every real claim
+    /// with CausationMismatch). Reuses EV-1 clue projection + EV-2 catalog + EV-3
+    /// `derive_offer_set` unchanged. fail-closed: no module / unknown scene / no surfaced clue ⇒
+    /// empty ⇒ no block. flag OFF ⇒ early return ⇒ ctx fields stay None ⇒ byte-identical
+    /// baseline (no graph load, no prompt change, no RNG). NO ruleset/module name-branch.
+    async fn derive_evidence_offers(&self, ctx: &mut TurnContext, input: &GmTurnInput<'_>) {
+        if !trpg_runtime::evidence_gateway::progress_claims_on_gm_enabled() {
+            return;
+        }
+        let Some(module_id) = input
+            .request
+            .module_id
+            .as_deref()
+            .filter(|id| !id.trim().is_empty())
+        else {
+            return;
+        };
+        let mut graph = match self.engine.db.load_module_graph(module_id).await {
+            Ok(Some(g)) => g,
+            Ok(None) => return,
+            Err(err) => {
+                tracing::warn!(error = %err, module_id, "EV-4R offer derivation: module graph load failed");
+                return;
+            }
+        };
+        // Surfaced clues come from page-containment projection (CL-1); we own this graph copy.
+        let _ = trpg_runtime::clue_projection::project_clues_onto_scenes(&mut graph);
+        let catalog = trpg_runtime::evidence_projection::build_evidence_atom_catalog(&graph);
+        let current_scene = ctx.state_agent.scene_id.as_deref().unwrap_or("");
+        let turn_id = input.request.turn_id.clone();
+        let offer_set = trpg_runtime::evidence_offers::derive_offer_set(
+            &graph,
+            &catalog,
+            current_scene,
+            &input.request.session_id,
+            &turn_id,
+        );
+        if offer_set.is_empty() {
+            return; // fail-closed: nothing surfaced ⇒ no block ⇒ byte-identical
+        }
+        let block = crate::evidence_claims::render_gm_offer_and_claim_block(&offer_set);
+        if block.trim().is_empty() {
+            return;
+        }
+        tracing::info!(
+            session_id = %input.request.session_id,
+            turn_id = %turn_id,
+            catalog_atoms = catalog.len(),
+            offers = offer_set.len(),
+            "EV-4R progress offers computed for MAIN GM (turn_id aligned to request.turn_id)"
+        );
+        ctx.evidence_offer_block = Some(block);
+        ctx.evidence_admission = Some((offer_set, catalog, turn_id));
     }
 
     /// ContextAssembly hook：跑内置 policy 插件 host，把 PromptBlock 贡献的渲染文本以

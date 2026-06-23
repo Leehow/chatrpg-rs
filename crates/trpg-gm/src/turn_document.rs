@@ -119,6 +119,16 @@ pub(crate) struct TurnDocument {
     /// dropped and the inner prose is kept as Narration. Downstream (战报 / narrator-phase
     /// debug trace) asserts this is ZERO under the gated path.
     pub malformed_rolls_unwrapped: usize,
+    /// EV-4R (`progress_claims_on_gm_v1`, default OFF): the main GM's `[progress_claims]`
+    /// sidecar, parsed from a GM-only markup tag whose inner content is a JSON array of
+    /// closed-schema [`trpg_model::adventure_ir::EvidenceClaim`] (cap_id + basis ONLY —
+    /// the type CANNOT carry objective_id / atom_id / completed / reward, so the LLM
+    /// literally cannot construct a ProgressSignal). Fail-closed: a missing tag, non-array
+    /// inner, or forged entry (extra fields / empty basis / bad ref) is dropped, never
+    /// guessed. NEVER player-visible (no block is pushed ⇒ excluded from `player_text`).
+    /// Empty unless the GM emitted the tag (which it only does when the flag is ON and the
+    /// claim instruction was injected) ⇒ OFF == byte-identical baseline.
+    pub progress_claims: Vec<trpg_model::adventure_ir::EvidenceClaim>,
 }
 
 impl TurnDocument {

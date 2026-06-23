@@ -28,6 +28,13 @@ pub struct DynamicTailInput<'a> {
     /// Carries only ids / enum tokens / short structural strings (content-safety owned by the
     /// renderer, since this is a GM-tail string that bypasses the ContextFilter).
     pub director_packet_block: Option<&'a str>,
+    /// EV-4R (`progress_claims_on_gm_v1`, default OFF): the rendered EvidenceOffer capability
+    /// list + claim instruction (EV-3 `render_offer_prompt_block` + the markup claim format),
+    /// appended after `director_packet_block`, before Player Input — same `[gm]` BP3 message,
+    /// NEVER the player-visible narration. Carries only opaque cap_id handles + human meanings
+    /// + required-basis tokens (NEVER atom_id / objective_id — the LLM emits only cap_id+basis;
+    /// Rust resolves cap→atom). None/empty ⇒ no block (flag OFF ⇒ byte-identical baseline).
+    pub evidence_offer_block: Option<&'a str>,
 }
 
 /// 回合消息容器：assemble 渲染一次、整回合复用；工具轮只在尾部 push，
@@ -85,6 +92,13 @@ impl TurnMessages {
         // P5.6 Director brief packet — mirrors npc_guidance_block exactly (same [gm] BP3
         // message, Option::filter empty). flag OFF ⇒ None ⇒ nothing appended ⇒ byte-identical.
         if let Some(block) = tail.director_packet_block.filter(|b| !b.trim().is_empty()) {
+            dynamic.push_str("\n\n");
+            dynamic.push_str(block);
+        }
+        // EV-4R evidence-offer + claim-instruction block — mirrors director_packet_block exactly
+        // (same [gm] BP3 message, Option::filter empty). flag OFF ⇒ None ⇒ nothing appended ⇒
+        // byte-identical baseline. GM-only (never copied to the player-visible path).
+        if let Some(block) = tail.evidence_offer_block.filter(|b| !b.trim().is_empty()) {
             dynamic.push_str("\n\n");
             dynamic.push_str(block);
         }
@@ -260,6 +274,7 @@ mod tests {
             obligations_block: Some("[obligations_carryover]debt[/obligations_carryover]"),
             npc_guidance_block: None,
             director_packet_block: None,
+            evidence_offer_block: None,
         };
         let messages = TurnMessages::assemble(&compiled(), "SKILL", &history, &tail);
         let raw = messages.to_request_messages();
@@ -311,6 +326,7 @@ mod tests {
             obligations_block: None,
             npc_guidance_block: None,
             director_packet_block: None,
+            evidence_offer_block: None,
         };
         let mut empty_pinned = compiled();
         empty_pinned.pinned_text = "  ".to_string();
@@ -347,6 +363,7 @@ mod tests {
             obligations_block: None,
             npc_guidance_block: None,
             director_packet_block: None,
+            evidence_offer_block: None,
         };
         let mut messages = TurnMessages::assemble(&compiled(), "SKILL", &[], &tail);
         let before = messages.prefix_byte_hash(4);
@@ -479,6 +496,7 @@ mod cache_stability_tests {
             obligations_block: None,
             npc_guidance_block: None,
             director_packet_block: None,
+            evidence_offer_block: None,
         };
         let a = TurnMessages::assemble(&compiled(), "skill", &[], &tail);
         let b = TurnMessages::assemble(&compiled(), "skill", &[], &tail);
@@ -497,6 +515,7 @@ mod cache_stability_tests {
             obligations_block: None,
             npc_guidance_block: None,
             director_packet_block: None,
+            evidence_offer_block: None,
         };
         let mut m = TurnMessages::assemble(
             &compiled(),
@@ -529,6 +548,7 @@ mod cache_stability_tests {
             obligations_block: None,
             npc_guidance_block: None,
             director_packet_block: None,
+            evidence_offer_block: None,
         };
         let m = TurnMessages::assemble(&compiled(), "skill", &[], &tail);
         assert_eq!(m.prefix_byte_hash(2), m.prefix_byte_hash(2));
@@ -556,6 +576,7 @@ mod cache_stability_tests {
             obligations_block: None,
             npc_guidance_block: None,
             director_packet_block: None,
+            evidence_offer_block: None,
         };
         let turn1 = TurnMessages::assemble(&compiled(), "skill", &turn1_history, &tail1);
         let mut turn2_history = turn1_history.clone();
@@ -574,6 +595,7 @@ mod cache_stability_tests {
             obligations_block: None,
             npc_guidance_block: None,
             director_packet_block: None,
+            evidence_offer_block: None,
         };
         let turn2 = TurnMessages::assemble(&compiled(), "skill", &turn2_history, &tail2);
         let raw1 = turn1.to_request_messages();
@@ -651,6 +673,7 @@ mod cache_stability_tests {
             obligations_block: None,
             npc_guidance_block: None,
             director_packet_block: None,
+            evidence_offer_block: None,
         };
         let skill_none = load_gm_skill_with_mode(&dir, "rs", None).unwrap();
         let skill_combat = load_gm_skill_with_mode(&dir, "rs", Some("combat")).unwrap();
@@ -682,6 +705,7 @@ mod cache_stability_tests {
             obligations_block: None,
             npc_guidance_block: None,
             director_packet_block: None,
+            evidence_offer_block: None,
         };
         let turn1 = TurnMessages::assemble(&compiled(), &skill, &[], &tail1);
         let history = vec![
@@ -701,6 +725,7 @@ mod cache_stability_tests {
             obligations_block: None,
             npc_guidance_block: None,
             director_packet_block: None,
+            evidence_offer_block: None,
         };
         let turn2 = TurnMessages::assemble(&compiled(), &skill, &history, &tail2);
         assert_eq!(
@@ -739,6 +764,7 @@ mod director_packet_wiring_tests {
             obligations_block: None,
             npc_guidance_block: None,
             director_packet_block: packet,
+            evidence_offer_block: None,
         }
     }
 
@@ -860,5 +886,103 @@ mod director_packet_wiring_tests {
         );
         // The history (player-visible prior narration) is never mutated to carry it.
         assert!(!history[0].content.contains("[director_packet]"));
+    }
+}
+
+/// EV-4R wiring proof: the evidence-offer + claim-instruction block enters the GM-only
+/// `[gm][BP3]` user message (ON), is absent + byte-identical to baseline (OFF), and lands after
+/// the director packet, before Player Input. Mirrors `director_packet_wiring_tests` — the block
+/// content is produced upstream (EV-3 `render_offer_prompt_block` + claim instruction); here we
+/// only prove the assemble-level wiring (Option::filter mirror).
+#[cfg(test)]
+mod evidence_offer_wiring_tests {
+    use super::*;
+    use serde_json::Value;
+    use trpg_model::{ChatMessage, CompiledContext};
+
+    fn compiled() -> CompiledContext {
+        CompiledContext {
+            prefix_text: "BP1".to_string(),
+            pinned_text: "BP2".to_string(),
+            dynamic_text: "BP3".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn tail_with<'a>(offer: Option<&'a str>) -> DynamicTailInput<'a> {
+        DynamicTailInput {
+            user_input: "go",
+            resolved_gate_facts: &[],
+            errata_blocks: &[],
+            obligations_block: None,
+            npc_guidance_block: None,
+            director_packet_block: None,
+            evidence_offer_block: offer,
+        }
+    }
+
+    fn last_dynamic(m: &TurnMessages) -> String {
+        m.to_request_messages()
+            .last()
+            .and_then(|x| x.get("content"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    }
+
+    const OFFER: &str =
+        "EVIDENCE CAPABILITIES (this turn only):\n- cap_2a0d946812d6 = the player learned \
+         the authored clue \"Aquifer\" [requires basis: fact_committed]";
+
+    #[test]
+    fn on_offer_block_reaches_gm_bp3_after_director_before_player_input() {
+        let history = vec![ChatMessage {
+            role: "assistant".to_string(),
+            content: "old".to_string(),
+        }];
+        let m = TurnMessages::assemble(&compiled(), "SKILL", &history, &tail_with(Some(OFFER)));
+        let dynamic = last_dynamic(&m);
+        assert!(dynamic.contains("[BP3: Dynamic Context]"));
+        assert!(dynamic.contains("cap_2a0d946812d6"), "offer cap must reach BP3");
+        assert!(
+            dynamic.find("cap_2a0d946812d6").unwrap() < dynamic.find("[Player Input]").unwrap(),
+            "offer block must precede Player Input within the [gm] BP3 message"
+        );
+        // GM-only: the offer rides exactly one (BP3) message, never the player-visible history.
+        assert!(!history[0].content.contains("cap_2a0d946812d6"));
+    }
+
+    #[test]
+    fn off_or_empty_offer_block_is_byte_identical_to_baseline() {
+        let history = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "hi".to_string(),
+        }];
+        let baseline = TurnMessages::assemble(&compiled(), "SKILL", &history, &tail_with(None));
+        let empty = TurnMessages::assemble(&compiled(), "SKILL", &history, &tail_with(Some("  ")));
+        let baseline_bytes = serde_json::to_vec(&baseline.to_request_messages()).unwrap();
+        let empty_bytes = serde_json::to_vec(&empty.to_request_messages()).unwrap();
+        assert_eq!(
+            baseline_bytes, empty_bytes,
+            "OFF / empty offer block must be byte-identical to baseline"
+        );
+        // Full prefix hash unchanged (mirror the director-packet OFF baseline proof).
+        assert_eq!(
+            baseline.prefix_byte_hash(usize::MAX),
+            empty.prefix_byte_hash(usize::MAX)
+        );
+        assert!(!last_dynamic(&baseline).contains("cap_"));
+    }
+
+    #[test]
+    fn an_explicitly_present_offer_changes_prompt_bytes_vs_baseline() {
+        // Justified cache miss: a real (non-empty) offer block DOES change BP3 bytes (so the
+        // OFF==baseline guarantee is meaningful, not vacuous).
+        let baseline = TurnMessages::assemble(&compiled(), "SKILL", &[], &tail_with(None));
+        let with_offer = TurnMessages::assemble(&compiled(), "SKILL", &[], &tail_with(Some(OFFER)));
+        assert_ne!(
+            baseline.prefix_byte_hash(usize::MAX),
+            with_offer.prefix_byte_hash(usize::MAX)
+        );
     }
 }

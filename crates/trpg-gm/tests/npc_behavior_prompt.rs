@@ -77,6 +77,7 @@ mod npc_behavior {
             obligations_block: None,
             npc_guidance_block: npc_guidance,
             director_packet_block: None,
+            evidence_offer_block: None,
         };
         let messages = TurnMessages::assemble(&compiled, "GM_SKILL", &[], &tail);
         messages
