@@ -18,6 +18,7 @@
 //! (`trpg-runtime::evidence_projection`). The engine does NOT consume the ledger
 //! yet — that is EV-6 (`witnessed_progression_apply_v1`).
 
+use crate::adventure_ir::ProgressRole;
 use crate::SourceRef;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -107,6 +108,12 @@ pub struct EvidenceAtomSpec {
     pub bindings: Vec<String>,
     pub source_refs: Vec<SourceRef>,
     pub grounding: String,
+    /// EV-P3: whether this atom is an authored objective success **leaf**
+    /// (`GuardLeaf`) or a mere affordance/mechanic **carrier** (`CarrierOnly`).
+    /// Default `CarrierOnly` is skipped on serialize → EV-2 clue/exact atoms stay
+    /// byte-identical (proves OFF == baseline).
+    #[serde(default, skip_serializing_if = "ProgressRole::is_carrier_only")]
+    pub progress_role: ProgressRole,
 }
 
 /// Who admitted the evidence. EV-2 only ever mints [`EvidenceAuthority::ExactDomain`]
@@ -256,6 +263,7 @@ mod tests {
             bindings: vec![clue_id.to_string()],
             source_refs: vec![src(page)],
             grounding: format!("fact:{clue_id}"),
+            progress_role: ProgressRole::CarrierOnly,
         }
     }
 

@@ -104,6 +104,7 @@ fn location_atom(module_id: &str, node_id: &str, page: Option<u32>) -> EvidenceA
             ..Default::default()
         }],
         grounding: format!("location:{node_id}"),
+        progress_role: trpg_model::adventure_ir::ProgressRole::CarrierOnly,
     }
 }
 
@@ -187,6 +188,7 @@ fn state_atom(module_id: &str, state_ref: &str, anchor: &str) -> EvidenceAtomSpe
             ..Default::default()
         }],
         grounding: format!("state:{state_ref}"),
+        progress_role: trpg_model::adventure_ir::ProgressRole::CarrierOnly,
     }
 }
 
@@ -565,6 +567,7 @@ mod tests {
                 ..Default::default()
             }],
             grounding: format!("fact:{clue_id}"),
+            progress_role: trpg_model::adventure_ir::ProgressRole::CarrierOnly,
         }
     }
 

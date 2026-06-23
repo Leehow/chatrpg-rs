@@ -145,7 +145,8 @@ pub use clue_projection::{
 
 pub mod evidence_projection;
 pub use evidence_projection::{
-    build_evidence_atom_catalog, exact_evidence_projector_enabled, project_exact_evidence,
+    build_evidence_atom_catalog, exact_evidence_projector_enabled,
+    progress_observable_leaf_catalog_enabled, project_exact_evidence,
 };
 
 pub mod evidence_offers;

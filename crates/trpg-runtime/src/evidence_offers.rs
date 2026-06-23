@@ -31,9 +31,12 @@
 
 use serde_json::Value;
 use trpg_model::adventure_ir::{
-    BasisKind, CapId, EvidenceAtomCatalog, EvidenceKind, EvidenceOffer, EvidenceOfferSet,
+    BasisKind, CapId, EvidenceAtomCatalog, EvidenceAtomSpec, EvidenceKind, EvidenceOffer,
+    EvidenceOfferSet,
 };
 use trpg_model::ModuleGraph;
+
+use crate::evidence_projection::progress_observable_leaf_catalog_enabled;
 
 const PROGRESS_OFFERS_V1_ENV: &str = "TRPG_PROGRESS_OFFERS_V1";
 const PROGRESS_EVIDENCE_V1_ENV: &str = "TRPG_PROGRESS_EVIDENCE_V1";
@@ -98,6 +101,41 @@ fn clue_meaning(label: &str, page: Option<u32>) -> String {
     }
 }
 
+/// Whether an atom kind is an EV-P3 observable-action capability (NOT a Fact*
+/// kind — those are surfaced via the clue path). Only these are offered from the
+/// observable-leaf catalog so the clue offers stay the EV-3 path.
+fn is_observable_action_kind(kind: EvidenceKind) -> bool {
+    matches!(
+        kind,
+        EvidenceKind::ActionResolved
+            | EvidenceKind::StateEstablished
+            | EvidenceKind::LocationEntered
+            | EvidenceKind::EntityEncountered
+    )
+}
+
+/// Human-readable, source-grounded meaning of an observable-action capability. Built
+/// from the atom's grounding verb-kind + its authored source note (the authored
+/// affordance/mechanic text). NEVER leaks the atom_id or any objective id.
+fn action_meaning(atom: &EvidenceAtomSpec) -> String {
+    let verb = match atom.kind {
+        EvidenceKind::ActionResolved => "resolved an authored action",
+        EvidenceKind::StateEstablished => "established an authored world state",
+        EvidenceKind::LocationEntered => "entered an authored location",
+        EvidenceKind::EntityEncountered => "encountered an authored entity",
+        _ => "did an authored thing",
+    };
+    let note = atom
+        .source_refs
+        .first()
+        .and_then(|s| s.note.clone())
+        .filter(|n| !n.trim().is_empty());
+    match note {
+        Some(n) => format!("the player {verb}: \"{}\"", n.trim()),
+        None => format!("the player {verb} ({})", atom.grounding),
+    }
+}
+
 /// Derive the turn-local [`EvidenceOfferSet`] = the EV-2 catalog ∩ the current
 /// scene's surfaced clue atoms. Deterministic, fail-closed, source-grounded (see
 /// module docs). `turn_id` scopes the opaque [`CapId`]s and the `expires_at`.
@@ -126,6 +164,31 @@ pub fn derive_offer_set(
             required_basis: required_basis_for(atom.kind),
             expires_at: turn_id.to_string(),
         });
+    }
+    // EV-P3: additionally offer observable-action atoms scoped to THIS scene. Flag-
+    // guarded so OFF ⇒ no extra offers ⇒ prompt byte-identical. Deduped by cap_id.
+    if progress_observable_leaf_catalog_enabled() {
+        let scene_tag = format!("scene:{current_scene}");
+        for atom in catalog.atoms() {
+            if !is_observable_action_kind(atom.kind) {
+                continue; // Fact* atoms stay on the surfaced-clue path
+            }
+            if !atom.bindings.iter().any(|b| b == &scene_tag) {
+                continue; // not surfaced in the current scene
+            }
+            let cap_id = CapId::from_parts(session_id, turn_id, &atom.atom_id);
+            if set.offers().iter().any(|o| o.cap_id == cap_id) {
+                continue; // dedup by cap_id
+            }
+            set.push(EvidenceOffer {
+                cap_id,
+                atom_id: atom.atom_id.clone(),
+                kind: atom.kind,
+                meaning: action_meaning(atom),
+                required_basis: required_basis_for(atom.kind),
+                expires_at: turn_id.to_string(),
+            });
+        }
     }
     set
 }
@@ -293,5 +356,89 @@ mod tests {
             "only 1/true/on arm the offers"
         );
         assert!(flag_on("1") && flag_on("true") && flag_on("on"));
+    }
+
+    // ───────────────────────── EV-P3 observable-action offers ─────────────────
+
+    use std::sync::Mutex;
+    /// Serializes the env-mutating EV-P3 tests so the process-global flag never
+    /// races a parallel test.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// A graph with one surfaced clue AND a director affordance whose target
+    /// (the clue name "Aquifer") resolves — so the catalog gains an action atom
+    /// tagged to the entry scene.
+    fn graph_with_affordance() -> ModuleGraph {
+        let mut scene = ScenarioNode {
+            node_id: "scene_001".into(),
+            node_type: "scene".into(),
+            title: "Springs Eternal".into(),
+            page_start: Some(8),
+            ..Default::default()
+        };
+        scene.referenced_clue_ids = vec!["clue_aquifer_commercial".into()];
+        ModuleGraph {
+            module_id: "the_vault".into(),
+            clues: vec![json!({"id": "clue_aquifer_commercial", "name": "Aquifer", "page": 8})],
+            scenes: vec![scene],
+            director_facilitation: Some(trpg_model::DirectorModuleConfig {
+                affordance_items: vec![trpg_model::DirectorAffordanceItem {
+                    description: "Investigate the Aquifer commercial.".into(),
+                    implies_vectors: vec!["Aquifer".into()],
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn off_offers_only_surfaced_clue_and_prompt_byte_identical() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("TRPG_PROGRESS_OBSERVABLE_LEAF_CATALOG_V1");
+        std::env::remove_var("TRPG_PROGRESS_EVIDENCE_V1");
+        let graph = graph_with_affordance();
+        // catalog built OFF ⇒ clue-only (no action atoms)
+        let cat = crate::evidence_projection::build_evidence_atom_catalog(&graph);
+        assert_eq!(cat.len(), 1, "OFF ⇒ clue-only catalog (EV-2 baseline)");
+        let set = derive_offer_set(&graph, &cat, "scene_001", "sess_a", "turn_5");
+        assert_eq!(set.len(), 1, "OFF ⇒ only the surfaced clue offer");
+        assert_eq!(set.offers()[0].kind, EvidenceKind::FactLearned);
+    }
+
+    #[test]
+    fn on_offers_include_action_atom_for_scene() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::set_var("TRPG_PROGRESS_OBSERVABLE_LEAF_CATALOG_V1", "1");
+        let graph = graph_with_affordance();
+        let cat = crate::evidence_projection::build_evidence_atom_catalog(&graph);
+        assert!(cat.len() >= 2, "ON ⇒ clue + ≥1 action atom, got {}", cat.len());
+        let set = derive_offer_set(&graph, &cat, "scene_001", "sess_a", "turn_5");
+        std::env::remove_var("TRPG_PROGRESS_OBSERVABLE_LEAF_CATALOG_V1");
+        let has_action = set
+            .offers()
+            .iter()
+            .any(|o| o.kind == EvidenceKind::ActionResolved);
+        assert!(has_action, "ON ⇒ scene_001 gains an action offer (not just the clue)");
+        // opaque + source-grounded meaning, never an atom id leaked
+        for o in set.offers() {
+            assert!(o.cap_id.as_str().starts_with("cap_"));
+            assert!(!o.meaning.contains("atom:"), "meaning never leaks atom id");
+        }
+        let action = set
+            .offers()
+            .iter()
+            .find(|o| o.kind == EvidenceKind::ActionResolved)
+            .unwrap();
+        assert_eq!(
+            action.required_basis,
+            vec![BasisKind::OutcomeCommitted],
+            "action capability requires a committed outcome"
+        );
+        assert!(
+            action.meaning.contains("Investigate the Aquifer commercial"),
+            "meaning cites the authored affordance text: {}",
+            action.meaning
+        );
     }
 }

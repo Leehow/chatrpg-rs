@@ -294,6 +294,7 @@ mod tests {
                 ..Default::default()
             }],
             grounding: format!("fact:{clue_id}"),
+            progress_role: trpg_model::adventure_ir::ProgressRole::CarrierOnly,
         }
     }
 

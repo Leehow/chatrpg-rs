@@ -35,6 +35,8 @@ use trpg_model::{DomainEvent, DomainEventKind, ModuleGraph, SourceRef};
 
 const EXACT_EVIDENCE_PROJECTOR_V1_ENV: &str = "TRPG_EXACT_EVIDENCE_PROJECTOR_V1";
 const PROGRESS_EVIDENCE_V1_ENV: &str = "TRPG_PROGRESS_EVIDENCE_V1";
+const PROGRESS_OBSERVABLE_LEAF_CATALOG_V1_ENV: &str =
+    "TRPG_PROGRESS_OBSERVABLE_LEAF_CATALOG_V1";
 
 /// Pure flag parse (env-race-free; mirrors the EV-1 bridge flag).
 fn flag_on(raw: &str) -> bool {
@@ -47,6 +49,19 @@ fn flag_on(raw: &str) -> bool {
 /// `progress_evidence_v1` OR the `exact_evidence_projector_v1` slice flag is truthy.
 pub fn exact_evidence_projector_enabled() -> bool {
     std::env::var(EXACT_EVIDENCE_PROJECTOR_V1_ENV)
+        .map(|v| flag_on(&v))
+        .unwrap_or(false)
+        || std::env::var(PROGRESS_EVIDENCE_V1_ENV)
+            .map(|v| flag_on(&v))
+            .unwrap_or(false)
+}
+
+/// Whether the EV-P3 observable-leaf catalog enrichment is active. Default OFF ==
+/// byte-identical baseline (catalog stays clue-only = EV-2). ON when EITHER the
+/// master `progress_evidence_v1` OR the `progress_observable_leaf_catalog_v1` slice
+/// flag is truthy.
+pub fn progress_observable_leaf_catalog_enabled() -> bool {
+    std::env::var(PROGRESS_OBSERVABLE_LEAF_CATALOG_V1_ENV)
         .map(|v| flag_on(&v))
         .unwrap_or(false)
         || std::env::var(PROGRESS_EVIDENCE_V1_ENV)
@@ -98,7 +113,13 @@ pub fn build_evidence_atom_catalog(graph: &ModuleGraph) -> EvidenceAtomCatalog {
             bindings: bound_refs,
             source_refs: vec![source_ref],
             grounding: format!("fact:{id}"),
+            progress_role: trpg_model::adventure_ir::ProgressRole::CarrierOnly,
         });
+    }
+    if progress_observable_leaf_catalog_enabled() {
+        for atom in trpg_model::adventure_ir::compile_authored_observations(graph) {
+            catalog.insert(atom);
+        }
     }
     catalog
 }
@@ -332,6 +353,31 @@ mod tests {
         let events = vec![ev.clone(), ev];
         let led = project_exact_evidence(&events, &cat);
         assert_eq!(led.len(), 1, "same (event, atom) ⇒ no duplicate evidence");
+    }
+
+    #[test]
+    fn observable_leaf_catalog_off_keeps_clue_only_baseline() {
+        // A graph that HAS affordance_items; with the EV-P3 flag OFF the catalog
+        // must stay clue-only (EV-2 byte baseline). No env set here ⇒ default OFF,
+        // unless the master flag is set in the ambient env — guard against that.
+        if progress_observable_leaf_catalog_enabled() {
+            return; // ambient master flag ON in this env; the dedicated ON test covers it
+        }
+        let graph = ModuleGraph {
+            module_id: "the_vault".into(),
+            clues: vec![json!({"id": "clue_aquifer_commercial", "name": "Aquifer", "page": 8})],
+            director_facilitation: Some(trpg_model::DirectorModuleConfig {
+                affordance_items: vec![trpg_model::DirectorAffordanceItem {
+                    description: "Investigate the Aquifer commercial.".into(),
+                    implies_vectors: vec!["Aquifer".into()],
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let cat = build_evidence_atom_catalog(&graph);
+        assert_eq!(cat.len(), 1, "OFF ⇒ clue-only (affordance_items ignored, EV-2 baseline)");
+        assert!(cat.resolve_fact("clue_aquifer_commercial").is_some());
     }
 
     #[test]
