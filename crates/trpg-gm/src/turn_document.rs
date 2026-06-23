@@ -150,6 +150,14 @@ pub(crate) struct TurnDocument {
     /// player-visible. Empty unless the GM emitted the tag (only when the flag is ON +
     /// the instruction was injected) ⇒ OFF == byte-identical baseline.
     pub materialized_content: Vec<trpg_model::adventure_ir::ContentDelivery>,
+    /// EV-P4 (`progress_capability_binding_v1`, default OFF): the main GM's
+    /// `[evidence_attempts]` sidecar — a JSON array of closed `{cap_id}` objects (the
+    /// offered action capabilities a check this turn is attempting). CANNOT carry an
+    /// objective/atom id or a completion verdict. Fail-closed: a missing tag, non-array
+    /// inner, or forged/empty entry is dropped, never guessed. NEVER player-visible.
+    /// Empty unless the GM emitted the tag (only when the flag is ON + the attempt
+    /// instruction was injected) ⇒ OFF == byte-identical baseline.
+    pub evidence_attempts: Vec<trpg_model::adventure_ir::CapId>,
 }
 
 impl TurnDocument {

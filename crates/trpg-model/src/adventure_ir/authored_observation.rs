@@ -324,7 +324,7 @@ pub fn parse_action_phrase(
 
 /// Tag the atom with its owning scene (`scene:<node_id>` binding) so the offer
 /// frontier can intersect by current scene. Idempotent.
-fn tag_scene(mut atom: EvidenceAtomSpec, scene_id: &str) -> EvidenceAtomSpec {
+pub(crate) fn tag_scene(mut atom: EvidenceAtomSpec, scene_id: &str) -> EvidenceAtomSpec {
     let tag = format!("scene:{scene_id}");
     if !atom.bindings.iter().any(|b| b == &tag) {
         atom.bindings.push(tag);
@@ -335,7 +335,7 @@ fn tag_scene(mut atom: EvidenceAtomSpec, scene_id: &str) -> EvidenceAtomSpec {
 // ───────────────────────── Source-specific derivers ─────────────────────────
 
 /// The entry scene's node_id (lowest `page_start`, ties broken by first listed).
-fn entry_scene_id(graph: &ModuleGraph) -> Option<String> {
+pub(crate) fn entry_scene_id(graph: &ModuleGraph) -> Option<String> {
     graph
         .scenes
         .iter()

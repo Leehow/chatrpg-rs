@@ -31,6 +31,7 @@ mod mission_template;
 mod mission_text;
 mod objective;
 mod predicate;
+mod prep_packet_objectives;
 mod progress_signal;
 mod relation;
 
@@ -66,6 +67,9 @@ pub use objective::{
 pub use predicate::{
     EvalContext, EventPattern, IrValue, KnowledgeHolder, ObjectiveStatus, PredicateExpr,
     PredicateValue,
+};
+pub use prep_packet_objectives::{
+    compile_prep_packet_guard_leaves, objectives_from_prep_packet, prep_packet_binding_hints,
 };
 pub use progress_signal::{J3Axis, ProgressSignal, ProgressSignalKind};
 pub use relation::{Authority, Enforcement, Relation, RelationKind};

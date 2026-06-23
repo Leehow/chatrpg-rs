@@ -160,6 +160,12 @@ pub use evidence_gateway::{
     EvidenceGateway, GatewayInputs, RejectionReason,
 };
 
+pub mod evidence_binding;
+pub use evidence_binding::{
+    bind_capability_evidence, parse_evidence_attempts, progress_capability_binding_enabled,
+    render_attempt_instruction, BindingDecision, BindingReject,
+};
+
 pub mod exact_projectors;
 pub use exact_projectors::{
     build_location_atom_catalog, build_state_atom_catalog, progress_exact_projectors_enabled,

@@ -36,6 +36,7 @@ const TAGS: &[(&str, WireTag)] = &[
     ("meta", WireTag::Meta),
     ("progress_claims", WireTag::ProgressClaims),
     ("evidence_audit", WireTag::EvidenceAudit),
+    ("evidence_attempts", WireTag::EvidenceAttempts),
     ("materialized_content", WireTag::MaterializedContent),
 ];
 
@@ -54,6 +55,10 @@ enum WireTag {
     /// EV-P1 `[evidence_audit]` — GM-only sidecar; inner is a single closed-schema JSON
     /// object (EvidenceAudit). Parsed into `TurnDocument.evidence_audit`; NO player block.
     EvidenceAudit,
+    /// EV-P4 `[evidence_attempts]` — GM-only sidecar; inner is a JSON array of closed
+    /// `{cap_id}` objects (the offered actions a check attempts this turn). Parsed into
+    /// `TurnDocument.evidence_attempts`; NO player-visible block.
+    EvidenceAttempts,
     /// EV-P2 `[materialized_content]` — GM-only sidecar; inner is a JSON array of
     /// closed-schema ContentDelivery. Parsed into `TurnDocument.materialized_content`;
     /// NO player-visible block.
@@ -72,6 +77,7 @@ impl WireTag {
             WireTag::Meta => "meta",
             WireTag::ProgressClaims => "progress_claims",
             WireTag::EvidenceAudit => "evidence_audit",
+            WireTag::EvidenceAttempts => "evidence_attempts",
             WireTag::MaterializedContent => "materialized_content",
         }
     }
@@ -161,6 +167,20 @@ fn push_tag_block(doc: &mut TurnDocument, tag: WireTag, inner: &str) {
                 trimmed.trim(),
             ) {
                 doc.evidence_audit = Some(audit);
+            }
+        }
+        WireTag::EvidenceAttempts => {
+            // EV-P4: the inner is a JSON array of closed `{cap_id}` objects. Reuse the
+            // fail-closed parser (`evidence_binding::parse_evidence_attempts`, which
+            // drops forged/extra-field/empty entries via `deny_unknown_fields`) by
+            // wrapping the array under the `evidence_attempts` key it expects. Non-array
+            // / malformed inner ⇒ no attempts. NO player-visible block ⇒ GM-only.
+            if let Ok(arr) = serde_json::from_str::<serde_json::Value>(trimmed.trim()) {
+                if arr.is_array() {
+                    let wrapped = serde_json::json!({ "evidence_attempts": arr });
+                    let caps = trpg_runtime::evidence_binding::parse_evidence_attempts(&wrapped);
+                    doc.evidence_attempts.extend(caps);
+                }
             }
         }
         WireTag::MaterializedContent => {
@@ -573,6 +593,32 @@ mod tests {
         // Default GM output (flag OFF / not instructed) leaves evidence_audit None.
         let doc = parse_turn_document("[narration]平平无奇的一回合。[/narration]");
         assert!(doc.evidence_audit.is_none());
+    }
+
+    // ── EV-P4 evidence_attempts sidecar (progress_capability_binding_v1) ──────────────────
+    #[test]
+    fn evidence_attempts_tag_parsed_fail_closed_and_never_player_visible() {
+        // A main-GM `[evidence_attempts]` array (closed `{cap_id}`) fills
+        // doc.evidence_attempts; a forged extra field is dropped; never player-visible.
+        let doc = parse_turn_document(concat!(
+            "[narration]特工撬开异常体的取样面板。[/narration]",
+            "[evidence_attempts][{\"cap_id\":\"cap_2a0d946812d6\"},",
+            "{\"cap_id\":\"cap_forge\",\"completed\":true}][/evidence_attempts]",
+        ));
+        assert_eq!(doc.evidence_attempts.len(), 1, "only the closed-schema attempt parses");
+        assert_eq!(doc.evidence_attempts[0].as_str(), "cap_2a0d946812d6");
+        let pt = doc.player_text();
+        assert_eq!(pt, "特工撬开异常体的取样面板。");
+        assert!(!pt.contains("cap_2a0d946812d6"), "cap handle leaked: {pt}");
+        assert!(!pt.contains("evidence_attempts"), "tag leaked: {pt}");
+    }
+
+    #[test]
+    fn no_evidence_attempts_tag_keeps_field_empty_baseline() {
+        // Default GM output (flag OFF / not instructed) leaves evidence_attempts empty,
+        // and the `evidence_attempts` tag does not disturb the sibling `evidence_audit` tag.
+        let doc = parse_turn_document("[narration]平平无奇的一回合。[/narration]");
+        assert!(doc.evidence_attempts.is_empty());
     }
 
     // ── EV-P2 materialized_content sidecar (progress_exact_projectors_v1) ─────────────────

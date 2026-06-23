@@ -1217,6 +1217,51 @@ impl GmLoop {
             return; // exact-only run (no offers this turn): the seed was already logged
         };
 
+        // EV-P4: capability binding producer (shadow), run in BOTH audit + claim modes.
+        // The GM's `[evidence_attempts]` tag + a committed successful check ⇒
+        // AcceptedEvidence(ActionResolved, ExactDomain). Seeded with the exact-producer
+        // ledger so a binding duplicating an exact observation is rejected. flag OFF or
+        // no attempts ⇒ no-op. Still SHADOW: engine not consuming, J3 unchanged.
+        if trpg_runtime::evidence_binding::progress_capability_binding_enabled()
+            && !doc.evidence_attempts.is_empty()
+        {
+            let (bound, decisions) = trpg_runtime::evidence_binding::bind_capability_evidence(
+                &input.request.session_id,
+                &turn_id,
+                &offer_set,
+                &catalog,
+                &events,
+                &doc.evidence_attempts,
+                &seed,
+            );
+            for d in &decisions {
+                match &d.result {
+                    Ok(atom) => tracing::info!(
+                        session_id = %input.request.session_id,
+                        turn_id = %turn_id,
+                        cap = %d.cap_id.as_str(),
+                        atom = %atom,
+                        authority = "ExactDomain",
+                        "EV-P4 capability binding ADMITTED action evidence on MAIN GM (shadow; engine not consuming, J3 unchanged)"
+                    ),
+                    Err(reason) => tracing::info!(
+                        session_id = %input.request.session_id,
+                        turn_id = %turn_id,
+                        cap = %d.cap_id.as_str(),
+                        reason = reason.as_str(),
+                        "EV-P4 capability binding REJECTED on MAIN GM (shadow)"
+                    ),
+                }
+            }
+            tracing::info!(
+                session_id = %input.request.session_id,
+                turn_id = %turn_id,
+                attempts = doc.evidence_attempts.len(),
+                bound_admitted = bound.len().saturating_sub(seed.len()),
+                "EV-P4 capability binding complete on MAIN GM (shadow; engine not consuming; J3 unchanged)"
+            );
+        }
+
         // EV-P1: in audit-mode evaluate the MANDATORY per-offer EvidenceAudit. A missing/
         // incomplete/extra/mismatched audit is a logged ProducerProtocolFailure — NEVER a
         // silent "none" (the EV-4R producer-recall bug). Still SHADOW: no engine, no objective.
@@ -1960,7 +2005,31 @@ impl GmLoop {
         };
         // Surfaced clues come from page-containment projection (CL-1); we own this graph copy.
         let _ = trpg_runtime::clue_projection::project_clues_onto_scenes(&mut graph);
-        let catalog = trpg_runtime::evidence_projection::build_evidence_atom_catalog(&graph);
+        let mut catalog = trpg_runtime::evidence_projection::build_evidence_atom_catalog(&graph);
+        // EV-P4 (B): the_vault's authored mission objectives live in the prep-packet, NOT
+        // the (flattened) module_graph. Enrich the catalog with GuardLeaf objective atoms
+        // from the prep-packet so flowing evidence is progression-relevant. Flag-gated ⇒
+        // OFF == byte-identical baseline (no DB read, no atoms). The EV-P3 offer path
+        // (active under the master flag) surfaces these scene-tagged observable actions.
+        if trpg_runtime::evidence_binding::progress_capability_binding_enabled() {
+            if let Ok(Some(csp)) = self.engine.db.load_module_prep_packet_session(module_id).await {
+                let mut guard_leaves = 0usize;
+                for atom in
+                    trpg_model::adventure_ir::compile_prep_packet_guard_leaves(&graph, &csp)
+                {
+                    if catalog.insert(atom) {
+                        guard_leaves += 1;
+                    }
+                }
+                if guard_leaves > 0 {
+                    tracing::info!(
+                        module_id,
+                        guard_leaves,
+                        "EV-P4 prep-packet GuardLeaf objective atoms compiled into the catalog (shadow)"
+                    );
+                }
+            }
+        }
         let current_scene = ctx.state_agent.scene_id.as_deref().unwrap_or("");
         let turn_id = input.request.turn_id.clone();
         let offer_set = trpg_runtime::evidence_offers::derive_offer_set(
@@ -1990,6 +2059,13 @@ impl GmLoop {
         if trpg_runtime::exact_projectors::progress_exact_projectors_enabled() {
             block.push_str("\n\n");
             block.push_str(&crate::evidence_audit::render_content_delivery_instruction());
+        }
+        // EV-P4: when capability binding is ON, ask the GM to tag a check with the
+        // offered action it attempts (`[evidence_attempts]`). Appended only inside the
+        // flag guard ⇒ OFF prompt bytes unchanged.
+        if trpg_runtime::evidence_binding::progress_capability_binding_enabled() {
+            block.push_str("\n\n");
+            block.push_str(&trpg_runtime::evidence_binding::render_attempt_instruction());
         }
         tracing::info!(
             session_id = %input.request.session_id,
