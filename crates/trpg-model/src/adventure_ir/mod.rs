@@ -34,6 +34,7 @@ mod predicate;
 mod prep_packet_objectives;
 mod progress_signal;
 mod relation;
+mod scene_advance_objectives;
 
 pub use authored_observation::{
     classify_verb, compile_authored_observations, compile_objective_leaves, is_tautology,
@@ -74,3 +75,6 @@ pub use prep_packet_objectives::{
 };
 pub use progress_signal::{J3Axis, ProgressSignal, ProgressSignalKind};
 pub use relation::{Authority, Enforcement, Relation, RelationKind};
+pub use scene_advance_objectives::{
+    scene_advance_guard_leaves, scene_advance_objective, SCENE_ADVANCE_PREFIX,
+};

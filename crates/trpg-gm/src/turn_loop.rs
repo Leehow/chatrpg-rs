@@ -1592,9 +1592,16 @@ impl GmLoop {
     /// Reuses the EV-APPLY pure core [`trpg_runtime::progression::witnessed_objective_resolutions`]
     /// (engine + EV-P4 objective compiler) — no rebuild. The ENGINE produces the signal, never
     /// the LLM (`LLM ∩ ProgressSignal = ∅`). **nav-split**: never mutates `current_scene`.
-    /// flag OFF (`witnessed_progression_apply_enabled()` false) ⇒ immediate no-op ⇒ no graph
-    /// load, no event, byte-identical to the shadow path. fail-closed: no module / no graph /
-    /// no prep-packet / no admitted GuardLeaf ⇒ no ObjectiveResolved.
+    ///
+    /// D2 `progress_scene_advance_evidence_v1` adds a SECOND consume on the SAME engine/ledger:
+    /// the player's CURRENT scene's evidence-backed advance objective
+    /// ([`trpg_runtime::progression::witnessed_scene_advance_resolutions`]) — so a published
+    /// module with no prep-packet objectives (homecoming) still advances when a real admitted
+    /// authored observation of its scene lands. Gated by its OWN standalone flag.
+    ///
+    /// Both flags OFF ⇒ immediate no-op ⇒ no graph load, no event, byte-identical to the shadow
+    /// path. fail-closed: no module / no graph / no prep-packet / no admitted GuardLeaf ⇒ no
+    /// ObjectiveResolved.
     async fn apply_witnessed_progression(
         &self,
         input: &GmTurnInput<'_>,
@@ -1602,8 +1609,10 @@ impl GmLoop {
         current_scene: &str,
         ledger: &trpg_model::adventure_ir::EvidenceLedger,
     ) {
-        if !trpg_runtime::progression::witnessed_progression_apply_enabled() {
-            return; // OFF == byte-identical baseline (engine never consumes the ledger live)
+        let apply_on = trpg_runtime::progression::witnessed_progression_apply_enabled();
+        let scene_adv_on = trpg_runtime::progression::scene_advance_evidence_enabled();
+        if !apply_on && !scene_adv_on {
+            return; // OFF (both flags) == byte-identical baseline (engine never consumes the ledger live)
         }
         let Some(module_id) = input
             .request
@@ -1614,40 +1623,69 @@ impl GmLoop {
             return; // fail-closed: no module ⇒ no progression
         };
         // Same graph the offer/catalog path used at turn-start (clue-projected) so the
-        // EV-P4 GuardLeaf atom_ids match the admitted evidence's atom_ids exactly.
+        // GuardLeaf atom_ids match the admitted evidence's atom_ids exactly (codex A).
         let mut graph = match self.engine.db.load_module_graph(module_id).await {
             Ok(Some(g)) => g,
             _ => return, // fail-closed: graph load failed/absent
         };
         let _ = trpg_runtime::clue_projection::project_clues_onto_scenes(&mut graph);
-        let Ok(Some(csp)) = self.engine.db.load_module_prep_packet_session(module_id).await else {
-            return; // fail-closed: no prep-packet ⇒ no authored evidence-objective
-        };
 
-        let resolutions = trpg_runtime::progression::witnessed_objective_resolutions(
-            &input.request.session_id,
-            turn_id,
-            &graph,
-            &csp,
-            ledger,
-            current_scene,
-        );
-        if resolutions.is_empty() {
-            return; // no objective completed this turn (fail-closed; common until the GuardLeaf admits)
+        // D2 `progress_scene_advance_evidence_v1`: the engine consumes the ledger for the
+        // player's CURRENT scene's evidence-backed advance objective → a durable
+        // `scene_advance` ObjectiveResolved when a real admitted authored observation of
+        // that scene lands. Wall B bridge for published modules with no prep-packet
+        // objectives (homecoming). Independent of the prep-packet; runs on the SAME
+        // clue-projected graph as the offers. OFF ⇒ this block never runs ⇒ byte-identical.
+        if scene_adv_on {
+            for ev in &trpg_runtime::progression::witnessed_scene_advance_resolutions(
+                &input.request.session_id,
+                turn_id,
+                &graph,
+                ledger,
+                current_scene,
+            ) {
+                if let Err(e) = self.engine.db.append_domain_event(ev).await {
+                    tracing::warn!(error = %e, turn_id = %turn_id, "D2 scene-advance ObjectiveResolved append failed (non-fatal)");
+                } else {
+                    tracing::info!(
+                        session_id = %input.request.session_id,
+                        turn_id = %turn_id,
+                        objective = %ev.data.get("objective_id").and_then(|v| v.as_str()).unwrap_or(""),
+                        atom = %ev.data.get("atom_id").and_then(|v| v.as_str()).unwrap_or(""),
+                        scene = %ev.data.get("scene_id").and_then(|v| v.as_str()).unwrap_or(""),
+                        "D2 engine consumed admitted scene observation ⇒ scene_advance ObjectiveResolved (frontier advances; current_scene untouched)"
+                    );
+                }
+            }
         }
-        for ev in &resolutions {
-            // Durable SEM_KINDS carrier (j3v2 semantic axis). Idempotent on event_id
-            // (de_objresolved_{session}_{objective}) ⇒ one row per objective per session.
-            if let Err(e) = self.engine.db.append_domain_event(ev).await {
-                tracing::warn!(error = %e, turn_id = %turn_id, "EV-APPLY-WIRE ObjectiveResolved append failed (non-fatal)");
-            } else {
-                tracing::info!(
-                    session_id = %input.request.session_id,
-                    turn_id = %turn_id,
-                    objective = %ev.data.get("objective_id").and_then(|v| v.as_str()).unwrap_or(""),
-                    atom = %ev.data.get("atom_id").and_then(|v| v.as_str()).unwrap_or(""),
-                    "EV-APPLY-WIRE engine consumed witnessed GuardLeaf evidence ⇒ ObjectiveResolved (J3 semantic progression; frontier advances; current_scene untouched)"
-                );
+
+        // EV-APPLY-WIRE prep-packet path (the_vault) — unchanged; gated by the master/apply flag.
+        if apply_on {
+            let Ok(Some(csp)) = self.engine.db.load_module_prep_packet_session(module_id).await else {
+                return; // fail-closed: no prep-packet ⇒ no authored evidence-objective
+            };
+            let resolutions = trpg_runtime::progression::witnessed_objective_resolutions(
+                &input.request.session_id,
+                turn_id,
+                &graph,
+                &csp,
+                ledger,
+                current_scene,
+            );
+            for ev in &resolutions {
+                // Durable SEM_KINDS carrier (j3v2 semantic axis). Idempotent on event_id
+                // (de_objresolved_{session}_{objective}) ⇒ one row per objective per session.
+                if let Err(e) = self.engine.db.append_domain_event(ev).await {
+                    tracing::warn!(error = %e, turn_id = %turn_id, "EV-APPLY-WIRE ObjectiveResolved append failed (non-fatal)");
+                } else {
+                    tracing::info!(
+                        session_id = %input.request.session_id,
+                        turn_id = %turn_id,
+                        objective = %ev.data.get("objective_id").and_then(|v| v.as_str()).unwrap_or(""),
+                        atom = %ev.data.get("atom_id").and_then(|v| v.as_str()).unwrap_or(""),
+                        "EV-APPLY-WIRE engine consumed witnessed GuardLeaf evidence ⇒ ObjectiveResolved (J3 semantic progression; frontier advances; current_scene untouched)"
+                    );
+                }
             }
         }
     }

@@ -322,10 +322,17 @@ pub fn parse_action_phrase(
     })
 }
 
+/// The `scene:` binding prefix that [`tag_scene`] uses to mark an atom's owning
+/// scene. Exposed so scene-scoped consumers (D2 scene-advance objectives) filter the
+/// catalog by the SAME prefix instead of re-hardcoding the literal.
+pub(crate) fn tag_scene_prefix() -> &'static str {
+    "scene:"
+}
+
 /// Tag the atom with its owning scene (`scene:<node_id>` binding) so the offer
 /// frontier can intersect by current scene. Idempotent.
 pub(crate) fn tag_scene(mut atom: EvidenceAtomSpec, scene_id: &str) -> EvidenceAtomSpec {
-    let tag = format!("scene:{scene_id}");
+    let tag = format!("{}{scene_id}", tag_scene_prefix());
     if !atom.bindings.iter().any(|b| b == &tag) {
         atom.bindings.push(tag);
     }

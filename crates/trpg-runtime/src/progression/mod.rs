@@ -15,6 +15,7 @@ mod engine;
 mod evidence_apply;
 mod frontier;
 mod program;
+mod scene_advance_apply;
 mod spine;
 mod state;
 
@@ -26,6 +27,9 @@ pub use evidence_apply::{
 pub use frontier::{compute_frontier, AdvancementFrontier};
 pub use program::{
     derive_threat_objective, program_from_module_graph, ObjectiveDerivation, OwnedProgram,
+};
+pub use scene_advance_apply::{
+    scene_advance_evidence_enabled, witnessed_scene_advance_resolutions,
 };
 pub use spine::augment_program_with_spine;
 pub use state::{ProgressEvent, ProgressionState};
