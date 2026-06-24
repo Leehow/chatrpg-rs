@@ -125,6 +125,46 @@ pub fn compile_prep_packet_guard_leaves(
     graph: &ModuleGraph,
     packet_csp: &Value,
 ) -> Vec<EvidenceAtomSpec> {
+    guard_leaf_pairs(graph, packet_csp)
+        .into_iter()
+        .map(|(_obj, atom)| atom)
+        .collect()
+}
+
+/// EV-APPLY `witnessed_progression_apply_v1` — re-express each prep-packet objective
+/// leaf as an objective whose `success_when` is
+/// [`PredicateExpr::EvidencePresent`]`(<the GuardLeaf atom compiled from the SAME
+/// leaf>)`. This is the **Wall C link**: the OpaqueAuthoredText objective (which
+/// never auto-fires) becomes Executable THROUGH its evidence atom — the engine
+/// completes it once that atom's `AcceptedEvidence` lands in the ledger, never by
+/// re-interpreting the authored prose. One evidence-objective per GuardLeaf atom;
+/// fail-closed (a leaf that compiles to no GuardLeaf atom yields no objective).
+pub fn evidence_objectives_from_prep_packet(
+    graph: &ModuleGraph,
+    packet_csp: &Value,
+) -> Vec<ObjectiveSpec> {
+    guard_leaf_pairs(graph, packet_csp)
+        .into_iter()
+        .map(|(obj, atom)| ObjectiveSpec {
+            // Re-express the opaque leaf's guard as its evidence atom — everything
+            // else (id / source provenance) is carried over unchanged.
+            success_when: PredicateExpr::EvidencePresent {
+                atom_id: atom.atom_id.as_str().to_string(),
+            },
+            ..obj
+        })
+        .collect()
+}
+
+/// Shared core: for each authored objective leaf that compiles to a **GuardLeaf**
+/// atom, the `(opaque ObjectiveSpec, GuardLeaf atom)` pair it produces. Reused by
+/// both [`compile_prep_packet_guard_leaves`] (atoms only) and
+/// [`evidence_objectives_from_prep_packet`] (objectives wired to those atoms) so the
+/// validator/dedup/anti-fabrication logic lives in ONE place.
+fn guard_leaf_pairs(
+    graph: &ModuleGraph,
+    packet_csp: &Value,
+) -> Vec<(ObjectiveSpec, EvidenceAtomSpec)> {
     let module_digest = graph.module_id.as_str();
     let objectives = objectives_from_prep_packet(packet_csp, module_digest);
     let hints = prep_packet_binding_hints(packet_csp);
@@ -138,7 +178,7 @@ pub fn compile_prep_packet_guard_leaves(
 
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
-    for obj in &objectives {
+    for obj in objectives {
         let PredicateExpr::OpaqueAuthoredText { raw_text } = &obj.success_when else {
             continue;
         };
@@ -169,10 +209,11 @@ pub fn compile_prep_packet_guard_leaves(
         if !seen.insert(atom.grounding.clone()) {
             continue;
         }
-        out.push(match &entry {
+        let atom = match &entry {
             Some(s) => tag_scene(atom, s),
             None => atom,
-        });
+        };
+        out.push((obj, atom));
     }
     out
 }
@@ -308,5 +349,47 @@ mod tests {
         let empty = json!({"npcs": []});
         assert!(objectives_from_prep_packet(&empty, "the_vault").is_empty());
         assert!(compile_prep_packet_guard_leaves(&g, &empty).is_empty());
+    }
+
+    #[test]
+    fn evidence_objective_links_success_when_to_its_own_guard_leaf_atom() {
+        // EV-APPLY Wall C: the prep-packet objective "Conduct an experiment." is an
+        // OpaqueAuthoredText leaf that NEVER auto-fires. Re-expressed here as an
+        // objective whose `success_when = EvidencePresent(<its GuardLeaf atom>)`, it
+        // becomes guard-checkable THROUGH typed evidence — never by re-interpreting
+        // the prose. The atom id MUST be the SAME atom the GuardLeaf compiler emits.
+        let g = graph_with_anomaly();
+        let p = packet("Conduct an experiment.");
+        let atom = compile_prep_packet_guard_leaves(&g, &p)
+            .into_iter()
+            .next()
+            .expect("authored leaf compiles to a GuardLeaf atom");
+        let objs = evidence_objectives_from_prep_packet(&g, &p);
+        assert_eq!(objs.len(), 1, "one evidence-backed objective from the authored leaf");
+        let o = &objs[0];
+        match &o.success_when {
+            PredicateExpr::EvidencePresent { atom_id } => {
+                assert_eq!(atom_id, atom.atom_id.as_str(), "links to its OWN GuardLeaf atom");
+            }
+            other => panic!("expected EvidencePresent, got {other:?}"),
+        }
+        assert!(o.success_when.is_executable(), "evidence guard is executable (unlike the opaque leaf)");
+        assert!(!o.source_evidence.is_empty(), "source-grounded (carries the packet anchor)");
+        assert_eq!(o.source_evidence[0].anchor_id.as_deref(), Some(PACKET_ANCHOR));
+    }
+
+    #[test]
+    fn evidence_objective_absent_when_no_guard_leaf() {
+        // 'wear' is not a lexicon verb ⇒ no GuardLeaf atom ⇒ no evidence-objective
+        // (fail-closed; never fabricate an objective with no evidence anchor).
+        let g = graph_with_anomaly();
+        assert!(evidence_objectives_from_prep_packet(&g, &packet("Wear a flower crown.")).is_empty());
+        // and the GuardLeaf atoms vs the evidence-objectives stay 1:1.
+        let p = packet("Conduct an experiment.");
+        assert_eq!(
+            compile_prep_packet_guard_leaves(&g, &p).len(),
+            evidence_objectives_from_prep_packet(&g, &p).len(),
+            "one evidence-objective per GuardLeaf atom"
+        );
     }
 }

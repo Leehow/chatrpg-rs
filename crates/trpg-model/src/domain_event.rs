@@ -144,6 +144,16 @@ pub enum DomainEventKind {
     /// 当前阶段 progression adapter **尚未**消费它（EV-2 exact projector 的活），故 EV-1 接通后
     /// 不改任何 ProgressSignal（J3 仍 RED，符合设计预期）。
     WorldFactChanged,
+    /// EV-APPLY `witnessed_progression_apply_v1`：当 **ProgressionEngine** 消费
+    /// AcceptedEvidence ledger、其可执行 guard（`EvidencePresent(<GuardLeaf atom>)`）判
+    /// True 而 fire `ProgressSignalKind::ObjectiveCompleted` 时，运行时把该引擎结论持久化为
+    /// 这条 canonical 领域事件——**唯有 ProgressionEngine 产 ProgressSignal**（`LLM output ∩
+    /// ProgressSignal = ∅`：LLM 只提过 EvidenceClaim，Rust 接纳并评 guard）。j3v2 进度判官的
+    /// SEMANTIC 轴（`SEM_KINDS` 含 `ObjectiveResolved`）据此把"任务目标经证据完成"记为语义推进。
+    /// 仅在 apply flag 开启时发出（OFF ⇒ 零此事件 = 字节基线）。data 带 objective_id +
+    /// basis_atom；幂等键 `de_objresolved_{session}_{objective}_{turn}`。**nav-split**：此事件
+    /// 只表"目标完成"，绝不改 current_scene（场景转换仍 NavigationResolver 玩家驱动）。
+    ObjectiveResolved,
 }
 
 impl DomainEventKind {
@@ -181,6 +191,7 @@ impl DomainEventKind {
             DomainEventKind::BeatPlanned => "BeatPlanned",
             DomainEventKind::BeatObserved => "BeatObserved",
             DomainEventKind::WorldFactChanged => "WorldFactChanged",
+            DomainEventKind::ObjectiveResolved => "ObjectiveResolved",
         }
     }
 
@@ -216,6 +227,7 @@ impl DomainEventKind {
             "BeatPlanned" => DomainEventKind::BeatPlanned,
             "BeatObserved" => DomainEventKind::BeatObserved,
             "WorldFactChanged" => DomainEventKind::WorldFactChanged,
+            "ObjectiveResolved" => DomainEventKind::ObjectiveResolved,
             _ => DomainEventKind::TurnStarted,
         }
     }
@@ -703,6 +715,63 @@ mod tests {
             "BeatObserved",
         ] {
             assert_ne!(k.as_str(), existing, "WorldFactChanged token 必与既有 27 个不同");
+        }
+        // fail-closed 未知回退不受影响。
+        assert_eq!(
+            DomainEventKind::from_str_token("Bogus"),
+            DomainEventKind::TurnStarted
+        );
+    }
+
+    #[test]
+    fn objective_resolved_kind_token_and_serde_roundtrip() {
+        // EV-APPLY witnessed_progression_apply_v1: minted kind for "the engine fired
+        // ObjectiveCompleted from an admitted GuardLeaf AcceptedEvidence" (only the
+        // ProgressionEngine produces this — LLM∩ProgressSignal=∅). token 稳定契约 +
+        // serde 闭环 + 与既有 28 variant 区分。
+        let k = DomainEventKind::ObjectiveResolved;
+        assert_eq!(k.as_str(), "ObjectiveResolved");
+        assert_eq!(DomainEventKind::from_str_token("ObjectiveResolved"), k);
+        let v = serde_json::to_value(k).unwrap();
+        assert_eq!(
+            v.as_str(),
+            Some("ObjectiveResolved"),
+            "serde token 必与 as_str 一致"
+        );
+        let back: DomainEventKind = serde_json::from_value(v).unwrap();
+        assert_eq!(back, k);
+        // 与既有 28 个 variant 全部不相交（不碰旧 token——上方 round-trip 守卫锁死它们）。
+        for existing in [
+            "TurnStarted",
+            "TurnFinalized",
+            "TurnFailed",
+            "SceneTransitioned",
+            "DiceRolled",
+            "CheckResolved",
+            "EntitySurfaced",
+            "ContextSurfaced",
+            "PlayerExposed",
+            "PlayerLearnedFact",
+            "NpcLearnedFact",
+            "ClientDisconnected",
+            "FactRevealed",
+            "RelationshipChanged",
+            "ResourceChanged",
+            "NpcActionResolved",
+            "ClockAdvanced",
+            "StoryThreadOpened",
+            "StoryThreadAdvanced",
+            "StoryThreadResolved",
+            "StoryThreadDormant",
+            "StoryPromiseCreated",
+            "StoryPromiseReinforced",
+            "StoryPromisePaidOff",
+            "ScenePlanCreated",
+            "BeatPlanned",
+            "BeatObserved",
+            "WorldFactChanged",
+        ] {
+            assert_ne!(k.as_str(), existing, "ObjectiveResolved token 必与既有 28 个不同");
         }
         // fail-closed 未知回退不受影响。
         assert_eq!(

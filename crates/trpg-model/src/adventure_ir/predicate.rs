@@ -10,7 +10,7 @@
 //! *cannot be decided* never silently passes.
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A finite, comparable value used by leaf predicates. Deliberately small and
 /// `Eq` so guard evaluation is deterministic (no float/NaN ambiguity).
@@ -85,6 +85,18 @@ pub enum PredicateExpr {
     /// so the LLM never evaluates the guard (Rust does, deterministically).
     /// Empty/whitespace-only tokens are skipped → never match-all (fail-closed).
     AnyFactMatches { tokens: Vec<String> },
+    /// EV-APPLY (`witnessed_progression_apply_v1`): True iff the turn's
+    /// AcceptedEvidence ledger admitted this authored atom (its `AtomId` string is
+    /// in [`EvalContext::present_evidence_atoms`]). This is the **executable**
+    /// objective→evidence link: an OpaqueAuthoredText objective leaf whose
+    /// EV-P4 GuardLeaf atom this is becomes guard-checkable THROUGH typed evidence
+    /// (Rust admitted it; the LLM produced none of this) — never by re-interpreting
+    /// the prose. Absent evidence ⇒ `False` (fail-closed: the objective stays open),
+    /// NEVER `NonExecutable`.
+    EvidencePresent { atom_id: String },
+    /// True iff AcceptedEvidence for ANY of these atoms is present. Empty set ⇒
+    /// `False` (fail-closed, never match-all).
+    EvidenceAnyOf { atom_ids: Vec<String> },
     /// Authored condition that could not be normalized. Stored for Director/GM
     /// to read; **never** auto-fires (`eval` → `NonExecutable`).
     OpaqueAuthoredText { raw_text: String },
@@ -116,6 +128,13 @@ pub struct EvalContext {
     /// ((entity, field) -> value)
     pub entity_states: BTreeMap<(String, String), IrValue>,
     pub resources: BTreeMap<String, i64>,
+    /// EV-APPLY: the `AtomId` strings the turn's AcceptedEvidence ledger admitted,
+    /// read by [`PredicateExpr::EvidencePresent`]/[`PredicateExpr::EvidenceAnyOf`].
+    /// Populated by the runtime ONLY when `witnessed_progression_apply_v1` is on
+    /// (the runtime calls `progression::apply_evidence_to_ctx`); empty otherwise, so
+    /// OFF == baseline (an EvidencePresent leaf fails closed and no objective auto-
+    /// completes through evidence). `Default` gives an empty set.
+    pub present_evidence_atoms: BTreeSet<String>,
 }
 
 impl EvalContext {
@@ -236,6 +255,12 @@ impl PredicateExpr {
                     let hay = k.to_lowercase();
                     needles.iter().any(|n| hay.contains(n.as_str()))
                 }))
+            }
+            PredicateExpr::EvidencePresent { atom_id } => {
+                b3(ctx.present_evidence_atoms.contains(atom_id))
+            }
+            PredicateExpr::EvidenceAnyOf { atom_ids } => {
+                b3(atom_ids.iter().any(|a| ctx.present_evidence_atoms.contains(a)))
             }
             // KEY fail-closed rule: Rust never auto-fires authored opaque text.
             PredicateExpr::OpaqueAuthoredText { .. } => NonExecutable,
@@ -511,6 +536,62 @@ mod tests {
         );
         // executable leaf (no opaque) → participates in is_executable.
         assert!(PredicateExpr::AnyFactMatches { tokens: vocab() }.is_executable());
+    }
+
+    #[test]
+    fn evidence_present_and_any_of_read_present_atoms() {
+        // EV-APPLY: the engine consumes the AcceptedEvidence ledger via the guard
+        // AST. `present_evidence_atoms` is the set of atom ids the ledger admitted
+        // this turn; an EvidencePresent leaf is True iff its atom is in that set.
+        let mut c = EvalContext::default();
+        c.present_evidence_atoms.insert("atom:abc".into());
+        // present ⇒ True (Rust decided from typed evidence; the LLM produced none).
+        assert_eq!(
+            PredicateExpr::EvidencePresent {
+                atom_id: "atom:abc".into()
+            }
+            .eval(&c),
+            True
+        );
+        // absent ⇒ False (fail-closed: objective stays OPEN, never NonExecutable —
+        // EvidencePresent is fully decidable, unlike OpaqueAuthoredText).
+        assert_eq!(
+            PredicateExpr::EvidencePresent {
+                atom_id: "atom:missing".into()
+            }
+            .eval(&c),
+            False
+        );
+        // EvidenceAnyOf: ANY present ⇒ True.
+        assert_eq!(
+            PredicateExpr::EvidenceAnyOf {
+                atom_ids: vec!["atom:x".into(), "atom:abc".into()]
+            }
+            .eval(&c),
+            True
+        );
+        // EvidenceAnyOf: none present ⇒ False.
+        assert_eq!(
+            PredicateExpr::EvidenceAnyOf {
+                atom_ids: vec!["atom:x".into()]
+            }
+            .eval(&c),
+            False
+        );
+        // empty atom set ⇒ False (fail-closed, never match-all).
+        assert_eq!(
+            PredicateExpr::EvidenceAnyOf { atom_ids: vec![] }.eval(&c),
+            False
+        );
+        // executable leaves (decidable) → participate in is_executable.
+        assert!(PredicateExpr::EvidencePresent {
+            atom_id: "atom:abc".into()
+        }
+        .is_executable());
+        assert!(PredicateExpr::EvidenceAnyOf {
+            atom_ids: vec!["atom:abc".into()]
+        }
+        .is_executable());
     }
 
     #[test]
