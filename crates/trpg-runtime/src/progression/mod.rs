@@ -20,7 +20,9 @@ mod state;
 
 pub use adapter::{progress_events_from_domain, replay_domain_events};
 pub use engine::{evaluate, ProgressionProgram};
-pub use evidence_apply::{apply_evidence_to_ctx, witnessed_progression_apply_enabled};
+pub use evidence_apply::{
+    apply_evidence_to_ctx, witnessed_objective_resolutions, witnessed_progression_apply_enabled,
+};
 pub use frontier::{compute_frontier, AdvancementFrontier};
 pub use program::{
     derive_threat_objective, program_from_module_graph, ObjectiveDerivation, OwnedProgram,

@@ -1185,6 +1185,9 @@ impl GmLoop {
         if admission.is_none() && !exact_on {
             return; // OFF == byte-identical baseline (neither path active)
         }
+        // EV-APPLY-WIRE: the engine reads (never writes) the current scene to surface
+        // scene-scoped objectives in the frontier — nav-split (no teleport/railroad).
+        let current_scene = ctx.state_agent.scene_id.clone().unwrap_or_default();
         let doc = crate::turn_markup_parser::parse_turn_document(visible_text);
         // THIS turn's committed events only (turn-local ⇒ commit:<i> resolves within the turn;
         // also reinforces the turn_id alignment the gateway's CausationMismatch enforces). The
@@ -1271,8 +1274,14 @@ impl GmLoop {
                 .await;
             // EV-P5: the post-turn witness recall backstop (separate focused LLM call), run
             // when the GM audit was missing/incomplete or complete-but-all-not_observed while
-            // structural candidates exist. flag OFF ⇒ no-op. Still SHADOW.
-            self.run_post_turn_witness(input, &turn_id, &offer_set, &catalog, &events, &doc, &outcome)
+            // structural candidates exist. flag OFF ⇒ no-op. Returns the turn's accumulated
+            // ledger (exact ∪ audit ∪ witness).
+            let ledger = self
+                .run_post_turn_witness(input, &turn_id, &offer_set, &catalog, &events, &doc, &outcome)
+                .await;
+            // EV-APPLY-WIRE: engine CONSUMES the accumulated ledger → ObjectiveResolved
+            // (flag-gated; OFF == byte-identical shadow). This is the slice that ends shadow.
+            self.apply_witnessed_progression(input, &turn_id, &current_scene, &ledger)
                 .await;
             return;
         }
@@ -1314,8 +1323,12 @@ impl GmLoop {
             turn_id = %turn_id,
             claims = doc.progress_claims.len(),
             admitted = ledger.len(),
-            "EV-4R shadow admission complete on MAIN GM (engine not consuming; J3 unchanged)"
+            "EV-4R admission complete on MAIN GM"
         );
+        // EV-APPLY-WIRE: engine CONSUMES this turn's admitted ledger on the EV-4R path too
+        // (flag-gated; OFF == byte-identical shadow).
+        self.apply_witnessed_progression(input, &turn_id, &current_scene, &ledger)
+            .await;
     }
 
     /// EV-P2 (`progress_exact_projectors_v1`) shadow exact producers, run post-commit BEFORE the
@@ -1485,9 +1498,9 @@ impl GmLoop {
         events: &[trpg_model::DomainEvent],
         doc: &crate::turn_document::TurnDocument,
         audit: &crate::evidence_audit::AuditOutcome,
-    ) {
+    ) -> trpg_model::adventure_ir::EvidenceLedger {
         if !trpg_runtime::post_turn_witness::progress_post_turn_witness_enabled() {
-            return; // OFF == byte-identical baseline (no second LLM call)
+            return audit.ledger.clone(); // OFF == byte-identical baseline (no second LLM call)
         }
         let candidates = trpg_runtime::post_turn_witness::structural_candidates(
             &input.request.session_id,
@@ -1510,7 +1523,7 @@ impl GmLoop {
                 witness_invoked = 0,
                 "EV-P5 post-turn witness NOT triggered (backstop idle; shadow)"
             );
-            return;
+            return audit.ledger.clone();
         }
         let materialized_refs: Vec<String> = doc
             .materialized_content
@@ -1565,6 +1578,78 @@ impl GmLoop {
             witness_admitted = ledger.len().saturating_sub(audit.ledger.len()),
             "EV-P5 post-turn witness complete (recall backstop; shadow — engine not consuming, J3 unchanged)"
         );
+        ledger
+    }
+
+    /// EV-APPLY-WIRE `witnessed_progression_apply_v1` (the last gap to J3): the engine
+    /// CONSUMES this turn's accumulated AcceptedEvidence `ledger`. Until this slice every
+    /// prior EV step was SHADOW (evidence admitted, engine never read it). Here, after the
+    /// turn's exact/binding/witness admission, an objective whose guard is
+    /// `EvidencePresent(<GuardLeaf atom>)` fires `ObjectiveCompleted` once that atom's
+    /// evidence is in the ledger ⇒ a durable [`DomainEventKind::ObjectiveResolved`] is
+    /// appended (the j3v2 SEMANTIC-axis carrier, prev always 0) and the frontier advances.
+    ///
+    /// Reuses the EV-APPLY pure core [`trpg_runtime::progression::witnessed_objective_resolutions`]
+    /// (engine + EV-P4 objective compiler) — no rebuild. The ENGINE produces the signal, never
+    /// the LLM (`LLM ∩ ProgressSignal = ∅`). **nav-split**: never mutates `current_scene`.
+    /// flag OFF (`witnessed_progression_apply_enabled()` false) ⇒ immediate no-op ⇒ no graph
+    /// load, no event, byte-identical to the shadow path. fail-closed: no module / no graph /
+    /// no prep-packet / no admitted GuardLeaf ⇒ no ObjectiveResolved.
+    async fn apply_witnessed_progression(
+        &self,
+        input: &GmTurnInput<'_>,
+        turn_id: &str,
+        current_scene: &str,
+        ledger: &trpg_model::adventure_ir::EvidenceLedger,
+    ) {
+        if !trpg_runtime::progression::witnessed_progression_apply_enabled() {
+            return; // OFF == byte-identical baseline (engine never consumes the ledger live)
+        }
+        let Some(module_id) = input
+            .request
+            .module_id
+            .as_deref()
+            .filter(|id| !id.trim().is_empty())
+        else {
+            return; // fail-closed: no module ⇒ no progression
+        };
+        // Same graph the offer/catalog path used at turn-start (clue-projected) so the
+        // EV-P4 GuardLeaf atom_ids match the admitted evidence's atom_ids exactly.
+        let mut graph = match self.engine.db.load_module_graph(module_id).await {
+            Ok(Some(g)) => g,
+            _ => return, // fail-closed: graph load failed/absent
+        };
+        let _ = trpg_runtime::clue_projection::project_clues_onto_scenes(&mut graph);
+        let Ok(Some(csp)) = self.engine.db.load_module_prep_packet_session(module_id).await else {
+            return; // fail-closed: no prep-packet ⇒ no authored evidence-objective
+        };
+
+        let resolutions = trpg_runtime::progression::witnessed_objective_resolutions(
+            &input.request.session_id,
+            turn_id,
+            &graph,
+            &csp,
+            ledger,
+            current_scene,
+        );
+        if resolutions.is_empty() {
+            return; // no objective completed this turn (fail-closed; common until the GuardLeaf admits)
+        }
+        for ev in &resolutions {
+            // Durable SEM_KINDS carrier (j3v2 semantic axis). Idempotent on event_id
+            // (de_objresolved_{session}_{objective}) ⇒ one row per objective per session.
+            if let Err(e) = self.engine.db.append_domain_event(ev).await {
+                tracing::warn!(error = %e, turn_id = %turn_id, "EV-APPLY-WIRE ObjectiveResolved append failed (non-fatal)");
+            } else {
+                tracing::info!(
+                    session_id = %input.request.session_id,
+                    turn_id = %turn_id,
+                    objective = %ev.data.get("objective_id").and_then(|v| v.as_str()).unwrap_or(""),
+                    atom = %ev.data.get("atom_id").and_then(|v| v.as_str()).unwrap_or(""),
+                    "EV-APPLY-WIRE engine consumed witnessed GuardLeaf evidence ⇒ ObjectiveResolved (J3 semantic progression; frontier advances; current_scene untouched)"
+                );
+            }
+        }
     }
 
     /// P1 Narrator 阶段（TRPG_NARRATOR_SPLIT ON）：从本回合 ctx 投影 NarrationPacket，
