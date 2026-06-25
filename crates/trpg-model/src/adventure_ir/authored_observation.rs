@@ -533,6 +533,14 @@ pub fn compile_authored_observations(graph: &ModuleGraph) -> Vec<EvidenceAtomSpe
     atoms.extend(from_affordance_items(graph, &index));
     atoms.extend(from_scene_mechanics(graph, &index));
     atoms.extend(from_gm_notes_affordances(graph, &index));
+    // F1 (default OFF ⇒ byte-identical baseline): scene-salient NPC-knowledge atoms
+    // for talk/combat scenes that carry no affordance/mechanic/gm-note (see
+    // `super::npc_knowledge_observation`). Single gated extend; no other insertion.
+    if super::npc_knowledge_observation::scene_npc_knowledge_enabled() {
+        atoms.extend(super::npc_knowledge_observation::from_referenced_npc_knowledge(
+            graph,
+        ));
+    }
 
     // dedup by grounding (keep first) + validator pass.
     let mut seen = std::collections::HashSet::new();

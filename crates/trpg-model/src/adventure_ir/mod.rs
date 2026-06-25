@@ -29,6 +29,7 @@ mod hierarchy;
 mod mission_scoring;
 mod mission_template;
 mod mission_text;
+mod npc_knowledge_observation;
 mod objective;
 mod predicate;
 mod prep_packet_objectives;
@@ -61,6 +62,10 @@ pub use mission_template::{
     MissionSpec,
 };
 pub use mission_text::pages_from_markdown;
+pub use npc_knowledge_observation::{
+    from_referenced_npc_knowledge, npc_has_authored_knowledge, scene_npc_knowledge_enabled,
+    SCENE_NPC_KNOWLEDGE_ENV,
+};
 pub use objective::{
     NormalizationStatus, ObjectiveSpec, ProgressRule, TrackerKind, TrackerRef, TrackerRung,
     TrackerSpec,
