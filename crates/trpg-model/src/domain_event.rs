@@ -154,6 +154,16 @@ pub enum DomainEventKind {
     /// basis_atom；幂等键 `de_objresolved_{session}_{objective}_{turn}`。**nav-split**：此事件
     /// 只表"目标完成"，绝不改 current_scene（场景转换仍 NavigationResolver 玩家驱动）。
     ObjectiveResolved,
+    /// E1 `scene_transition_gated_v1`：当某场景的 `obj.scene_advance.<scene>` 经 D2 真完成
+    /// （玩家在该场景做了 salient 内容、挣得推进）后，**ProgressionEngine 层**据结构（authored
+    /// out-edge 优先，否则连续脊文档型的 spine 顺序）解算出下一场景目标，发出的「场景已解锁」
+    /// canonical 领域事件。data 带 from_scene / next_scene / basis_objective。**nav-split 守恒**：
+    /// 此事件**只表"目标已解锁"，绝不改 current_scene**——真正的物理转场仍由唯一所有者
+    /// NavigationResolver（`scene_navigate_critical`）消费此解锁后写 current_scene + 发
+    /// `SceneTransitioned`。幂等键 `de_sceneunlocked_{session}_{from_scene}`（每会话每来源场景一次）。
+    /// 仅在 E1 flag 开启时发出（OFF ⇒ 零此事件 = 字节基线）。fail-closed：无可解算/可信下一场景
+    /// ⇒ 不发（绝不 teleport/编造）。
+    SceneUnlocked,
 }
 
 impl DomainEventKind {
@@ -192,6 +202,7 @@ impl DomainEventKind {
             DomainEventKind::BeatObserved => "BeatObserved",
             DomainEventKind::WorldFactChanged => "WorldFactChanged",
             DomainEventKind::ObjectiveResolved => "ObjectiveResolved",
+            DomainEventKind::SceneUnlocked => "SceneUnlocked",
         }
     }
 
@@ -228,6 +239,7 @@ impl DomainEventKind {
             "BeatObserved" => DomainEventKind::BeatObserved,
             "WorldFactChanged" => DomainEventKind::WorldFactChanged,
             "ObjectiveResolved" => DomainEventKind::ObjectiveResolved,
+            "SceneUnlocked" => DomainEventKind::SceneUnlocked,
             _ => DomainEventKind::TurnStarted,
         }
     }
@@ -382,6 +394,18 @@ mod tests {
             Some("FactRevealed"),
             "serde token 必与 as_str 一致"
         );
+        let back: DomainEventKind = serde_json::from_value(v).unwrap();
+        assert_eq!(back, k);
+    }
+
+    #[test]
+    fn scene_unlocked_kind_token_and_serde_roundtrip() {
+        // E1：进度门控场景解锁事件——token 稳定契约 + serde 闭环 + 未知回退不受影响。
+        let k = DomainEventKind::SceneUnlocked;
+        assert_eq!(k.as_str(), "SceneUnlocked");
+        assert_eq!(DomainEventKind::from_str_token("SceneUnlocked"), k);
+        let v = serde_json::to_value(k).unwrap();
+        assert_eq!(v.as_str(), Some("SceneUnlocked"), "serde token 必与 as_str 一致");
         let back: DomainEventKind = serde_json::from_value(v).unwrap();
         assert_eq!(back, k);
     }

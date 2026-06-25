@@ -12,7 +12,8 @@ use super::{
 };
 use crate::progression::{
     augment_program_with_spine, compute_frontier, derive_threat_objective, evaluate,
-    program_from_module_graph, progression_engine_enabled, replay_domain_events, ProgressEvent,
+    pending_unlock_target, program_from_module_graph, progression_engine_enabled,
+    replay_domain_events, scene_transition_gated_enabled, ProgressEvent,
 };
 use serde_json::json;
 use tracing::info;
@@ -50,6 +51,48 @@ pub async fn scene_navigate_critical(
         return Ok(None);
     }
     let current = db.load_session_scene(session_id).await?.unwrap_or_default();
+    // E1 `scene_transition_gated_v1` CONSUME (TRPG_PROGRESS_SCENE_TRANSITION_GATED_V1, default OFF):
+    // if the ProgressionEngine emitted an UNCONSUMED `SceneUnlocked` for the scene we are in — i.e.
+    // the player EARNED the advance by completing `obj.scene_advance.<current>` (D2) — perform the
+    // ONE scene write here and RETURN before the LLM nav. The NavigationResolver stays the SOLE
+    // `current_scene` owner (nav-split: E1 evolves WHEN it transitions, not WHO writes the scene);
+    // the next scene was resolved data-drivenly at emit time (authored edge / continuous-spine
+    // order, never a hardcoded map). execute.rs then writes `SceneTransitioned` via the EXISTING
+    // SceneNavCommit path (no second writer). fail-closed: no pending/unconsumed unlock ⇒ fall
+    // through to today's player-driven LLM nav. OFF ⇒ this whole block is skipped ⇒ byte-identical
+    // baseline (no extra DB read, no behavior change).
+    if scene_transition_gated_enabled() {
+        let events = db.list_domain_events(session_id, 5000).await.unwrap_or_default();
+        if let Some(next) = pending_unlock_target(&events, &current) {
+            // defense-in-depth: the unlock target must be a real, distinct scene node (the emitter's
+            // `resolve_next_scene` already guarantees this; re-checked so a stale/foreign unlock can
+            // never teleport off-graph).
+            if next != current && graph.scenes.iter().any(|s| s.node_id.trim() == next.trim()) {
+                db.set_session_scene(session_id, &next).await?;
+                let reason = format!("progression-gated: earned obj.scene_advance.{current}");
+                info!(session_id, from = %current, to = %next, %reason, "E1 progression-gated scene transition (critical): earned completed scene-advance objective drove the transition");
+                let event_data = json!({"kind": "scene_transition", "from": current, "to": next, "reason": reason, "module_id": module_id});
+                if let Err(err) = WorldTimeService::new(db.clone())
+                    .record_event(
+                        session_id,
+                        None,
+                        None,
+                        WorldEventKind::SceneChanged,
+                        event_data,
+                        Visibility::GmOnly,
+                    )
+                    .await
+                {
+                    tracing::warn!(error = %err, "E1 scene_navigate_critical: world event write failed; scene already switched");
+                }
+                return Ok(Some(SceneNavCommit {
+                    from: current,
+                    to: next,
+                    reason,
+                }));
+            }
+        }
+    }
     let list = graph
         .scenes
         .iter()

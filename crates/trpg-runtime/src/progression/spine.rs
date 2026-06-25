@@ -56,6 +56,21 @@ pub fn augment_program_with_spine(program: &mut OwnedProgram, graph: &ModuleGrap
     }
 }
 
+/// E1: the next scene after `from` in spine (page-sequence) order, if any. Pure structure —
+/// reuses [`spine_order`] (page_start then stable index). Returns None when `from` is absent from
+/// the spine or is the terminal scene. The CALLER decides whether a page-order successor is a SANE
+/// transition target (E1's `resolve_next_scene` gates this on continuous-spine document types so an
+/// anthology never page-teleports across independent units).
+pub fn next_spine_scene(graph: &ModuleGraph, from: &str) -> Option<String> {
+    let f = from.trim();
+    if f.is_empty() {
+        return None;
+    }
+    let order = spine_order(graph);
+    let pos = order.iter().position(|s| s.node_id.trim() == f)?;
+    order.get(pos + 1).map(|s| s.node_id.clone())
+}
+
 /// Spine order = scenes with a non-empty id, ordered by authored page sequence
 /// (`page_start`), then by their stable position in the parsed list. Pure structure.
 fn spine_order(graph: &ModuleGraph) -> Vec<&ScenarioNode> {
@@ -305,6 +320,32 @@ mod tests {
         let mut p = OwnedProgram::default();
         augment_program_with_spine(&mut p, &graph(vec![]));
         assert!(p.is_empty());
+    }
+
+    #[test]
+    fn next_spine_scene_follows_page_order_and_fails_closed_at_terminal() {
+        // E1: page-order successor; terminal scene / absent id ⇒ None.
+        let g = graph(vec![
+            scene("scene_01_lawmen", "Lawmen in Trouble", Some(5)),
+            scene("scene_02_athena", "Questions for Athena", Some(7)),
+            scene("scene_03_foxwell", "Foxwell Services", Some(9)),
+        ]);
+        assert_eq!(next_spine_scene(&g, "scene_01_lawmen").as_deref(), Some("scene_02_athena"));
+        assert_eq!(next_spine_scene(&g, "scene_02_athena").as_deref(), Some("scene_03_foxwell"));
+        assert_eq!(next_spine_scene(&g, "scene_03_foxwell"), None, "terminal ⇒ fail-closed");
+        assert_eq!(next_spine_scene(&g, "not_a_scene"), None, "absent id ⇒ None");
+        assert_eq!(next_spine_scene(&g, "   "), None, "blank ⇒ None");
+    }
+
+    #[test]
+    fn next_spine_scene_respects_page_order_not_list_order() {
+        // list order reversed vs page order; successor must follow page_start.
+        let g = graph(vec![
+            scene("late", "Final", Some(20)),
+            scene("early", "Opening", Some(1)),
+        ]);
+        assert_eq!(next_spine_scene(&g, "early").as_deref(), Some("late"));
+        assert_eq!(next_spine_scene(&g, "late"), None);
     }
 
     #[test]

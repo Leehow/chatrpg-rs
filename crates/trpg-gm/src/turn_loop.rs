@@ -1637,13 +1637,27 @@ impl GmLoop {
         // objectives (homecoming). Independent of the prep-packet; runs on the SAME
         // clue-projected graph as the offers. OFF ⇒ this block never runs ⇒ byte-identical.
         if scene_adv_on {
-            for ev in &trpg_runtime::progression::witnessed_scene_advance_resolutions(
-                &input.request.session_id,
-                turn_id,
-                &graph,
-                ledger,
-                current_scene,
-            ) {
+            let scene_adv_resolutions =
+                trpg_runtime::progression::witnessed_scene_advance_resolutions(
+                    &input.request.session_id,
+                    turn_id,
+                    &graph,
+                    ledger,
+                    current_scene,
+                );
+            // Track whether the player's CURRENT scene's advance objective resolved this turn — the
+            // earned-completion signal that gates the E1 SceneUnlocked emit (never unlock unearned).
+            let mut current_scene_advanced = false;
+            for ev in &scene_adv_resolutions {
+                if ev
+                    .data
+                    .get("scene_id")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    == Some(current_scene.trim())
+                {
+                    current_scene_advanced = true;
+                }
                 if let Err(e) = self.engine.db.append_domain_event(ev).await {
                     tracing::warn!(error = %e, turn_id = %turn_id, "D2 scene-advance ObjectiveResolved append failed (non-fatal)");
                 } else {
@@ -1655,6 +1669,44 @@ impl GmLoop {
                         scene = %ev.data.get("scene_id").and_then(|v| v.as_str()).unwrap_or(""),
                         "D2 engine consumed admitted scene observation ⇒ scene_advance ObjectiveResolved (frontier advances; current_scene untouched)"
                     );
+                }
+            }
+
+            // E1 `scene_transition_gated_v1` EMIT: once the CURRENT scene's advance objective has
+            // COMPLETED (the player earned it, above), the ProgressionEngine emits a durable
+            // `SceneUnlocked` recording the data-driven next-scene target (authored out-edge else
+            // continuous-spine page order; fail-closed if no sensible target ⇒ no event, never
+            // teleport). **nav-split**: this ONLY records the unlock — it NEVER writes current_scene;
+            // the NavigationResolver (`scene_navigate_critical`) consumes it later THIS SAME turn and
+            // performs the physical transition (it is the SOLE current_scene writer). Idempotent on
+            // event_id ⇒ a re-emit on a later turn is a no-op. OFF (flag default) ⇒ this block is
+            // skipped ⇒ zero SceneUnlocked + navigator consume skipped ⇒ byte-identical baseline.
+            if current_scene_advanced
+                && trpg_runtime::progression::scene_transition_gated_enabled()
+            {
+                if let Some(unlock) = trpg_runtime::progression::scene_unlock_event(
+                    &input.request.session_id,
+                    turn_id,
+                    &graph,
+                    current_scene,
+                ) {
+                    let next = unlock
+                        .data
+                        .get("next_scene")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if let Err(e) = self.engine.db.append_domain_event(&unlock).await {
+                        tracing::warn!(error = %e, turn_id = %turn_id, "E1 SceneUnlocked append failed (non-fatal)");
+                    } else {
+                        tracing::info!(
+                            session_id = %input.request.session_id,
+                            turn_id = %turn_id,
+                            from_scene = %current_scene,
+                            next_scene = %next,
+                            "E1 engine emitted SceneUnlocked from a COMPLETED obj.scene_advance (data-driven next-scene target; current_scene untouched — NavigationResolver will transition this turn)"
+                        );
+                    }
                 }
             }
         }

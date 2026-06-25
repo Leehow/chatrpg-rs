@@ -921,6 +921,25 @@ impl Default for DocumentType {
     }
 }
 
+impl DocumentType {
+    /// E1 structural classifier: does this document's top-level scenes form a SINGLE continuous
+    /// narrative spine (so advancing scene→next-in-page-order is sane), as opposed to a collection
+    /// of INDEPENDENT units where page-order "next" is an unrelated scenario?
+    ///
+    /// `OneShot` / `Campaign` = one continuous adventure → page-order spine advance is meaningful.
+    /// `ScenarioCollection` (anthology of independent missions) = advancing across units is a
+    /// category error / nonsense teleport → false. Non-module documents (rulebook/supplement/
+    /// catalog/unknown) carry no playable scene spine → false (fail-closed).
+    ///
+    /// This is a STRUCTURAL document classification (set by the parser), NOT a ruleset_id/module_id
+    /// name branch (constitution ⑪): behavior keys on the document's intrinsic type, like keying on
+    /// page order or link types. Used only to gate the progression-gated transition's spine-order
+    /// FALLBACK; authored out-edges are always honored regardless of document type.
+    pub fn scenes_form_continuous_spine(&self) -> bool {
+        matches!(self, DocumentType::OneShot | DocumentType::Campaign)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct ParsedRuleset {
     pub ruleset_id: String,

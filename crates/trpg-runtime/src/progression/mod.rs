@@ -16,6 +16,7 @@ mod evidence_apply;
 mod frontier;
 mod program;
 mod scene_advance_apply;
+mod scene_unlock;
 mod spine;
 mod state;
 
@@ -31,7 +32,10 @@ pub use program::{
 pub use scene_advance_apply::{
     scene_advance_evidence_enabled, witnessed_scene_advance_resolutions,
 };
-pub use spine::augment_program_with_spine;
+pub use scene_unlock::{
+    pending_unlock_target, resolve_next_scene, scene_transition_gated_enabled, scene_unlock_event,
+};
+pub use spine::{augment_program_with_spine, next_spine_scene};
 pub use state::{ProgressEvent, ProgressionState};
 
 /// Whether the runtime ProgressionEngine is active. Default OFF → today's behavior
