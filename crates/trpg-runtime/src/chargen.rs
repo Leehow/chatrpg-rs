@@ -33,6 +33,38 @@ pub struct CreatedCharacter {
     pub validation: ValidationReport,
 }
 
+const FORBIDDEN_STOCK_NAMES: &str = "Li Ming, Zhang Wei, Wang Fang, Chen Jing, Chen Mo, Lin Xia, Su Qing, Gu Yan, Shen Qing, Lu Chen, Jiang Li, Xu Mo, Lin Shen, Bai Ye, Ye Bai, Chu He, Wen Yan, Shen Zhiyan, John Smith, Jane Doe, Alex Chen";
+
+fn setting_culture_hint(ruleset_id: &str, title: &str) -> &'static str {
+    let haystack = format!("{} {}", ruleset_id, title).to_lowercase();
+    if haystack.contains("call_of_cthulhu") || haystack.contains("cthulhu") {
+        "For Call of Cthulhu and The Haunting, assume 1920s Boston/New England unless the player says otherwise. Plausible default investigator naming cultures include Anglo-American, Irish-American, Italian-American, Jewish Ashkenazi, Polish-American, French-Canadian, and Black American. Do not default to a Chinese name just because the output language is Chinese."
+    } else if haystack.contains("sword_world") || haystack.contains("sword world") {
+        "For Sword World, names may follow Japanese fantasy, European fantasy, or setting-specific regional styles. Let the world setting decide the cultural style, not the conversation language."
+    } else {
+        "If the setting is not explicitly mono-cultural, prefer a culturally plausible name grounded in the world context. Vary cultural origins across repeated generations instead of collapsing into stock Chinese or stock English defaults."
+    }
+}
+
+fn multicultural_naming_contract(ruleset_id: &str, title: &str, concept: &str) -> String {
+    format!(
+        "## Multicultural Naming Contract\n\
+         The player's conversation language controls narration language only; it does NOT determine the character's ethnicity, culture, homeland, or naming style. Character names are an exception to same-language localization.\n\
+         - If the player explicitly supplied a name or heritage, preserve that choice exactly unless it violates rules or safety.\n\
+         - If the player did not supply a name, choose a culturally plausible name from the setting, module, ruleset, and concept.\n\
+         - The character's canonical name must stay in its authentic/common script: Latin alphabet for most European and American names, kanji for Japanese, hangul for Korean, hanzi for Chinese, Arabic script when appropriate.\n\
+         - Never replace a non-Chinese canonical name with a Chinese transliteration as the stored primary name. For example, store \"Ethan Caldwell\", NOT \"伊森·卡尔德维尔\".\n\
+         - Chinese narration may include a one-time reading aid such as \"伊森·卡尔德维尔(Ethan Caldwell)\", but the JSON `name` field must keep the canonical name unchanged.\n\
+         - Avoid stock names and obvious near-variants: {forbidden}.\n\
+         - Setting hint: {setting_hint}\n\
+         - Player concept/preferences may be in any language; infer output language from them, but do not infer ethnicity from language alone.\n\
+         User concept excerpt: {concept_excerpt}",
+        forbidden = FORBIDDEN_STOCK_NAMES,
+        setting_hint = setting_culture_hint(ruleset_id, title),
+        concept_excerpt = concept.chars().take(500).collect::<String>(),
+    )
+}
+
 /// Generate ONE complete starter character, grounded in the sheet template
 /// (every field, its type + notes), the creation flow, option catalogs, and the
 /// derived/resolution formulas. Returns a structured sheet object: one key per
@@ -87,6 +119,7 @@ pub async fn generate_starter_character(
          character-sheet template below with a concrete, rules-appropriate value. Do not leave \
          any required field blank or generic — choose specific options (a concrete Anomaly, \
          Competency, Role, archetype, etc.) consistent with this game and internally coherent.\n\n\
+         {naming_contract}\n\n\
          SHEET FIELDS (fill each by its field_id):\n{fields}\n\n\
          CREATION STEPS: {steps}\nOPTION CATALOGS: {catalogs}\n\
          DERIVED / RESOLUTION FORMULAS: {formulas}\n\n\
@@ -101,6 +134,7 @@ pub async fn generate_starter_character(
         catalogs = if catalogs.is_empty() { "(none parsed)".into() } else { catalogs.join("; ") },
         formulas = if formulas.is_empty() { "(none parsed)".into() } else { formulas.join("; ") },
         schema = serde_json::to_string_pretty(&schema_hint).unwrap_or_default(),
+        naming_contract = multicultural_naming_contract(&t.ruleset_id, &t.title, concept),
     );
     let user_msg = if concept.trim().is_empty() {
         "Generate a fresh, interesting starter character. Make all the choices yourself."
@@ -133,6 +167,36 @@ fn safe_id(s: &str) -> String {
         .collect()
 }
 
+fn skill_totals_from_summary(sheet: &Value) -> serde_json::Map<String, Value> {
+    let mut out = serde_json::Map::new();
+    let Some(summary) = sheet
+        .get("skill_bases_and_totals")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return out;
+    };
+    for entry in summary.split(|ch| ch == ';' || ch == ',') {
+        let entry = entry.trim().trim_end_matches('.');
+        let Some((name, values)) = entry.rsplit_once(' ') else {
+            continue;
+        };
+        let total = values
+            .rsplit_once('/')
+            .map(|(_, total)| total)
+            .unwrap_or(values);
+        let Ok(total) = total.trim().parse::<i64>() else {
+            continue;
+        };
+        let name = name.trim();
+        if !name.is_empty() {
+            out.insert(name.to_string(), json!(total));
+        }
+    }
+    out
+}
+
 /// Re-derive the combat/check-facing VIEW (`stats`/`skills`/`fields`) of a
 /// `mechanical_profile` from the authoritative `sheet`, preserving every other key
 /// (ruleset, source_quality, any enrichment). `sheet_json` stays the SINGLE source
@@ -147,10 +211,18 @@ pub fn refresh_mechanical_profile(profile: &mut Value, sheet: &Value) {
         "stats".into(),
         sheet.get("stats").cloned().unwrap_or_else(|| json!({})),
     );
-    p.insert(
-        "skills".into(),
-        sheet.get("skills").cloned().unwrap_or_else(|| json!({})),
-    );
+    let mut skills = sheet.get("skills").cloned().unwrap_or_else(|| json!({}));
+    if !skills.is_object() {
+        skills = json!({});
+    }
+    if let Some(skill_obj) = skills.as_object_mut() {
+        for (name, total) in skill_totals_from_summary(sheet) {
+            if !skill_obj.keys().any(|k| k.eq_ignore_ascii_case(&name)) {
+                skill_obj.insert(name, total);
+            }
+        }
+    }
+    p.insert("skills".into(), skills);
     let mut fields = sheet.clone();
     if let Some(o) = fields.as_object_mut() {
         o.remove("stats");
@@ -532,9 +604,32 @@ impl RuntimeEngine {
             .ok_or_else(|| {
                 anyhow!("no character onboarding pack for '{ruleset_id}'; parse the ruleset first")
             })?;
-        let template = pack.sheet_template.clone();
+        let sheet = generate_starter_character(llm, &pack, concept).await?;
+        self.bind_character_sheet(ruleset_id, module_id, session_id, actor_id, None, sheet)
+            .await
+    }
 
-        let mut sheet = generate_starter_character(llm, &pack, concept).await?;
+    /// Bind an existing structured character sheet into a session as the active
+    /// player character. This is the product path behind "use my saved card in
+    /// this group" and the eval path behind cached autoplay investigators.
+    pub async fn bind_character_sheet(
+        &self,
+        ruleset_id: &str,
+        module_id: Option<&str>,
+        session_id: Option<&str>,
+        actor_id: &str,
+        character_id: Option<&str>,
+        mut sheet: Value,
+    ) -> Result<CreatedCharacter> {
+        let template = match self.db.load_character_onboarding_pack(ruleset_id).await? {
+            Some(pack) => pack.sheet_template,
+            None => self
+                .db
+                .load_character_template(ruleset_id)
+                .await?
+                .ok_or_else(|| anyhow!("template not found for {ruleset_id}"))?,
+        };
+
         // Deterministic, source-backed derived values OVERWRITE the LLM's guesses
         // (HP/SAN/dodge/DB computed from the input stats per the ruleset's chargen
         // spec — no more LLM-invented parameters). No-op if no spec is present.
@@ -553,7 +648,9 @@ impl RuntimeEngine {
         };
 
         let character = CharacterSheet {
-            character_id: format!("character_{}", Uuid::new_v4().simple()),
+            character_id: character_id
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("character_{}", Uuid::new_v4().simple())),
             ruleset_id: ruleset_id.to_string(),
             template_id: template.template_id.clone(),
             name: name.clone(),
@@ -613,6 +710,25 @@ mod chargen_formula_tests {
             "../../../data/parsed/characters/call_of_cthulhu_7e.chargen.json"
         ))
         .expect("CoC chargen spec parses")
+    }
+
+    #[test]
+    fn multicultural_naming_contract_decouples_output_language_from_culture() {
+        let contract = multicultural_naming_contract(
+            "call_of_cthulhu_7e",
+            "Call of Cthulhu 7e",
+            "请用简体中文创建一名《鬼屋》调查记者。",
+        );
+
+        assert!(contract.contains("conversation language controls narration language only"));
+        assert!(contract.contains("does NOT determine the character's ethnicity"));
+        assert!(contract.contains("canonical name"));
+        assert!(contract.contains("1920s Boston"));
+        assert!(contract.contains("Irish"));
+        assert!(contract.contains("Italian"));
+        assert!(contract.contains("Jewish"));
+        assert!(contract.contains("NOT"));
+        assert!(contract.contains("伊森"));
     }
 
     #[test]
@@ -936,6 +1052,43 @@ mod chargen_formula_tests {
             profile["fields"].get("stats").is_none(),
             "fields excludes stats (no duplication)"
         );
+    }
+
+    #[test]
+    fn refresh_mechanical_profile_fills_missing_skill_totals_from_summary() {
+        let mut profile = json!({"ruleset":"call_of_cthulhu_7e"});
+        let sheet = json!({
+            "skills": {"Dodge": 37},
+            "skill_bases_and_totals": "Dodge 32/37; Library Use 20/60; Spot Hidden 25/60."
+        });
+        refresh_mechanical_profile(&mut profile, &sheet);
+        assert_eq!(
+            profile["skills"]["Library Use"],
+            json!(60),
+            "missing structured skill should be available to roll-under checks"
+        );
+        assert_eq!(
+            profile["skills"]["Dodge"],
+            json!(37),
+            "structured skill values remain authoritative"
+        );
+    }
+
+    #[test]
+    fn refresh_mechanical_profile_fills_coc_plain_skill_totals_from_summary() {
+        let mut profile = json!({"ruleset":"call_of_cthulhu_7e"});
+        let sheet = json!({
+            "skills": {"Dodge": 37},
+            "skill_bases_and_totals": "Accounting 5, Anthropology 1, Art/Craft (Photography) 50, Library Use 70, Fast Talk 45, Spot Hidden 70."
+        });
+        refresh_mechanical_profile(&mut profile, &sheet);
+        assert_eq!(
+            profile["skills"]["Library Use"],
+            json!(70),
+            "plain `Skill 70` entries from CoC character sheets must feed roll-under checks"
+        );
+        assert_eq!(profile["skills"]["Fast Talk"], json!(45));
+        assert_eq!(profile["skills"]["Spot Hidden"], json!(70));
     }
 
     #[test]

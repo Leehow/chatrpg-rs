@@ -19,7 +19,8 @@
 
 use crate::adventure_ir::authored_observation::{entry_scene_id, tag_scene};
 use crate::adventure_ir::{
-    parse_action_phrase, EvidenceAtomSpec, GraphRefIndex, ObjectiveSpec, PredicateExpr, ProgressRole,
+    parse_action_phrase, EvidenceAtomSpec, GraphRefIndex, ObjectiveSpec, PredicateExpr,
+    ProgressRole,
 };
 use crate::{ModuleGraph, SourceRef};
 use serde_json::Value;
@@ -267,9 +268,18 @@ mod tests {
             }
             other => panic!("expected OpaqueAuthoredText, got {other:?}"),
         }
-        assert!(o.mission_id.is_none(), "the closed objective carries no mission/objective id binding");
-        assert!(!o.source_evidence.is_empty(), "source-grounded (carries the packet anchor)");
-        assert_eq!(o.source_evidence[0].anchor_id.as_deref(), Some(PACKET_ANCHOR));
+        assert!(
+            o.mission_id.is_none(),
+            "the closed objective carries no mission/objective id binding"
+        );
+        assert!(
+            !o.source_evidence.is_empty(),
+            "source-grounded (carries the packet anchor)"
+        );
+        assert_eq!(
+            o.source_evidence[0].anchor_id.as_deref(),
+            Some(PACKET_ANCHOR)
+        );
     }
 
     #[test]
@@ -277,13 +287,31 @@ mod tests {
         let g = graph_with_anomaly();
         let p = packet("Conduct an experiment.");
         let atoms = compile_prep_packet_guard_leaves(&g, &p);
-        assert!(!atoms.is_empty(), "the authored objective compiles to ≥1 GuardLeaf atom");
+        assert!(
+            !atoms.is_empty(),
+            "the authored objective compiles to ≥1 GuardLeaf atom"
+        );
         let a = &atoms[0];
-        assert_eq!(a.progress_role, ProgressRole::GuardLeaf, "objective leaf ⇒ GuardLeaf (guard-checkable)");
-        assert_eq!(a.kind, EvidenceKind::ActionResolved, "'conduct' ⇒ ActionResolved");
-        assert!(a.grounding.contains("npc_anomaly"), "bound to the authored mission Anomaly: {}", a.grounding);
+        assert_eq!(
+            a.progress_role,
+            ProgressRole::GuardLeaf,
+            "objective leaf ⇒ GuardLeaf (guard-checkable)"
+        );
+        assert_eq!(
+            a.kind,
+            EvidenceKind::ActionResolved,
+            "'conduct' ⇒ ActionResolved"
+        );
+        assert!(
+            a.grounding.contains("npc_anomaly"),
+            "bound to the authored mission Anomaly: {}",
+            a.grounding
+        );
         assert!(!a.source_refs.is_empty(), "source-grounded");
-        assert!(a.bindings.iter().any(|b| b == "scene:scene_001"), "tagged to the mission entry scene for offering");
+        assert!(
+            a.bindings.iter().any(|b| b == "scene:scene_001"),
+            "tagged to the mission entry scene for offering"
+        );
     }
 
     #[test]
@@ -301,7 +329,10 @@ mod tests {
             ..Default::default()
         };
         let atoms = compile_prep_packet_guard_leaves(&g, &packet("Conduct an experiment."));
-        assert!(atoms.is_empty(), "fail-closed: no authored hint resolves ⇒ no fabricated GuardLeaf");
+        assert!(
+            atoms.is_empty(),
+            "fail-closed: no authored hint resolves ⇒ no fabricated GuardLeaf"
+        );
     }
 
     #[test]
@@ -340,7 +371,10 @@ mod tests {
         // though the anomaly hint resolves.
         let g = graph_with_anomaly();
         let atoms = compile_prep_packet_guard_leaves(&g, &packet("Wear a flower crown."));
-        assert!(atoms.is_empty(), "fail-closed: no lexicon verb ⇒ no action atom");
+        assert!(
+            atoms.is_empty(),
+            "fail-closed: no lexicon verb ⇒ no action atom"
+        );
     }
 
     #[test]
@@ -365,17 +399,34 @@ mod tests {
             .next()
             .expect("authored leaf compiles to a GuardLeaf atom");
         let objs = evidence_objectives_from_prep_packet(&g, &p);
-        assert_eq!(objs.len(), 1, "one evidence-backed objective from the authored leaf");
+        assert_eq!(
+            objs.len(),
+            1,
+            "one evidence-backed objective from the authored leaf"
+        );
         let o = &objs[0];
         match &o.success_when {
             PredicateExpr::EvidencePresent { atom_id } => {
-                assert_eq!(atom_id, atom.atom_id.as_str(), "links to its OWN GuardLeaf atom");
+                assert_eq!(
+                    atom_id,
+                    atom.atom_id.as_str(),
+                    "links to its OWN GuardLeaf atom"
+                );
             }
             other => panic!("expected EvidencePresent, got {other:?}"),
         }
-        assert!(o.success_when.is_executable(), "evidence guard is executable (unlike the opaque leaf)");
-        assert!(!o.source_evidence.is_empty(), "source-grounded (carries the packet anchor)");
-        assert_eq!(o.source_evidence[0].anchor_id.as_deref(), Some(PACKET_ANCHOR));
+        assert!(
+            o.success_when.is_executable(),
+            "evidence guard is executable (unlike the opaque leaf)"
+        );
+        assert!(
+            !o.source_evidence.is_empty(),
+            "source-grounded (carries the packet anchor)"
+        );
+        assert_eq!(
+            o.source_evidence[0].anchor_id.as_deref(),
+            Some(PACKET_ANCHOR)
+        );
     }
 
     #[test]
@@ -383,7 +434,9 @@ mod tests {
         // 'wear' is not a lexicon verb ⇒ no GuardLeaf atom ⇒ no evidence-objective
         // (fail-closed; never fabricate an objective with no evidence anchor).
         let g = graph_with_anomaly();
-        assert!(evidence_objectives_from_prep_packet(&g, &packet("Wear a flower crown.")).is_empty());
+        assert!(
+            evidence_objectives_from_prep_packet(&g, &packet("Wear a flower crown.")).is_empty()
+        );
         // and the GuardLeaf atoms vs the evidence-objectives stay 1:1.
         let p = packet("Conduct an experiment.");
         assert_eq!(

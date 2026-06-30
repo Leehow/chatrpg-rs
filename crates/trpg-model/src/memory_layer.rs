@@ -62,7 +62,10 @@ pub fn layer_of(block: &ContextBlock) -> MemoryLayer {
     use BlockKind::*;
     match block.kind {
         // ── Story / Director memory (decision #5: NEVER reaches the Adjudicator) ──────────────
-        DirectorPolicy | ActionableSituationBrief | ClueBoard | ConsequenceContract
+        DirectorPolicy
+        | ActionableSituationBrief
+        | ClueBoard
+        | ConsequenceContract
         | SpotlightState => MemoryLayer::Story,
         // ── World memory (time / events / state) ─────────────────────────────────────────────
         WorldState | WorldTime | WorldEvent | TimeAdvance | ScheduledEvent | TimeAnchor
@@ -146,7 +149,10 @@ mod tests {
         }
         // Narrative surface → PlayerPerceived
         assert_eq!(
-            layer_of(&block(BlockKind::RecentTranscript, Visibility::PlayerVisible)),
+            layer_of(&block(
+                BlockKind::RecentTranscript,
+                Visibility::PlayerVisible
+            )),
             MemoryLayer::PlayerPerceived
         );
         // GM-only recall → Mechanical
@@ -220,7 +226,8 @@ mod tests {
         };
         let mut v = serde_json::to_value(&q).unwrap();
         v.as_object_mut().unwrap().remove("layers");
-        let back: crate::MemoryQuery = serde_json::from_value(v).expect("deserialize without layers");
+        let back: crate::MemoryQuery =
+            serde_json::from_value(v).expect("deserialize without layers");
         assert!(
             back.layers.is_empty(),
             "absent layers ⇒ empty ⇒ byte-equal baseline"

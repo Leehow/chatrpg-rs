@@ -69,7 +69,11 @@ async fn the_vault_post_turn_witness_admits_guard_leaf_without_inline_gm_tag() {
         .find(|a| a.kind == EvidenceKind::ActionResolved)
         .cloned()
         .expect("≥1 prep-packet GuardLeaf is an ActionResolved action atom (bindable by a check)");
-    assert_eq!(atom.progress_role, ProgressRole::GuardLeaf, "objective leaf ⇒ GuardLeaf");
+    assert_eq!(
+        atom.progress_role,
+        ProgressRole::GuardLeaf,
+        "objective leaf ⇒ GuardLeaf"
+    );
     let span = atom
         .source_refs
         .first()
@@ -106,7 +110,11 @@ async fn the_vault_post_turn_witness_admits_guard_leaf_without_inline_gm_tag() {
     );
     let events = vec![success_check];
     let candidates = structural_candidates(SESSION, TURN, &offer_set, &events);
-    assert_eq!(candidates, vec![cap.clone()], "committed success ∩ check-bindable offer ⇒ candidate");
+    assert_eq!(
+        candidates,
+        vec![cap.clone()],
+        "committed success ∩ check-bindable offer ⇒ candidate"
+    );
     // fail-closed: no committed success ⇒ zero candidates (the extractor gets nothing).
     let failed = vec![DomainEvent::new(
         "de_witness_chk_fail",
@@ -119,7 +127,10 @@ async fn the_vault_post_turn_witness_admits_guard_leaf_without_inline_gm_tag() {
         structural_candidates(SESSION, TURN, &offer_set, &failed).is_empty(),
         "fail-closed: no committed success ⇒ no candidate offered to the extractor"
     );
-    eprintln!("RAN: structural_candidates={} (success) / 0 (failed) — deterministic narrowing", candidates.len());
+    eprintln!(
+        "RAN: structural_candidates={} (success) / 0 (failed) — deterministic narrowing",
+        candidates.len()
+    );
 
     // ─── (iii) the extractor view leaks no progression vocabulary ─────────────────────
     let view = build_extractor_view(
@@ -129,11 +140,30 @@ async fn the_vault_post_turn_witness_admits_guard_leaf_without_inline_gm_tag() {
         vec![],
         &candidates,
     );
-    assert_eq!(view.candidates.len(), 1, "only the narrowed candidate is surfaced");
-    assert_eq!(view.committed_outcomes.len(), 1, "the committed success is the citable basis");
+    assert_eq!(
+        view.candidates.len(),
+        1,
+        "only the narrowed candidate is surfaced"
+    );
+    assert_eq!(
+        view.committed_outcomes.len(),
+        1,
+        "the committed success is the citable basis"
+    );
     let view_json = serde_json::to_string(&view).unwrap();
-    for forbidden in ["objective", "guard", "reward", "next_scene", "atom:", "atom_id", "success_when"] {
-        assert!(!view_json.contains(forbidden), "extractor view leaked `{forbidden}`");
+    for forbidden in [
+        "objective",
+        "guard",
+        "reward",
+        "next_scene",
+        "atom:",
+        "atom_id",
+        "success_when",
+    ] {
+        assert!(
+            !view_json.contains(forbidden),
+            "extractor view leaked `{forbidden}`"
+        );
     }
 
     // ─── (iv) a mock witness proposal ⇒ 1 admitted AcceptedEvidence(ActionResolved) ───
@@ -145,14 +175,35 @@ async fn the_vault_post_turn_witness_admits_guard_leaf_without_inline_gm_tag() {
         basis: NonEmpty::from_vec(vec![TurnLocalRef::Commit(0)]).unwrap(),
     }];
     let (ledger, admissions) = admit_witness_proposals(
-        SESSION, TURN, &offer_set, &catalog, &events, &proposals, &EvidenceLedger::new(),
+        SESSION,
+        TURN,
+        &offer_set,
+        &catalog,
+        &events,
+        &proposals,
+        &EvidenceLedger::new(),
     );
-    assert_eq!(ledger.len(), 1, "EV-P5: witness proposal ⇒ exactly one admitted AcceptedEvidence");
+    assert_eq!(
+        ledger.len(),
+        1,
+        "EV-P5: witness proposal ⇒ exactly one admitted AcceptedEvidence"
+    );
     let ev = &ledger.entries()[0];
     assert_eq!(ev.evidence_kind, EvidenceKind::ActionResolved);
-    assert_eq!(ev.authority, EvidenceAuthority::ExactDomain, "Rust decided success (reused EV-P4 binding)");
-    assert_eq!(ev.atom_id, atom.atom_id, "atom Rust-resolved from the OfferSet, never named by the extractor");
-    assert_eq!(ev.basis_event_ids, vec!["de_witness_chk_1".to_string()], "basis = the committed check");
+    assert_eq!(
+        ev.authority,
+        EvidenceAuthority::ExactDomain,
+        "Rust decided success (reused EV-P4 binding)"
+    );
+    assert_eq!(
+        ev.atom_id, atom.atom_id,
+        "atom Rust-resolved from the OfferSet, never named by the extractor"
+    );
+    assert_eq!(
+        ev.basis_event_ids,
+        vec!["de_witness_chk_1".to_string()],
+        "basis = the committed check"
+    );
     assert!(admissions[0].result.is_ok());
     eprintln!(
         "RAN: mock witness proposal ⇒ admitted AcceptedEvidence(ActionResolved, GuardLeaf) atom={} basis={:?} authority={:?}",
@@ -167,7 +218,11 @@ async fn the_vault_post_turn_witness_admits_guard_leaf_without_inline_gm_tag() {
         WitnessTrigger::AllNotObservedWithCandidates,
         "GM audit observed nothing but a real success on an offered atom happened ⇒ backstop fires"
     );
-    assert_eq!(witness_trigger(true, 0, 0), WitnessTrigger::NotTriggered, "no candidate ⇒ fail-closed idle");
+    assert_eq!(
+        witness_trigger(true, 0, 0),
+        WitnessTrigger::NotTriggered,
+        "no candidate ⇒ fail-closed idle"
+    );
 
     eprintln!(
         "PASS: EV-P5 post-turn witness admits a GuardLeaf ActionResolved on real the_vault \

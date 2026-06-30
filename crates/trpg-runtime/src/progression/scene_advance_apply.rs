@@ -29,7 +29,9 @@
 //!   runs the guard and produces the signal.
 
 use std::env;
-use trpg_model::adventure_ir::{scene_advance_objective, EvidenceLedger, PredicateExpr, ProgressSignalKind};
+use trpg_model::adventure_ir::{
+    scene_advance_objective, EvidenceLedger, PredicateExpr, ProgressSignalKind,
+};
 use trpg_model::{DomainEvent, DomainEventKind, ModuleGraph};
 
 const SCENE_ADV_ENV: &str = "TRPG_PROGRESS_SCENE_ADVANCE_EVIDENCE_V1";
@@ -45,7 +47,9 @@ fn flag_on(raw: &str) -> bool {
 /// Default OFF and **standalone** (no master OR) so OFF == byte-identical to 3f92013
 /// even when the evidence master (`TRPG_PROGRESS_EVIDENCE_V1`) is on.
 pub fn scene_advance_evidence_enabled() -> bool {
-    env::var(SCENE_ADV_ENV).map(|v| flag_on(&v)).unwrap_or(false)
+    env::var(SCENE_ADV_ENV)
+        .map(|v| flag_on(&v))
+        .unwrap_or(false)
 }
 
 /// Run the engine over the player's CURRENT scene's evidence-backed advance objective
@@ -92,17 +96,18 @@ pub fn witnessed_scene_advance_resolutions(
         .map(|s| {
             // the matched atom: the first guard atom actually in the ledger (audit /
             // provenance — codex H2). The guard is only True because an atom is present.
-            let matched_atom = objectives
-                .iter()
-                .find(|o| o.id == s.id)
-                .and_then(|o| match &o.success_when {
-                    PredicateExpr::EvidenceAnyOf { atom_ids } => atom_ids
-                        .iter()
-                        .find(|a| state.ctx.present_evidence_atoms.contains(*a))
-                        .cloned(),
-                    PredicateExpr::EvidencePresent { atom_id } => Some(atom_id.clone()),
-                    _ => None,
-                });
+            let matched_atom =
+                objectives
+                    .iter()
+                    .find(|o| o.id == s.id)
+                    .and_then(|o| match &o.success_when {
+                        PredicateExpr::EvidenceAnyOf { atom_ids } => atom_ids
+                            .iter()
+                            .find(|a| state.ctx.present_evidence_atoms.contains(*a))
+                            .cloned(),
+                        PredicateExpr::EvidencePresent { atom_id } => Some(atom_id.clone()),
+                        _ => None,
+                    });
             let data = serde_json::json!({
                 "objective_id": s.id,
                 "atom_id": matched_atom,
@@ -202,10 +207,17 @@ mod tests {
 
         let events =
             witnessed_scene_advance_resolutions("sess-1", "turn-7", &g, &ledger, "scene_001");
-        assert_eq!(events.len(), 1, "one ObjectiveResolved for the current scene");
+        assert_eq!(
+            events.len(),
+            1,
+            "one ObjectiveResolved for the current scene"
+        );
         let ev = &events[0];
         assert_eq!(ev.kind, DomainEventKind::ObjectiveResolved);
-        assert_eq!(ev.event_id, "de_objresolved_sess-1_obj.scene_advance.scene_001");
+        assert_eq!(
+            ev.event_id,
+            "de_objresolved_sess-1_obj.scene_advance.scene_001"
+        );
         assert_eq!(ev.data["objective_id"], "obj.scene_advance.scene_001");
         assert_eq!(ev.data["atom_id"], atom, "matched atom recorded (audit)");
         assert_eq!(ev.data["scene_id"], "scene_001");
@@ -222,7 +234,10 @@ mod tests {
             &EvidenceLedger::new(),
             "scene_001",
         );
-        assert!(events.is_empty(), "no admitted atom ⇒ no advance, got {events:?}");
+        assert!(
+            events.is_empty(),
+            "no admitted atom ⇒ no advance, got {events:?}"
+        );
     }
 
     #[test]
@@ -289,6 +304,9 @@ mod tests {
         ledger.append(admitted(&atom));
         let a = witnessed_scene_advance_resolutions("sess-1", "turn-3", &g, &ledger, "scene_001");
         let b = witnessed_scene_advance_resolutions("sess-1", "turn-9", &g, &ledger, "scene_001");
-        assert_eq!(a[0].event_id, b[0].event_id, "turn-independent id ⇒ dedups across turns");
+        assert_eq!(
+            a[0].event_id, b[0].event_id,
+            "turn-independent id ⇒ dedups across turns"
+        );
     }
 }

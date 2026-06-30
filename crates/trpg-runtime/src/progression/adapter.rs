@@ -101,9 +101,7 @@ mod tests {
     use crate::progression::{evaluate, ProgressionProgram, ProgressionState};
     use chrono::{DateTime, Utc};
     use serde_json::json;
-    use trpg_model::adventure_ir::{
-        EventPattern, ProgressSignalKind, TrackerKind, TrackerSpec,
-    };
+    use trpg_model::adventure_ir::{EventPattern, ProgressSignalKind, TrackerKind, TrackerSpec};
 
     fn ev(kind: DomainEventKind, data: serde_json::Value) -> DomainEvent {
         ev_t(kind, "t", data)
@@ -179,7 +177,10 @@ mod tests {
         // Kinds whose live progression mapping is deferred must NOT be invented.
         let evs = vec![
             ev(DomainEventKind::TurnStarted, json!({})),
-            ev(DomainEventKind::TurnFinalized, json!({"signal": "Narration"})),
+            ev(
+                DomainEventKind::TurnFinalized,
+                json!({"signal": "Narration"}),
+            ),
             ev(
                 DomainEventKind::ClockAdvanced,
                 json!({"clock_id": "c", "new_value": 1, "delta": 1}),
@@ -193,14 +194,8 @@ mod tests {
     fn order_preserved_across_mixed_events() {
         let evs = vec![
             ev(DomainEventKind::TurnStarted, json!({})),
-            ev(
-                DomainEventKind::SceneTransitioned,
-                json!({"to": "sc.b"}),
-            ),
-            ev(
-                DomainEventKind::PlayerLearnedFact,
-                json!({"fact_id": "f1"}),
-            ),
+            ev(DomainEventKind::SceneTransitioned, json!({"to": "sc.b"})),
+            ev(DomainEventKind::PlayerLearnedFact, json!({"fact_id": "f1"})),
         ];
         assert_eq!(
             progress_events_from_domain(&evs),
@@ -276,7 +271,11 @@ mod tests {
             // Turn 1: enter A — but the gate is not yet true.
             ev_t(DomainEventKind::SceneTransitioned, "t1", json!({"to": "A"})),
             // Turn 2: gate becomes true — but there is no Entered(A) event this turn.
-            ev_t(DomainEventKind::PlayerLearnedFact, "t2", json!({"fact_id": "gate"})),
+            ev_t(
+                DomainEventKind::PlayerLearnedFact,
+                "t2",
+                json!({"fact_id": "gate"}),
+            ),
         ];
         let (state, _) = replay_domain_events(&events, &program);
         assert!(
@@ -330,7 +329,11 @@ mod tests {
         let mut state = ProgressionState::default();
         let signals = evaluate(&mut state, &progress, &program);
 
-        assert!(state.ctx.entered_locations.iter().any(|l| l == "unit.foxwell_services"));
+        assert!(state
+            .ctx
+            .entered_locations
+            .iter()
+            .any(|l| l == "unit.foxwell_services"));
         assert!(signals
             .iter()
             .any(|s| s.kind == ProgressSignalKind::LocationChanged

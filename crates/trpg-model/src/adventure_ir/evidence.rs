@@ -303,8 +303,18 @@ mod tests {
 
     #[test]
     fn atom_id_is_order_independent_over_bound_refs() {
-        let a = AtomId::from_parts("d", "p8", EvidenceKind::FactLearned, &["x".into(), "y".into()]);
-        let b = AtomId::from_parts("d", "p8", EvidenceKind::FactLearned, &["y".into(), "x".into()]);
+        let a = AtomId::from_parts(
+            "d",
+            "p8",
+            EvidenceKind::FactLearned,
+            &["x".into(), "y".into()],
+        );
+        let b = AtomId::from_parts(
+            "d",
+            "p8",
+            EvidenceKind::FactLearned,
+            &["y".into(), "x".into()],
+        );
         assert_eq!(a, b, "bound-ref order must not change the id");
     }
 
@@ -320,14 +330,20 @@ mod tests {
             cat.resolve_fact("aquifer").is_none(),
             "substring/partial ref must NOT resolve (no fuzzy match — Wall B)"
         );
-        assert!(cat.resolve_fact("wf_chk_check_abc").is_none(), "synthetic ref unresolved");
+        assert!(
+            cat.resolve_fact("wf_chk_check_abc").is_none(),
+            "synthetic ref unresolved"
+        );
     }
 
     #[test]
     fn catalog_insert_is_deduped_by_grounding() {
         let mut cat = EvidenceAtomCatalog::new();
         assert!(cat.insert(atom("clue_a", 8)));
-        assert!(!cat.insert(atom("clue_a", 8)), "same grounding ⇒ not re-inserted");
+        assert!(
+            !cat.insert(atom("clue_a", 8)),
+            "same grounding ⇒ not re-inserted"
+        );
         assert_eq!(cat.len(), 1);
     }
 

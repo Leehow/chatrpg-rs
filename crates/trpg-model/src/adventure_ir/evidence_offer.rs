@@ -168,7 +168,12 @@ mod tests {
     use super::*;
 
     fn atom(clue_id: &str) -> AtomId {
-        AtomId::from_parts("digest_v1", "p8", EvidenceKind::FactLearned, &[clue_id.to_string()])
+        AtomId::from_parts(
+            "digest_v1",
+            "p8",
+            EvidenceKind::FactLearned,
+            &[clue_id.to_string()],
+        )
     }
 
     #[test]
@@ -178,10 +183,20 @@ mod tests {
         // Opaque handle shape, NOT the atom id, NOT an objective id.
         assert!(cap.as_str().starts_with("cap_"), "opaque cap_ handle");
         assert_ne!(cap.as_str(), a.as_str(), "cap_id ≠ atom_id");
-        assert!(!cap.as_str().starts_with("atom:"), "cap_id is not an AtomId");
+        assert!(
+            !cap.as_str().starts_with("atom:"),
+            "cap_id is not an AtomId"
+        );
         // Authored objective ids are dotted slugs like `obj.neutralize_threat`.
-        assert_ne!(cap.as_str(), "obj.neutralize_threat", "cap_id ≠ objective_id");
-        assert!(!cap.as_str().contains("clue_aquifer_commercial"), "handle hides the authored ref");
+        assert_ne!(
+            cap.as_str(),
+            "obj.neutralize_threat",
+            "cap_id ≠ objective_id"
+        );
+        assert!(
+            !cap.as_str().contains("clue_aquifer_commercial"),
+            "handle hides the authored ref"
+        );
     }
 
     #[test]
@@ -189,7 +204,10 @@ mod tests {
         let a = atom("clue_a");
         let t3 = CapId::from_parts("sess_a", "turn_3", &a);
         let t4 = CapId::from_parts("sess_a", "turn_4", &a);
-        assert_ne!(t3, t4, "different turn ⇒ different handle (single-turn capability)");
+        assert_ne!(
+            t3, t4,
+            "different turn ⇒ different handle (single-turn capability)"
+        );
         let other_sess = CapId::from_parts("sess_b", "turn_3", &a);
         assert_ne!(t3, other_sess, "different session ⇒ different handle");
     }
@@ -217,7 +235,11 @@ mod tests {
         let mut uniq = tokens.clone();
         uniq.sort_unstable();
         uniq.dedup();
-        assert_eq!(uniq.len(), tokens.len(), "every BasisKind token is distinct");
+        assert_eq!(
+            uniq.len(),
+            tokens.len(),
+            "every BasisKind token is distinct"
+        );
         assert_eq!(BasisKind::FactCommitted.as_str(), "fact_committed");
     }
 
@@ -236,8 +258,14 @@ mod tests {
             expires_at: "turn_1".into(),
         });
         assert_eq!(set.len(), 1);
-        assert!(set.find(cap.as_str()).is_some(), "handle resolves to its offer");
-        assert!(set.find("cap_unknown").is_none(), "unknown handle does not resolve");
+        assert!(
+            set.find(cap.as_str()).is_some(),
+            "handle resolves to its offer"
+        );
+        assert!(
+            set.find("cap_unknown").is_none(),
+            "unknown handle does not resolve"
+        );
     }
 
     #[test]
@@ -273,7 +301,11 @@ mod tests {
             set
         };
         assert!(mk(false).id().starts_with("osid_"), "opaque osid_ handle");
-        assert_eq!(mk(false).id(), mk(true).id(), "id is independent of push order");
+        assert_eq!(
+            mk(false).id(),
+            mk(true).id(),
+            "id is independent of push order"
+        );
         // Different turn ⇒ different id.
         let mut t2 = EvidenceOfferSet::new("turn_2");
         t2.push(EvidenceOffer {

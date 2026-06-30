@@ -19,13 +19,19 @@ pub struct SceneRestateCheckpoint {
 
 impl Default for SceneRestateCheckpoint {
     fn default() -> Self {
-        Self { active: false, max_stall: 2 }
+        Self {
+            active: false,
+            max_stall: 2,
+        }
     }
 }
 
 impl SceneRestateCheckpoint {
     pub fn active() -> Self {
-        Self { active: true, max_stall: 2 }
+        Self {
+            active: true,
+            max_stall: 2,
+        }
     }
     pub fn is_active(&self) -> bool {
         self.active
@@ -118,7 +124,10 @@ mod tests {
     use super::*;
 
     fn turn(scene: &str, progress: bool) -> SceneTurn {
-        SceneTurn { scene_id: scene.into(), made_progress: progress }
+        SceneTurn {
+            scene_id: scene.into(),
+            made_progress: progress,
+        }
     }
 
     #[test]
@@ -177,7 +186,9 @@ mod tests {
         assert_eq!(
             classify_scene_restate_checkpoint(
                 &SceneRestateCheckpoint::active(),
-                &SceneRestateEvidence { turns: vec![turn("s1", false), turn("s1", false)] }
+                &SceneRestateEvidence {
+                    turns: vec![turn("s1", false), turn("s1", false)]
+                }
             ),
             SceneRestateCheckpointState::NotTriggered
         );

@@ -28,8 +28,8 @@
 //! run prints `RAN:` + counts + `PASS`; only seeing `SKIP` = not verified.
 use trpg_db::Db;
 use trpg_runtime::{
-    build_evidence_atom_catalog, derive_offer_set, progress_offers_enabled, project_clues_onto_scenes,
-    render_offer_prompt_block,
+    build_evidence_atom_catalog, derive_offer_set, progress_offers_enabled,
+    project_clues_onto_scenes, render_offer_prompt_block,
 };
 
 const VAULT: &str = "triangle_agency.the_vault";
@@ -82,15 +82,23 @@ async fn the_vault_surfaced_clue_scene_produces_an_offer_set() {
         // opaque, turn-scoped cap_id ≠ atom_id ≠ objective slug
         assert!(o.cap_id.as_str().starts_with("cap_"), "opaque handle");
         assert_ne!(o.cap_id.as_str(), o.atom_id.as_str(), "cap_id ≠ atom_id");
-        assert!(!o.cap_id.as_str().starts_with("atom:"), "cap_id is not an AtomId");
-        assert!(!o.cap_id.as_str().contains('.'), "cap_id is not a dotted objective slug");
+        assert!(
+            !o.cap_id.as_str().starts_with("atom:"),
+            "cap_id is not an AtomId"
+        );
+        assert!(
+            !o.cap_id.as_str().contains('.'),
+            "cap_id is not a dotted objective slug"
+        );
         assert_eq!(o.expires_at, "turn_4", "single-turn capability");
         assert!(!o.required_basis.is_empty(), "offer cites a required basis");
         // the offered atom is the catalog atom for a surfaced clue
-        let surfaced = scene
-            .referenced_clue_ids
-            .iter()
-            .any(|cid| catalog.resolve_fact(cid).map(|a| a.atom_id == o.atom_id).unwrap_or(false));
+        let surfaced = scene.referenced_clue_ids.iter().any(|cid| {
+            catalog
+                .resolve_fact(cid)
+                .map(|a| a.atom_id == o.atom_id)
+                .unwrap_or(false)
+        });
         assert!(surfaced, "every offered atom is a SURFACED clue atom");
     }
 
@@ -108,16 +116,28 @@ async fn the_vault_surfaced_clue_scene_produces_an_offer_set() {
 
     // ---- (4) rendered prompt block shows cap+meaning+basis, never the atom_id ----
     let block = render_offer_prompt_block(&offer_set);
-    assert!(!block.is_empty(), "non-empty OfferSet renders a prompt block");
+    assert!(
+        !block.is_empty(),
+        "non-empty OfferSet renders a prompt block"
+    );
     for o in offer_set.offers() {
-        assert!(block.contains(o.cap_id.as_str()), "block shows the opaque handle");
+        assert!(
+            block.contains(o.cap_id.as_str()),
+            "block shows the opaque handle"
+        );
         assert!(
             !block.contains(o.atom_id.as_str()),
             "block NEVER leaks the atom_id (GM only sees the opaque handle)"
         );
     }
-    assert!(block.contains("requires basis"), "block states the required basis");
-    assert!(!block.contains("atom:"), "no atom id prefix anywhere in the prompt block");
+    assert!(
+        block.contains("requires basis"),
+        "block states the required basis"
+    );
+    assert!(
+        !block.contains("atom:"),
+        "no atom id prefix anywhere in the prompt block"
+    );
     eprintln!("RAN: GM prompt block =\n{block}");
 
     // ---- (5) OFF run: gate false by default ⇒ empty block ⇒ prompt byte-identical ----
@@ -127,8 +147,17 @@ async fn the_vault_surfaced_clue_scene_produces_an_offer_set() {
     );
     // An unknown current scene (or an OFF turn) ⇒ empty set ⇒ empty block ⇒ no prompt
     // mutation: mirror the tiered.rs append guard and assert byte-identity.
-    let empty = derive_offer_set(&graph, &catalog, "scene_does_not_exist", "sess_ev3", "turn_4");
-    assert!(empty.is_empty(), "fail-closed: unknown scene ⇒ empty OfferSet");
+    let empty = derive_offer_set(
+        &graph,
+        &catalog,
+        "scene_does_not_exist",
+        "sess_ev3",
+        "turn_4",
+    );
+    assert!(
+        empty.is_empty(),
+        "fail-closed: unknown scene ⇒ empty OfferSet"
+    );
     let base = "BASE NAV PROMPT".to_string();
     let mut prompt = base.clone();
     let eb = render_offer_prompt_block(&empty);
@@ -136,7 +165,10 @@ async fn the_vault_surfaced_clue_scene_produces_an_offer_set() {
         prompt.push_str("\n\n");
         prompt.push_str(&eb);
     }
-    assert_eq!(prompt, base, "empty OfferSet ⇒ prompt bytes identical (OFF==baseline)");
+    assert_eq!(
+        prompt, base,
+        "empty OfferSet ⇒ prompt bytes identical (OFF==baseline)"
+    );
 
     eprintln!(
         "PASS: scene {} surfaces {} clue(s) ⇒ {} offer(s) (opaque cap_id, correct atom, basis) | catalog={} (conservative) | block hides atom_id | OFF gate=false ⇒ prompt unchanged",

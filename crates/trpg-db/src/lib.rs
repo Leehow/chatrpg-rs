@@ -186,6 +186,40 @@ impl Db {
         Ok(())
     }
 
+    pub async fn list_source_documents(&self) -> Result<Vec<SourceDocument>> {
+        let rows = sqlx::query(
+            r#"
+            select id, source_id, source_kind, title, file_path, markdown_path,
+                   source_hash, parse_config_hash, metadata
+            from source_documents
+            where parse_status = 'parsed'
+            order by updated_at desc, source_id asc
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|r| {
+                let source_kind = match r.get::<String, _>("source_kind").as_str() {
+                    "rulebook" => SourceKind::Rulebook,
+                    "module" => SourceKind::Module,
+                    _ => SourceKind::Unknown,
+                };
+                Ok(SourceDocument {
+                    id: r.get("id"),
+                    source_id: r.get("source_id"),
+                    source_kind,
+                    title: r.get("title"),
+                    file_path: r.get("file_path"),
+                    markdown_path: r.get("markdown_path"),
+                    source_hash: r.get("source_hash"),
+                    parse_config_hash: r.get("parse_config_hash"),
+                    metadata: r.get("metadata"),
+                })
+            })
+            .collect()
+    }
+
     pub async fn has_bundle_for_source(
         &self,
         source_hash: &str,
@@ -1219,6 +1253,33 @@ impl Db {
         Ok(())
     }
 
+    pub async fn load_character(&self, character_id: &str) -> Result<Option<CharacterSheet>> {
+        let row = sqlx::query(
+            r#"
+            select character_id, ruleset_id, template_id, name, sheet_json, validation_report
+            from characters
+            where character_id = $1
+            "#,
+        )
+        .bind(character_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let validation_value: serde_json::Value = row.try_get("validation_report")?;
+        let validation_report = serde_json::from_value(validation_value)
+            .context("invalid validation_report stored for character")?;
+        Ok(Some(CharacterSheet {
+            character_id: row.try_get("character_id")?,
+            ruleset_id: row.try_get("ruleset_id")?,
+            template_id: row.try_get("template_id")?,
+            name: row.try_get("name")?,
+            sheet: row.try_get("sheet_json")?,
+            validation_report,
+        }))
+    }
+
     pub async fn create_session(
         &self,
         session_id: &str,
@@ -1379,6 +1440,18 @@ impl Db {
         .bind(session_id)
         .fetch_optional(&self.pool)
         .await?;
+        Ok(row.map(|r| r.0))
+    }
+
+    /// R5：按 turn_id 精确读取该回合的 postprocess 生命周期。one-shot transport 等待
+    /// heavy 末态时必须用当前 turn_id，避免同一 session 中后写入/孤儿回合把
+    /// `load_last_turn_pp_lifecycle` 指向别的 turn。
+    pub async fn load_turn_pp_lifecycle(&self, turn_id: &str) -> Result<Option<String>> {
+        let row: Option<(String,)> =
+            sqlx::query_as("select pp_lifecycle from turns where turn_id = $1")
+                .bind(turn_id)
+                .fetch_optional(&self.pool)
+                .await?;
         Ok(row.map(|r| r.0))
     }
 
@@ -1636,6 +1709,47 @@ impl Db {
             turn_id: r.get("turn_id"),
             confidence: r.get("confidence"),
         }))
+    }
+
+    /// Load the most recent durable world facts for a session. Rows are returned
+    /// oldest-to-newest within the bounded recent window so prompt consumers read
+    /// the committed state chain in causal order.
+    pub async fn list_recent_world_facts(
+        &self,
+        session_id: &str,
+        limit: i64,
+    ) -> Result<Vec<WorldFactRow>> {
+        let rows = sqlx::query(
+            r#"
+            select fact_id, session_id, subject, predicate, object, summary, truth_status,
+                   source_event_ids, turn_id, confidence
+            from world_facts
+            where session_id = $1
+            order by updated_at desc, created_at desc
+            limit $2
+            "#,
+        )
+        .bind(session_id)
+        .bind(limit.max(0))
+        .fetch_all(&self.pool)
+        .await?;
+        let mut facts: Vec<WorldFactRow> = rows
+            .into_iter()
+            .map(|r| WorldFactRow {
+                fact_id: r.get("fact_id"),
+                session_id: r.get("session_id"),
+                subject: r.get("subject"),
+                predicate: r.get("predicate"),
+                object: r.get("object"),
+                summary: r.get("summary"),
+                truth_status: r.get("truth_status"),
+                source_event_ids: r.get("source_event_ids"),
+                turn_id: r.get("turn_id"),
+                confidence: r.get("confidence"),
+            })
+            .collect();
+        facts.reverse();
+        Ok(facts)
     }
 
     /// P5.5 StoryState 持久化：读该 session 的 story 快照（`story_state` 表，单行/会话）。
@@ -3301,6 +3415,50 @@ impl Db {
         Ok(out)
     }
 
+    /// List complete check-result records whose embedded roll belongs to this turn.
+    /// This is read-only recovery for runtime paths that already persisted
+    /// `check_results` but whose in-memory turn ledger missed the record.
+    pub async fn list_check_results_for_turn(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+    ) -> Result<Vec<CheckResultRecord>> {
+        let rows = sqlx::query(
+            r#"
+            select check_id, roll_json, outcome_json, committed_patches, created_at
+            from check_results
+            where roll_json->>'session_id' = $1 and roll_json->>'turn_id' = $2
+            order by created_at asc
+            "#,
+        )
+        .bind(session_id)
+        .bind(turn_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::new();
+        for row in rows {
+            let check_id: String = row.get("check_id");
+            let roll_json: serde_json::Value = row.get("roll_json");
+            let outcome: serde_json::Value = row.get("outcome_json");
+            let patches_json: serde_json::Value = row.get("committed_patches");
+            let created_at = row.get("created_at");
+            let Ok(roll) = serde_json::from_value(roll_json) else {
+                continue;
+            };
+            let Ok(committed_patches) = serde_json::from_value(patches_json) else {
+                continue;
+            };
+            out.push(CheckResultRecord {
+                check_id,
+                roll,
+                outcome,
+                committed_patches,
+                created_at,
+            });
+        }
+        Ok(out)
+    }
+
     /// Return the latest check contract that has not yet produced a check_result.
     /// Used by the turn/API `/roll` path to bind a naked `/roll` command to
     /// the most recent mechanical question instead of creating an orphan die.
@@ -3852,6 +4010,38 @@ impl Db {
     /// secret_terms（不在集内 = 未揭示 = 裁剪）。
     pub async fn list_revealed_facts(&self, session_id: &str) -> Result<Vec<String>> {
         self.list_player_known_fact_ids(session_id).await
+    }
+
+    /// Current-turn player-learned facts from the append-only event ledger.
+    /// This complements `list_revealed_facts`: the latter answers "what does the
+    /// party know now?", while this answers "what became known during this exact
+    /// turn?" so presentation can project immediate `reveal_fact` commits without
+    /// re-surfacing older knowledge.
+    pub async fn list_player_learned_fact_ids_for_turn(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+    ) -> Result<Vec<String>> {
+        let rows = sqlx::query(
+            r#"
+            select distinct data->>'fact_id' as fact_id
+            from domain_events
+            where session_id = $1
+              and turn_id = $2
+              and kind = $3
+              and coalesce(nullif(trim(data->>'fact_id'), ''), '') <> ''
+            order by fact_id
+            "#,
+        )
+        .bind(session_id)
+        .bind(turn_id)
+        .bind(trpg_model::DomainEventKind::PlayerLearnedFact.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| r.get::<String, _>("fact_id"))
+            .collect())
     }
 
     /// P0c 玩家暴露写穿（`PlayerExposed` 事件 API 面）：把一个实体记为"玩家在可见虚构里
@@ -5751,14 +5941,21 @@ fn read_kernel_override_file(ruleset_id: &str) -> Option<serde_json::Value> {
         .join("parsed")
         .join("rules")
         .join(format!("{safe}.rule_kernel.override.json"));
-    // Local data/ file wins (unchanged path). When it is absent/unreadable, fall
-    // back to the binary-embedded copy so a clean checkout (no data/) reproduces
-    // the migrated values byte-for-byte.
+    let embedded_doc =
+        embedded_kernel_override(ruleset_id).and_then(|text| serde_json::from_str(text).ok());
+    // Local data/ files may lag behind embedded migrations. Treat embedded as
+    // the default migration package and overlay local keys on top, with the
+    // existing dice_core shallow-merge semantics so local dice_core additions do
+    // not mask new embedded dice_core keys.
     if let Ok(text) = std::fs::read_to_string(&p) {
-        return serde_json::from_str(&text).ok();
+        if let Ok(local_doc) = serde_json::from_str(&text) {
+            return Some(match embedded_doc {
+                Some(embedded) => merge_kernel_override_docs(embedded, local_doc),
+                None => local_doc,
+            });
+        }
     }
-    let embedded = embedded_kernel_override(ruleset_id)?;
-    serde_json::from_str(embedded).ok()
+    embedded_doc
 }
 
 /// The kernel override's `dice_core.pool_scaling_parameter`, if declared. This is
@@ -5796,6 +5993,28 @@ fn embedded_kernel_override(ruleset_id: &str) -> Option<&'static str> {
         }
         _ => return None,
     })
+}
+
+fn merge_kernel_override_docs(
+    base: serde_json::Value,
+    over: serde_json::Value,
+) -> serde_json::Value {
+    let (mut base_obj, over_obj) = match (base.as_object().cloned(), over.as_object().cloned()) {
+        (Some(base_obj), Some(over_obj)) => (base_obj, over_obj),
+        (_, Some(_)) => return over,
+        _ => return base,
+    };
+    for (key, value) in over_obj {
+        if key == "dice_core" {
+            if let Some(over_dice) = value.as_object() {
+                let base_dice = base_obj.remove("dice_core").unwrap_or_default();
+                base_obj.insert(key, merge_dice_core(base_dice, over_dice));
+                continue;
+            }
+        }
+        base_obj.insert(key, value);
+    }
+    serde_json::Value::Object(base_obj)
 }
 
 /// P0-2: layer the typed strategy policy keys from a kernel override doc onto the
@@ -6087,10 +6306,17 @@ mod pool_scaling_override_tests {
         .unwrap();
         let over = doc["dice_core"].as_object().unwrap();
         let merged = merge_dice_core(parsed, over);
-        assert_eq!(merged["dice"], serde_json::json!("6d4"), "flat dice preserved");
+        assert_eq!(
+            merged["dice"],
+            serde_json::json!("6d4"),
+            "flat dice preserved"
+        );
         assert_eq!(merged["compare"], serde_json::json!("count_faces"));
         assert_eq!(merged["target_face"], serde_json::json!(3));
-        assert_eq!(merged["pool_scaling_parameter"], serde_json::json!("competency_rank"));
+        assert_eq!(
+            merged["pool_scaling_parameter"],
+            serde_json::json!("competency_rank")
+        );
     }
 
     /// The public accessor used by the parser at chargen-compile time returns the
@@ -6342,13 +6568,30 @@ mod kernel_strategy_override_tests {
             .npc_actor_bindings
             .iter()
             .any(|b| b.actor_id == "npc.athena_drone"));
-        let dvs: Vec<i32> = cfg
-            .technical_option_table
-            .unwrap()
-            .iter()
-            .map(|t| t.dv)
-            .collect();
+        let technical = cfg.technical_option_table.unwrap();
+        let dvs: Vec<i32> = technical.iter().map(|t| t.dv).collect();
         assert_eq!(dvs, vec![14, 12]);
+        let matcher_blob = technical
+            .iter()
+            .flat_map(|t| t.matcher.iter())
+            .map(|s| s.to_ascii_lowercase())
+            .collect::<Vec<_>>()
+            .join("\n");
+        for term in [
+            "tether",
+            "signal",
+            "interference",
+            "terminal",
+            "control channel",
+            "control node",
+            "remote commands",
+            "weapon permissions",
+        ] {
+            assert!(
+                matcher_blob.contains(term),
+                "homecoming technical_option_table must cover live scene term `{term}`"
+            );
+        }
     }
 
     /// P0-2 clean-checkout equivalence: point TRPG_DATA_DIR at a FRESH EMPTY dir
@@ -6430,6 +6673,78 @@ mod kernel_strategy_override_tests {
         assert!(super::embedded_module_config("cyberpunk_red.homecoming").is_some());
         assert!(super::embedded_kernel_override("triangle_agency").is_some());
         assert!(super::embedded_kernel_override("not_a_ruleset").is_none());
+    }
+
+    #[test]
+    fn local_override_preserves_embedded_dice_core_migrations() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("TRPG_DATA_DIR").ok();
+        let tmp =
+            std::env::temp_dir().join(format!("trpg_local_overlay_test_{}", std::process::id()));
+        let rules_dir = tmp.join("parsed").join("rules");
+        std::fs::create_dir_all(&rules_dir).expect("mk temp rules dir");
+
+        struct Restore(Option<String>, std::path::PathBuf);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                unsafe {
+                    match &self.0 {
+                        Some(v) => std::env::set_var("TRPG_DATA_DIR", v),
+                        None => std::env::remove_var("TRPG_DATA_DIR"),
+                    }
+                }
+                let _ = std::fs::remove_dir_all(&self.1);
+            }
+        }
+        let _restore = Restore(prev, tmp.clone());
+        std::fs::write(
+            rules_dir.join("cyberpunk_red.rule_kernel.override.json"),
+            serde_json::to_vec(&json!({
+                "dice_core": {
+                    "skill_stat_links": {
+                        "Unit Test Skill": "TECH"
+                    }
+                }
+            }))
+            .expect("serialize local override"),
+        )
+        .expect("write local override");
+        unsafe {
+            std::env::set_var("TRPG_DATA_DIR", &tmp);
+        }
+
+        let doc = super::read_kernel_override_file("cyberpunk_red")
+            .expect("local override should load with embedded defaults");
+        let dice_core = doc
+            .get("dice_core")
+            .and_then(|v| v.as_object())
+            .expect("dice_core object");
+        assert_eq!(
+            dice_core
+                .get("skill_stat_links")
+                .and_then(|v| v.get("Unit Test Skill"))
+                .and_then(|v| v.as_str()),
+            Some("TECH"),
+            "local dice_core keys must still win"
+        );
+        let band_ids: Vec<String> = dice_core
+            .get("success_bands")
+            .and_then(|v| v.as_array())
+            .map(|bands| {
+                bands
+                    .iter()
+                    .filter_map(|band| band.get("id").and_then(|v| v.as_str()).map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            band_ids.iter().any(|id| id == "success"),
+            "embedded dice_core.success_bands migrations must survive stale local overrides; got {band_ids:?}"
+        );
+        assert!(
+            !band_ids.iter().any(|id| id.contains("critical")),
+            "embedded fail-closed Cyberpunk success_bands must not be masked by stale local overrides; got {band_ids:?}"
+        );
     }
 
     /// §10.5 behavior alignment: the CoC embedded override now carries aligned

@@ -150,7 +150,13 @@ async fn fixture(llm: Arc<MockLlm>) -> Result<(GmLoop, String)> {
     let engine = RuntimeEngine::new(db.clone());
     let session_id = engine.start_session(RULESET, None).await?;
     let data_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data");
-    let gm = GmLoop::new(engine, llm, ToolRegistry::standard(), LoopConfig::default(), data_dir);
+    let gm = GmLoop::new(
+        engine,
+        llm,
+        ToolRegistry::standard(),
+        LoopConfig::default(),
+        data_dir,
+    );
     Ok((gm, session_id))
 }
 
@@ -298,7 +304,10 @@ async fn run_scene(buf: &Arc<Mutex<Vec<u8>>>, skill: i64) -> Result<CapturedScen
         marker_line.contains(MARKER),
         "scene must emit the director_spine event (none captured this scene)"
     );
-    assert!(marker_line.contains("committed_results"), "trace must carry committed_results");
+    assert!(
+        marker_line.contains("committed_results"),
+        "trace must carry committed_results"
+    );
     let disposition = if marker_line.contains("Failed") {
         CheckOutcomeView::Failed
     } else if marker_line.contains("Passed") {
@@ -369,21 +378,29 @@ async fn director_steers_multiscene_without_railroading_live() -> Result<()> {
         run_scene(&buf, 1).await?,  // expected committed FAIL ⇒ Complicate (relocated)
         run_scene(&buf, 99).await?, // expected committed PASS ⇒ Escalate
     ];
-    assert!(scenes.len() >= 3, "≥3 scenes required for the multi-scene proof");
+    assert!(
+        scenes.len() >= 3,
+        "≥3 scenes required for the multi-scene proof"
+    );
 
     // checkpoint #1 on EVERY live scene: the beat reflects that scene's committed result (spine live).
     for (i, s) in scenes.iter().enumerate() {
         assert_beat_checkpoint(s);
         // L6.2: the split Narrator authored no mechanics on this live scene.
         let nm = classify_narrator_mechanics_checkpoint(
-            &NarratorMechanicsCheckpoint { require_no_invention: true },
+            &NarratorMechanicsCheckpoint {
+                require_no_invention: true,
+            },
             &NarratorMechanicsEvidence {
                 narrator_text: s.narration.clone(),
                 committed_check: true,
                 committed_effect: false,
             },
         );
-        assert!(!nm.is_failing(), "scene {i}: split Narrator must author no mechanics, got {nm:?}");
+        assert!(
+            !nm.is_failing(),
+            "scene {i}: split Narrator must author no mechanics, got {nm:?}"
+        );
         println!(
             "scene {i}: committed={:?} ⇒ beat={:?}/{} (narrator no-invention ✓)",
             s.disposition, s.beat_kind, s.desired_change
@@ -397,8 +414,15 @@ async fn director_steers_multiscene_without_railroading_live() -> Result<()> {
         .filter(|s| s.disposition == CheckOutcomeView::Failed)
         .collect();
     if let Some(f) = failed.first() {
-        assert_eq!(f.beat_kind, BeatKind::Complicate, "a failed scene must relocate via Complicate");
-        assert_eq!(f.desired_change, "fail_forward", "relocation = fail_forward (steer, not dead-end)");
+        assert_eq!(
+            f.beat_kind,
+            BeatKind::Complicate,
+            "a failed scene must relocate via Complicate"
+        );
+        assert_eq!(
+            f.desired_change, "fail_forward",
+            "relocation = fail_forward (steer, not dead-end)"
+        );
         // NOT a forced menu: the spine plan carries a steering beat, never a choice-menu token.
         println!("✓ (2) content-gravity: committed FAIL ⇒ fail_forward Complicate (relocated, no forced menu).");
     } else {
@@ -409,11 +433,16 @@ async fn director_steers_multiscene_without_railroading_live() -> Result<()> {
     // ── (5) the §H 8-checkpoint story-quality harness passes on the chapter transcript. Checkpoint #1
     //        is driven by the LIVE captured beats (above); the remaining 7 by the chapter story-state.
     //        This INCLUDES (3) anti-railroad (#2) and (4) no-premature-reveal (#3). ──
-    let live_beats: Vec<String> = scenes.iter().map(|s| s.beat_kind.as_str().to_string()).collect();
+    let live_beats: Vec<String> = scenes
+        .iter()
+        .map(|s| s.beat_kind.as_str().to_string())
+        .collect();
 
     // #2 anti-railroad: a rejected thread is never spotlighted.
     let c2 = classify_rejected_thread_checkpoint(
-        &RejectedThreadCheckpoint { require_no_rejected_spotlight: true },
+        &RejectedThreadCheckpoint {
+            require_no_rejected_spotlight: true,
+        },
         &RejectedThreadEvidence {
             rejected_thread_ids: vec!["thr.cult_finale".into()],
             primary_thread_id: Some("thr.cellar_investigation".into()),
@@ -422,42 +451,81 @@ async fn director_steers_multiscene_without_railroading_live() -> Result<()> {
     );
     // #3 no premature reveal: the forbidden secret stays hidden (revealed ⊆ gm_truth∖player_known; empty here).
     let c3 = classify_reveal_checkpoint(
-        &RevealCheckpoint { require_fail_closed_reveal: true },
+        &RevealCheckpoint {
+            require_fail_closed_reveal: true,
+        },
         &RevealEvidence {
             player_known: Some(vec!["fact.cellar_door".into()]),
-            gm_truth: Some(vec!["fact.cellar_door".into(), "fact.cult_leader_identity".into()]),
+            gm_truth: Some(vec![
+                "fact.cellar_door".into(),
+                "fact.cult_leader_identity".into(),
+            ]),
             revealed_fact_ids: vec![], // the forbidden fact.cult_leader_identity is NOT revealed
         },
     );
     // #4 unpaid setup: a ripe promise is paid off, not left dangling.
     let c4 = classify_unpaid_setup_checkpoint(
-        &UnpaidSetupCheckpoint { active: true, ripe_threshold: 0.8 },
+        &UnpaidSetupCheckpoint {
+            active: true,
+            ripe_threshold: 0.8,
+        },
         &UnpaidSetupEvidence {
             promises: vec![
-                PromiseObservation { promise_id: "p.rescue".into(), maturity: 0.9, paid_off: true, broken: false, overdue: true },
-                PromiseObservation { promise_id: "p.slow_burn".into(), maturity: 0.4, paid_off: false, broken: false, overdue: false },
+                PromiseObservation {
+                    promise_id: "p.rescue".into(),
+                    maturity: 0.9,
+                    paid_off: true,
+                    broken: false,
+                    overdue: true,
+                },
+                PromiseObservation {
+                    promise_id: "p.slow_burn".into(),
+                    maturity: 0.4,
+                    paid_off: false,
+                    broken: false,
+                    overdue: false,
+                },
             ],
         },
     );
     // #5 repeated beat: the LIVE chapter beats do not monotonously repeat past the cap.
     let c5 = classify_repeated_beat_checkpoint(
-        &RepeatedBeatCheckpoint { active: true, max_consecutive: 3 },
-        &RepeatedBeatEvidence { beat_kinds: live_beats.clone() },
+        &RepeatedBeatCheckpoint {
+            active: true,
+            max_consecutive: 3,
+        },
+        &RepeatedBeatEvidence {
+            beat_kinds: live_beats.clone(),
+        },
     );
     // #6 scene restate: each scene made progress (no treading-water loop).
     let c6 = classify_scene_restate_checkpoint(
-        &SceneRestateCheckpoint { active: true, max_stall: 2 },
+        &SceneRestateCheckpoint {
+            active: true,
+            max_stall: 2,
+        },
         &SceneRestateEvidence {
             turns: vec![
-                SceneTurn { scene_id: "scene.cellar".into(), made_progress: true },
-                SceneTurn { scene_id: "scene.ritual".into(), made_progress: true },
-                SceneTurn { scene_id: "scene.confront".into(), made_progress: true },
+                SceneTurn {
+                    scene_id: "scene.cellar".into(),
+                    made_progress: true,
+                },
+                SceneTurn {
+                    scene_id: "scene.ritual".into(),
+                    made_progress: true,
+                },
+                SceneTurn {
+                    scene_id: "scene.confront".into(),
+                    made_progress: true,
+                },
             ],
         },
     );
     // #7 consequence: every committed choice has a downstream consequence.
     let c7 = classify_consequence_checkpoint(
-        &ConsequenceCheckpoint { require_consequences: true },
+        &ConsequenceCheckpoint {
+            require_consequences: true,
+        },
         &ConsequenceEvidence {
             committed_choice_ids: vec!["choice.enter_cellar".into()],
             consequence_referenced_choice_ids: vec!["choice.enter_cellar".into()],
@@ -465,9 +533,16 @@ async fn director_steers_multiscene_without_railroading_live() -> Result<()> {
     );
     // #8 spotlight: a high-debt PC is focused (not perpetually sidelined).
     let c8 = classify_spotlight_debt_checkpoint(
-        &SpotlightDebtCheckpoint { active: true, max_debt: 0.7 },
+        &SpotlightDebtCheckpoint {
+            active: true,
+            max_debt: 0.7,
+        },
         &SpotlightDebtEvidence {
-            arcs: vec![ArcObservation { character_id: "pc.current".into(), spotlight_debt: 0.9, focused_recently: true }],
+            arcs: vec![ArcObservation {
+                character_id: "pc.current".into(),
+                spotlight_debt: 0.9,
+                focused_recently: true,
+            }],
         },
     );
 
@@ -475,15 +550,39 @@ async fn director_steers_multiscene_without_railroading_live() -> Result<()> {
         "\nLV.1 §H 8-checkpoint chapter result: #2={} #3={} #4={} #5={} #6={} #7={} #8={} (#1 per-scene above)",
         c2.as_str(), c3.as_str(), c4.as_str(), c5.as_str(), c6.as_str(), c7.as_str(), c8.as_str()
     );
-    assert!(!c2.is_failing(), "checkpoint #2 (anti-railroad) must pass, got {c2:?}");
-    assert!(!c3.is_failing(), "checkpoint #3 (no premature reveal) must pass, got {c3:?}");
-    assert!(!c4.is_failing(), "checkpoint #4 (unpaid setup) must pass, got {c4:?}");
-    assert!(!c5.is_failing(), "checkpoint #5 (repeated beat) must pass, got {c5:?}");
-    assert!(!c6.is_failing(), "checkpoint #6 (scene restate) must pass, got {c6:?}");
-    assert!(!c7.is_failing(), "checkpoint #7 (consequence) must pass, got {c7:?}");
-    assert!(!c8.is_failing(), "checkpoint #8 (spotlight) must pass, got {c8:?}");
+    assert!(
+        !c2.is_failing(),
+        "checkpoint #2 (anti-railroad) must pass, got {c2:?}"
+    );
+    assert!(
+        !c3.is_failing(),
+        "checkpoint #3 (no premature reveal) must pass, got {c3:?}"
+    );
+    assert!(
+        !c4.is_failing(),
+        "checkpoint #4 (unpaid setup) must pass, got {c4:?}"
+    );
+    assert!(
+        !c5.is_failing(),
+        "checkpoint #5 (repeated beat) must pass, got {c5:?}"
+    );
+    assert!(
+        !c6.is_failing(),
+        "checkpoint #6 (scene restate) must pass, got {c6:?}"
+    );
+    assert!(
+        !c7.is_failing(),
+        "checkpoint #7 (consequence) must pass, got {c7:?}"
+    );
+    assert!(
+        !c8.is_failing(),
+        "checkpoint #8 (spotlight) must pass, got {c8:?}"
+    );
 
-    println!("\n✓ LV.1 LIVE: Director steered across {} scenes (spine reflects every committed result),", scenes.len());
+    println!(
+        "\n✓ LV.1 LIVE: Director steered across {} scenes (spine reflects every committed result),",
+        scenes.len()
+    );
     println!("  content-gravity relocation on failure, and the §H 8-checkpoint harness passed the chapter.");
     Ok(())
 }

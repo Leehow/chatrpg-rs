@@ -28,6 +28,8 @@ const NO_MECHANICAL_GUIDANCE: &str = r#"## 机械结果守则
 不要在叙事里替引擎宣布任何未经结算落账的机械结果：
 - 不说"你掉了 X 点 HP / 你死了 / 检定成功或失败 / 你获得了某物 / 敌人被击杀"，除非这些已由掷骰/检定/施效工具结算并落账。
 - 需要判定时，发起检定/掷骰，让工具给出结果，再据实叙述。
+- 如果工具返回 `rolled:false` / `passive_mechanic:true`，那不是检定或掷骰结果；不要用 `[roll]` 包裹，也不要写成成功/失败。
+- 门、设备、炮塔、无人机、供电、警报、锁、控制台等环境状态变化，也必须由工具/世界事实落账后才能写成既成事实；没有落账时，只能写成威胁或迹象。
 - 不确定数值或成败时，用可观察的描写表达不确定，不要编造具体数字或结局。"#;
 
 /// 防私造机械结果守卫（内置 policy 插件，Safety 等级，always-on）。
@@ -135,5 +137,21 @@ mod tests {
             ..Default::default()
         };
         assert!(NoMechanicalInvention.on_hook(&ctx).await.is_empty());
+    }
+
+    #[test]
+    fn no_mechanical_guidance_covers_environment_state_changes() {
+        assert!(NO_MECHANICAL_GUIDANCE.contains("环境状态变化"));
+        assert!(NO_MECHANICAL_GUIDANCE.contains("门"));
+        assert!(NO_MECHANICAL_GUIDANCE.contains("设备"));
+        assert!(NO_MECHANICAL_GUIDANCE.contains("落账"));
+        assert!(NO_MECHANICAL_GUIDANCE.contains("威胁或迹象"));
+    }
+
+    #[test]
+    fn no_mechanical_guidance_covers_passive_mechanics() {
+        assert!(NO_MECHANICAL_GUIDANCE.contains("rolled:false"));
+        assert!(NO_MECHANICAL_GUIDANCE.contains("passive_mechanic:true"));
+        assert!(NO_MECHANICAL_GUIDANCE.contains("不要用 `[roll]` 包裹"));
     }
 }

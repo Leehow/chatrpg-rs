@@ -68,15 +68,40 @@ pub enum PredicateExpr {
     All(Vec<PredicateExpr>),
     Any(Vec<PredicateExpr>),
     Not(Box<PredicateExpr>),
-    FactEquals { fact: String, value: IrValue },
-    ObjectiveStatus { id: String, status: ObjectiveStatus },
-    RevelationKnown { id: String, holder: KnowledgeHolder },
-    ClockAtLeast { id: String, value: i32 },
-    ElapsedSince { event: EventPattern, minutes: i64 },
+    FactEquals {
+        fact: String,
+        value: IrValue,
+    },
+    ObjectiveStatus {
+        id: String,
+        status: ObjectiveStatus,
+    },
+    RevelationKnown {
+        id: String,
+        holder: KnowledgeHolder,
+    },
+    ClockAtLeast {
+        id: String,
+        value: i32,
+    },
+    ElapsedSince {
+        event: EventPattern,
+        minutes: i64,
+    },
     LocationEntered(String),
-    ChoiceMade { key: String, value: String },
-    EntityState { entity: String, field: String, value: IrValue },
-    ResourceAtLeast { resource: String, amount: i64 },
+    ChoiceMade {
+        key: String,
+        value: String,
+    },
+    EntityState {
+        entity: String,
+        field: String,
+        value: IrValue,
+    },
+    ResourceAtLeast {
+        resource: String,
+        amount: i64,
+    },
     /// True iff SOME known fact's id case-insensitively contains ANY of these
     /// source-grounded vocabulary tokens. Aligns a GM's free-form `fact_id`
     /// (e.g. `encounter.hacking_server`) to an authored objective via the
@@ -84,7 +109,9 @@ pub enum PredicateExpr {
     /// same case-insensitive-substring scheme the module config already uses,
     /// so the LLM never evaluates the guard (Rust does, deterministically).
     /// Empty/whitespace-only tokens are skipped → never match-all (fail-closed).
-    AnyFactMatches { tokens: Vec<String> },
+    AnyFactMatches {
+        tokens: Vec<String>,
+    },
     /// EV-APPLY (`witnessed_progression_apply_v1`): True iff the turn's
     /// AcceptedEvidence ledger admitted this authored atom (its `AtomId` string is
     /// in [`EvalContext::present_evidence_atoms`]). This is the **executable**
@@ -93,13 +120,19 @@ pub enum PredicateExpr {
     /// (Rust admitted it; the LLM produced none of this) — never by re-interpreting
     /// the prose. Absent evidence ⇒ `False` (fail-closed: the objective stays open),
     /// NEVER `NonExecutable`.
-    EvidencePresent { atom_id: String },
+    EvidencePresent {
+        atom_id: String,
+    },
     /// True iff AcceptedEvidence for ANY of these atoms is present. Empty set ⇒
     /// `False` (fail-closed, never match-all).
-    EvidenceAnyOf { atom_ids: Vec<String> },
+    EvidenceAnyOf {
+        atom_ids: Vec<String>,
+    },
     /// Authored condition that could not be normalized. Stored for Director/GM
     /// to read; **never** auto-fires (`eval` → `NonExecutable`).
-    OpaqueAuthoredText { raw_text: String },
+    OpaqueAuthoredText {
+        raw_text: String,
+    },
 }
 
 /// Three-valued result. `NonExecutable` means "Rust cannot decide this guard"
@@ -139,10 +172,7 @@ pub struct EvalContext {
 
 impl EvalContext {
     fn elapsed_for(&self, ev: &EventPattern) -> Option<i64> {
-        self.elapsed
-            .iter()
-            .find(|(e, _)| e == ev)
-            .map(|(_, m)| *m)
+        self.elapsed.iter().find(|(e, _)| e == ev).map(|(_, m)| *m)
     }
     fn revelation_known(&self, id: &str, holder: &KnowledgeHolder) -> bool {
         self.known_revelations.iter().any(|(rid, h)| {
@@ -209,9 +239,7 @@ impl PredicateExpr {
                 False => True,
                 NonExecutable => NonExecutable,
             },
-            PredicateExpr::FactEquals { fact, value } => {
-                b3(ctx.facts.get(fact) == Some(value))
-            }
+            PredicateExpr::FactEquals { fact, value } => b3(ctx.facts.get(fact) == Some(value)),
             PredicateExpr::ObjectiveStatus { id, status } => {
                 b3(ctx.objectives.get(id) == Some(status))
             }
@@ -221,7 +249,10 @@ impl PredicateExpr {
             }
             PredicateExpr::ElapsedSince { event, minutes } => {
                 // Event has not occurred yet → not elapsed (deterministic False).
-                b3(ctx.elapsed_for(event).map(|m| m >= *minutes).unwrap_or(false))
+                b3(ctx
+                    .elapsed_for(event)
+                    .map(|m| m >= *minutes)
+                    .unwrap_or(false))
             }
             PredicateExpr::LocationEntered(loc) => {
                 b3(ctx.entered_locations.iter().any(|l| l == loc))
@@ -233,10 +264,7 @@ impl PredicateExpr {
                 entity,
                 field,
                 value,
-            } => b3(ctx
-                .entity_states
-                .get(&(entity.clone(), field.clone()))
-                == Some(value)),
+            } => b3(ctx.entity_states.get(&(entity.clone(), field.clone())) == Some(value)),
             PredicateExpr::ResourceAtLeast { resource, amount } => {
                 b3(ctx.resources.get(resource).copied().unwrap_or(0) >= *amount)
             }
@@ -259,9 +287,9 @@ impl PredicateExpr {
             PredicateExpr::EvidencePresent { atom_id } => {
                 b3(ctx.present_evidence_atoms.contains(atom_id))
             }
-            PredicateExpr::EvidenceAnyOf { atom_ids } => {
-                b3(atom_ids.iter().any(|a| ctx.present_evidence_atoms.contains(a)))
-            }
+            PredicateExpr::EvidenceAnyOf { atom_ids } => b3(atom_ids
+                .iter()
+                .any(|a| ctx.present_evidence_atoms.contains(a))),
             // KEY fail-closed rule: Rust never auto-fires authored opaque text.
             PredicateExpr::OpaqueAuthoredText { .. } => NonExecutable,
         }
@@ -283,7 +311,8 @@ mod tests {
         c.elapsed
             .push((EventPattern::Entered("unit.foxwell".into()), 16));
         c.entered_locations.push("loc.condo_1".into());
-        c.choices.insert("quil_vs_hisako".into(), "side_with_quil".into());
+        c.choices
+            .insert("quil_vs_hisako".into(), "side_with_quil".into());
         c.resources.insert("eb".into(), 500);
         c.known_revelations
             .push(("rev.coords".into(), KnowledgeHolder::Party));
@@ -448,7 +477,10 @@ mod tests {
             NonExecutable
         );
         // Any: a True satisfies even alongside opaque.
-        assert_eq!(PredicateExpr::Any(vec![t.clone(), o.clone()]).eval(&c), True);
+        assert_eq!(
+            PredicateExpr::Any(vec![t.clone(), o.clone()]).eval(&c),
+            True
+        );
         // Any: False + opaque → cannot confirm any → NonExecutable.
         assert_eq!(
             PredicateExpr::Any(vec![f.clone(), o.clone()]).eval(&c),

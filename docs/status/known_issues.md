@@ -116,7 +116,7 @@
 | 45 | Spoiler / visibility | Homecoming 首场会把未发现的隐藏实体名 `Athena` 暴露给玩家。 | 对 GM-only search/runtime blocks 增加 player-facing redaction；默认通过 `TRPG_SECRET_TERM_OVERRIDES=Athena,Shelob` 屏蔽隐藏名，并新增输出契约要求不得猜测 redacted identity。 |
 | 46 | LLM transport | `stream_chat` 遇到 429/5xx 无重试；CLI JSONL/SSE 可能没有可见错误。 | `stream_chat` 和 `post_chat` 增加 retry/backoff/Retry-After 支持；CLI 增加 `error` event。 |
 | 47 | 检定策略 | 技术/分析动作可能被免费给结论。 | `player_facing_output_contract` 与 engine protocol 增加一致检定策略：有风险、成本、状态改变或战术收益时要求/提供 check，否则明确标注为 free read。 |
-| 48 | 叙事节奏 | 回合结尾过度依赖编号菜单。 | 输出契约要求变化收束方式：选项、聚焦问题、纯叙事停顿混用。 |
+| 48 | 叙事节奏 / 玩家自主权 | 显式选项菜单和“关键事实”式内容清单会替玩家收窄行动权。 | 输出契约与 always-on 玩家自主权守卫硬禁显式选项菜单、编号/项目符号行动清单、原始线索/模组内容 dump；只允许通过场景 affordance 暗示选择，除非 runtime/rules 明确打开 required choice/reaction gate。 |
 
 ### 仍未修的功能问题
 

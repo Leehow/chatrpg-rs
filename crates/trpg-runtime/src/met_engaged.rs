@@ -218,7 +218,9 @@ mod tests {
     }
 
     fn exposed(v: &[(&str, &str)]) -> Vec<(String, String)> {
-        v.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
+        v.iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
     }
 
     // ===== TDD #1+#2 基座：Enforce 下 present 划分 met / unmet =====
@@ -262,11 +264,17 @@ mod tests {
     fn unmet_npc_guidance_gets_reactive_only_constraint() {
         let active = ids(&["npc_unmet"]);
         let gate = derive_met_engaged_gate(&active, &exposed(&[]), Enforce);
-        let out = restrict_unmet_npc_guidance(Some("[npc_behavior_guidance npc=npc_unmet]\n…\n[/npc_behavior_guidance]".into()), &gate);
+        let out = restrict_unmet_npc_guidance(
+            Some("[npc_behavior_guidance npc=npc_unmet]\n…\n[/npc_behavior_guidance]".into()),
+            &gate,
+        );
         let s = out.unwrap();
         assert!(s.contains("[npc_presence_gate]"), "应追加在场闸约束块");
         assert!(s.contains("npc_unmet"), "约束应点名 un-met NPC id");
-        assert!(s.contains("only reactively") || s.contains("reactively"), "应表达只可反应");
+        assert!(
+            s.contains("only reactively") || s.contains("reactively"),
+            "应表达只可反应"
+        );
         // 约束只提 id，绝不含 secret 文本。
         assert!(!s.contains("secret_value"));
     }
@@ -276,7 +284,8 @@ mod tests {
         // 全部 active NPC 已会面 → 无 un-met → 不追加（基线）。
         let active = ids(&["npc_met"]);
         let gate = derive_met_engaged_gate(&active, &exposed(&[("npc_met", "npc")]), Enforce);
-        let base = Some("[npc_behavior_guidance npc=npc_met]\n…\n[/npc_behavior_guidance]".to_string());
+        let base =
+            Some("[npc_behavior_guidance npc=npc_met]\n…\n[/npc_behavior_guidance]".to_string());
         assert_eq!(
             restrict_unmet_npc_guidance(base.clone(), &gate),
             base,
@@ -305,7 +314,10 @@ mod tests {
     fn shadow_mode_inert_no_player_visible_effect() {
         let active = ids(&["npc_a", "npc_b"]);
         let gate = derive_met_engaged_gate(&active, &exposed(&[("npc_a", "npc")]), Shadow);
-        assert!(!gate.enforced, "Shadow：无独立 audit sink，对 M4 等同非应用");
+        assert!(
+            !gate.enforced,
+            "Shadow：无独立 audit sink，对 M4 等同非应用"
+        );
         assert_eq!(gate.met, active);
         assert!(gate.unmet.is_empty());
         assert_eq!(director_leverage_npc_ids(&gate), active);
@@ -365,7 +377,10 @@ mod tests {
         let evs = player_engaged_met_events("sess", "t1", &active, "npc_athena", Enforce);
         assert_eq!(evs.len(), 1, "应为被接触的 active NPC 发一条事件");
         assert_eq!(evs[0].kind, trpg_model::DomainEventKind::PlayerExposed);
-        assert_eq!(evs[0].event_id, "de_exposed_sess_npc_athena", "与念白暴露同口径 ⇒ 幂等折叠");
+        assert_eq!(
+            evs[0].event_id, "de_exposed_sess_npc_athena",
+            "与念白暴露同口径 ⇒ 幂等折叠"
+        );
         assert_eq!(
             evs[0].data.get("entity_id").and_then(|v| v.as_str()),
             Some("npc_athena")
@@ -414,11 +429,19 @@ mod tests {
     /// TDD #6：GENERIC —— 任意 ruleset/module 命名都 data-driven，无名分支。
     #[test]
     fn engage_event_is_generic_no_name_branch() {
-        for npc in ["coc_keeper_npc", "dnd_tavern_npc", "生造模组_村长", "npc.athena_drone"] {
+        for npc in [
+            "coc_keeper_npc",
+            "dnd_tavern_npc",
+            "生造模组_村长",
+            "npc.athena_drone",
+        ] {
             let active = ids(&[npc]);
             let evs = player_engaged_met_events("s", "t", &active, npc, Enforce);
             assert_eq!(evs.len(), 1, "id={npc} 应纯 data-driven 发事件");
-            assert_eq!(evs[0].data.get("entity_id").and_then(|v| v.as_str()), Some(npc));
+            assert_eq!(
+                evs[0].data.get("entity_id").and_then(|v| v.as_str()),
+                Some(npc)
+            );
         }
     }
 

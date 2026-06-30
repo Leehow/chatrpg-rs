@@ -57,14 +57,17 @@ async fn homecoming_cooccurrence_is_associated_not_spatial() {
     assert!(!rels.is_empty());
     // 核心断言：共现边全 AssociatedByEntity/RetrievalOnly + 带 evidence，无一标 Spatial。
     assert!(
-        rels.iter().all(|r| r.kind == RelationKind::AssociatedByEntity),
+        rels.iter()
+            .all(|r| r.kind == RelationKind::AssociatedByEntity),
         "homecoming 共现边全 AssociatedByEntity"
     );
     assert!(
         !rels.iter().any(|r| r.kind == RelationKind::SpatialAdjacent),
         "无一标 SpatialAdjacent"
     );
-    assert!(rels.iter().all(|r| r.enforcement == Enforcement::RetrievalOnly));
+    assert!(rels
+        .iter()
+        .all(|r| r.enforcement == Enforcement::RetrievalOnly));
     assert!(rels.iter().all(|r| !r.evidence.is_empty()), "带 evidence");
     assert!(
         rels.iter().all(|r| !r.participates_in_progression()),

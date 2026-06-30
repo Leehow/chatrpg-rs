@@ -105,7 +105,9 @@ mod tests {
 
     #[test]
     fn default_and_off_aliases_parse_off() {
-        for raw in ["", "0", "off", "OFF", "false", "no", "enabled", "garbage", "  "] {
+        for raw in [
+            "", "0", "off", "OFF", "false", "no", "enabled", "garbage", "  ",
+        ] {
             assert_eq!(
                 MaterializationAffordanceMode::parse(raw),
                 MaterializationAffordanceMode::Off,
@@ -121,7 +123,10 @@ mod tests {
         assert_eq!(MaterializationAffordanceMode::for_session("", false), Off);
         assert_eq!(MaterializationAffordanceMode::for_session("  ", false), Off);
         // unset + module bound → Enforce (DP-C scoped default).
-        assert_eq!(MaterializationAffordanceMode::for_session("", true), Enforce);
+        assert_eq!(
+            MaterializationAffordanceMode::for_session("", true),
+            Enforce
+        );
         // explicit env wins BOTH ways, even for a module-bound session.
         assert_eq!(MaterializationAffordanceMode::for_session("off", true), Off);
         assert_eq!(MaterializationAffordanceMode::for_session("0", true), Off);

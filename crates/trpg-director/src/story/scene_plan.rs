@@ -69,9 +69,15 @@ fn is_live(status: StoryThreadStatus) -> bool {
 /// a ripe thread wants resolution; an escalating one wants pressure; reveal material (thread facts
 /// or module scene facts) wants information; an active thread wants a choice; nothing live ⇒ tone.
 fn derive_purpose(live: &[&StoryThread], config: Option<&DirectorModuleConfig>) -> ScenePurpose {
-    if live.iter().any(|t| t.status == StoryThreadStatus::ReadyForPayoff) {
+    if live
+        .iter()
+        .any(|t| t.status == StoryThreadStatus::ReadyForPayoff)
+    {
         ScenePurpose::ResolveConflict
-    } else if live.iter().any(|t| t.status == StoryThreadStatus::Escalating) {
+    } else if live
+        .iter()
+        .any(|t| t.status == StoryThreadStatus::Escalating)
+    {
         ScenePurpose::RaisePressure
     } else if live.iter().any(|t| !t.related_fact_ids.is_empty())
         || config.map(|c| !c.scene_facts.is_empty()).unwrap_or(false)
@@ -93,7 +99,11 @@ fn fail_forward_for(purpose: ScenePurpose) -> Vec<String> {
         ScenePurpose::ForceChoice => "success_with_cost",
         _ => "reframe_situation",
     };
-    vec![head.to_string(), "success_with_cost".to_string(), "fail_reveals_risk".to_string()]
+    vec![
+        head.to_string(),
+        "success_with_cost".to_string(),
+        "fail_reveals_risk".to_string(),
+    ]
 }
 
 /// L4.1 — PURE derivation of a [`ScenePlan`] from a scene id + its live threads + optional module
@@ -114,7 +124,10 @@ pub fn derive_scene_plan(
         .iter()
         .map(|t| format!("advance:{}", t.thread_id))
         .collect();
-    if config.map(|c| !c.pressure_items.is_empty()).unwrap_or(false) {
+    if config
+        .map(|c| !c.pressure_items.is_empty())
+        .unwrap_or(false)
+    {
         progress_signals.push("pressure_shift".to_string());
     }
     if progress_signals.is_empty() {
@@ -132,10 +145,7 @@ pub fn derive_scene_plan(
     // Pacing budget: base 6, tightened by thread load (more live threads ⇒ less time each) and by
     // high urgency (a pressing scene runs hot). Clamped to a sane 2..=6 — never the old constant 4.
     let load = spotlight_thread_ids.len().min(4) as u32;
-    let max_urgency = live
-        .iter()
-        .map(|t| t.urgency)
-        .fold(0.0_f32, f32::max);
+    let max_urgency = live.iter().map(|t| t.urgency).fold(0.0_f32, f32::max);
     let mut budget = 6u32.saturating_sub(load);
     if max_urgency >= 0.7 {
         budget = budget.saturating_sub(1);
@@ -147,7 +157,10 @@ pub fn derive_scene_plan(
     // ripe (ReadyForPayoff) thread's facts are NOT forbidden (the scene is here to pay them off).
     // Order-stable, de-duplicated; empty when no building thread has facts (fail-closed no-op).
     let mut forbidden_fact_ids: Vec<String> = Vec::new();
-    for t in live.iter().filter(|t| t.status != StoryThreadStatus::ReadyForPayoff) {
+    for t in live
+        .iter()
+        .filter(|t| t.status != StoryThreadStatus::ReadyForPayoff)
+    {
         for f in &t.related_fact_ids {
             if !forbidden_fact_ids.contains(f) {
                 forbidden_fact_ids.push(f.clone());
@@ -256,8 +269,14 @@ mod tests {
         );
         assert!(plan.spotlight_thread_ids.is_empty());
         assert_eq!(plan.scene_purpose, ScenePurpose::EstablishTone);
-        assert_eq!(plan.progress_signals, vec!["player_states_intent".to_string()]);
-        assert_eq!(plan.pacing_budget_turns, 6, "no load, no urgency ⇒ loose budget");
+        assert_eq!(
+            plan.progress_signals,
+            vec!["player_states_intent".to_string()]
+        );
+        assert_eq!(
+            plan.pacing_budget_turns, 6,
+            "no load, no urgency ⇒ loose budget"
+        );
     }
 
     // Pacing tightens with load + urgency, and is never the old constant 4 by accident.
@@ -304,8 +323,18 @@ mod tests {
         let plan = derive_scene_plan(
             "s",
             &[
-                thread("t_build", StoryThreadStatus::Active, 0.3, &["secret_a", "secret_b"]),
-                thread("t_ripe", StoryThreadStatus::ReadyForPayoff, 0.3, &["payoff_c"]),
+                thread(
+                    "t_build",
+                    StoryThreadStatus::Active,
+                    0.3,
+                    &["secret_a", "secret_b"],
+                ),
+                thread(
+                    "t_ripe",
+                    StoryThreadStatus::ReadyForPayoff,
+                    0.3,
+                    &["payoff_c"],
+                ),
                 thread("t_dorm", StoryThreadStatus::Dormant, 0.9, &["dormant_d"]),
             ],
             None,
@@ -325,7 +354,12 @@ mod tests {
     fn no_building_facts_yields_empty_forbidden() {
         let plan = derive_scene_plan(
             "s",
-            &[thread("t_ripe", StoryThreadStatus::ReadyForPayoff, 0.3, &["payoff"])],
+            &[thread(
+                "t_ripe",
+                StoryThreadStatus::ReadyForPayoff,
+                0.3,
+                &["payoff"],
+            )],
             None,
         );
         assert!(plan.forbidden_fact_ids.is_empty());
@@ -346,6 +380,8 @@ mod tests {
         );
         // scene_facts present ⇒ RevealInformation even though the thread has no facts.
         assert_eq!(plan.scene_purpose, ScenePurpose::RevealInformation);
-        assert!(plan.progress_signals.contains(&"pressure_shift".to_string()));
+        assert!(plan
+            .progress_signals
+            .contains(&"pressure_shift".to_string()));
     }
 }

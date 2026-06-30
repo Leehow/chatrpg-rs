@@ -36,7 +36,13 @@ fn rank_for(template: &trpg_model::CharacterTemplate, catalogs: &Value, pick: &s
     let mut sheet = json!({ "competency": pick });
     trpg_runtime::apply_chargen_formulas(&[rec], &mut sheet);
     let params = trpg_runtime::materialize_actor_params(
-        "sess_q2_live", RULESET, "pc.q2", "tmpl", "Agent", &sheet, 0,
+        "sess_q2_live",
+        RULESET,
+        "pc.q2",
+        "tmpl",
+        "Agent",
+        &sheet,
+        0,
     );
     params
         .mechanical_profile
@@ -103,7 +109,10 @@ async fn live_competent_triangle_agent_rolls_bigger_param_driven_pool() {
         .expect("ordinal table");
     assert!(ranges.len() >= 2, "need >= 2 live competency options");
     let low_pick = ranges[0]["min"].as_str().unwrap().to_string();
-    let high_pick = ranges[ranges.len() - 1]["min"].as_str().unwrap().to_string();
+    let high_pick = ranges[ranges.len() - 1]["min"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let low_rank = rank_for(&template, &catalogs, &low_pick).expect("low rank materialized");
     let high_rank = rank_for(&template, &catalogs, &high_pick).expect("high rank materialized");
@@ -117,10 +126,8 @@ async fn live_competent_triangle_agent_rolls_bigger_param_driven_pool() {
         "dice":"6d4","compare":"count_faces","target_face":3,
         "pool_scaling_parameter":"competency_rank","pool_base":6,"pool_per_rank":1
     });
-    let pool_low =
-        trpg_model::param_driven_pool_expression(&dice_core, "6d4", low_rank).unwrap();
-    let pool_high =
-        trpg_model::param_driven_pool_expression(&dice_core, "6d4", high_rank).unwrap();
+    let pool_low = trpg_model::param_driven_pool_expression(&dice_core, "6d4", low_rank).unwrap();
+    let pool_high = trpg_model::param_driven_pool_expression(&dice_core, "6d4", high_rank).unwrap();
     assert_ne!(
         pool_low, pool_high,
         "LIVE: a more-competent Triangle agent rolls a DIFFERENT pool than a less-competent one \

@@ -283,11 +283,40 @@ fn actor_display_for(actor_id: &str, actor_kind: ActorKind) -> String {
     }
 }
 
+fn normalize_visibility_for_check_args(
+    requested: RollVisibility,
+    actor_kind: ActorKind,
+    intent_kind: Option<&str>,
+) -> RollVisibility {
+    if requested == RollVisibility::PrivateGmRoll
+        && matches!(actor_kind, ActorKind::PlayerCharacter)
+        && !pc_private_check_intent_allowed(intent_kind)
+    {
+        return RollVisibility::PublicGmRoll;
+    }
+    requested
+}
+
+fn pc_private_check_intent_allowed(intent_kind: Option<&str>) -> bool {
+    let Some(intent) = intent_kind.map(str::trim).filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    let lowered = intent.to_ascii_lowercase();
+    lowered.contains("stealth")
+        || lowered.contains("hidden")
+        || lowered.contains("secret")
+        || lowered.contains("passive")
+}
+
 fn mechanic_has_roll_step(entry: &MechanicEntry) -> bool {
     entry
         .procedure
         .iter()
         .any(|step| matches!(step, ProcedureStep::Roll { .. }))
+}
+
+fn mechanic_should_return_passive(entry: &MechanicEntry) -> bool {
+    !mechanic_has_roll_step(entry) && !matches!(entry.kind, MechanicKind::SkillCheck)
 }
 
 fn passive_mechanic_result(mechanic_id: &str, entry: &MechanicEntry) -> Value {
@@ -298,7 +327,8 @@ fn passive_mechanic_result(mechanic_id: &str, entry: &MechanicEntry) -> Value {
         "rolled": false,
         "procedure": entry.procedure,
         "source_refs": entry.source_refs,
-        "note": "This mechanics-catalog entry has no roll step; apply/narrate its gates without rolling a default die."
+        "note": "This mechanics-catalog entry has no roll step; apply/narrate its gates without rolling a default die.",
+        "narration_instruction": "This is not a check or roll result. Do not wrap it in [roll] and do not say a roll/check succeeded or failed; narrate only the gate/action state."
     })
 }
 
@@ -406,12 +436,21 @@ pub fn build_check_contract_for_args(
     args: &RollCheckArgs,
     dice: &str,
 ) -> Result<CheckContract> {
-    let visibility = visibility_for_system(&args.visibility)?;
+    let requested_visibility = visibility_for_system(&args.visibility)?;
     let actor_id = args
         .actor_id
         .clone()
         .unwrap_or_else(|| "pc.current".to_string());
     let actor_kind = actor_kind_for_actor_id(&actor_id);
+    let visibility = normalize_visibility_for_check_args(
+        requested_visibility,
+        actor_kind,
+        args.intent_kind.as_deref(),
+    );
+    let mut advice_refs = vec!["gm_agent.roll_check".to_string()];
+    if requested_visibility != visibility {
+        advice_refs.push("visibility_normalized:active_pc_check_public".to_string());
+    }
     Ok(CheckContract {
         check_id: format!("check_{}", Uuid::new_v4().simple()),
         session_id: session_id.to_string(),
@@ -461,7 +500,7 @@ pub fn build_check_contract_for_args(
         },
         confidence: RulingConfidence::Medium,
         ruling_status: RulingStatus::Provisional,
-        advice_refs: vec!["gm_agent.roll_check".to_string()],
+        advice_refs,
         expires_at_turn: Some(turn_id.to_string()),
     })
 }
@@ -561,7 +600,7 @@ impl GmTool for RollCheckTool {
                     ),
                 ));
             };
-            if !mechanic_has_roll_step(entry) {
+            if mechanic_should_return_passive(entry) {
                 resolve_dues_for_mechanic_id(ctx, &mechanic_id).await;
                 return Ok(ToolOutput::ok(passive_mechanic_result(&mechanic_id, entry)));
             }

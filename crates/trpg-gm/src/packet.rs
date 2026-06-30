@@ -111,9 +111,13 @@ pub struct NarrationPacket {
 
 fn roll_is_player_visible(visibility: RollVisibility) -> bool {
     // 镜像 trpg_agent::gm_loop 既有语义(PublicGmRoll / PlayerRollRequired 玩家可见)。
+    // PassiveResolution is also player-auditable once committed: the player did not roll by hand,
+    // but the GM still owes a visible mechanical result instead of silently hiding the check.
     matches!(
         visibility,
-        RollVisibility::PublicGmRoll | RollVisibility::PlayerRollRequired
+        RollVisibility::PublicGmRoll
+            | RollVisibility::PlayerRollRequired
+            | RollVisibility::PassiveResolution
     )
 }
 
@@ -610,6 +614,25 @@ mod tests {
     }
 
     #[test]
+    fn narration_packet_projects_passive_resolution_checks_as_player_visible() {
+        let snap = snapshot_with(
+            vec![check_result("c_passive", RollVisibility::PassiveResolution)],
+            vec![],
+            vec![],
+        );
+
+        let adj = AdjudicationPacket::project("谨慎下楼查看地下室", &snap, &[], "", None);
+        let narration = NarrationPacket::project(&adj, "", &[]);
+
+        assert_eq!(
+            narration.what_happened.len(),
+            1,
+            "committed passive checks must still be available to player-visible narration"
+        );
+        assert!(narration.what_happened[0].contains("c_passive"));
+    }
+
+    #[test]
     fn faithful_roll_line_renders_real_pool_and_d100() {
         // OA-ROLLTRUTH: the Check fact summary must carry the REAL canonical dice expression +
         // rolled values + target + band (so the split Narrator copies "6d4" instead of fabricating
@@ -624,13 +647,28 @@ mod tests {
             "resolution_model":{"kind":"dice_pool_count","threshold":1,"target_face":3}
         });
         let line = faithful_roll_line(&pool);
-        assert!(line.contains("check_pool"), "must keep check_id ref for verifier: {line}");
-        assert!(line.contains("6d4"), "must carry canonical expression: {line}");
-        assert!(line.contains("2,2,3,2,1,1") || line.contains("[2, 2, 3, 2, 1, 1]"), "real dice: {line}");
+        assert!(
+            line.contains("check_pool"),
+            "must keep check_id ref for verifier: {line}"
+        );
+        assert!(
+            line.contains("6d4"),
+            "must carry canonical expression: {line}"
+        );
+        assert!(
+            line.contains("2,2,3,2,1,1") || line.contains("[2, 2, 3, 2, 1, 1]"),
+            "real dice: {line}"
+        );
         // dice_pool_count = count dice whose face EQUALS target_face (codex #3), not ≥.
-        assert!(line.contains("面值=3"), "pool target face EQUALS semantics: {line}");
+        assert!(
+            line.contains("面值=3"),
+            "pool target face EQUALS semantics: {line}"
+        );
         assert!(!line.contains('?'), "NEVER an unbound '?' marker: {line}");
-        assert!(!line.contains('{') && !line.contains('}'), "NEVER raw JSON braces: {line}");
+        assert!(
+            !line.contains('{') && !line.contains('}'),
+            "NEVER raw JSON braces: {line}"
+        );
         assert!(line.contains("成功"), "outcome band: {line}");
 
         // CoC d100 percentile_roll_under (the REAL CheckResolutionModel kind, codex #2).
@@ -657,7 +695,10 @@ mod tests {
         });
         let l3 = faithful_roll_line(&prov);
         assert!(l3.contains("待结算"), "unresolved must be pending: {l3}");
-        assert!(!l3.contains("6d") && !l3.contains("1d"), "no fake dice on pending: {l3}");
+        assert!(
+            !l3.contains("6d") && !l3.contains("1d"),
+            "no fake dice on pending: {l3}"
+        );
     }
 
     #[test]
@@ -690,9 +731,13 @@ mod tests {
     fn scene_establishing_project_empty_builder_injects_q_module() {
         // DP-B': project() leaves scene_establishing empty (OFF byte-equal); with_scene_establishing
         // injects the gated, redacted slices and trims/filters empties.
-        let adj = AdjudicationPacket::project("环顾", &TurnLedgerSnapshot::default(), &[], "", None);
+        let adj =
+            AdjudicationPacket::project("环顾", &TurnLedgerSnapshot::default(), &[], "", None);
         let base = NarrationPacket::project(&adj, "", &[]);
-        assert!(base.scene_establishing.is_empty(), "project must leave it empty (OFF byte-equal)");
+        assert!(
+            base.scene_establishing.is_empty(),
+            "project must leave it empty (OFF byte-equal)"
+        );
 
         let injected = NarrationPacket::project(&adj, "", &[]).with_scene_establishing(&[
             "  春雨敲打着加油站的雨棚。  ".to_string(),
@@ -716,9 +761,13 @@ mod tests {
         // OA2 (G-3): project() leaves character_context empty (OFF byte-equal);
         // with_character_context injects the gated player-safe PC competency slices,
         // trimming/filtering empties exactly like with_scene_establishing.
-        let adj = AdjudicationPacket::project("环顾", &TurnLedgerSnapshot::default(), &[], "", None);
+        let adj =
+            AdjudicationPacket::project("环顾", &TurnLedgerSnapshot::default(), &[], "", None);
         let base = NarrationPacket::project(&adj, "", &[]);
-        assert!(base.character_context.is_empty(), "project must leave it empty (OFF byte-equal)");
+        assert!(
+            base.character_context.is_empty(),
+            "project must leave it empty (OFF byte-equal)"
+        );
 
         let injected = NarrationPacket::project(&adj, "", &[]).with_character_context(&[
             "  stats: STR 55、DEX 70  ".to_string(),
@@ -727,7 +776,10 @@ mod tests {
         ]);
         assert_eq!(
             injected.character_context,
-            vec!["stats: STR 55、DEX 70".to_string(), "skills: Spot Hidden 50".to_string()]
+            vec![
+                "stats: STR 55、DEX 70".to_string(),
+                "skills: Spot Hidden 50".to_string()
+            ]
         );
         let empty = NarrationPacket::project(&adj, "", &[]).with_character_context(&[]);
         assert!(empty.character_context.is_empty());
@@ -738,9 +790,13 @@ mod tests {
         // L6.1: project() leaves director_plan empty (spine OFF ⇒ byte-equal); with_director_plan
         // injects the player-safe structured steering tokens, trimming/filtering empties exactly
         // like with_scene_establishing/with_character_context.
-        let adj = AdjudicationPacket::project("环顾", &TurnLedgerSnapshot::default(), &[], "", None);
+        let adj =
+            AdjudicationPacket::project("环顾", &TurnLedgerSnapshot::default(), &[], "", None);
         let base = NarrationPacket::project(&adj, "", &[]);
-        assert!(base.director_plan.is_empty(), "project must leave it empty (OFF byte-equal)");
+        assert!(
+            base.director_plan.is_empty(),
+            "project must leave it empty (OFF byte-equal)"
+        );
 
         let injected = NarrationPacket::project(&adj, "", &[]).with_director_plan(&[
             "  beat:complicate  ".to_string(),
@@ -749,7 +805,10 @@ mod tests {
         ]);
         assert_eq!(
             injected.director_plan,
-            vec!["beat:complicate".to_string(), "desired_change:fail_forward".to_string()]
+            vec![
+                "beat:complicate".to_string(),
+                "desired_change:fail_forward".to_string()
+            ]
         );
         // Empty slices ⇒ field stays empty ⇒ render adds zero bytes.
         let empty = NarrationPacket::project(&adj, "", &[]).with_director_plan(&[]);
@@ -761,9 +820,13 @@ mod tests {
         // M3 decision #3: project() leaves story_mood empty (carrier kept but empty ⇒ default OFF ⇒
         // byte-equal, zero telegraph risk); with_story_mood injects player-perceived mood tokens,
         // trimming/filtering empties exactly like the other carriers.
-        let adj = AdjudicationPacket::project("环顾", &TurnLedgerSnapshot::default(), &[], "", None);
+        let adj =
+            AdjudicationPacket::project("环顾", &TurnLedgerSnapshot::default(), &[], "", None);
         let base = NarrationPacket::project(&adj, "", &[]);
-        assert!(base.story_mood.is_empty(), "project must leave it empty (OFF byte-equal)");
+        assert!(
+            base.story_mood.is_empty(),
+            "project must leave it empty (OFF byte-equal)"
+        );
 
         let injected = NarrationPacket::project(&adj, "", &[]).with_story_mood(&[
             "  雨后的潮湿  ".to_string(),

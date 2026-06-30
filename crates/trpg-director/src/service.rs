@@ -190,7 +190,9 @@ mod tests {
             acting_actor_id: "pc.current",
         };
 
-        let via_service = StoryDirectorService::new().plan_beat(&req, &inputs).unwrap();
+        let via_service = StoryDirectorService::new()
+            .plan_beat(&req, &inputs)
+            .unwrap();
         let direct = crate::build_director_brief_packet(
             DirectorMode::OnDemand,
             &candidates,
@@ -250,7 +252,9 @@ mod tests {
             outcome: CheckOutcomeView::Failed,
             ..Default::default()
         }];
-        let post = svc.plan_beat_post_adjudication(&req, &inputs, &failed).unwrap();
+        let post = svc
+            .plan_beat_post_adjudication(&req, &inputs, &failed)
+            .unwrap();
 
         assert_eq!(post.beat_kind, trpg_model::BeatKind::Complicate);
         assert_eq!(post.desired_change, crate::DESIRED_CHANGE_FAIL_FORWARD);

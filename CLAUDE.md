@@ -32,6 +32,17 @@ large dependency, public API or DB break, missing secrets, conflicting product
 requirements, or validation failures that remain unattributed after focused
 investigation.
 
+## Rust-Only Boundary
+
+This project is Rust-native. Implement product behavior, runtime logic, CLI
+surfaces, orchestration, gameplay/playtest runners, caching, character-card
+lifecycle, evaluation runners, and durable state handling in Rust.
+
+Python is only allowed for test scripts and test fixtures. Do not add or
+expand Python as a product path, scheduler, cache, character-pool layer,
+semantic policy layer, or gameplay/eval runner. If a needed capability exists
+only in Python, port or expose it through Rust before relying on it.
+
 ## Handoff
 
 Write the final report to `.tmp/team-lead/worker-<task_id>-<timestamp>.md`.

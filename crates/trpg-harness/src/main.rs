@@ -10,6 +10,7 @@ use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
+use trpg_eval::{evaluate_fixture, parse_markdown_fixture, render_markdown_report, Verdict};
 use trpg_harness::{
     build_cassette, build_check_evidence, classify_check_checkpoint,
     classify_flight_recorder_checkpoint, classify_knowledge_checkpoint, classify_memory_checkpoint,
@@ -45,6 +46,8 @@ enum Commands {
     Suite(SuiteArgs),
     /// Run a multi-turn black-box playtest and optionally ask an external evaluator such as Claude Code to judge each turn.
     Playtest(PlaytestArgs),
+    /// Run offline TRPG evaluation over recorded fixtures and battle reports.
+    Eval(EvalArgs),
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -159,6 +162,28 @@ struct SuiteArgs {
     verbose: bool,
 }
 
+#[derive(Debug, Parser, Clone)]
+struct EvalArgs {
+    #[command(subcommand)]
+    command: EvalCommand,
+}
+
+#[derive(Debug, Subcommand, Clone)]
+enum EvalCommand {
+    /// Evaluate a markdown `eval-fixture` transcript without running the GM.
+    Replay(EvalReplayArgs),
+}
+
+#[derive(Debug, Parser, Clone)]
+struct EvalReplayArgs {
+    /// Markdown fixture containing a fenced `eval-fixture` JSON block.
+    #[arg(long)]
+    fixture: PathBuf,
+    /// Evaluation report output format.
+    #[arg(long, value_enum, default_value = "text")]
+    output: OutputMode,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct HarnessResult {
     ok: bool,
@@ -242,6 +267,30 @@ async fn main() -> Result<()> {
             }
             if failed {
                 Err(anyhow!("harness suite failed"))
+            } else {
+                Ok(())
+            }
+        }
+        Commands::Eval(args) => run_eval_command(args).await,
+    }
+}
+
+async fn run_eval_command(args: EvalArgs) -> Result<()> {
+    match args.command {
+        EvalCommand::Replay(replay) => {
+            let text = tokio::fs::read_to_string(&replay.fixture)
+                .await
+                .with_context(|| format!("failed to read fixture {}", replay.fixture.display()))?;
+            let fixture = parse_markdown_fixture(&text)
+                .with_context(|| format!("invalid eval fixture {}", replay.fixture.display()))?;
+            let report = evaluate_fixture(&fixture);
+            emit_eval_report(&report, &replay.output)?;
+            if report.verdict == Verdict::Fail {
+                Err(anyhow!(
+                    "eval fixture failed: {} ({} findings)",
+                    replay.fixture.display(),
+                    report.findings.len()
+                ))
             } else {
                 Ok(())
             }
@@ -3036,6 +3085,15 @@ fn emit_playtest_result(result: &PlaytestResult, mode: &OutputMode) -> Result<()
                 }
             }
         }
+    }
+    Ok(())
+}
+
+fn emit_eval_report(report: &trpg_eval::EvalReport, mode: &OutputMode) -> Result<()> {
+    match mode {
+        OutputMode::Json => println!("{}", serde_json::to_string_pretty(report)?),
+        OutputMode::Jsonl => println!("{}", serde_json::to_string(report)?),
+        OutputMode::Text => print!("{}", render_markdown_report(report)),
     }
     Ok(())
 }

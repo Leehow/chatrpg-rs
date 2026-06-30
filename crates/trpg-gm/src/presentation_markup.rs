@@ -28,6 +28,9 @@ pub(crate) struct StrippedNarration {
     /// Player-facing text: {narration, dialogue, roll, system, choice}, with `[meta]`/`[hide]`
     /// removed and empty `[roll]` wrappers unwrapped. `[system]` is KEPT (A.0).
     pub player_text: String,
+    /// Player-facing wire text: same audience routing as `player_text`, but valid player-facing
+    /// wrappers such as `[roll]...[/roll]` are preserved for audit/report consumers.
+    pub player_wire_text: String,
     /// `[meta]` block contents — internal out-of-game note; route to engine/audit, never player.
     pub meta_blocks: Vec<String>,
     /// `[hide]` block contents — Proposal for campaign-canon, NOT player-knowledge.
@@ -40,18 +43,13 @@ pub(crate) struct StrippedNarration {
     pub malformed_rolls_unwrapped: usize,
 }
 
-impl StrippedNarration {
-    pub(crate) fn changed(&self, original: &str) -> bool {
-        self.player_text != original
-    }
-}
-
 /// Run the player-visible markup pass. Parses the wire text into a typed `TurnDocument` and
 /// projects the dual-route result. `[system]` is preserved in `player_text` (A.0).
 pub(crate) fn strip_player_markup(text: &str) -> StrippedNarration {
     let doc = parse_turn_document(text);
     StrippedNarration {
         player_text: doc.player_text(),
+        player_wire_text: doc.player_wire_text(),
         meta_blocks: doc
             .meta_blocks()
             .iter()
@@ -75,7 +73,7 @@ mod tests {
     fn plain_text_unchanged() {
         let r = strip_player_markup("你推开门，走廊一片寂静。");
         assert_eq!(r.player_text, "你推开门，走廊一片寂静。");
-        assert!(!r.changed("你推开门，走廊一片寂静。"));
+        assert_eq!(r.player_wire_text, "你推开门，走廊一片寂静。");
         assert!(r.meta_blocks.is_empty() && r.hide_blocks.is_empty());
         assert_eq!(r.empty_rolls_unwrapped, 0);
     }
@@ -138,6 +136,7 @@ mod tests {
         // R-1: 未定 / unbound-target roll → unwrapped to narration, counted separately.
         let r = strip_player_markup("[roll]结果：未定[/roll]");
         assert_eq!(r.player_text, "结果：未定");
+        assert_eq!(r.player_wire_text, "结果：未定");
         assert_eq!(r.malformed_rolls_unwrapped, 1);
         assert_eq!(r.empty_rolls_unwrapped, 0);
     }
@@ -148,8 +147,25 @@ mod tests {
         let r = strip_player_markup("[roll]入侵终端 1d10+6=14 ≥ DV13 成功[/roll]");
         assert!(r.player_text.contains("14"));
         assert!(r.player_text.contains("成功"));
+        assert_eq!(
+            r.player_wire_text,
+            "[roll]入侵终端 1d10+6=14 ≥ DV13 成功[/roll]"
+        );
         assert_eq!(r.malformed_rolls_unwrapped, 0);
         assert_eq!(r.empty_rolls_unwrapped, 0);
+    }
+
+    #[test]
+    fn player_wire_text_preserves_valid_roll_and_unwraps_bad_roll() {
+        let r = strip_player_markup(
+            "前半段。[roll]侦查 1d10=8 ≥ DV13 失败[/roll]\n[roll]目标未绑定，结果未知[/roll]",
+        );
+        assert!(r
+            .player_wire_text
+            .contains("[roll]侦查 1d10=8 ≥ DV13 失败[/roll]"));
+        assert!(!r.player_wire_text.contains("[roll]目标未绑定"));
+        assert!(r.player_wire_text.contains("目标未绑定，结果未知"));
+        assert_eq!(r.malformed_rolls_unwrapped, 1);
     }
 
     #[test]

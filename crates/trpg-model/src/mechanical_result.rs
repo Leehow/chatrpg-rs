@@ -90,7 +90,9 @@ impl EffectSummary {
                 detail: trait_id.clone(),
             },
             StatePatch::GrantObject {
-                actor_id, object_id, ..
+                actor_id,
+                object_id,
+                ..
             } => Self {
                 kind: "grant_object".into(),
                 target: actor_id.clone(),
@@ -193,7 +195,11 @@ mod tests {
         }
     }
 
-    fn rec(check_id: &str, outcome: serde_json::Value, patches: Vec<StatePatch>) -> CheckResultRecord {
+    fn rec(
+        check_id: &str,
+        outcome: serde_json::Value,
+        patches: Vec<StatePatch>,
+    ) -> CheckResultRecord {
         CheckResultRecord {
             check_id: check_id.into(),
             roll: roll("1d100"),
@@ -230,7 +236,11 @@ mod tests {
 
     #[test]
     fn projects_a_failed_check() {
-        let r = rec("dodge", json!({"success": false, "degree": "failure"}), vec![]);
+        let r = rec(
+            "dodge",
+            json!({"success": false, "degree": "failure"}),
+            vec![],
+        );
         let view = MechanicalResultView::from(&r);
         assert_eq!(view.outcome, CheckOutcomeView::Failed);
         assert!(!view.outcome.is_success());

@@ -18,7 +18,7 @@
 //! schema 读取全 data-driven(多备选字段名),绝不按 `ruleset_id`/`module_id` 分支。
 
 use serde_json::Value;
-use trpg_model::ModuleBundle;
+use trpg_model::{ModuleBundle, ModuleGraph};
 
 /// 一条已抽出的玩家可见线索(纯数据,正文为模组原文)。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,7 +49,14 @@ fn first_nonempty(v: &Value, keys: &[&str]) -> Option<String> {
 /// ① 受检多字段含 gm_only/keeper_only/secret/spoiler/hidden ⇒ 剔除;
 /// ② 布尔旗 `secret`/`hidden`/`spoiler`/`gm_only`==true ⇒ 剔除。
 fn is_gm_only(clue: &Value) -> bool {
-    for k in ["tier", "visibility", "audience", "access", "delivery", "scope"] {
+    for k in [
+        "tier",
+        "visibility",
+        "audience",
+        "access",
+        "delivery",
+        "scope",
+    ] {
         if let Some(s) = clue.get(k).and_then(Value::as_str) {
             let s = s.to_lowercase();
             if s.contains("gm_only")
@@ -98,6 +105,32 @@ fn extract_clue(clue: &Value, fallback_id: &str) -> Option<SurfacedClue> {
     })
 }
 
+fn graph_clue_id(clue: &Value) -> Option<String> {
+    clue.get("id")
+        .or_else(|| clue.get("clue_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// Graph-level clues often carry authored summaries rather than prep-packet `text`.
+/// They are still source-backed, but only the current scene's referenced clues are
+/// eligible for this surface block.
+fn extract_graph_clue(clue: &Value, fallback_id: &str) -> Option<SurfacedClue> {
+    if is_gm_only(clue) {
+        return None;
+    }
+    let text = first_nonempty(clue, &["text", "clue", "discovery", "meaning", "summary"])?;
+    let id = graph_clue_id(clue).unwrap_or_else(|| fallback_id.to_string());
+    let delivery_hint = first_nonempty(clue, &["delivery", "skill", "via", "method"]);
+    Some(SurfacedClue {
+        id,
+        text,
+        delivery_hint,
+    })
+}
+
 /// 从 `current_session_packet`(Value)抽取玩家可见线索。generic schema:
 /// `clues[]` / `clue_web[]` / `current_scenes[].clues[]`,逐条 [`extract_clue`]。
 /// 按出现序合成 fallback id;GM-only 与无正文条目剔除。
@@ -126,7 +159,10 @@ pub fn surface_player_facing_clues(current_session_packet: &Value) -> Vec<Surfac
             }
             return;
         }
-        if let Some(arr) = current_session_packet.get(arr_key).and_then(Value::as_array) {
+        if let Some(arr) = current_session_packet
+            .get(arr_key)
+            .and_then(Value::as_array)
+        {
             for c in arr {
                 if let Some(sc) = extract_clue(c, &format!("{arr_key}_{idx}")) {
                     if !out.iter().any(|e| e.id == sc.id) {
@@ -140,6 +176,47 @@ pub fn surface_player_facing_clues(current_session_packet: &Value) -> Vec<Surfac
     take("clues", false);
     take("clue_web", false);
     take("", true);
+    out
+}
+
+pub fn surface_current_scene_graph_clues(
+    module: &ModuleBundle,
+    scene_id: Option<&str>,
+) -> Vec<SurfacedClue> {
+    let Some(scene_id) = scene_id.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Vec::new();
+    };
+    let mut graph: ModuleGraph = module.module_graph.clone();
+    let _ = crate::clue_projection::project_clues_onto_scenes(&mut graph);
+    let Some(scene) = graph
+        .scenes
+        .iter()
+        .find(|scene| scene.node_id.trim() == scene_id)
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for clue_ref in &scene.referenced_clue_ids {
+        let cid = clue_ref.trim();
+        if cid.is_empty() {
+            continue;
+        }
+        let Some(clue) = graph
+            .clues
+            .iter()
+            .find(|clue| graph_clue_id(clue).as_deref() == Some(cid))
+        else {
+            continue;
+        };
+        if let Some(sc) = extract_graph_clue(clue, cid) {
+            if !out
+                .iter()
+                .any(|existing: &SurfacedClue| existing.id == sc.id)
+            {
+                out.push(sc);
+            }
+        }
+    }
     out
 }
 
@@ -164,7 +241,10 @@ pub fn render_clue_surface(clues: &[SurfacedClue]) -> String {
 
 /// 便利:为指定模组从其 prep packet 集渲染线索 surface 文本。无模组 / 无玩家可见线索 ⇒ None。
 /// (Enforce 门控在调用方 `prepare_turn_context`,与 M2/M8 一致。)
-pub fn module_clue_surface_text(modules: &[ModuleBundle], module_id: Option<&str>) -> Option<String> {
+pub fn module_clue_surface_text(
+    modules: &[ModuleBundle],
+    module_id: Option<&str>,
+) -> Option<String> {
     let mid = module_id?;
     let module = modules.iter().find(|m| m.module_id == mid)?;
     let mut clues: Vec<SurfacedClue> = Vec::new();
@@ -181,10 +261,38 @@ pub fn module_clue_surface_text(modules: &[ModuleBundle], module_id: Option<&str
     Some(render_clue_surface(&clues))
 }
 
+pub fn module_scene_clue_surface_text(
+    modules: &[ModuleBundle],
+    module_id: Option<&str>,
+    scene_id: Option<&str>,
+    prep_packet: Option<&Value>,
+) -> Option<String> {
+    let mid = module_id?;
+    let module = modules.iter().find(|m| m.module_id == mid)?;
+    let mut clues: Vec<SurfacedClue> = Vec::new();
+    if let Some(packet) = prep_packet {
+        for c in surface_player_facing_clues(packet) {
+            if !clues.iter().any(|e| e.id == c.id) {
+                clues.push(c);
+            }
+        }
+    }
+    for c in surface_current_scene_graph_clues(module, scene_id) {
+        if !clues.iter().any(|e| e.id == c.id) {
+            clues.push(c);
+        }
+    }
+    if clues.is_empty() {
+        return None;
+    }
+    Some(render_clue_surface(&clues))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    use trpg_model::{ModuleGraph, ScenarioNode};
 
     // ===== CoC schema: clues[]{id,text,tier,delivery} =====
     #[test]
@@ -198,7 +306,10 @@ mod tests {
         });
         let out = surface_player_facing_clues(&packet);
         let ids: Vec<&str> = out.iter().map(|c| c.id.as_str()).collect();
-        assert!(ids.contains(&"clue_1") && ids.contains(&"clue_3"), "玩家可见线索应抽出: {ids:?}");
+        assert!(
+            ids.contains(&"clue_1") && ids.contains(&"clue_3"),
+            "玩家可见线索应抽出: {ids:?}"
+        );
         assert!(!ids.contains(&"clue_5"), "gm_only_seed 必须剔除: {ids:?}");
         let c1 = out.iter().find(|c| c.id == "clue_1").unwrap();
         assert_eq!(c1.delivery_hint.as_deref(), Some("环境描写、玩家观察"));
@@ -216,8 +327,15 @@ mod tests {
         });
         let out = surface_player_facing_clues(&packet);
         assert_eq!(out.len(), 2, "clue_web 两条都应抽出: {out:?}");
-        assert!(out[0].text.contains("Athena is attached"), "clue 字段即正文");
-        assert!(out[0].id.starts_with("clue_web_"), "无 id 时合成: {}", out[0].id);
+        assert!(
+            out[0].text.contains("Athena is attached"),
+            "clue 字段即正文"
+        );
+        assert!(
+            out[0].id.starts_with("clue_web_"),
+            "无 id 时合成: {}",
+            out[0].id
+        );
         assert!(out[0].delivery_hint.is_none(), "clue_web 无 delivery");
     }
 
@@ -260,7 +378,10 @@ mod tests {
         }
         // delivery 字段标 GM-only 也剔除
         let packet = json!({"clues":[{"id":"y","text":"秘密","delivery":"GM-only reaction"}]});
-        assert!(surface_player_facing_clues(&packet).is_empty(), "delivery GM-only 应剔除");
+        assert!(
+            surface_player_facing_clues(&packet).is_empty(),
+            "delivery GM-only 应剔除"
+        );
     }
 
     // ===== codex 折入：secret/hidden/spoiler 布尔旗 + secret 层级也剔除 =====
@@ -300,7 +421,10 @@ mod tests {
             delivery_hint: Some("侦查".into()),
         }];
         let s = render_clue_surface(&clues);
-        assert!(s.contains("成功") && s.contains("赢得"), "须含'赢得检定才揭示'框架");
+        assert!(
+            s.contains("成功") && s.contains("赢得"),
+            "须含'赢得检定才揭示'框架"
+        );
         assert!(s.contains("切勿主动奉送"), "须含不主动奉送框架");
         assert!(s.contains("门后有血迹"), "须列出线索正文");
         assert!(s.contains("clue_1"));
@@ -312,5 +436,69 @@ mod tests {
         let modules: Vec<ModuleBundle> = vec![];
         assert!(module_clue_surface_text(&modules, Some("nope")).is_none());
         assert!(module_clue_surface_text(&modules, None).is_none());
+    }
+
+    fn module_with_scene_graph_clue() -> ModuleBundle {
+        let mut scene = ScenarioNode::default();
+        scene.node_id = "loc_hall_records".into();
+        scene.title = "Hall of Records".into();
+        scene.referenced_clue_ids = vec!["handout_7".into()];
+        ModuleBundle {
+            schema_version: String::new(),
+            bundle_id: String::new(),
+            module_id: "m1".into(),
+            ruleset_id: None,
+            title: String::new(),
+            source_index: Default::default(),
+            module_graph: ModuleGraph {
+                module_id: "m1".into(),
+                scenes: vec![scene],
+                clues: vec![json!({
+                    "clue_id": "handout_7",
+                    "title": "Executor and Chapel Record",
+                    "summary": "Corbitt’s executor was Reverend Michael Thomas of the Chapel of Contemplation; the chapel closed in 1912."
+                })],
+                ..Default::default()
+            },
+            module_prep_packets: vec![],
+            module_locators: vec![],
+            material_index: vec![],
+            context_blocks: vec![],
+            validation_report: Default::default(),
+            conversion_trace: vec![],
+        }
+    }
+
+    #[test]
+    fn current_scene_graph_clue_summary_is_surfaceable() {
+        let module = module_with_scene_graph_clue();
+        let out = surface_current_scene_graph_clues(&module, Some("loc_hall_records"));
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, "handout_7");
+        assert!(out[0].text.contains("Reverend Michael Thomas"));
+        assert!(out[0].text.contains("1912"));
+    }
+
+    #[test]
+    fn module_scene_clue_surface_text_merges_prep_and_graph_clues() {
+        let module = module_with_scene_graph_clue();
+        let prep = json!({
+            "clues": [
+                {"id": "prep_clue", "text": "A prep-packet clue.", "tier": "obvious"}
+            ]
+        });
+        let text = module_scene_clue_surface_text(
+            &[module],
+            Some("m1"),
+            Some("loc_hall_records"),
+            Some(&prep),
+        )
+        .expect("merged clue surface should render");
+
+        assert!(text.contains("prep_clue"));
+        assert!(text.contains("handout_7"));
+        assert!(text.contains("Reverend Michael Thomas"));
+        assert!(text.contains("1912"));
     }
 }

@@ -7,8 +7,8 @@ use super::{
     build_frontier_block, build_nav_exits, build_nav_prompt, build_nav_prompt_with_exits,
     extract_module_scenes, gravity_nav_system_prompt, nav_content_gravity_enabled,
     nav_departure_commit_enabled, nav_follow_flow_links_enabled, nav_objective_commit_enabled,
-    prefetch_frontier, resolve_offgraph_to_neighbor, validate_transition,
-    with_flow_link_clause, with_frontier_focus_clause, SCENE_NAV_SYS,
+    prefetch_frontier, resolve_offgraph_to_neighbor, trigger_transition_lacks_explicit_player_move,
+    validate_transition, with_flow_link_clause, with_frontier_focus_clause, SCENE_NAV_SYS,
 };
 use crate::progression::{
     augment_program_with_spine, compute_frontier, derive_threat_objective, evaluate,
@@ -62,7 +62,10 @@ pub async fn scene_navigate_critical(
     // through to today's player-driven LLM nav. OFF ⇒ this whole block is skipped ⇒ byte-identical
     // baseline (no extra DB read, no behavior change).
     if scene_transition_gated_enabled() {
-        let events = db.list_domain_events(session_id, 5000).await.unwrap_or_default();
+        let events = db
+            .list_domain_events(session_id, 5000)
+            .await
+            .unwrap_or_default();
         if let Some(next) = pending_unlock_target(&events, &current) {
             // defense-in-depth: the unlock target must be a real, distinct scene node (the emitter's
             // `resolve_next_scene` already guarantees this; re-checked so a stale/foreign unlock can
@@ -122,7 +125,14 @@ pub async fn scene_navigate_critical(
                 ),
                 follow_flow,
             ),
-            build_nav_prompt_with_exits(&current, cur_title, &exits, &list, player_input, narration),
+            build_nav_prompt_with_exits(
+                &current,
+                cur_title,
+                &exits,
+                &list,
+                player_input,
+                narration,
+            ),
         )
     } else {
         (
@@ -135,7 +145,10 @@ pub async fn scene_navigate_critical(
     // 在其中选焦/搬内容，反铁路绝不 teleport）。OFF ⇒ 整块跳过 ⇒ sys/usr 字节等价基线。
     // 全程 fail-closed：取事件失败/空 ⇒ 空 frontier ⇒ 不追加（绝不乱跳、绝不编造）。
     if progression_engine_enabled() {
-        let events = db.list_domain_events(session_id, 5000).await.unwrap_or_default();
+        let events = db
+            .list_domain_events(session_id, 5000)
+            .await
+            .unwrap_or_default();
         let mut program = program_from_module_graph(&graph);
         // PL-1 (PHASE 2): give scene_01 an OPEN threat objective so the frontier is
         // non-empty even before any flow ridge fires (the proven scene_01 starvation:
@@ -214,7 +227,10 @@ pub async fn scene_navigate_critical(
     // builds + logs it. OFF ⇒ block skipped entirely (no prompt mutation, no event,
     // no RNG) ⇒ sys/usr byte-identical baseline.
     if crate::evidence_projection::exact_evidence_projector_enabled() {
-        let events = db.list_domain_events(session_id, 5000).await.unwrap_or_default();
+        let events = db
+            .list_domain_events(session_id, 5000)
+            .await
+            .unwrap_or_default();
         let catalog = crate::evidence_projection::build_evidence_atom_catalog(&graph);
         let ledger = crate::evidence_projection::project_exact_evidence(&events, &catalog);
         info!(
@@ -294,6 +310,15 @@ pub async fn scene_navigate_critical(
             }
         }
     };
+    if trigger_transition_lacks_explicit_player_move(&graph, &current, &target, player_input) {
+        info!(
+            session_id,
+            from = %current,
+            to = %target,
+            "scene transition rejected: trigger link needs explicit player movement before writing current_scene"
+        );
+        return Ok(None);
+    }
     db.set_session_scene(session_id, &target).await?;
     let reason = decision
         .get("reason")

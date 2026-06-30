@@ -100,14 +100,21 @@ async fn homecoming_committed_nav_projects_location_entered_exact() {
         json!({"from": "scene_origin", "to": dest}),
     );
     let led = project_location_entered(std::slice::from_ref(&nav), &catalog);
-    assert_eq!(led.len(), 1, "committed nav to an authored scene ⇒ 1 LocationEntered");
+    assert_eq!(
+        led.len(),
+        1,
+        "committed nav to an authored scene ⇒ 1 LocationEntered"
+    );
     let ev = &led.entries()[0];
     eprintln!("RAN: LocationEntered ledger row = {ev:#?}");
     assert_eq!(ev.authority, EvidenceAuthority::ExactDomain);
     assert_eq!(ev.evidence_kind, EvidenceKind::LocationEntered);
     assert_eq!(
         ev.atom_id,
-        catalog.resolve_grounding(&format!("location:{dest}")).unwrap().atom_id,
+        catalog
+            .resolve_grounding(&format!("location:{dest}"))
+            .unwrap()
+            .atom_id,
         "atom is the authored location node's atom (Rust-resolved by topology)"
     );
     assert_eq!(ev.basis_event_ids, vec!["de_evp2_nav".to_string()]);
@@ -212,7 +219,10 @@ async fn the_vault_content_delivery_projects_fact_learned_exact() {
         "atom is Rust-resolved from the OfferSet cap→atom map; the GM never named it"
     );
     assert_eq!(ev.basis_event_ids, vec!["de_evp2_reveal".to_string()]);
-    assert!(!ev.source_refs.is_empty(), "source-grounded (carries the clue's authored page)");
+    assert!(
+        !ev.source_refs.is_empty(),
+        "source-grounded (carries the clue's authored page)"
+    );
 
     // ---- (4) fail-closed: a delivery citing a cap NOT in this turn's OfferSet ⇒ none ----
     let forged = ContentDelivery {

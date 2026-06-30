@@ -451,11 +451,18 @@ mod tests {
             .expect("valid claim admits");
         assert_eq!(ev.authority, EvidenceAuthority::GmWitnessed);
         // The atom is Rust-resolved from the OfferSet/catalog — the claim never named it.
-        assert_eq!(ev.atom_id, set.offers()[0].atom_id, "atom_id is Rust-resolved, not from the LLM");
+        assert_eq!(
+            ev.atom_id,
+            set.offers()[0].atom_id,
+            "atom_id is Rust-resolved, not from the LLM"
+        );
         assert_eq!(ev.evidence_kind, EvidenceKind::FactLearned);
         assert_eq!(ev.basis_event_ids, vec!["de_1".to_string()]);
         assert_eq!(ev.turn_id, TURN);
-        assert!(!ev.source_refs.is_empty(), "source-grounded (carries the atom's source ref)");
+        assert!(
+            !ev.source_refs.is_empty(),
+            "source-grounded (carries the atom's source ref)"
+        );
         assert_eq!(ev.source_refs[0].page, Some(8));
     }
 
@@ -670,7 +677,11 @@ mod tests {
             {"cap_id": "cap_empty", "basis": []}
         ]});
         let claims = parse_progress_claims(&v);
-        assert_eq!(claims.len(), 1, "only the well-formed, closed-schema claim parses");
+        assert_eq!(
+            claims.len(),
+            1,
+            "only the well-formed, closed-schema claim parses"
+        );
         assert_eq!(claims[0].cap_id.as_str(), "cap_ok");
     }
 
@@ -696,9 +707,18 @@ mod tests {
         // The instruction itself must never leak an atom id or name an objective —
         // the GM only ever sees opaque handles (design: LLM never evaluates a guard).
         let instr = render_claim_instruction();
-        assert!(instr.contains("progress_claims"), "instructs the sidecar field");
-        assert!(instr.contains("cap_id") && instr.contains("basis"), "names only the closed fields");
-        assert!(!instr.contains("atom:"), "no atom id leaked into the GM prompt");
+        assert!(
+            instr.contains("progress_claims"),
+            "instructs the sidecar field"
+        );
+        assert!(
+            instr.contains("cap_id") && instr.contains("basis"),
+            "names only the closed fields"
+        );
+        assert!(
+            !instr.contains("atom:"),
+            "no atom id leaked into the GM prompt"
+        );
         assert!(
             !instr.contains("objective_id") && !instr.contains("completed"),
             "the GM is told NOT to name objectives/completion"

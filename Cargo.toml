@@ -27,6 +27,7 @@ members = [
   "crates/trpg-search",
   "crates/trpg-api",
   "crates/trpg-cli",
+  "crates/trpg-eval",
   "crates/trpg-harness",
   "crates/trpg-gm",
 ]

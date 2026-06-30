@@ -80,8 +80,14 @@ async fn the_vault_engine_consumes_ledger_and_appends_objectiveresolved() {
     let atom = compile_prep_packet_guard_leaves(&graph, &csp)
         .into_iter()
         .find(|a| a.kind == EvidenceKind::ActionResolved)
-        .expect("≥1 prep-packet GuardLeaf ActionResolved atom (the mission 'experiment' objective)");
-    assert_eq!(atom.progress_role, ProgressRole::GuardLeaf, "objective leaf ⇒ GuardLeaf");
+        .expect(
+            "≥1 prep-packet GuardLeaf ActionResolved atom (the mission 'experiment' objective)",
+        );
+    assert_eq!(
+        atom.progress_role,
+        ProgressRole::GuardLeaf,
+        "objective leaf ⇒ GuardLeaf"
+    );
     let span = atom
         .source_refs
         .first()
@@ -128,7 +134,11 @@ async fn the_vault_engine_consumes_ledger_and_appends_objectiveresolved() {
         &proposals,
         &EvidenceLedger::new(),
     );
-    assert_eq!(ledger.len(), 1, "EV-P5 admission ⇒ exactly one admitted GuardLeaf AcceptedEvidence");
+    assert_eq!(
+        ledger.len(),
+        1,
+        "EV-P5 admission ⇒ exactly one admitted GuardLeaf AcceptedEvidence"
+    );
     eprintln!(
         "RAN: admitted ledger has 1 AcceptedEvidence(atom={}) — the engine's input",
         ledger.entries()[0].atom_id.as_str()
@@ -142,7 +152,10 @@ async fn the_vault_engine_consumes_ledger_and_appends_objectiveresolved() {
 
     // ─── (iv-pre) the evidence-objective is OPEN in the frontier before consumption ──────
     let objs = evidence_objectives_from_prep_packet(&graph, &csp);
-    assert!(!objs.is_empty(), "the_vault prep-packet yields ≥1 evidence-backed objective");
+    assert!(
+        !objs.is_empty(),
+        "the_vault prep-packet yields ≥1 evidence-backed objective"
+    );
     let mut state = ProgressionState::default();
     if !current_scene.trim().is_empty() {
         state.ctx.entered_locations.push(current_scene.clone());
@@ -150,7 +163,11 @@ async fn the_vault_engine_consumes_ledger_and_appends_objectiveresolved() {
     let open_before = compute_frontier(&state, &objs, &[]).open_objectives;
     // confirm the engine does NOT re-fire / completes idempotently: apply + evaluate twice.
     apply_evidence_to_ctx(&mut state.ctx, &ledger);
-    let prog = ProgressionProgram { rules: &[], objectives: &objs, trackers: &[] };
+    let prog = ProgressionProgram {
+        rules: &[],
+        objectives: &objs,
+        trackers: &[],
+    };
     let _ = evaluate(&mut state, &[], &prog);
     let open_after = compute_frontier(&state, &objs, &[]).open_objectives;
 
@@ -179,7 +196,11 @@ async fn the_vault_engine_consumes_ledger_and_appends_objectiveresolved() {
     // nav-split: building/consuming the ledger never mutated the current scene.
     assert_eq!(
         state.ctx.entered_locations,
-        if current_scene.trim().is_empty() { vec![] } else { vec![current_scene.clone()] },
+        if current_scene.trim().is_empty() {
+            vec![]
+        } else {
+            vec![current_scene.clone()]
+        },
         "engine never teleported the scene (nav-split)"
     );
     eprintln!(
@@ -205,14 +226,21 @@ async fn the_vault_engine_consumes_ledger_and_appends_objectiveresolved() {
             .await
             .expect("count query")
             .get(0);
-    assert_eq!(before_rows, 0, "prev ObjectiveResolved rows = 0 (the gap EV-APPLY-WIRE closes)");
+    assert_eq!(
+        before_rows, 0,
+        "prev ObjectiveResolved rows = 0 (the gap EV-APPLY-WIRE closes)"
+    );
 
     for ev in &resolutions {
-        db.append_domain_event(ev).await.expect("LIVE append_domain_event");
+        db.append_domain_event(ev)
+            .await
+            .expect("LIVE append_domain_event");
     }
     // idempotent: re-appending the SAME resolution must not create a second row.
     for ev in &resolutions {
-        db.append_domain_event(ev).await.expect("idempotent re-append");
+        db.append_domain_event(ev)
+            .await
+            .expect("idempotent re-append");
     }
 
     let after_rows: Vec<(String, serde_json::Value)> = sqlx::query(

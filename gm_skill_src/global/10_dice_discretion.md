@@ -48,4 +48,4 @@ Player-supplied mechanical numbers are claims. Verify them against active rules,
 
 ## Narrative situation practice
 
-Present observable facts, pressure, affordances, risks, and a goal question. Offer costed examples only when helpful. Avoid repeatedly forcing numbered menus. Add fresh pressure, cost, or world change when the same tactic repeats.
+Present observable facts, pressure, affordances, and risks as diegetic facts. Ask at most one open clarification question only when the player's intent is genuinely unclear. Do not compress affordances, clues, locations, or actions into inline options such as "records or papers?", "which lead first?", or any A/B/C-style branch, numbered or not. The player chooses their own action. Add fresh pressure, cost, or world change when the same tactic repeats.

@@ -26,7 +26,12 @@ pub fn build_frontier_block(frontier: &AdvancementFrontier, scenes: &[ScenarioNo
     if frontier.is_empty() {
         return String::new();
     }
-    let title_of = |id: &str| scenes.iter().find(|s| s.node_id == id).map(|s| s.title.as_str());
+    let title_of = |id: &str| {
+        scenes
+            .iter()
+            .find(|s| s.node_id == id)
+            .map(|s| s.title.as_str())
+    };
     let mut out = String::from(
         "【已解锁·可推进内容（运行时 frontier；Rust 已判定合法，导演只在其中选焦/呈现）】\
         \n（内容引力：下列各项是可**就地**送到玩家当前位置的内容功能/Carrier，**非传送目标**——\
@@ -93,7 +98,11 @@ mod tests {
     #[test]
     fn empty_frontier_renders_empty_block() {
         let f = AdvancementFrontier::default();
-        assert_eq!(build_frontier_block(&f, &[]), "", "empty frontier → no hollow block");
+        assert_eq!(
+            build_frontier_block(&f, &[]),
+            "",
+            "empty frontier → no hollow block"
+        );
     }
 
     #[test]
@@ -102,7 +111,10 @@ mod tests {
         let f = frontier(&["beat.escape_condo"], &[], &[]);
         let block = build_frontier_block(&f, &scenes);
         assert!(block.contains("beat.escape_condo"), "lists the unit id");
-        assert!(block.contains("Escape the Condo"), "annotates with the in-graph title");
+        assert!(
+            block.contains("Escape the Condo"),
+            "annotates with the in-graph title"
+        );
     }
 
     #[test]
@@ -122,7 +134,10 @@ mod tests {
             open_objectives: vec![],
         };
         let listed = build_frontier_block(&f, &[]).matches("beat.").count();
-        assert!(listed <= FRONTIER_CAP, "listed {listed} > cap {FRONTIER_CAP}");
+        assert!(
+            listed <= FRONTIER_CAP,
+            "listed {listed} > cap {FRONTIER_CAP}"
+        );
     }
 
     #[test]

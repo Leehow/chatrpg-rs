@@ -25,7 +25,12 @@ use trpg_model::{LinkType, ScenarioLink, ScenarioNode};
 /// 对标 `facilitation::narrative_anchors_enabled` 的默认关形态。OFF ⇒ 字节级不变。
 pub fn flow_links_enabled() -> bool {
     std::env::var("TRPG_MODULE_FLOW_LINKS")
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes"))
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "on" | "yes"
+            )
+        })
         .unwrap_or(false)
 }
 
@@ -72,7 +77,8 @@ pub(super) fn parse_flow_links(
         let Some(anchor) = anchor else {
             continue; // fail-closed：无锚不收。
         };
-        let Some(lt) = flow_link_type(l.get("link_type").and_then(Value::as_str).unwrap_or("")) else {
+        let Some(lt) = flow_link_type(l.get("link_type").and_then(Value::as_str).unwrap_or(""))
+        else {
             continue; // 非流转型（spatial/未知）不收。
         };
         let reason = l
@@ -181,10 +187,7 @@ pub async fn extract_flow_links_all(
         let Some(start) = readout.scenes[idx].page_start else {
             continue; // 无页码 → 跳过（fail-closed）。
         };
-        let end = readout.scenes[idx]
-            .page_end
-            .unwrap_or(start)
-            .max(start);
+        let end = readout.scenes[idx].page_end.unwrap_or(start).max(start);
         let pages = if end > start {
             format!("{start}-{end}")
         } else {
@@ -237,8 +240,14 @@ mod tests {
         assert!(got[0].source_anchor.as_deref().unwrap().contains("Foxwell"));
         assert_eq!(got[1].to_node_id, "c");
         assert_eq!(got[1].link_type, LinkType::Branch);
-        assert!(got.iter().all(|l| l.source_anchor.as_deref().map(|s| !s.is_empty()).unwrap_or(false)),
-            "every surviving link carries a non-empty source_anchor (fail-closed)");
+        assert!(
+            got.iter().all(|l| l
+                .source_anchor
+                .as_deref()
+                .map(|s| !s.is_empty())
+                .unwrap_or(false)),
+            "every surviving link carries a non-empty source_anchor (fail-closed)"
+        );
     }
 
     #[test]
@@ -254,7 +263,11 @@ mod tests {
         assert_eq!(flow_link_type("TRIGGER"), Some(LinkType::Trigger));
         assert_eq!(flow_link_type(" branch "), Some(LinkType::Branch));
         assert_eq!(flow_link_type("timeline"), Some(LinkType::Timeline));
-        assert_eq!(flow_link_type("spatial"), None, "spatial is the bridge's job, not a flow link");
+        assert_eq!(
+            flow_link_type("spatial"),
+            None,
+            "spatial is the bridge's job, not a flow link"
+        );
         assert_eq!(flow_link_type("garbage"), None);
     }
 
@@ -266,7 +279,10 @@ mod tests {
         ]});
         let got = parse_flow_links(&submitted, "self", &known);
         assert_eq!(got.len(), 1);
-        assert!(!got[0].reason.is_empty(), "missing reason falls back to a non-empty label");
+        assert!(
+            !got[0].reason.is_empty(),
+            "missing reason falls back to a non-empty label"
+        );
     }
 
     #[test]
@@ -274,7 +290,10 @@ mod tests {
         // env is process-global; save/restore around the assertion.
         let saved = std::env::var("TRPG_MODULE_FLOW_LINKS").ok();
         std::env::remove_var("TRPG_MODULE_FLOW_LINKS");
-        assert!(!flow_links_enabled(), "unset → default OFF (byte-identical baseline)");
+        assert!(
+            !flow_links_enabled(),
+            "unset → default OFF (byte-identical baseline)"
+        );
         std::env::set_var("TRPG_MODULE_FLOW_LINKS", "1");
         assert!(flow_links_enabled(), "\"1\" → ON");
         std::env::set_var("TRPG_MODULE_FLOW_LINKS", "0");

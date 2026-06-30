@@ -138,8 +138,7 @@ pub fn build_director_brief_packet(
     // its own zero-reveal; we keep whatever the knowledge surfaces legitimately allow).
     if primary_thread_id.is_none() {
         let mut plan = super::fallback::fallback_beat_plan(story, _spotlights, acting_actor_id);
-        let selected_world_candidates =
-            select_candidates(candidates, &uniquely_resolvable, &[]);
+        let selected_world_candidates = select_candidates(candidates, &uniquely_resolvable, &[]);
         plan.focus_actor_ids = selected_world_candidates
             .iter()
             .map(|r| r.npc_id.clone())
@@ -185,10 +184,14 @@ pub fn build_director_brief_packet(
 
 /// Canonical keys that resolve to EXACTLY ONE pool member. Keys reached by >1 candidate
 /// (ambiguous collision, e.g. empty `source_event_ids`) are excluded — fail-closed.
-fn unambiguous_pool_keys(candidates: &[WorldReactionCandidate]) -> HashMap<WorldCandidateRef, usize> {
+fn unambiguous_pool_keys(
+    candidates: &[WorldReactionCandidate],
+) -> HashMap<WorldCandidateRef, usize> {
     let mut counts: HashMap<WorldCandidateRef, usize> = HashMap::new();
     for c in candidates {
-        *counts.entry(WorldCandidateRef::from_candidate(c)).or_insert(0) += 1;
+        *counts
+            .entry(WorldCandidateRef::from_candidate(c))
+            .or_insert(0) += 1;
     }
     counts.retain(|_, n| *n == 1);
     counts

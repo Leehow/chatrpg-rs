@@ -160,7 +160,10 @@ mod tests {
             ],
         );
         let report = project_clues_onto_scenes(&mut g);
-        assert_eq!(report.linked, 2, "both clues land in exactly one scene: {report:?}");
+        assert_eq!(
+            report.linked, 2,
+            "both clues land in exactly one scene: {report:?}"
+        );
         assert_eq!(g.scenes[0].referenced_clue_ids, vec!["clue_a"]);
         assert_eq!(g.scenes[1].referenced_clue_ids, vec!["clue_b"]);
     }
@@ -170,10 +173,7 @@ mod tests {
     fn boundary_pages_are_inclusive() {
         let mut g = graph(
             vec![scene("s", 8, 21)],
-            vec![
-                json!({"id":"low","page":8}),
-                json!({"id":"high","page":21}),
-            ],
+            vec![json!({"id":"low","page":8}), json!({"id":"high","page":21})],
         );
         let report = project_clues_onto_scenes(&mut g);
         assert_eq!(report.linked, 2);
@@ -190,7 +190,10 @@ mod tests {
         let report = project_clues_onto_scenes(&mut g);
         assert_eq!(report.linked, 0);
         assert_eq!(report.skipped_out_of_range, 1, "{report:?}");
-        assert!(g.scenes[0].referenced_clue_ids.is_empty(), "never fabricate a link");
+        assert!(
+            g.scenes[0].referenced_clue_ids.is_empty(),
+            "never fabricate a link"
+        );
     }
 
     // ===== TDD #4: clue with no page is skipped + counted (fail-closed) =====
@@ -233,7 +236,11 @@ mod tests {
         );
         project_clues_onto_scenes(&mut g);
         let report = project_clues_onto_scenes(&mut g);
-        assert_eq!(g.scenes[0].referenced_clue_ids, vec!["clue_a"], "no duplicate");
+        assert_eq!(
+            g.scenes[0].referenced_clue_ids,
+            vec!["clue_a"],
+            "no duplicate"
+        );
         // second pass re-links the same clue (idempotent), still counts it linked.
         assert_eq!(report.linked, 1);
     }
@@ -264,7 +271,10 @@ mod tests {
         );
         let report = project_clues_onto_scenes(&mut g);
         assert_eq!(report.linked, 0);
-        assert_eq!(report.skipped_out_of_range, 1, "no full range ⇒ no containment");
+        assert_eq!(
+            report.skipped_out_of_range, 1,
+            "no full range ⇒ no containment"
+        );
         assert!(g.scenes[0].referenced_clue_ids.is_empty());
     }
 

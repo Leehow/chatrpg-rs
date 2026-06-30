@@ -108,8 +108,11 @@ pub(crate) fn evaluate_gm_audit(
     }
 
     // Completeness: every offered cap has exactly one decision; no extra/unknown caps.
-    let offered: std::collections::BTreeSet<&str> =
-        offer_set.offers().iter().map(|o| o.cap_id.as_str()).collect();
+    let offered: std::collections::BTreeSet<&str> = offer_set
+        .offers()
+        .iter()
+        .map(|o| o.cap_id.as_str())
+        .collect();
     let decided: std::collections::BTreeSet<&str> =
         audit.decisions.keys().map(|c| c.as_str()).collect();
     if decided.iter().any(|c| !offered.contains(c)) {
@@ -267,12 +270,12 @@ pub(crate) fn render_content_delivery_instruction() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use trpg_model::adventure_ir::{
         AtomId, BasisKind, CapId, EvidenceAtomCatalog, EvidenceAtomSpec, EvidenceAuthority,
         EvidenceKind, EvidenceOffer, NonEmpty, NotObservedReason, TurnLocalRef,
     };
     use trpg_model::{DomainEventKind, SourceRef};
-    use std::collections::BTreeMap;
 
     const SESSION: &str = "sess_p1";
     const TURN: &str = "turn-uuid-real-1234";
@@ -280,10 +283,12 @@ mod tests {
     const CLUE_B: &str = "clue_back_alley_map";
 
     fn atom_spec(clue_id: &str, page: u32) -> EvidenceAtomSpec {
-        let atom_id =
-            AtomId::from_parts("digest_v1", &format!("p{page}"), EvidenceKind::FactLearned, &[
-                clue_id.to_string(),
-            ]);
+        let atom_id = AtomId::from_parts(
+            "digest_v1",
+            &format!("p{page}"),
+            EvidenceKind::FactLearned,
+            &[clue_id.to_string()],
+        );
         EvidenceAtomSpec {
             atom_id,
             kind: EvidenceKind::FactLearned,
@@ -340,7 +345,10 @@ mod tests {
     /// A complete audit: cap_A observed (commit:0), cap_B not_observed (merely_implied).
     fn complete_audit(set: &EvidenceOfferSet) -> EvidenceAudit {
         let mut decisions = BTreeMap::new();
-        decisions.insert(set.offers()[0].cap_id.clone(), observed(vec![TurnLocalRef::Commit(0)]));
+        decisions.insert(
+            set.offers()[0].cap_id.clone(),
+            observed(vec![TurnLocalRef::Commit(0)]),
+        );
         decisions.insert(
             set.offers()[1].cap_id.clone(),
             not_observed(NotObservedReason::MerelyImplied),
@@ -359,10 +367,25 @@ mod tests {
         let events = vec![learned_event("de_clue_a", CLUE_A)];
         let audit = complete_audit(&set);
 
-        let out = evaluate_gm_audit(SESSION, TURN, &set, &catalog, &events, Some(&audit), &EvidenceLedger::new());
+        let out = evaluate_gm_audit(
+            SESSION,
+            TURN,
+            &set,
+            &catalog,
+            &events,
+            Some(&audit),
+            &EvidenceLedger::new(),
+        );
 
-        assert_eq!(out.ledger.len(), 1, "one observed clue ⇒ one GmWitnessed evidence");
-        assert_eq!(out.ledger.entries()[0].authority, EvidenceAuthority::GmWitnessed);
+        assert_eq!(
+            out.ledger.len(),
+            1,
+            "one observed clue ⇒ one GmWitnessed evidence"
+        );
+        assert_eq!(
+            out.ledger.entries()[0].authority,
+            EvidenceAuthority::GmWitnessed
+        );
         assert_eq!(
             out.ledger.entries()[0].atom_id,
             set.offers()[0].atom_id,
@@ -382,10 +405,21 @@ mod tests {
         let (set, catalog) = two_clue_offer_set();
         let events = vec![learned_event("de_clue_a", CLUE_A)];
 
-        let out = evaluate_gm_audit(SESSION, TURN, &set, &catalog, &events, None, &EvidenceLedger::new());
+        let out = evaluate_gm_audit(
+            SESSION,
+            TURN,
+            &set,
+            &catalog,
+            &events,
+            None,
+            &EvidenceLedger::new(),
+        );
 
         assert_eq!(out.ledger.len(), 0);
-        assert_eq!(out.telemetry.protocol_failure, Some(ProtocolFailureKind::MissingAudit));
+        assert_eq!(
+            out.telemetry.protocol_failure,
+            Some(ProtocolFailureKind::MissingAudit)
+        );
         assert_eq!(out.telemetry.completeness, 0.0);
     }
 
@@ -395,15 +429,30 @@ mod tests {
         let (set, catalog) = two_clue_offer_set();
         let events = vec![learned_event("de_clue_a", CLUE_A)];
         let mut decisions = BTreeMap::new();
-        decisions.insert(set.offers()[0].cap_id.clone(), observed(vec![TurnLocalRef::Commit(0)]));
+        decisions.insert(
+            set.offers()[0].cap_id.clone(),
+            observed(vec![TurnLocalRef::Commit(0)]),
+        );
         let audit = EvidenceAudit {
             offer_set_id: set.id(),
             decisions,
         };
 
-        let out = evaluate_gm_audit(SESSION, TURN, &set, &catalog, &events, Some(&audit), &EvidenceLedger::new());
+        let out = evaluate_gm_audit(
+            SESSION,
+            TURN,
+            &set,
+            &catalog,
+            &events,
+            Some(&audit),
+            &EvidenceLedger::new(),
+        );
 
-        assert_eq!(out.ledger.len(), 0, "incomplete audit ⇒ no admission (fail-closed)");
+        assert_eq!(
+            out.ledger.len(),
+            0,
+            "incomplete audit ⇒ no admission (fail-closed)"
+        );
         assert_eq!(
             out.telemetry.protocol_failure,
             Some(ProtocolFailureKind::IncompleteDecisions)
@@ -416,14 +465,26 @@ mod tests {
         let (set, catalog) = two_clue_offer_set();
         let events = vec![learned_event("de_clue_a", CLUE_A)];
         let mut audit = complete_audit(&set);
-        audit
-            .decisions
-            .insert(CapId("cap_never_offered".into()), not_observed(NotObservedReason::Failed));
+        audit.decisions.insert(
+            CapId("cap_never_offered".into()),
+            not_observed(NotObservedReason::Failed),
+        );
 
-        let out = evaluate_gm_audit(SESSION, TURN, &set, &catalog, &events, Some(&audit), &EvidenceLedger::new());
+        let out = evaluate_gm_audit(
+            SESSION,
+            TURN,
+            &set,
+            &catalog,
+            &events,
+            Some(&audit),
+            &EvidenceLedger::new(),
+        );
 
         assert_eq!(out.ledger.len(), 0);
-        assert_eq!(out.telemetry.protocol_failure, Some(ProtocolFailureKind::ExtraDecisions));
+        assert_eq!(
+            out.telemetry.protocol_failure,
+            Some(ProtocolFailureKind::ExtraDecisions)
+        );
     }
 
     #[test]
@@ -433,10 +494,21 @@ mod tests {
         let mut audit = complete_audit(&set);
         audit.offer_set_id = "osid_stale000000".into();
 
-        let out = evaluate_gm_audit(SESSION, TURN, &set, &catalog, &events, Some(&audit), &EvidenceLedger::new());
+        let out = evaluate_gm_audit(
+            SESSION,
+            TURN,
+            &set,
+            &catalog,
+            &events,
+            Some(&audit),
+            &EvidenceLedger::new(),
+        );
 
         assert_eq!(out.ledger.len(), 0);
-        assert_eq!(out.telemetry.protocol_failure, Some(ProtocolFailureKind::OfferSetMismatch));
+        assert_eq!(
+            out.telemetry.protocol_failure,
+            Some(ProtocolFailureKind::OfferSetMismatch)
+        );
     }
 
     #[test]
@@ -448,38 +520,78 @@ mod tests {
         let events: Vec<DomainEvent> = vec![]; // commit:0 resolves to nothing
         let audit = complete_audit(&set);
 
-        let out = evaluate_gm_audit(SESSION, TURN, &set, &catalog, &events, Some(&audit), &EvidenceLedger::new());
+        let out = evaluate_gm_audit(
+            SESSION,
+            TURN,
+            &set,
+            &catalog,
+            &events,
+            Some(&audit),
+            &EvidenceLedger::new(),
+        );
 
-        assert_eq!(out.ledger.len(), 0, "unresolvable basis ⇒ gateway rejects, not admitted");
-        assert_eq!(out.telemetry.protocol_failure, None, "protocol was complete");
+        assert_eq!(
+            out.ledger.len(),
+            0,
+            "unresolvable basis ⇒ gateway rejects, not admitted"
+        );
+        assert_eq!(
+            out.telemetry.protocol_failure, None,
+            "protocol was complete"
+        );
         assert_eq!(out.telemetry.observed, 1);
-        assert!(out.decisions[0].result.is_err(), "the observed decision was rejected by the gateway");
+        assert!(
+            out.decisions[0].result.is_err(),
+            "the observed decision was rejected by the gateway"
+        );
     }
 
     #[test]
     fn audit_block_lists_caps_and_format_never_leaks_atom_id() {
         let (set, _catalog) = two_clue_offer_set();
         let block = render_gm_audit_block(&set);
-        assert!(block.contains(set.offers()[0].cap_id.as_str()), "shows the opaque cap handle");
-        assert!(block.contains("[evidence_audit]"), "tells the GM the markup format");
+        assert!(
+            block.contains(set.offers()[0].cap_id.as_str()),
+            "shows the opaque cap handle"
+        );
+        assert!(
+            block.contains("[evidence_audit]"),
+            "tells the GM the markup format"
+        );
         assert!(block.contains(&set.id()), "echoes the offer_set_id to use");
-        assert!(block.contains("not_observed"), "explains the not_observed status");
-        assert!(block.contains("merely_implied"), "shows the boundary few-shot vocabulary");
+        assert!(
+            block.contains("not_observed"),
+            "explains the not_observed status"
+        );
+        assert!(
+            block.contains("merely_implied"),
+            "shows the boundary few-shot vocabulary"
+        );
         // LLM-never-evaluates-guard: atom ids / objective id slugs never leak into the
         // prompt. (The bare word "objective" DOES appear — the instruction tells the GM
         // NOT to judge any objective — but no atom id or `obj.<slug>` may appear.)
-        assert!(!block.contains(set.offers()[0].atom_id.as_str()), "atom_id must NEVER appear");
+        assert!(
+            !block.contains(set.offers()[0].atom_id.as_str()),
+            "atom_id must NEVER appear"
+        );
         assert!(!block.contains("atom:"), "no atom: prefix may leak");
         assert!(!block.contains("obj."), "no objective id slug leaked");
         // The GM is instructed NOT to judge objectives/completion (the words appear as a
         // prohibition, never as a verdict field it could fill).
-        assert!(block.contains("Do NOT judge any objective"), "carries the no-guard instruction");
+        assert!(
+            block.contains("Do NOT judge any objective"),
+            "carries the no-guard instruction"
+        );
     }
 
     #[test]
     fn empty_offer_set_renders_no_block_baseline() {
         let empty = EvidenceOfferSet::new(TURN);
-        assert_eq!(render_gm_audit_block(&empty), "", "empty offers ⇒ no block ⇒ baseline");
+        assert_eq!(
+            render_gm_audit_block(&empty),
+            "",
+            "empty offers ⇒ no block ⇒ baseline"
+        );
     }
 
     #[test]
@@ -494,16 +606,28 @@ mod tests {
             block.push_str("\n\n");
             block.push_str(&render_content_delivery_instruction());
         }
-        assert_eq!(block, baseline, "OFF ⇒ block bytes identical to EV-P1 baseline");
+        assert_eq!(
+            block, baseline,
+            "OFF ⇒ block bytes identical to EV-P1 baseline"
+        );
 
         // The instruction names only the closed schema fields + opaque handles — never an
         // atom id, the fact name, or an objective slug.
         let instr = render_content_delivery_instruction();
-        assert!(instr.contains("materialized_content"), "instructs the sidecar tag");
-        assert!(instr.contains("delivery_cap") && instr.contains("basis"), "names closed fields");
+        assert!(
+            instr.contains("materialized_content"),
+            "instructs the sidecar tag"
+        );
+        assert!(
+            instr.contains("delivery_cap") && instr.contains("basis"),
+            "names closed fields"
+        );
         assert!(!instr.contains("atom:"), "no atom id leaked");
         assert!(!instr.contains("obj."), "no objective id slug leaked");
-        assert!(!instr.contains("fact_id"), "the GM never names the authored fact");
+        assert!(
+            !instr.contains("fact_id"),
+            "the GM never names the authored fact"
+        );
     }
 
     #[test]

@@ -42,9 +42,7 @@ pub use authored_observation::{
     parse_action_phrase, GraphRefIndex, ProgressRole,
 };
 pub use content_delivery::{ContentDelivery, DeliveryRecipient};
-pub use content_unit::{
-    ContentUnit, DeliveryPolicy, FacetKind, UnitKind, VisibilityPolicy,
-};
+pub use content_unit::{ContentUnit, DeliveryPolicy, FacetKind, UnitKind, VisibilityPolicy};
 pub use effect::{EffectExpr, ScoreEffect};
 pub use evidence::{
     AcceptedEvidence, AtomId, EvidenceAtomCatalog, EvidenceAtomSpec, EvidenceAuthority,

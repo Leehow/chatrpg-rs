@@ -35,8 +35,7 @@ use trpg_model::{DomainEvent, DomainEventKind, ModuleGraph, SourceRef};
 
 const EXACT_EVIDENCE_PROJECTOR_V1_ENV: &str = "TRPG_EXACT_EVIDENCE_PROJECTOR_V1";
 const PROGRESS_EVIDENCE_V1_ENV: &str = "TRPG_PROGRESS_EVIDENCE_V1";
-const PROGRESS_OBSERVABLE_LEAF_CATALOG_V1_ENV: &str =
-    "TRPG_PROGRESS_OBSERVABLE_LEAF_CATALOG_V1";
+const PROGRESS_OBSERVABLE_LEAF_CATALOG_V1_ENV: &str = "TRPG_PROGRESS_OBSERVABLE_LEAF_CATALOG_V1";
 
 /// Pure flag parse (env-race-free; mirrors the EV-1 bridge flag).
 fn flag_on(raw: &str) -> bool {
@@ -237,12 +236,15 @@ mod tests {
     #[test]
     fn catalog_skips_clue_without_id_or_page_no_fabricated_atom() {
         let graph = graph_with_clues(vec![
-            json!({"name": "anon", "page": 10}),            // no id
+            json!({"name": "anon", "page": 10}),             // no id
             json!({"id": "clue_nopage", "name": "no page"}), // no page
             json!({"id": "clue_strpage", "page": "twelve"}), // non-numeric page
         ]);
         let cat = build_evidence_atom_catalog(&graph);
-        assert!(cat.is_empty(), "fail-closed: never fabricate a source-less atom");
+        assert!(
+            cat.is_empty(),
+            "fail-closed: never fabricate a source-less atom"
+        );
     }
 
     #[test]
@@ -262,7 +264,11 @@ mod tests {
             cat.resolve_fact("clue_aquifer_commercial").unwrap().atom_id,
             "correct atom_id"
         );
-        assert_eq!(ev.basis_event_ids, vec!["de_1".to_string()], "basis = the event");
+        assert_eq!(
+            ev.basis_event_ids,
+            vec!["de_1".to_string()],
+            "basis = the event"
+        );
         assert_eq!(
             ev.source_refs.first().and_then(|s| s.page),
             Some(10),
@@ -286,7 +292,10 @@ mod tests {
             json!({"fact_id": "wf_chk_check_2c160e4", "truth_status": "true"}),
         )];
         let led = project_exact_evidence(&events, &cat);
-        assert!(led.is_empty(), "fail-closed: synthetic non-authored fact never projects");
+        assert!(
+            led.is_empty(),
+            "fail-closed: synthetic non-authored fact never projects"
+        );
     }
 
     #[test]
@@ -324,7 +333,11 @@ mod tests {
             json!({"fact_id": "clue_aquifer_commercial", "knowledge_state": "knows_true"}),
         )];
         let led = project_exact_evidence(&events, &cat);
-        assert_eq!(led.len(), 1, "explicit knows_true over an authored ref projects");
+        assert_eq!(
+            led.len(),
+            1,
+            "explicit knows_true over an authored ref projects"
+        );
         assert_eq!(
             led.entries()[0].evidence_kind,
             EvidenceKind::FactRevealed,
@@ -340,7 +353,10 @@ mod tests {
         let cat = build_evidence_atom_catalog(&graph);
         let events = vec![player_learned("de_x", "clue_not_in_catalog")];
         let led = project_exact_evidence(&events, &cat);
-        assert!(led.is_empty(), "fail-closed: a ref with no catalog atom never projects");
+        assert!(
+            led.is_empty(),
+            "fail-closed: a ref with no catalog atom never projects"
+        );
     }
 
     #[test]
@@ -376,7 +392,11 @@ mod tests {
             ..Default::default()
         };
         let cat = build_evidence_atom_catalog(&graph);
-        assert_eq!(cat.len(), 1, "OFF ⇒ clue-only (affordance_items ignored, EV-2 baseline)");
+        assert_eq!(
+            cat.len(),
+            1,
+            "OFF ⇒ clue-only (affordance_items ignored, EV-2 baseline)"
+        );
         assert!(cat.resolve_fact("clue_aquifer_commercial").is_some());
     }
 

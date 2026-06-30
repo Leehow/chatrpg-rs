@@ -479,6 +479,55 @@ async fn cyberpunk_kernel_gains_luck_and_humanity_via_override() {
     );
 }
 
+#[tokio::test]
+async fn cyberpunk_success_bands_fail_closed_without_natural_die_audit() {
+    let url = match std::env::var("DATABASE_URL") {
+        Ok(u) => u,
+        Err(_) => {
+            eprintln!("SKIP: DATABASE_URL unset");
+            return;
+        }
+    };
+    let db = match Db::connect(&url).await {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("SKIP: connect: {e}");
+            return;
+        }
+    };
+    let kernel = match db.load_rule_kernel("cyberpunk_red").await.ok().flatten() {
+        Some(k) => k,
+        None => {
+            eprintln!("SKIP: no cyberpunk_red kernel in this DB");
+            return;
+        }
+    };
+    let ids: Vec<String> = kernel
+        .dice_core
+        .get("success_bands")
+        .and_then(|v| v.as_array())
+        .map(|bands| {
+            bands
+                .iter()
+                .filter_map(|band| band.get("id").and_then(|v| v.as_str()).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    assert!(
+        ids.iter().any(|id| id == "success"),
+        "cyberpunk bands must retain a normal success tier; got {ids:?}"
+    );
+    assert!(
+        ids.iter().any(|id| id == "failure"),
+        "cyberpunk bands must retain a normal failure tier; got {ids:?}"
+    );
+    assert!(
+        !ids.iter().any(|id| id.contains("critical")),
+        "the generic tier evaluator cannot audit Cyberpunk natural-1/10 dice yet, so critical bands must fail closed out of the read-time kernel; got {ids:?}"
+    );
+}
+
 // End-to-end proof that the D&D fix makes combat HP NON-None: a D&D actor with a
 // character-derived hit_points resolves a real current value via the SSOT primitive
 // (formerly None, because the dirty kernel had no valid HP track). Throwaway session.

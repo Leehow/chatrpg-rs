@@ -148,6 +148,32 @@ async fn run_pipeline(
         // mode_inference / context_assembly fail-closed 返 Err（P1-1）：发 TurnFailed
         // （**不再**发空 TurnComplete 伪装成功）+ 落 turns.failure_kind + 写失败 TurnTrace 后早返。
         for phase in plan.iter().filter(|p| p.kind == PhaseKind::Deterministic) {
+            if phase.id == PhaseId::ContextAssembly {
+                if let Some(transition) = gm.phase_pre_context_scene_navigate(&input).await {
+                    phases_run.push("PreContextSceneNavigate".to_string());
+                    ctx.set_pre_context_scene_override(transition.to.clone());
+                    let _ = tx
+                        .send(TurnEvent::SceneTransition {
+                            from: transition.from.clone(),
+                            to: transition.to.clone(),
+                            reason: transition.reason.clone(),
+                        })
+                        .await;
+                    append_lifecycle_event(
+                        &gm,
+                        &req.request,
+                        trpg_model::DomainEventKind::SceneTransitioned,
+                        serde_json::json!({
+                            "from": transition.from.clone(),
+                            "to": transition.to.clone(),
+                            "reason": transition.reason.clone(),
+                            "pre_context": true
+                        }),
+                    )
+                    .await;
+                    scene_commit = Some(transition);
+                }
+            }
             phases_run.push(format!("{:?}", phase.id));
             if let Err(f) = dispatch_deterministic(&mut gm, &mut ctx, &input, phase.id).await {
                 // 确定性头部失败的只有 mode_inference / context_assembly，按分级器均为 AbortTurn
@@ -217,10 +243,22 @@ async fn run_pipeline(
         let narrator_split = std::env::var("TRPG_NARRATOR_SPLIT")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
+        let module_present = req.module_id.is_some() || req.request.module_id.is_some();
+        // PresentationGate hard delivery: explicit env enables it globally; module play
+        // enables it by default because action menus/secret leaks are product-contract
+        // violations, not optional diagnostics.
+        let presentation_gate_delivery =
+            crate::turn_loop::presentation_gate_enforced(module_present);
         // P1-3 follow-up：把取消令牌穿进 agent loop——客户端在状态变更前断开时 driver fire 它，
         // run_agent_loop 在 LLM 流边界 break、放弃在途生成（不再续烧 token）。
         signal = gm
-            .run_agent_loop(&mut ctx, &input, tx, req.cancel.as_ref(), !narrator_split)
+            .run_agent_loop(
+                &mut ctx,
+                &input,
+                tx,
+                req.cancel.as_ref(),
+                !narrator_split && !presentation_gate_delivery,
+            )
             .await;
 
         // P1-3 follow-up：令牌已 fire ⇒ run_agent_loop 已放弃在途生成。此处同样短路尾段——
@@ -246,7 +284,7 @@ async fn run_pipeline(
         // 已在 agent loop 内流出，不经 Narrator（ON/OFF 行为一致）。run_narrator_phase 内
         // 自带 fail-soft：Narrator 失败/空 → 回退直发 buffer 的 adjudicator prose（= OFF 基线，
         // 无新增泄漏、绝不空白）。cancel 已在上方短路；此处仅未取消路径进入。
-        if narrator_split && signal == AgentSignal::Narration {
+        if narrator_split && !presentation_gate_delivery && signal == AgentSignal::Narration {
             phases_run.push("Narrator".to_string());
             gm.run_narrator_phase(&mut ctx, &input, tx, req.cancel.as_ref())
                 .await;
@@ -257,9 +295,9 @@ async fn run_pipeline(
         // （勘误判定要在 finalize 前注入 ledger 真相）→ Finalize 的 save_turn →
         // SceneNavigate 的切场景决策 + set_session_scene + SceneChanged 事件。
         // AuditLearning（finalize 的 memory/audit 半边）/ 深抽 / carryover → heavy。
-        let module_present = req.module_id.is_some();
         let has_pending = gm.has_pending_obligations();
         selected = select_phases(plan, signal, module_present, has_pending);
+        let mut deferred_finalize_status: Option<&'static str> = None;
         for phase in &selected {
             if phase.kind != PhaseKind::Postprocess {
                 continue;
@@ -271,7 +309,8 @@ async fn run_pipeline(
                     // P2：buffered-narration 就位 = TRPG_NARRATOR_SPLIT ON 且 Narration 终态
                     //（与上方 Narrator phase 触发条件一致——文字经 Narrator 缓冲，gate Block 时
                     // repair ladder 真正生效；否则 gate ON 也只记 trace）。
-                    let buffered_narration = narrator_split && signal == AgentSignal::Narration;
+                    let buffered_narration = (narrator_split || presentation_gate_delivery)
+                        && signal == AgentSignal::Narration;
                     gm.phase_verify_after_stream(
                         &mut ctx,
                         &input,
@@ -280,6 +319,19 @@ async fn run_pipeline(
                         buffered_narration,
                     )
                     .await;
+                    if presentation_gate_delivery && signal == AgentSignal::Narration {
+                        gm.apply_presentation_gate_safe_fallback(&mut ctx, input.user_input);
+                        gm.ensure_committed_visible_projection_after_repairs(
+                            &mut ctx,
+                            input.user_input,
+                        )
+                        .await;
+                        gm.ensure_concrete_information_request_answered_after_repairs(
+                            &mut ctx,
+                            input.user_input,
+                        )
+                        .await;
+                    }
                     // P2 步骤7：emit 一条 gate 决策事件（OFF/ON 都 emit，不阻断；§13 PresentationCommit
                     // 的真正扣留留待 P1 收口实时流后接 Block 分支）。TurnWarning 复用 verify phase 通道。
                     if let crate::presentation_gate::PresentationGate::Block(findings) =
@@ -303,17 +355,22 @@ async fn run_pipeline(
                         .await;
                 }
                 PhaseId::Finalize => {
-                    phases_run.push(format!("{:?}", PhaseId::Finalize));
                     // awaiting 终态 finalize 状态 = "awaiting_player_roll"，正常 = "ready"。
-                    let status = match signal {
+                    deferred_finalize_status = Some(match signal {
                         AgentSignal::AwaitingPlayerRoll => "awaiting_player_roll",
                         AgentSignal::Narration => "ready",
-                    };
-                    gm.phase_finalize(&mut ctx, &input, status).await; // R5：只 save_turn
+                    });
                 }
                 PhaseId::SceneNavigate => {
                     phases_run.push(format!("{:?}", PhaseId::SceneNavigate));
                     if let Some(t) = gm.phase_scene_navigate_critical(&ctx, &input).await {
+                        if presentation_gate_delivery && signal == AgentSignal::Narration {
+                            ctx.repair_visible_text_for_scene_transition(&t);
+                            gm.ensure_scene_transition_visible_information_after_repair(
+                                &mut ctx, &t,
+                            )
+                            .await;
+                        }
                         let _ = tx
                             .send(TurnEvent::SceneTransition {
                                 from: t.from.clone(),
@@ -335,6 +392,34 @@ async fn run_pipeline(
                 // AuditLearning / CarryoverDebt → heavy（spawn_heavy 内跑）。
                 _ => {}
             }
+        }
+        // Pre-context navigation commits before ContextAssembly, while critical
+        // SceneNavigate commits in the postprocess loop above. Run the visible
+        // transition repair once at the shared commit boundary so either path
+        // cannot complete a module turn with only a SceneTransition event and no
+        // player-visible arrival text.
+        if presentation_gate_delivery && signal == AgentSignal::Narration {
+            if let Some(t) = scene_commit.as_ref() {
+                ctx.repair_visible_text_for_scene_transition(t);
+                gm.ensure_scene_transition_visible_information_after_repair(&mut ctx, t)
+                    .await;
+                gm.ensure_committed_visible_projection_after_repairs(&mut ctx, input.user_input)
+                    .await;
+                gm.ensure_concrete_information_request_answered_after_repairs(
+                    &mut ctx,
+                    input.user_input,
+                )
+                .await;
+            }
+        }
+
+        if let Some(status) = deferred_finalize_status {
+            phases_run.push(format!("{:?}", PhaseId::Finalize));
+            gm.phase_finalize(&mut ctx, &input, status).await; // R5：只 save_turn
+        }
+
+        if presentation_gate_delivery && signal == AgentSignal::Narration {
+            gm.emit_buffered_visible_text(&ctx, tx).await;
         }
 
         // —— 4. TurnComplete（critical 已落账，可继续下一回合）——

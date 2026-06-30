@@ -99,8 +99,7 @@ pub fn classify_campaign(threads: &[StoryThread], arcs: &[CharacterArcState]) ->
         match classify_thread(t) {
             ThreadBucket::Active => {
                 active_thread_ids.push(t.thread_id.clone());
-                if !t.dramatic_question.is_empty()
-                    && !thematic_focus.contains(&t.dramatic_question)
+                if !t.dramatic_question.is_empty() && !thematic_focus.contains(&t.dramatic_question)
                 {
                     thematic_focus.push(t.dramatic_question.clone());
                 }

@@ -16,14 +16,15 @@
 //! `TRPG_CHECK_OUTCOME_WORLD_FACT` 默认 ON;OFF ⇒ 无派生 = 基线字节等价(走原 review/commit
 //! 管线,knowledge kernel 仍各自门控)。零 ruleset 分支(同 `meet_or_beat` 系门控之外的通用层)。
 
-use trpg_model::{
-    CheckContract, FactTruthStatus, MemoryExtractionProposal, WorldFactCandidate,
-};
+use trpg_model::{CheckContract, FactTruthStatus, MemoryExtractionProposal, WorldFactCandidate};
 
 /// flag 门控。默认 ON;仅 `0`/`false`/`off`(大小写不敏感)关闭。OFF ⇒ 引擎跳过派生。
 pub fn check_outcome_world_fact_enabled() -> bool {
     match std::env::var("TRPG_CHECK_OUTCOME_WORLD_FACT") {
-        Ok(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off"),
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off"
+        ),
         Err(_) => true,
     }
 }
@@ -160,7 +161,12 @@ mod tests {
 
     #[test]
     fn success_check_yields_world_fact_keyed_on_check_id() {
-        let c = contract("chk1", "pc.current", "供电已被切断,粗缆嗡鸣停止", "短断关键线");
+        let c = contract(
+            "chk1",
+            "pc.current",
+            "供电已被切断,粗缆嗡鸣停止",
+            "短断关键线",
+        );
         let p = world_fact_from_check(&c, "success", "turn9").expect("success ⇒ Some");
         let wf = unwrap_wf(p);
         assert_eq!(wf.fact_id, "wf_chk_chk1");
@@ -214,7 +220,10 @@ mod tests {
     fn flag_defaults_on() {
         // 默认(未设环境变量)应为 ON;不在测试里 set/unset env(进程级竞态),仅断言默认分支。
         // 由 from_env 的 Err(_) => true 保证;此处文档化意图。
-        assert!(check_outcome_world_fact_enabled() || std::env::var("TRPG_CHECK_OUTCOME_WORLD_FACT").is_ok());
+        assert!(
+            check_outcome_world_fact_enabled()
+                || std::env::var("TRPG_CHECK_OUTCOME_WORLD_FACT").is_ok()
+        );
     }
 
     #[test]

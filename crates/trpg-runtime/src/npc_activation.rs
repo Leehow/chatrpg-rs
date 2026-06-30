@@ -254,6 +254,10 @@ mod tests {
             Some("sc01"),
             MaterializationAffordanceMode::Enforce,
         );
-        assert_eq!(ids, vec!["caller_npc"], "非空调用方集合在 Enforce 下也不被覆盖（additive）");
+        assert_eq!(
+            ids,
+            vec!["caller_npc"],
+            "非空调用方集合在 Enforce 下也不被覆盖（additive）"
+        );
     }
 }

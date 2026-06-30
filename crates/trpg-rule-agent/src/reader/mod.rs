@@ -40,10 +40,10 @@ pub use object_compile::{
     compile_object_schemas, discover_object_categories, extract_object_category, ObjectCtx,
 };
 pub use onboarding_compile::{compile_starter_pack, OnboardingCtx};
-pub use pool_scaling::pool_scaling_choice_record;
 pub use parallel::{
     plan_phase, read_character_slice, read_resolution_and_gm, run_reader_parallel, CharacterSlice,
     Plan, ResolutionGm,
 };
+pub use pool_scaling::pool_scaling_choice_record;
 pub use run_kit::{CoreRules, GmRunKit};
 pub use units::{load_units, Unit};

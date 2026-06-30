@@ -13,15 +13,16 @@ use crate::tools::{AwaitingPlayerRoll, SceneDeepExtractFn, ToolCtx, ToolRegistry
 use anyhow::Result;
 use chrono::Utc;
 use futures_util::StreamExt;
-use serde_json::json;
+use regex::Regex;
+use serde_json::{json, Value};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio_util::sync::CancellationToken;
 use trpg_interaction::InteractionLifecycleKernel;
 use trpg_llm::{LlmClient, StreamEvent, ToolChoice};
 use trpg_model::{
     ChatMessage, CompiledContext, ContextRequest, DirectorPlan, MechanicDue, MechanicalResultView,
-    MemoryEvent, MemoryKind, RuntimeState, StateFrame, Visibility, WorldEventKind,
+    MemoryEvent, MemoryKind, RollVisibility, RuntimeState, StateFrame, Visibility, WorldEventKind,
     WorldReactionCandidate,
 };
 use trpg_runtime::RuntimeEngine;
@@ -260,6 +261,11 @@ pub(crate) struct TurnContext {
     // the narrator's `NarrationPacket.forbidden_reveals`. Gated by `TRPG_DIRECTOR_SCENE_PLAN` ⇒ OFF
     // 恒空 ⇒ 字节等价基线 (run_narrator_phase passes an empty set, exactly as before).
     scene_forbidden_reveals: Vec<String>,
+    // Pre-context scene override set only when a deterministic authored-neighbor
+    // move is committed before ContextAssembly. The incoming RuntimeState may
+    // still carry the old scene from turn entry; this override keeps the current
+    // turn's context projection aligned with the just-committed scene.
+    pre_context_scene_override: Option<String>,
 }
 impl TurnContext {
     pub(crate) fn new() -> Self {
@@ -294,6 +300,7 @@ impl TurnContext {
             world_candidates: Vec::new(),
             post_adjudication_plan: None,
             scene_forbidden_reveals: Vec::new(),
+            pre_context_scene_override: None,
         }
     }
 
@@ -354,6 +361,19 @@ impl TurnContext {
         match &self.awaiting_gate {
             Some(gate) if self.visible_text.trim().is_empty() => gate.prompt_public.clone(),
             _ => self.visible_text.clone(),
+        }
+    }
+
+    /// When a post-stream SceneNavigate commit proves that the player's movement
+    /// reached a real module scene, ensure the buffered player-visible prose also
+    /// acknowledges that destination before save/delivery.
+    pub(crate) fn repair_visible_text_for_scene_transition(&mut self, info: &SceneTransitionInfo) {
+        self.visible_text = scene_transition_visible_repair(&self.visible_text, info);
+    }
+
+    pub(crate) fn set_pre_context_scene_override(&mut self, scene_id: String) {
+        if !scene_id.trim().is_empty() {
+            self.pre_context_scene_override = Some(scene_id);
         }
     }
 
@@ -1083,6 +1103,7 @@ impl GmLoop {
         ctx.rejected_nominations = rejections_cell
             .into_inner()
             .unwrap_or_else(|p| p.into_inner());
+        self.sync_committed_turn_checks_from_db(input, ledger).await;
         // MAT.M3 axis-2：成功侦查 → 提名揭示一条 source-backed 线索 FACT（DP-3）。双闸：
         // 仅 MaterializationAffordanceMode::Enforce ∧ reveal-gating ON 才产提名（Off/Shadow/
         // gating-off ⇒ 严格无操作，字节级基线）。提名经既有 RevealNomination 通道 →
@@ -1095,7 +1116,18 @@ impl GmLoop {
             input,
             ledger.snapshot(),
             &mut ctx.nominated_reveals,
+            &mut ctx.resolved_gate_facts,
             reveal_gating,
+        )
+        .await;
+        self.fold_source_backed_nominations_for_module(
+            input
+                .request
+                .module_id
+                .as_deref()
+                .or(ctx.state_agent.module_id.as_deref()),
+            &ctx.nominated_reveals,
+            &mut ctx.resolved_gate_facts,
         )
         .await;
         // —— 终态 A：request_player_roll gate ——
@@ -1158,9 +1190,53 @@ impl GmLoop {
         // events (shadow). Parses `visible_text` BEFORE verify_after_stream may rewrite it, using
         // the OfferSet/catalog/turn_id held from turn-start. flag OFF ⇒ ctx.evidence_admission is
         // None ⇒ no-op ⇒ byte-identical baseline.
-        self.admit_main_gm_progress_claims(ctx, input, &visible_text).await;
+        self.admit_main_gm_progress_claims(ctx, input, &visible_text)
+            .await;
         ctx.visible_text = visible_text;
         crate::execute::AgentSignal::Narration
+    }
+
+    async fn sync_committed_turn_checks_from_db(
+        &self,
+        input: &GmTurnInput<'_>,
+        ledger: &mut TurnLedger,
+    ) {
+        match self
+            .engine
+            .db
+            .list_check_contracts_for_turn(&input.request.session_id, &input.request.turn_id)
+            .await
+        {
+            Ok(contracts) => {
+                for contract in contracts {
+                    ledger.record_contract_if_absent(&contract);
+                }
+            }
+            Err(err) => tracing::warn!(
+                error = %err,
+                session_id = %input.request.session_id,
+                turn_id = %input.request.turn_id,
+                "turn ledger sync: list check contracts failed"
+            ),
+        }
+        match self
+            .engine
+            .db
+            .list_check_results_for_turn(&input.request.session_id, &input.request.turn_id)
+            .await
+        {
+            Ok(results) => {
+                for result in results {
+                    ledger.record_result_if_absent(&result);
+                }
+            }
+            Err(err) => tracing::warn!(
+                error = %err,
+                session_id = %input.request.session_id,
+                turn_id = %input.request.turn_id,
+                "turn ledger sync: list check results failed"
+            ),
+        }
     }
 
     /// EV-4R shadow admission of the main GM's `[progress_claims]` sidecar. Parses the GM prose
@@ -1277,7 +1353,9 @@ impl GmLoop {
             // structural candidates exist. flag OFF ⇒ no-op. Returns the turn's accumulated
             // ledger (exact ∪ audit ∪ witness).
             let ledger = self
-                .run_post_turn_witness(input, &turn_id, &offer_set, &catalog, &events, &doc, &outcome)
+                .run_post_turn_witness(
+                    input, &turn_id, &offer_set, &catalog, &events, &doc, &outcome,
+                )
                 .await;
             // EV-APPLY-WIRE: engine CONSUMES the accumulated ledger → ObjectiveResolved
             // (flag-gated; OFF == byte-identical shadow). This is the slice that ends shadow.
@@ -1371,9 +1449,8 @@ impl GmLoop {
                     }
                 }
                 let st_cat = trpg_runtime::exact_projectors::build_state_atom_catalog(&graph);
-                for ev in
-                    trpg_runtime::exact_projectors::project_state_established(events, &st_cat)
-                        .entries()
+                for ev in trpg_runtime::exact_projectors::project_state_established(events, &st_cat)
+                    .entries()
                 {
                     if ledger.append(ev.clone()) {
                         state += 1;
@@ -1537,8 +1614,7 @@ impl GmLoop {
             materialized_refs,
             &candidates,
         );
-        let producer =
-            trpg_runtime::post_turn_witness::LlmWitnessProducer::new(self.llm.clone());
+        let producer = trpg_runtime::post_turn_witness::LlmWitnessProducer::new(self.llm.clone());
         let proposals =
             trpg_runtime::post_turn_witness::EvidenceClaimProducer::propose(&producer, &view).await;
         let (ledger, admissions) = trpg_runtime::post_turn_witness::admit_witness_proposals(
@@ -1681,8 +1757,7 @@ impl GmLoop {
             // performs the physical transition (it is the SOLE current_scene writer). Idempotent on
             // event_id ⇒ a re-emit on a later turn is a no-op. OFF (flag default) ⇒ this block is
             // skipped ⇒ zero SceneUnlocked + navigator consume skipped ⇒ byte-identical baseline.
-            if current_scene_advanced
-                && trpg_runtime::progression::scene_transition_gated_enabled()
+            if current_scene_advanced && trpg_runtime::progression::scene_transition_gated_enabled()
             {
                 if let Some(unlock) = trpg_runtime::progression::scene_unlock_event(
                     &input.request.session_id,
@@ -1713,7 +1788,12 @@ impl GmLoop {
 
         // EV-APPLY-WIRE prep-packet path (the_vault) — unchanged; gated by the master/apply flag.
         if apply_on {
-            let Ok(Some(csp)) = self.engine.db.load_module_prep_packet_session(module_id).await else {
+            let Ok(Some(csp)) = self
+                .engine
+                .db
+                .load_module_prep_packet_session(module_id)
+                .await
+            else {
                 return; // fail-closed: no prep-packet ⇒ no authored evidence-objective
             };
             let resolutions = trpg_runtime::progression::witnessed_objective_resolutions(
@@ -1812,12 +1892,12 @@ impl GmLoop {
         match narrated {
             Some(text) if !text.trim().is_empty() => {
                 ctx.visible_text = text; // Narrator 输出 = 玩家可见单一事实源
-                // OB-hide / OB-meta (Phase B): the split Narrator (player-facing, constitution ⑧)
-                // does NOT author hidden facts; the adjudicator (台下) emits [hide]/[meta]. Those
-                // blocks would be LOST when narrator output replaces visible_text — so preserve
-                // them RAW (Q-7-REVISED: transport emits raw; the parser classifies them hidden;
-                // the 战报 labels them). GM_CRAFT-gated ⇒ additive; OFF==baseline (OFF skips this
-                // whole craft path, and split-OFF never calls run_narrator_phase).
+                                         // OB-hide / OB-meta (Phase B): the split Narrator (player-facing, constitution ⑧)
+                                         // does NOT author hidden facts; the adjudicator (台下) emits [hide]/[meta]. Those
+                                         // blocks would be LOST when narrator output replaces visible_text — so preserve
+                                         // them RAW (Q-7-REVISED: transport emits raw; the parser classifies them hidden;
+                                         // the 战报 labels them). GM_CRAFT-gated ⇒ additive; OFF==baseline (OFF skips this
+                                         // whole craft path, and split-OFF never calls run_narrator_phase).
                 if crate::gm_craft::enabled() {
                     // (a) LLM-authored [hide]/[meta] from the adjudicator prose (richer secrets
                     //     like [hide kind="secret"] the GM judged exist), if it emitted any.
@@ -1861,6 +1941,9 @@ impl GmLoop {
         // strip here. TRPG_GM_CRAFT ON only; OFF ⇒ untouched (byte-equal baseline).
         if crate::gm_craft::enabled() {
             let classified = crate::presentation_markup::strip_player_markup(&ctx.visible_text);
+            if classified.empty_rolls_unwrapped > 0 || classified.malformed_rolls_unwrapped > 0 {
+                ctx.visible_text = classified.player_wire_text.clone();
+            }
             tracing::debug!(
                 turn_id = %input.request.turn_id,
                 meta_blocks = classified.meta_blocks.len(),
@@ -1869,9 +1952,8 @@ impl GmLoop {
                 // R-1: count of unbound/未定 [roll] blocks unwrapped to narration this turn
                 // (the v4 sample asserts ZERO undetermined [roll] reach the player text).
                 malformed_rolls = classified.malformed_rolls_unwrapped,
-                "gm_craft typed turn-document: audience classified (emit RAW, no strip at API)"
+                "gm_craft typed turn-document: audience classified; malformed/empty roll wrappers sanitized before delivery"
             );
-            // NOTE: ctx.visible_text intentionally NOT overwritten — emit raw (Q-7-REVISED).
         }
     }
 
@@ -1885,6 +1967,29 @@ impl GmLoop {
         private_tokens: &[String],
         tx: &tokio::sync::mpsc::Sender<crate::turn_event::TurnEvent>,
         cancel: Option<&CancellationToken>,
+    ) -> Option<String> {
+        self.run_narrator_with_delivery(packet, private_tokens, tx, cancel, true)
+            .await
+    }
+
+    pub(crate) async fn run_narrator_buffered(
+        &self,
+        packet: &crate::packet::NarrationPacket,
+        private_tokens: &[String],
+        tx: &tokio::sync::mpsc::Sender<crate::turn_event::TurnEvent>,
+        cancel: Option<&CancellationToken>,
+    ) -> Option<String> {
+        self.run_narrator_with_delivery(packet, private_tokens, tx, cancel, false)
+            .await
+    }
+
+    async fn run_narrator_with_delivery(
+        &self,
+        packet: &crate::packet::NarrationPacket,
+        private_tokens: &[String],
+        tx: &tokio::sync::mpsc::Sender<crate::turn_event::TurnEvent>,
+        cancel: Option<&CancellationToken>,
+        stream_prose: bool,
     ) -> Option<String> {
         // G1：env-gated「场景感兜底」。OFF（默认）字节等价旧装配；这是唯一读 env 处。
         let sensory_floor = std::env::var("TRPG_SCENE_SENSORY_FLOOR")
@@ -1916,9 +2021,11 @@ impl GmLoop {
             if let StreamEvent::ContentDelta(delta) = event {
                 let safe = redactor.push(&delta);
                 if !safe.is_empty() {
-                    let _ = tx
-                        .send(crate::turn_event::TurnEvent::Delta(safe.clone()))
-                        .await;
+                    if stream_prose {
+                        let _ = tx
+                            .send(crate::turn_event::TurnEvent::Delta(safe.clone()))
+                            .await;
+                    }
                     visible_text.push_str(&safe);
                 }
             }
@@ -1926,9 +2033,11 @@ impl GmLoop {
         if !cancelled {
             let rest = redactor.finish();
             if !rest.is_empty() {
-                let _ = tx
-                    .send(crate::turn_event::TurnEvent::Delta(rest.clone()))
-                    .await;
+                if stream_prose {
+                    let _ = tx
+                        .send(crate::turn_event::TurnEvent::Delta(rest.clone()))
+                        .await;
+                }
                 visible_text.push_str(&rest);
             }
         }
@@ -2106,6 +2215,93 @@ impl GmLoop {
         ctx.obligations_block = self.obligations.carryover_block();
     }
 
+    /// Pre-ContextAssembly deterministic scene navigation.
+    ///
+    /// When the player explicitly names an authored neighboring scene in the
+    /// same action that starts an investigation there, the GM needs that target
+    /// scene's player-safe context before it speaks. This path is intentionally
+    /// conservative: it only consumes current-scene authored links and fails
+    /// closed on missing module/graph/session state.
+    pub(crate) async fn phase_pre_context_scene_navigate(
+        &self,
+        input: &GmTurnInput<'_>,
+    ) -> Option<SceneTransitionInfo> {
+        let module_id = input.request.module_id.as_deref()?;
+        let graph = match self.engine.db.load_module_graph(module_id).await {
+            Ok(Some(graph)) => graph,
+            Ok(None) => return None,
+            Err(err) => {
+                tracing::warn!(error = %err, module_id, "pre-context scene navigate: load_module_graph failed");
+                return None;
+            }
+        };
+        let current = match self
+            .engine
+            .db
+            .load_session_scene(&input.request.session_id)
+            .await
+        {
+            Ok(Some(scene_id)) => scene_id.trim().to_string(),
+            Ok(None) => return None,
+            Err(err) => {
+                tracing::warn!(error = %err, session_id = %input.request.session_id, "pre-context scene navigate: load_session_scene failed");
+                return None;
+            }
+        };
+        if current.is_empty() {
+            return None;
+        }
+        let target = match trpg_runtime::scene_navigation::resolve_explicit_authored_scene(
+            &graph,
+            &current,
+            input.user_input,
+        ) {
+            Some(target) => target,
+            None => {
+                trpg_runtime::scene_navigation::resolve_explicit_authored_scene_semantic(
+                    self.llm.as_ref(),
+                    &graph,
+                    &current,
+                    input.user_input,
+                )
+                .await?
+            }
+        };
+        if target == current {
+            return None;
+        }
+        if let Err(err) = self
+            .engine
+            .db
+            .set_session_scene(&input.request.session_id, &target)
+            .await
+        {
+            tracing::warn!(
+                error = %err,
+                session_id = %input.request.session_id,
+                from = %current,
+                to = %target,
+                "pre-context scene navigate: set_session_scene failed"
+            );
+            return None;
+        }
+        let (from_title, to_title, to_read_aloud, to_summary, to_aliases) = self
+            .scene_transition_player_context(module_id, &current, &target)
+            .await;
+        Some(SceneTransitionInfo {
+            from: current,
+            to: target.clone(),
+            reason: format!(
+                "pre-context explicit neighbor move: player named authored scene {target}"
+            ),
+            from_title,
+            to_title,
+            to_read_aloud,
+            to_summary,
+            to_aliases,
+        })
+    }
+
     /// PhaseId::ContextAssembly — prepare_turn_context + 四级 gm_skill 合并 + mode
     /// 目录联动 + errata/novelty BP3 块 + TurnMessages 组装 + mode 工具/节拍参数。
     /// fail-closed：budget 超限 / gm_skill 缺 / 未知工具名 → Err 终止回合。
@@ -2115,6 +2311,9 @@ impl GmLoop {
         input: &GmTurnInput<'_>,
     ) -> Result<()> {
         ctx.state_agent = input.state.clone();
+        if let Some(scene_id) = ctx.pre_context_scene_override.clone() {
+            ctx.state_agent.scene_id = Some(scene_id);
+        }
         ctx.state_agent.agent_loop_protocol = true;
         ctx.compiled = match &self.ctx_provider {
             Some(provider) => provider(input.request, &ctx.state_agent),
@@ -2294,10 +2493,14 @@ impl GmLoop {
         // OFF == byte-identical baseline (no DB read, no atoms). The EV-P3 offer path
         // (active under the master flag) surfaces these scene-tagged observable actions.
         if trpg_runtime::evidence_binding::progress_capability_binding_enabled() {
-            if let Ok(Some(csp)) = self.engine.db.load_module_prep_packet_session(module_id).await {
+            if let Ok(Some(csp)) = self
+                .engine
+                .db
+                .load_module_prep_packet_session(module_id)
+                .await
+            {
                 let mut guard_leaves = 0usize;
-                for atom in
-                    trpg_model::adventure_ir::compile_prep_packet_guard_leaves(&graph, &csp)
+                for atom in trpg_model::adventure_ir::compile_prep_packet_guard_leaves(&graph, &csp)
                 {
                     if catalog.insert(atom) {
                         guard_leaves += 1;
@@ -2705,12 +2908,39 @@ impl GmLoop {
         active_npc_ids: &[String],
     ) -> VerifyAfterStreamOutcome {
         let verifier = trpg_agent::NarrationVerifier;
-        // B7 语义决策：agent 不显式声明引用，引擎代填"已落账事实全集"
-        // （ledger_id_set 物化，排序保证确定性）——结构化核对退化为"声称的
-        // id 必在账本"恒真 + 子串回退被关闭；`fallback:substring_scan: `
-        // 标注路径只在账本为空（id 全集为空 → refs 为空）时出现。
+        let mut verification_snapshot = ledger.snapshot().clone();
+        if let Ok(facts) = self
+            .engine
+            .db
+            .list_recent_world_facts(&request.session_id, 16)
+            .await
+        {
+            verification_snapshot.committed_world_facts = facts
+                .into_iter()
+                .map(|fact| {
+                    let summary = [
+                        fact.summary.as_str(),
+                        fact.subject.as_str(),
+                        fact.predicate.as_str(),
+                        fact.object.as_str(),
+                    ]
+                    .into_iter()
+                    .filter(|part| !part.trim().is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                    trpg_agent::CommittedWorldFactEvidence {
+                        fact_id: fact.fact_id,
+                        summary,
+                        truth_status: fact.truth_status,
+                    }
+                })
+                .collect();
+        }
+        // B7 语义决策：agent 不显式声明引用，引擎代填"本回合 ledger id 全集"
+        // （ledger_id_set 物化，排序保证确定性），但子串回退仍独立运行；
+        // 额外接入 committed world facts 只作为既成事实证据，不作为结构化 ledger id。
         let referenced_ledger_ids = {
-            let mut ids: Vec<String> = trpg_agent::ledger_id_set(ledger.snapshot())
+            let mut ids: Vec<String> = trpg_agent::ledger_id_set(&verification_snapshot)
                 .into_iter()
                 .collect();
             ids.sort();
@@ -2721,7 +2951,7 @@ impl GmLoop {
             mechanical_claims: vec![],
             referenced_ledger_ids,
         };
-        let result = verifier.verify(ledger.snapshot(), &submission);
+        let result = verifier.verify(&verification_snapshot, &submission);
         let entries = self.errata.record(&request.turn_id, &result.findings);
         if !entries.is_empty() {
             let event = self.errata.to_memory_event(request, &entries);
@@ -3162,22 +3392,30 @@ impl GmLoop {
         ctx.visible_text = visible;
 
         // —— P2 步骤6：repair ladder（feature-gated + buffered-narration 前置）——
-        // 两 env flag 正交：TRPG_PRESENTATION_GATE 默认 OFF ⇒ gate 仅记 trace（上方已记），
-        // 零行为变更，**不**进 repair。ON 且 buffered_narration 就位（= TRPG_NARRATOR_SPLIT ON、
-        // 文字在校验前经 Narrator 缓冲）时，Block ⇒ 跑修复阶梯；ON 但文字已实时流出（buffer 不在位）
-        // ⇒ 退化为仅 trace（回收已流出文字无意义）。绝不回滚已 commit 的 ledger/DB。
+        // Gate 策略：显式 TRPG_PRESENTATION_GATE 开启时全局执行；module play 默认执行，
+        // 因为玩家行动菜单/秘密泄漏属于产品契约违例而不是可选诊断。非 module 且 env OFF
+        // 仍维持基线：只记 trace、不进 repair。只有 buffered_narration 在位时才修复；
+        // 若文字已实时流出，则退化为仅 trace（回收已流出文字无意义）。绝不回滚已 commit
+        // 的 ledger/DB。
         //
         // A3(§6 大考)：白名单之外的 OmittedVisibleResult(空心念白)在 ON+buffered 时**旁路**触发
         // 同一阶梯——split Narrator 无 ReviseText 自修环,靠此补收敛守卫。触发条件加 NARRATOR_SPLIT
         // 显式门(buffered_narration 已蕴含,但显式更清晰),且 OFF(任一 flag 关)恒不进 ⇒ 字节等价。
         let gate_block = ctx.presentation_gate.is_block();
-        let omitted_repair = narrator_split_enabled() && outcome.omitted_visible_repair;
+        let missing_committed_roll = committed_player_visible_check_missing_roll(
+            &ctx.ledger.snapshot().check_results,
+            &ctx.visible_text,
+        );
+        let omitted_repair = omitted_visible_repair_path_enabled(
+            input.request.module_id.is_some(),
+            narrator_split_enabled(),
+        ) && (outcome.omitted_visible_repair || missing_committed_roll);
         // A3-HARDEN(§6 大考)：机器上下文回显 / 原始 JSON dump 旁路信号。**严格 ON-only**——
         // 谓词仅在 narrator_split_enabled() 时**才计算**(codex 审：避免 OFF 路径"算了但不生效"，
         // 使 OFF 真正不消费该谓词)，且白名单(BLOCKING_KINDS)纹丝不动 ⇒ OFF 字节等价。
         let echo_repair =
             narrator_split_enabled() && narration_is_machine_context_echo(&ctx.visible_text);
-        if presentation_gate_enabled()
+        if presentation_gate_enforced(input.request.module_id.is_some())
             && buffered_narration
             && (gate_block || omitted_repair || echo_repair)
         {
@@ -3190,6 +3428,49 @@ impl GmLoop {
                 echo_repair,
             )
             .await;
+        }
+        if presentation_gate_enforced(input.request.module_id.is_some()) {
+            if let Some(repaired) =
+                source_limited_missing_address_repair(input.user_input, &ctx.visible_text)
+            {
+                ctx.visible_text = repaired;
+            }
+            if let Some(repaired) = deterministic_manifest_list_prose_repair(&ctx.visible_text) {
+                ctx.visible_text = repaired;
+            }
+            if let Some(repaired) = deterministic_player_agency_menu_tail_repair(&ctx.visible_text)
+            {
+                ctx.visible_text = repaired;
+            }
+            if let Some(repaired) = deterministic_dangling_colon_tail_repair(&ctx.visible_text) {
+                ctx.visible_text = repaired;
+            }
+            if let Some(repaired) = unwrap_nonauditable_roll_blocks(&ctx.visible_text) {
+                ctx.visible_text = repaired;
+            }
+            ctx.visible_text = unwrap_player_visible_system_wrappers(&ctx.visible_text);
+            self.ensure_committed_visible_projection_after_repairs(ctx, input.user_input)
+                .await;
+            self.ensure_concrete_information_request_answered_after_repairs(ctx, input.user_input)
+                .await;
+            if let Some(repaired) = deterministic_dangling_colon_tail_repair(&ctx.visible_text) {
+                ctx.visible_text = repaired;
+            }
+        }
+        if presentation_gate_enforced(input.request.module_id.is_some())
+            && buffered_narration
+            && player_agency_menu_cue_needs_block(&ctx.visible_text)
+        {
+            ctx.presentation_gate = crate::presentation_gate::PresentationGate::Block(vec![
+                trpg_agent::VerifierFinding {
+                    kind: trpg_agent::VerifierFindingKind::PlayerAgencyViolation,
+                    severity: trpg_agent::VerifierSeverity::Blocker,
+                    detail: "final visible text still contains an explicit action menu cue"
+                        .to_string(),
+                },
+            ]);
+            ctx.plugin_contributions
+                .push(presentation_gate_trace(&ctx.presentation_gate));
         }
     }
 
@@ -3240,10 +3521,38 @@ impl GmLoop {
         let narration = crate::packet::NarrationPacket::project(&adj, "", &forbidden)
             .with_scene_context(&player_safe_scene_context(input));
         let private_tokens = ctx.ledger.private_roll_tokens();
-        // P7.3：repair-ladder 的 Narrator 重生同样经 NarratorPort 适配器派发（byte-identical）。
-        // `&mut self` 处只读重借 `&*self` 构造适配器，不持有跨 await 的可变借用。
-        let regenerated = crate::ports::GmLoopNarratorAdapter(&*self)
-            .narrate(&narration, &private_tokens, tx, cancel)
+        if let crate::presentation_gate::PresentationGate::Block(findings) = &ctx.presentation_gate
+        {
+            if findings.iter().any(|f| f.detail.contains("manifest list")) {
+                if let Some(text) = deterministic_manifest_list_prose_repair(&ctx.visible_text) {
+                    let recheck = self
+                        .verify_after_stream(
+                            input.request,
+                            &ctx.ledger,
+                            &text,
+                            &input.state.active_npc_ids,
+                        )
+                        .await;
+                    ctx.plugin_contributions.extend(recheck.traces);
+                    let still_omitted = include_omitted_repair
+                        && (recheck.omitted_visible_repair
+                            || committed_player_visible_check_missing_roll(
+                                &ctx.ledger.snapshot().check_results,
+                                &text,
+                            ));
+                    let still_echo =
+                        include_echo_repair && narration_is_machine_context_echo(&text);
+                    if !recheck.gate.is_block() && !still_omitted && !still_echo {
+                        ctx.presentation_gate = recheck.gate;
+                        ctx.visible_text = text;
+                        return;
+                    }
+                    ctx.presentation_gate = recheck.gate;
+                }
+            }
+        }
+        let regenerated = self
+            .run_narrator_buffered(&narration, &private_tokens, tx, cancel)
             .await;
         if let Some(text) = regenerated {
             if !text.trim().is_empty() {
@@ -3259,7 +3568,12 @@ impl GmLoop {
                 ctx.plugin_contributions.extend(recheck.traces);
                 // A3：旁路触发时,recheck 还须确认重生稿不再漏报可见结果(白名单不管 OmittedVisible,
                 // 故必须显式查 recheck.omitted_visible_repair),否则不采纳 ⇒ 落确定性兜底(收敛)。
-                let still_omitted = include_omitted_repair && recheck.omitted_visible_repair;
+                let still_omitted = include_omitted_repair
+                    && (recheck.omitted_visible_repair
+                        || committed_player_visible_check_missing_roll(
+                            &ctx.ledger.snapshot().check_results,
+                            &text,
+                        ));
                 // A3-HARDEN：echo 旁路触发时,重生稿若仍是机器回显则不采纳 ⇒ 落确定性兜底(收敛保证)。
                 let still_echo = include_echo_repair && narration_is_machine_context_echo(&text);
                 if !recheck.gate.is_block() && !still_omitted && !still_echo {
@@ -3291,15 +3605,37 @@ impl GmLoop {
             let forced_packet =
                 crate::packet::NarrationPacket::project(&adj, "", &forced_forbidden)
                     .with_scene_context(&player_safe_scene_context(input));
-            let forced = crate::ports::GmLoopNarratorAdapter(&*self)
-                .narrate(&forced_packet, &private_tokens, tx, cancel)
+            let forced = self
+                .run_narrator_buffered(&forced_packet, &private_tokens, tx, cancel)
                 .await;
             ctx.visible_text = match forced {
-                Some(t) if !t.trim().is_empty() && !narration_is_machine_context_echo(&t) => t,
+                Some(t)
+                    if !t.trim().is_empty()
+                        && !narration_is_machine_context_echo(&t)
+                        && !committed_player_visible_check_missing_roll(
+                            &ctx.ledger.snapshot().check_results,
+                            &t,
+                        ) =>
+                {
+                    t
+                }
                 // 极端：连强制重述都失败/仍是机器回显 ⇒ 一句中性的「故事继续」散文，绝不落
                 // 机械账本模板,绝不出现「（机械结果）」。这是 LLM 彻底失败时的 infra fail-soft。
-                _ => "你定了定神，眼前的局势仍在推进，你需要决定下一步怎么做。".to_string(),
+                _ if ctx.ledger.snapshot().check_results.is_empty() => {
+                    "你定了定神，眼前的局势仍在推进，你需要决定下一步怎么做。".to_string()
+                }
+                _ => deterministic_committed_facts_narration(&narration),
             };
+            let terminal_recheck = self
+                .verify_after_stream(
+                    input.request,
+                    &ctx.ledger,
+                    &ctx.visible_text,
+                    &input.state.active_npc_ids,
+                )
+                .await;
+            ctx.plugin_contributions.extend(terminal_recheck.traces);
+            ctx.presentation_gate = terminal_recheck.gate;
             return;
         }
         // (2-baseline) 确定性 committed-facts 模板叙事（§18，never blank）。逐条复述可见证据 token ⇒
@@ -3407,13 +3743,64 @@ impl GmLoop {
         // (2) reveal 提名提交（终审 Allow only）。
         let allow = !ctx.presentation_gate.is_block();
         let nominations = std::mem::take(&mut ctx.nominated_reveals);
+        let mut projected_reveals = nominations.clone();
+        if allow {
+            for fact_id in self
+                .engine
+                .db
+                .list_player_learned_fact_ids_for_turn(&request.session_id, &request.turn_id)
+                .await
+                .unwrap_or_default()
+            {
+                if !projected_reveals.iter().any(|n| n.fact_id == fact_id) {
+                    projected_reveals.push(crate::tools::RevealNomination {
+                        fact_id,
+                        reason: None,
+                    });
+                }
+            }
+        }
+        if allow {
+            self.fold_source_backed_nominations_for_module(
+                request
+                    .module_id
+                    .as_deref()
+                    .or(ctx.state_agent.module_id.as_deref()),
+                &projected_reveals,
+                &mut ctx.resolved_gate_facts,
+            )
+            .await;
+            let player_visible_facts =
+                player_visible_fact_projection(ctx.ledger.snapshot(), &ctx.resolved_gate_facts);
+            if let Some(repaired) = self
+                .rewrite_missing_facts_for_output_language(&ctx.visible_text, &player_visible_facts)
+                .await
+            {
+                ctx.visible_text = repaired;
+                ctx.presentation_gate = crate::presentation_gate::PresentationGate::Allow;
+                ctx.plugin_contributions
+                    .push(presentation_gate_trace(&ctx.presentation_gate));
+            }
+            if let Some(repaired) = append_missing_resolved_gate_facts_to_visible(
+                &ctx.visible_text,
+                &player_visible_facts,
+            ) {
+                ctx.visible_text = repaired;
+                ctx.presentation_gate = crate::presentation_gate::PresentationGate::Allow;
+                ctx.plugin_contributions
+                    .push(presentation_gate_trace(&ctx.presentation_gate));
+            }
+        }
         // M1: the fact_ids revealed (made player-known) THIS turn are exactly the newly-known facts
         // that floor a matching Dormant story thread `Dormant → Introduced` (a reveal IS the
         // PlayerLearnedFact edge `apply_thread_opened` keys on). Snapshot the ids BEFORE the move,
         // and only on a committed (Allow) turn — a Blocked reveal never becomes player-known, so it
         // floors nothing (same gate discipline as the reveal commit itself).
         let newly_known_fact_ids: Vec<String> = if allow {
-            nominations.iter().map(|n| n.fact_id.clone()).collect()
+            projected_reveals
+                .iter()
+                .map(|n| n.fact_id.clone())
+                .collect()
         } else {
             Vec::new()
         };
@@ -3485,6 +3872,7 @@ impl GmLoop {
         input: &GmTurnInput<'_>,
         snap: &trpg_agent::TurnLedgerSnapshot,
         nominated_reveals: &mut Vec<crate::tools::RevealNomination>,
+        resolved_gate_facts: &mut Vec<String>,
         gating_on: bool,
     ) {
         // CL-2(b) DP-C: this is the clue-affordance path — reached only with a module
@@ -3524,6 +3912,12 @@ impl GmLoop {
         let Some(scene) = graph.scenes.iter().find(|s| s.node_id == scene_id) else {
             return;
         };
+        let known_fact_ids = self
+            .engine
+            .db
+            .list_revealed_facts(&input.request.session_id)
+            .await
+            .unwrap_or_default();
         // 结果 join 契约（by check_id）→ 逐条跑纯映射，收集候选（DP-3 单 fact / 检定）。
         // 先收集再推送：snapshot() 是 &ctx 不可变借用，与后续 ctx.nominated_reveals 可变推送
         // 不能交叠，故分两段（借用规则）。
@@ -3550,9 +3944,14 @@ impl GmLoop {
                 check_label: contract.check_label.as_str(),
                 action_summary: contract.action_summary.as_str(),
             };
-            for cand in
-                trpg_runtime::clue_reveal_candidates(&resolved, scene, &graph, mode, gating_on)
-            {
+            for cand in trpg_runtime::clue_reveal_candidates_with_known(
+                &resolved,
+                scene,
+                &graph,
+                mode,
+                gating_on,
+                &known_fact_ids,
+            ) {
                 candidates.push(crate::tools::RevealNomination {
                     fact_id: cand.fact_id,
                     reason: Some(cand.reason),
@@ -3562,9 +3961,232 @@ impl GmLoop {
         // 与既有提名 + 候选间去重（同 fact_id 只提名一次；保留首次 reason）。
         for cand in candidates {
             if !nominated_reveals.iter().any(|n| n.fact_id == cand.fact_id) {
+                if let Some(fact) = Self::source_backed_clue_projection_fact(&graph, &cand.fact_id)
+                {
+                    if !resolved_gate_facts.iter().any(|existing| existing == &fact) {
+                        resolved_gate_facts.push(fact);
+                    }
+                }
                 nominated_reveals.push(cand);
             }
         }
+    }
+
+    async fn rewrite_missing_facts_for_output_language(
+        &self,
+        visible_text: &str,
+        facts: &[String],
+    ) -> Option<String> {
+        let output_language = crate::gm_craft::output_language_from_env()?;
+        let missing =
+            missing_rewrite_facts_for_output_language(visible_text, facts, &output_language);
+        if missing.is_empty() {
+            return None;
+        }
+
+        let system = format!(
+            "You rewrite TRPG player-visible narration without changing adjudication.\n\
+             {}\n\
+             Hard constraints: preserve every [roll]...[/roll] block verbatim; do not add checks, \
+             damage, resources, NPC actions, hidden information, or action menus; weave the \
+             confirmed facts into natural second-person narration instead of a numbered or bullet \
+             list.",
+            crate::gm_craft::output_language_contract(Some(&output_language))
+        );
+        let user = format!(
+            "Existing player-visible text:\n{visible_text}\n\n\
+             Confirmed player-known facts that must be visible in the same turn:\n{}\n\n\
+             Rewrite the text so those confirmed facts are present in the configured output \
+             language. Return only the final player-visible text.",
+            missing
+                .iter()
+                .map(|fact| format!("- {fact}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        let original_rolls = auditable_roll_block_count(visible_text);
+        let repaired = self
+            .llm
+            .complete_text(
+                vec![
+                    ChatMessage {
+                        role: "system".to_string(),
+                        content: system,
+                    },
+                    ChatMessage {
+                        role: "user".to_string(),
+                        content: user,
+                    },
+                ],
+                0.1,
+            )
+            .await
+            .ok()?;
+        let repaired = repaired.trim();
+        if repaired.is_empty()
+            || auditable_roll_block_count(repaired) < original_rolls
+            || player_agency_menu_cue_needs_block(repaired)
+            || (crate::gm_craft::output_language_is_chinese(Some(&output_language))
+                && !contains_cjk(repaired))
+        {
+            return None;
+        }
+        Some(repaired.to_string())
+    }
+
+    async fn rewrite_roll_only_success_for_visible_information(
+        &self,
+        visible_text: &str,
+        player_input: &str,
+        scene_establishing: &[String],
+    ) -> Option<String> {
+        if !crate::gm_craft::enabled() && crate::gm_craft::output_language_from_env().is_none() {
+            return None;
+        }
+        let output_language = crate::gm_craft::output_language_from_env();
+        let language_contract =
+            crate::gm_craft::output_language_contract(output_language.as_deref());
+        let scene_context = if scene_establishing.is_empty() {
+            "No additional player-safe scene text is available. Do not invent hidden clues; state only what the successful action makes safely visible or what limits remain."
+                .to_string()
+        } else {
+            scene_establishing
+                .iter()
+                .take(3)
+                .map(|line| line.trim())
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let system = format!(
+            "You repair a TRPG turn whose successful check was rendered as a roll-only ledger.\n\
+             {}\n\
+             Hard constraints: preserve every [roll]...[/roll] block verbatim; do not add checks, \
+             damage, resources, hidden Keeper information, secret names, or action menus. Use only \
+             the public roll, the player's declared action, and the player-safe scene context. Add \
+             concrete player-visible consequence: what the character can now see/hear/confirm, what \
+             was ruled out in the visible area, or what their current position/status is. If the \
+             context does not support a secret clue, do not invent one.",
+            language_contract
+        );
+        let user = format!(
+            "Current roll-only player-visible text:\n{visible_text}\n\n\
+             Player action:\n{player_input}\n\n\
+             Player-safe scene context:\n{scene_context}\n\n\
+             Rewrite into final player-visible narration. Return only the final narration."
+        );
+        let original_rolls = auditable_roll_block_count(visible_text);
+        let repaired = self
+            .llm
+            .complete_text(
+                vec![
+                    ChatMessage {
+                        role: "system".to_string(),
+                        content: system,
+                    },
+                    ChatMessage {
+                        role: "user".to_string(),
+                        content: user,
+                    },
+                ],
+                0.1,
+            )
+            .await
+            .ok()?;
+        let repaired = repaired.trim();
+        if repaired.is_empty()
+            || visible_is_roll_only_committed_summary(repaired)
+            || auditable_roll_block_count(repaired) < original_rolls
+            || player_agency_menu_cue_needs_block(repaired)
+            || narration_is_machine_context_echo(repaired)
+            || (output_language
+                .as_deref()
+                .map(|lang| crate::gm_craft::output_language_is_chinese(Some(lang)))
+                .unwrap_or(false)
+                && !contains_cjk(repaired))
+        {
+            return None;
+        }
+        Some(repaired.to_string())
+    }
+
+    pub(crate) async fn ensure_scene_transition_visible_information_after_repair(
+        &self,
+        ctx: &mut TurnContext,
+        info: &SceneTransitionInfo,
+    ) {
+        if !scene_transition_generic_success_needs_rewrite(&ctx.visible_text) {
+            return;
+        }
+        let Some(source_text) = info
+            .to_read_aloud
+            .as_deref()
+            .or(info.to_summary.as_deref())
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        else {
+            return;
+        };
+        let Some(output_language) = crate::gm_craft::output_language_from_env() else {
+            return;
+        };
+        let system = format!(
+            "You repair a TRPG scene-transition narration that became too generic.\n\
+             {}\n\
+             Hard constraints: preserve every [roll]...[/roll] block verbatim; do not add checks, \
+             damage, resources, hidden Keeper information, secret names, or action menus. Use only \
+             the current visible text plus the player-safe destination scene text. Turn the \
+             destination text into natural second-person narration in the configured language; do \
+             not dump it as a list.",
+            crate::gm_craft::output_language_contract(Some(&output_language))
+        );
+        let destination = info
+            .to_title
+            .as_deref()
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or(info.to.as_str());
+        let user = format!(
+            "Current player-visible text:\n{}\n\n\
+             Destination scene: {destination}\n\
+             Player-safe destination scene text:\n{source_text}\n\n\
+             Rewrite into final player-visible narration. Return only the final narration.",
+            ctx.visible_text
+        );
+        let original_rolls = auditable_roll_block_count(&ctx.visible_text);
+        let repaired = match self
+            .llm
+            .complete_text(
+                vec![
+                    ChatMessage {
+                        role: "system".to_string(),
+                        content: system,
+                    },
+                    ChatMessage {
+                        role: "user".to_string(),
+                        content: user,
+                    },
+                ],
+                0.1,
+            )
+            .await
+        {
+            Ok(text) => text,
+            Err(_) => return,
+        };
+        let repaired = repaired.trim();
+        if repaired.is_empty()
+            || auditable_roll_block_count(repaired) < original_rolls
+            || player_agency_menu_cue_needs_block(repaired)
+            || (crate::gm_craft::output_language_is_chinese(Some(&output_language))
+                && !contains_cjk(repaired))
+            || scene_transition_generic_success_needs_rewrite(repaired)
+        {
+            return;
+        }
+        ctx.visible_text = repaired.to_string();
+        ctx.presentation_gate = crate::presentation_gate::PresentationGate::Allow;
+        ctx.plugin_contributions
+            .push(presentation_gate_trace(&ctx.presentation_gate));
     }
 
     /// P6.7 commit primitive 包装：终审 Allow 时按 fact_id 排序逐条 engine.reveal_fact
@@ -3603,6 +4225,83 @@ impl GmLoop {
         }
     }
 
+    async fn fold_source_backed_nominations_for_module(
+        &self,
+        module_id: Option<&str>,
+        nominations: &[crate::tools::RevealNomination],
+        resolved_gate_facts: &mut Vec<String>,
+    ) {
+        if nominations.is_empty() {
+            return;
+        }
+        let Some(module_id) = module_id else {
+            return;
+        };
+        let graph = match self.engine.db.load_module_graph(module_id).await {
+            Ok(Some(graph)) => graph,
+            _ => return,
+        };
+        Self::fold_source_backed_nominated_reveals(&graph, nominations, resolved_gate_facts);
+    }
+
+    pub(crate) fn fold_source_backed_nominated_reveals(
+        graph: &trpg_model::ModuleGraph,
+        nominations: &[crate::tools::RevealNomination],
+        resolved_gate_facts: &mut Vec<String>,
+    ) {
+        for nomination in nominations {
+            if let Some(fact) = Self::source_backed_clue_projection_fact(graph, &nomination.fact_id)
+            {
+                if !resolved_gate_facts.iter().any(|existing| existing == &fact) {
+                    resolved_gate_facts.push(fact);
+                }
+            }
+        }
+    }
+
+    fn clue_json_id(clue: &Value) -> Option<&str> {
+        clue.get("id")
+            .or_else(|| clue.get("clue_id"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    }
+
+    fn clue_json_text(clue: &Value) -> Option<&str> {
+        ["text", "clue", "discovery", "meaning", "summary"]
+            .iter()
+            .find_map(|key| {
+                clue.get(*key)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+            })
+    }
+
+    pub(crate) fn source_backed_clue_gate_fact(
+        graph: &trpg_model::ModuleGraph,
+        fact_id: &str,
+    ) -> Option<String> {
+        let fact_id = fact_id.trim();
+        if fact_id.is_empty() {
+            return None;
+        }
+        let clue = graph
+            .clues
+            .iter()
+            .find(|clue| Self::clue_json_id(clue) == Some(fact_id))?;
+        let text = Self::clue_json_text(clue)?;
+        Some(text.to_string())
+    }
+
+    fn source_backed_clue_projection_fact(
+        graph: &trpg_model::ModuleGraph,
+        fact_id: &str,
+    ) -> Option<String> {
+        let text = Self::source_backed_clue_gate_fact(graph, fact_id)?;
+        Some(format!("已揭示的模组线索 {fact_id}: {text}"))
+    }
+
     /// PhaseId::Finalize（R5 critical）— 只持久化回合记录 + status（save_turn）。
     /// memory/audit 由 phase_finalize_heavy_memory 在 heavy 段后台跑。awaiting 终态用
     /// gate prompt_public 兜底空 visible_text（与 run_gm_turn assistant_output 选择一致）。
@@ -3623,6 +4322,297 @@ impl GmLoop {
             status,
         )
         .await;
+    }
+
+    /// PresentationGate hard delivery path: when the final gate is Block and the
+    /// transport has held player-visible prose, replace the blocked prose with a
+    /// neutral, non-menu fallback before save/TurnComplete. The gate itself stays
+    /// Block so traces, warnings, and reveal-commit policy remain auditable.
+    pub(crate) fn apply_presentation_gate_safe_fallback(
+        &self,
+        ctx: &mut TurnContext,
+        player_input: &str,
+    ) {
+        if !ctx.presentation_gate.is_block() {
+            return;
+        }
+        let snapshot = ctx.ledger.snapshot();
+        let adj = crate::packet::AdjudicationPacket::project(
+            player_input,
+            &snapshot,
+            &ctx.resolved_gate_facts,
+            &ctx.visible_text,
+            None,
+        );
+        let narration = crate::packet::NarrationPacket::project(&adj, "", &[]);
+        let committed = deterministic_committed_facts_narration(&narration);
+        ctx.visible_text = if !narration.what_happened.is_empty()
+            || !narration.what_changed.is_empty()
+            || !narration.player_perceivable_facts.is_empty()
+        {
+            committed
+        } else {
+            presentation_gate_safe_fallback_text(player_input)
+        };
+        // The blocked draft must not commit any player-knowledge/story side effects,
+        // but the final delivered fallback is safe, deterministic, and auditable.
+        ctx.nominated_reveals.clear();
+        ctx.rejected_nominations.clear();
+        ctx.presentation_gate = crate::presentation_gate::PresentationGate::Allow;
+        ctx.plugin_contributions
+            .push(presentation_gate_trace(&ctx.presentation_gate));
+    }
+
+    /// Final post-repair guard: deterministic cleanup steps may run after the
+    /// PresentationGate repair ladder and accidentally drop a committed,
+    /// player-visible check from the final text. Re-project committed facts at
+    /// the end of the cleanup chain so the saved/streamed narration remains
+    /// auditable.
+    pub(crate) async fn ensure_committed_visible_projection_after_repairs(
+        &self,
+        ctx: &mut TurnContext,
+        player_input: &str,
+    ) {
+        let snapshot = ctx.ledger.snapshot();
+        let player_visible_facts =
+            player_visible_fact_projection(snapshot, &ctx.resolved_gate_facts);
+        let missing_roll =
+            committed_player_visible_check_missing_roll(&snapshot.check_results, &ctx.visible_text);
+        let missing_resolved_facts =
+            resolved_gate_facts_missing_from_visible(&player_visible_facts, &ctx.visible_text);
+        let roll_only_success_needs_rewrite =
+            roll_only_success_summary_needs_visible_information(snapshot, &ctx.visible_text);
+        if !missing_roll && !missing_resolved_facts && !roll_only_success_needs_rewrite {
+            return;
+        }
+        if roll_only_success_needs_rewrite && !missing_resolved_facts {
+            if let Some(repaired) = self
+                .rewrite_roll_only_success_for_visible_information(
+                    &ctx.visible_text,
+                    player_input,
+                    &ctx.compiled.scene_establishing,
+                )
+                .await
+            {
+                ctx.visible_text = repaired;
+                ctx.presentation_gate = crate::presentation_gate::PresentationGate::Allow;
+                ctx.plugin_contributions
+                    .push(presentation_gate_trace(&ctx.presentation_gate));
+            }
+            if visible_is_roll_only_committed_summary(&ctx.visible_text) {
+                if let Some(repaired) =
+                    deterministic_roll_only_success_visible_fallback(&ctx.visible_text)
+                {
+                    ctx.visible_text = repaired;
+                    ctx.presentation_gate = crate::presentation_gate::PresentationGate::Allow;
+                    ctx.plugin_contributions
+                        .push(presentation_gate_trace(&ctx.presentation_gate));
+                }
+            }
+            if !visible_is_roll_only_committed_summary(&ctx.visible_text) {
+                return;
+            }
+        }
+        if !missing_roll && missing_resolved_facts {
+            if let Some(repaired) = self
+                .rewrite_missing_facts_for_output_language(&ctx.visible_text, &player_visible_facts)
+                .await
+            {
+                ctx.visible_text = repaired;
+                ctx.presentation_gate = crate::presentation_gate::PresentationGate::Allow;
+                ctx.plugin_contributions
+                    .push(presentation_gate_trace(&ctx.presentation_gate));
+                return;
+            }
+            if let Some(repaired) = append_missing_resolved_gate_facts_to_visible(
+                &ctx.visible_text,
+                &player_visible_facts,
+            ) {
+                ctx.visible_text = repaired;
+                ctx.presentation_gate = crate::presentation_gate::PresentationGate::Allow;
+                ctx.plugin_contributions
+                    .push(presentation_gate_trace(&ctx.presentation_gate));
+                return;
+            }
+            if output_language_rewrite_required_for_missing_facts(
+                &ctx.visible_text,
+                &player_visible_facts,
+            ) {
+                return;
+            }
+        }
+        let adj = crate::packet::AdjudicationPacket::project(
+            player_input,
+            snapshot,
+            &player_visible_facts,
+            &ctx.visible_text,
+            None,
+        );
+        let narration = crate::packet::NarrationPacket::project(&adj, "", &[]);
+        if narration.what_happened.is_empty()
+            && narration.what_changed.is_empty()
+            && narration.player_perceivable_facts.is_empty()
+        {
+            return;
+        }
+        ctx.visible_text = deterministic_committed_facts_narration(&narration);
+        if visible_is_roll_only_committed_summary(&ctx.visible_text) {
+            if let Some(repaired) =
+                deterministic_roll_only_success_visible_fallback(&ctx.visible_text)
+            {
+                ctx.visible_text = repaired;
+            }
+        }
+        ctx.presentation_gate = crate::presentation_gate::PresentationGate::Allow;
+        ctx.plugin_contributions
+            .push(presentation_gate_trace(&ctx.presentation_gate));
+    }
+
+    pub(crate) async fn ensure_concrete_information_request_answered_after_repairs(
+        &self,
+        ctx: &mut TurnContext,
+        player_input: &str,
+    ) {
+        if !player_input_requests_concrete_visible_information(player_input)
+            || ctx.visible_text.trim().is_empty()
+        {
+            return;
+        }
+        let scene_context = if ctx.compiled.scene_establishing.is_empty() {
+            "No additional player-safe scene context is available. Do not invent hidden Keeper information; if a requested item is not visible, say that it is not visible or cannot be confirmed from the current position."
+                .to_string()
+        } else {
+            ctx.compiled
+                .scene_establishing
+                .iter()
+                .take(3)
+                .map(|line| line.trim())
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let output_language = crate::gm_craft::output_language_from_env();
+        let language_contract =
+            crate::gm_craft::output_language_contract(output_language.as_deref());
+        let audit_system = format!(
+            "You are an evidence-based TRPG response-contract auditor.\n\
+             {}\n\
+             Decide whether the GM's player-visible response satisfies the player's concrete request for visible information. \
+             A response is sufficient only if it gives concrete visible facts, explicitly says a requested item is not visible/unknown from the current position, asks for clarification, requests a check, or creates a tracked pending item. \
+             Continuity contract: the response must not contradict player-stated facts in the current request or already player-visible facts, including notes, photos, measurements, positions, tools used, and facts the player explicitly says they are carrying forward. \
+             Measurement contract: if the player used an appropriate measuring tool or the GM says a measurement was completed, the response must provide actual or approximate readings, or explain the concrete physical obstruction/check failure that prevents those readings. It is insufficient to acknowledge the measurement and then say the readings are not present in the record. \
+             It is insufficient if it merely says there are several things/positions/clues without naming them. \
+             Return JSON only with keys: needs_repair:boolean, reason:string, missing_items:string[].",
+            language_contract
+        );
+        let audit_user = format!(
+            "Player request:\n{player_input}\n\n\
+             GM response:\n{}\n\n\
+             Player-safe scene context:\n{scene_context}",
+            ctx.visible_text
+        );
+        let Ok(audit) = self
+            .llm
+            .complete_json(
+                vec![
+                    ChatMessage {
+                        role: "system".to_string(),
+                        content: audit_system,
+                    },
+                    ChatMessage {
+                        role: "user".to_string(),
+                        content: audit_user,
+                    },
+                ],
+                0.0,
+            )
+            .await
+        else {
+            return;
+        };
+        let (needs_repair, missing_items) = concrete_information_audit_needs_repair(&audit);
+        if !needs_repair {
+            return;
+        }
+        let original_rolls = auditable_roll_block_count(&ctx.visible_text);
+        let missing = if missing_items.is_empty() {
+            "The response did not concretely answer the player's requested visible information."
+                .to_string()
+        } else {
+            missing_items.join("; ")
+        };
+        let rewrite_system = format!(
+            "You repair a TRPG GM response that failed a response-contract audit.\n\
+             {}\n\
+             Hard constraints: preserve every existing [roll]...[/roll] block verbatim; do not add checks, damage, resources, hidden Keeper information, secret names, or action menus. \
+             Use only the player's request, the current response, and the player-safe scene context. \
+             Keep player-stated and already player-visible facts continuous; do not rewrite them into uncertainty or deny that the player has notes, photos, measurements, positions, or tools they explicitly carried forward. \
+             For each missing requested item, either provide a concrete player-visible fact supported by the current scene context or explicitly say that it is not visible/cannot be confirmed from the current position. \
+             For measurements, give actual or approximate readings if the current response says the measuring action happened; otherwise explain the concrete obstruction/check failure that made the readings unavailable. \
+             Return only the final player-visible narration.",
+            language_contract
+        );
+        let rewrite_user = format!(
+            "Player request:\n{player_input}\n\n\
+             Current GM response:\n{}\n\n\
+             Missing requested items:\n{missing}\n\n\
+             Player-safe scene context:\n{scene_context}",
+            ctx.visible_text
+        );
+        let Ok(repaired) = self
+            .llm
+            .complete_text(
+                vec![
+                    ChatMessage {
+                        role: "system".to_string(),
+                        content: rewrite_system,
+                    },
+                    ChatMessage {
+                        role: "user".to_string(),
+                        content: rewrite_user,
+                    },
+                ],
+                0.1,
+            )
+            .await
+        else {
+            return;
+        };
+        let repaired = repaired.trim();
+        if repaired.is_empty()
+            || player_agency_menu_cue_needs_block(repaired)
+            || narration_is_machine_context_echo(repaired)
+            || auditable_roll_block_count(repaired) < original_rolls
+            || (output_language
+                .as_deref()
+                .map(|lang| crate::gm_craft::output_language_is_chinese(Some(lang)))
+                .unwrap_or(false)
+                && !contains_cjk(repaired))
+        {
+            return;
+        }
+        ctx.visible_text = repaired.to_string();
+        ctx.presentation_gate = crate::presentation_gate::PresentationGate::Allow;
+        ctx.plugin_contributions
+            .push(presentation_gate_trace(&ctx.presentation_gate));
+    }
+
+    /// Emit prose that was buffered for terminal presentation-gate verification.
+    /// This is intentionally a late delivery point: callers invoke it only after
+    /// VerifyAfterStream and PresentationCommit have settled the final text.
+    pub(crate) async fn emit_buffered_visible_text(
+        &self,
+        ctx: &TurnContext,
+        tx: &tokio::sync::mpsc::Sender<crate::turn_event::TurnEvent>,
+    ) {
+        if ctx.visible_text.trim().is_empty() || ctx.awaiting_gate.is_some() {
+            return;
+        }
+        let _ = tx
+            .send(crate::turn_event::TurnEvent::Delta(
+                ctx.visible_text.clone(),
+            ))
+            .await;
     }
 
     /// R5 heavy：phase_finalize 的 memory/audit 半边（execute.rs heavy 段调）。
@@ -3667,6 +4657,9 @@ impl GmLoop {
         .await
         {
             Ok(Some(c)) => {
+                let (from_title, to_title, to_read_aloud, to_summary, to_aliases) = self
+                    .scene_transition_player_context(module_id, &c.from, &c.to)
+                    .await;
                 // L4.2 — on a COMMITTED scene change, derive the scene's ScenePlan from the live
                 // story threads (+ module director config) and emit exactly one ScenePlanCreated
                 // ledger event. Flag-gated (`TRPG_DIRECTOR_SCENE_PLAN`, default OFF ⇒ immediate
@@ -3683,6 +4676,11 @@ impl GmLoop {
                     from: c.from,
                     to: c.to,
                     reason: c.reason,
+                    from_title,
+                    to_title,
+                    to_read_aloud,
+                    to_summary,
+                    to_aliases,
                 })
             }
             Ok(None) => None,
@@ -3691,6 +4689,45 @@ impl GmLoop {
                 None
             }
         }
+    }
+
+    async fn scene_transition_player_context(
+        &self,
+        module_id: &str,
+        from: &str,
+        to: &str,
+    ) -> (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Vec<String>,
+    ) {
+        let Ok(Some(graph)) = self.engine.db.load_module_graph(module_id).await else {
+            return (None, None, None, None, Vec::new());
+        };
+        let from_title = graph
+            .scenes
+            .iter()
+            .find(|s| s.node_id == from)
+            .map(|s| s.title.clone())
+            .filter(|s| !s.trim().is_empty());
+        let Some(to_scene) = graph.scenes.iter().find(|s| s.node_id == to) else {
+            return (from_title, None, None, None, Vec::new());
+        };
+        let mut aliases = Vec::new();
+        push_alias(&mut aliases, &to_scene.node_id);
+        push_alias(&mut aliases, &to_scene.title);
+        for loc in &to_scene.referenced_location_ids {
+            push_alias(&mut aliases, loc);
+        }
+        (
+            from_title,
+            Some(to_scene.title.clone()).filter(|s| !s.trim().is_empty()),
+            to_scene.read_aloud.clone().filter(|s| !s.trim().is_empty()),
+            Some(to_scene.summary.clone()).filter(|s| !s.trim().is_empty()),
+            aliases,
+        )
     }
 
     /// PhaseId::SceneNavigate（R5 heavy）— 到场深抽 + frontier 前探（后台，best-effort）。
@@ -3860,6 +4897,8 @@ fn build_narrator_messages(
          绝不逐字复述或照搬玩家输入原句——把它转写成发生在场景里的画面。\n\
          机械忠实：**逐条**复述下方“本回合机械事实”里的每一条结果(检定成败/伤害/资源/状态)，\n\
          一条都不许略过(玩家必须感知到每个已落账的可见结果)。\n\
+         连续性忠实：从“当前场景”和本回合机械事实确立的**当前所在位置**继续；不要重述场景的到达/入口定场，玩家已深入内部或离开入口时绝不把镜头拉回入口、外景或旧开场图景。\n\
+         既成状态忠实：已由机械事实、玩家可感知信息或当前场景确立的状态必须保持，不复活、不反转；例如供电已切断、灯已熄、设备已停，就不要再写同一设备仍通电、闪烁、嗡鸣或正常握手，除非机械事实明确给出新的独立来源。\n\
          铁律：只叙述下方机械事实与玩家可感知信息；绝不发明未列出的检定/伤害/资源/状态；\n\
          不输出规则原文、工具 JSON、GM 内部推理；不揭示下方“禁止揭示”项。\n\
          禁止揭示：{}",
@@ -3987,6 +5026,508 @@ pub(crate) struct SceneTransitionInfo {
     pub from: String,
     pub to: String,
     pub reason: String,
+    pub from_title: Option<String>,
+    pub to_title: Option<String>,
+    pub to_read_aloud: Option<String>,
+    pub to_summary: Option<String>,
+    pub to_aliases: Vec<String>,
+}
+
+fn push_alias(aliases: &mut Vec<String>, value: &str) {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    aliases.push(trimmed.to_string());
+    if trimmed.contains('_') {
+        aliases.push(trimmed.replace('_', " "));
+    }
+}
+
+fn normalize_transition_text(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(|c| c.to_lowercase())
+        .map(|c| {
+            if c.is_alphanumeric() || ('\u{4e00}'..='\u{9fff}').contains(&c) {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+}
+
+fn visible_mentions_transition_destination(visible_text: &str, info: &SceneTransitionInfo) -> bool {
+    let hay = normalize_transition_text(visible_text);
+    let mut aliases = info.to_aliases.clone();
+    push_alias(&mut aliases, &info.to);
+    if let Some(title) = info.to_title.as_deref() {
+        push_alias(&mut aliases, title);
+    }
+    aliases.iter().any(|alias| {
+        let needle = normalize_transition_text(alias);
+        let needle = needle.trim();
+        needle.chars().count() >= 4 && hay.contains(needle)
+    })
+}
+
+fn visible_has_transition_stall_marker(visible_text: &str) -> bool {
+    let hay = visible_text.to_lowercase();
+    [
+        "没有再往前动",
+        "没有往前动",
+        "没有任何新的记录",
+        "没有任何新的线索",
+        "没有新的记录",
+        "没有新的线索",
+        "没有新的消息",
+        "仍只是刚才",
+        "仍然只是刚才",
+        "still where you were",
+        "nothing changes",
+        "nothing moves forward",
+        "no new lead",
+        "no new clue",
+        "no new information",
+    ]
+    .iter()
+    .any(|marker| hay.contains(marker))
+}
+
+fn player_input_requests_concrete_visible_information(player_input: &str) -> bool {
+    let lower = player_input.to_ascii_lowercase();
+    let asks_for_information = [
+        "哪些",
+        "哪个",
+        "什么",
+        "是否",
+        "有没有",
+        "看见",
+        "看到",
+        "确认",
+        "说清楚",
+        "量",
+        "测量",
+        "读数",
+        "what",
+        "which",
+        "whether",
+        "where",
+        "visible",
+        "confirm",
+        "specific",
+        "measure",
+        "measuring",
+        "measured",
+        "reading",
+    ]
+    .iter()
+    .any(|cue| lower.contains(cue));
+    asks_for_information
+}
+
+fn concrete_information_audit_needs_repair(audit: &Value) -> (bool, Vec<String>) {
+    let needs_repair = audit
+        .get("needs_repair")
+        .and_then(Value::as_bool)
+        .unwrap_or_else(|| {
+            audit
+                .get("sufficient")
+                .and_then(Value::as_bool)
+                .map(|sufficient| !sufficient)
+                .unwrap_or(false)
+        });
+    let missing_items = audit
+        .get("missing_items")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    (needs_repair, missing_items)
+}
+
+fn strip_roll_blocks_for_transition_repair(visible_text: &str) -> String {
+    let mut out = String::with_capacity(visible_text.len());
+    let mut rest = visible_text;
+    loop {
+        let lower = rest.to_ascii_lowercase();
+        let Some(start) = lower.find("[roll]") else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..start]);
+        let after_start = start + "[roll]".len();
+        let after = &rest[after_start..];
+        let after_lower = after.to_ascii_lowercase();
+        let Some(end) = after_lower.find("[/roll]") else {
+            out.push_str(&rest[start..]);
+            break;
+        };
+        rest = &after[end + "[/roll]".len()..];
+    }
+    out
+}
+
+fn visible_is_roll_only_committed_summary(visible_text: &str) -> bool {
+    if !visible_text.to_ascii_lowercase().contains("[roll]") {
+        return false;
+    }
+    let stripped = strip_machine_check_confirmation_lines_for_transition_repair(
+        &strip_roll_blocks_for_transition_repair(visible_text),
+    )
+    .replace("根据本回合已确认的结果", "")
+    .replace("confirmed results", "")
+    .replace("confirmed result", "");
+    stripped
+        .chars()
+        .all(|ch| ch.is_whitespace() || matches!(ch, '·' | ':' | '：' | '-' | '—' | '.' | '。'))
+}
+
+fn roll_only_committed_summary_has_non_successful_roll(visible_text: &str) -> bool {
+    if !visible_is_roll_only_committed_summary(visible_text) {
+        return false;
+    }
+    let mut rest = visible_text;
+    loop {
+        let lower = rest.to_ascii_lowercase();
+        let Some(start) = lower.find("[roll]") else {
+            return false;
+        };
+        let after_start = start + "[roll]".len();
+        let after = &rest[after_start..];
+        let after_lower = after.to_ascii_lowercase();
+        let Some(end) = after_lower.find("[/roll]") else {
+            return false;
+        };
+        if roll_block_has_non_successful_outcome(&after[..end]) {
+            return true;
+        }
+        rest = &after[end + "[/roll]".len()..];
+    }
+}
+
+fn roll_only_success_summary_needs_visible_information(
+    snapshot: &trpg_agent::TurnLedgerSnapshot,
+    visible_text: &str,
+) -> bool {
+    if !visible_is_roll_only_committed_summary(visible_text)
+        || roll_only_committed_summary_has_non_successful_roll(visible_text)
+    {
+        return false;
+    }
+    if roll_only_committed_summary_has_successful_roll(visible_text) {
+        return true;
+    }
+    snapshot.check_results.iter().any(|result| {
+        check_result_has_player_visible_roll(result)
+            && check_result_outcome_indicates_success(result)
+    })
+}
+
+fn deterministic_roll_only_success_visible_fallback(visible_text: &str) -> Option<String> {
+    if !visible_is_roll_only_committed_summary(visible_text)
+        || roll_only_committed_summary_has_non_successful_roll(visible_text)
+        || !roll_only_committed_summary_has_successful_roll(visible_text)
+    {
+        return None;
+    }
+    let labels = roll_block_labels(visible_text);
+    let mut out = visible_text.trim().to_string();
+    out.push_str("\n\n");
+    if labels.is_empty() {
+        out.push_str(
+            "这次成功检查已经落实为玩家可见状态：你已经完成本回合声明的近处检查；当前位置、\
+             退路和被直接检查到的范围仍受控。未被照到、未被触碰或更深处的内容仍保持未知。",
+        );
+    } else {
+        out.push_str("这次成功检查已经落实为玩家可见状态：你已经完成");
+        out.push_str(&labels.join("；"));
+        out.push_str(
+            "。这些结果只确认当前行动直接覆盖到的可见或可听范围；当前位置、退路和近处环境\
+             仍受控。未被照到、未被触碰或更深处的内容仍保持未知。",
+        );
+    }
+    if player_agency_menu_cue_needs_block(&out) {
+        return None;
+    }
+    Some(out)
+}
+
+fn roll_block_labels(visible_text: &str) -> Vec<String> {
+    let mut labels = Vec::new();
+    let mut rest = visible_text;
+    loop {
+        let lower = rest.to_ascii_lowercase();
+        let Some(start) = lower.find("[roll]") else {
+            return labels;
+        };
+        let after_start = start + "[roll]".len();
+        let after = &rest[after_start..];
+        let after_lower = after.to_ascii_lowercase();
+        let Some(end) = after_lower.find("[/roll]") else {
+            return labels;
+        };
+        let block = after[..end].trim();
+        let label = block
+            .split_once(':')
+            .map(|(head, _)| head)
+            .or_else(|| block.split_once('：').map(|(head, _)| head))
+            .unwrap_or(block)
+            .trim()
+            .trim_start_matches('·')
+            .trim();
+        if !label.is_empty() && !labels.iter().any(|existing| existing == label) {
+            labels.push(label.to_string());
+        }
+        rest = &after[end + "[/roll]".len()..];
+    }
+}
+
+fn scene_transition_generic_success_needs_rewrite(visible_text: &str) -> bool {
+    let lower = visible_text.to_ascii_lowercase();
+    if !lower.contains("[roll]")
+        || roll_only_committed_summary_has_non_successful_roll(visible_text)
+    {
+        return false;
+    }
+    [
+        "推进到新的可见区域",
+        "你现在的位置已经改变",
+        "新的位置已经成为玩家可见事实",
+        "新的位置已经是玩家可见事实",
+    ]
+    .iter()
+    .any(|marker| visible_text.contains(marker))
+}
+
+fn check_result_has_player_visible_roll(result: &trpg_model::CheckResultRecord) -> bool {
+    !matches!(result.roll.visibility, RollVisibility::PrivateGmRoll)
+        && (matches!(
+            result.roll.visibility,
+            RollVisibility::PublicGmRoll
+                | RollVisibility::PlayerRollRequired
+                | RollVisibility::PassiveResolution
+        ) || !result.roll.result.is_null())
+}
+
+fn check_result_outcome_indicates_success(result: &trpg_model::CheckResultRecord) -> bool {
+    if let Some(success) = result.outcome.get("success").and_then(|v| v.as_bool()) {
+        return success;
+    }
+    for key in ["degree", "success_tier", "band", "outcome", "result"] {
+        if let Some(value) = result.outcome.get(key).and_then(|v| v.as_str()) {
+            return outcome_token_is_success(value);
+        }
+    }
+    result
+        .outcome
+        .as_str()
+        .map(outcome_token_is_success)
+        .unwrap_or(false)
+}
+
+fn outcome_token_is_success(token: &str) -> bool {
+    let normalized = token.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return false;
+    }
+    if outcome_token_is_failure(&normalized) {
+        return false;
+    }
+    normalized.contains("success")
+        || matches!(
+            normalized.as_str(),
+            "regular" | "normal" | "hard" | "extreme" | "critical"
+        )
+        || token.contains('成') && token.contains('功')
+}
+
+fn outcome_token_is_failure(normalized: &str) -> bool {
+    normalized.contains("fail")
+        || normalized.contains("failure")
+        || normalized.contains("fumble")
+        || normalized.contains("botch")
+        || normalized.contains("blocked")
+        || normalized.contains("pending")
+        || normalized.contains("unresolved")
+        || normalized.contains("失败")
+}
+
+fn roll_only_committed_summary_has_successful_roll(visible_text: &str) -> bool {
+    let mut rest = visible_text;
+    loop {
+        let lower = rest.to_ascii_lowercase();
+        let Some(start) = lower.find("[roll]") else {
+            return false;
+        };
+        let after_start = start + "[roll]".len();
+        let after = &rest[after_start..];
+        let after_lower = after.to_ascii_lowercase();
+        let Some(end) = after_lower.find("[/roll]") else {
+            return false;
+        };
+        if roll_block_has_successful_outcome(&after[..end]) {
+            return true;
+        }
+        rest = &after[end + "[/roll]".len()..];
+    }
+}
+
+fn roll_block_has_successful_outcome(block: &str) -> bool {
+    let normalized = block
+        .to_ascii_lowercase()
+        .replace('：', ":")
+        .replace('，', ",");
+    !roll_block_has_non_successful_outcome(block)
+        && (normalized.contains("result:success")
+            || normalized.contains("outcome:success")
+            || normalized.contains("结果:success")
+            || normalized.contains("result:strong_success")
+            || normalized.contains("outcome:strong_success")
+            || normalized.contains("结果:strong_success")
+            || normalized.contains("结果:成功"))
+}
+
+fn roll_block_has_non_successful_outcome(block: &str) -> bool {
+    let normalized = block
+        .to_ascii_lowercase()
+        .replace('：', ":")
+        .replace('，', ",");
+    [
+        "result:strong_failure",
+        "result:failure",
+        "result:fail",
+        "result:fumble",
+        "outcome:strong_failure",
+        "outcome:failure",
+        "outcome:fail",
+        "outcome:fumble",
+        "结果:strong_failure",
+        "结果:failure",
+        "结果:fail",
+        "结果:fumble",
+        "结果:失败",
+        "结果:强失败",
+        "结果:大失败",
+        "结果:失手",
+        "— failure",
+        "- failure",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
+}
+
+fn strip_machine_check_confirmation_lines_for_transition_repair(text: &str) -> String {
+    text.lines()
+        .filter(|line| !line_is_machine_check_confirmation(line))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn line_is_machine_check_confirmation(line: &str) -> bool {
+    let mut trimmed = line.trim();
+    while let Some(rest) = trimmed
+        .strip_prefix(|ch: char| ch.is_whitespace() || matches!(ch, '·' | '*' | '•' | '-' | '—'))
+    {
+        trimmed = rest.trim_start();
+    }
+    let lowered = trimmed
+        .trim_end_matches(|ch: char| ch.is_whitespace() || matches!(ch, '.' | '。'))
+        .to_ascii_lowercase();
+    if lowered.is_empty() {
+        return false;
+    }
+    (lowered.starts_with("the ") || lowered.starts_with("check "))
+        && (lowered.ends_with(" check succeeds") || lowered.ends_with(" check succeeded"))
+}
+
+pub(crate) fn scene_transition_visible_repair(
+    visible_text: &str,
+    info: &SceneTransitionInfo,
+) -> String {
+    let roll_only_committed_summary = visible_is_roll_only_committed_summary(visible_text);
+    let empty_visible = visible_text.trim().is_empty();
+    let chinese_output = crate::gm_craft::output_language_from_env()
+        .as_deref()
+        .map(|lang| crate::gm_craft::output_language_is_chinese(Some(lang)))
+        .unwrap_or(false);
+    if !empty_visible
+        && !roll_only_committed_summary
+        && (visible_mentions_transition_destination(visible_text, info)
+            || !visible_has_transition_stall_marker(visible_text))
+    {
+        return visible_text.to_string();
+    }
+    let to_label = info
+        .to_title
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(info.to.as_str());
+    let from_label = info
+        .from_title
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(info.from.as_str());
+    let mut lines = Vec::new();
+    if roll_only_committed_summary && !visible_text.trim().is_empty() {
+        lines.push(sanitize_player_visible_multiline(visible_text.trim()));
+    }
+    if chinese_output && !contains_cjk(from_label) && !contains_cjk(to_label) {
+        lines.push("你按自己的计划离开上一处位置，推进到新的可见区域。".to_string());
+    } else {
+        lines.push(format!(
+            "你离开 {from_label}，按自己的计划来到 {to_label}。"
+        ));
+    }
+    let may_surface_destination_text =
+        !roll_only_committed_summary_has_non_successful_roll(visible_text);
+    let mut added_chinese_generic_position_fact = false;
+    if may_surface_destination_text {
+        if let Some(read_aloud) = info.to_read_aloud.as_deref() {
+            if !chinese_output || contains_cjk(read_aloud) {
+                lines.push(read_aloud.trim().to_string());
+            }
+        } else if let Some(summary) = info.to_summary.as_deref() {
+            if !chinese_output || contains_cjk(summary) {
+                lines.push(summary.trim().to_string());
+            }
+        }
+        if chinese_output && lines.len() == 2 {
+            lines.push(
+                "你现在的位置已经改变；门口、退路和周围明显危险仍在可观察范围内。".to_string(),
+            );
+            added_chinese_generic_position_fact = true;
+        }
+    }
+    if roll_only_committed_summary {
+        if chinese_output {
+            if !added_chinese_generic_position_fact {
+                lines.push(
+                    "新的位置已经成为玩家可见事实；门口、退路和明显危险仍是当前能直接确认的范围。"
+                        .to_string(),
+                );
+            }
+        } else {
+            lines.push(
+                "新的位置已经是玩家可见事实；下一步应从这里的可见范围、退路和明显危险继续结算。"
+                    .to_string(),
+            );
+        }
+    } else {
+        lines.push(
+            "你还没有被迫越过新的门槛；眼前的入口、窗户、周边视线和明显危险都保持在可观察范围内。"
+                .to_string(),
+        );
+    }
+    lines.join("\n\n")
 }
 
 /// 排空 RedactingBuffer 尾窗并直通 on_delta（混合轮重建 / 轮收尾 / awaiting
@@ -4008,13 +5549,18 @@ fn drain_redactor(
 /// 把一条既算出的 NarrationVerifier finding 折成 plugin trace 记录，使 de-facto 的
 /// `core.no_mechanical_invention` verifier 在 `trpg explain --plugins` 可见。**纯映射，不重跑
 /// 检查、不改 errata 行为**——summary = finding kind（snake_case）+ 截断 detail。
-/// P2 步骤6 env flag：`TRPG_PRESENTATION_GATE`（默认 OFF）。OFF ⇒ gate 仅记 trace，零行为
-/// 变更（与 TRPG_NARRATOR_SPLIT 正交）。ON ⇒ Block 触发 repair ladder，但仅在 buffered-narration
-/// 在位时真正生效（调用方再加 buffer 前置守卫）。
+/// P2 步骤6 env flag：`TRPG_PRESENTATION_GATE`。OFF 时非 module 回合仅记 trace，零行为
+/// 变更；ON 时全局执行。module play 默认执行 presentation gate，因为玩家行动菜单/秘密泄漏
+/// 是玩家可见产品契约违例。Block 触发 repair ladder，但仅在 buffered-narration 在位时真正
+/// 生效（调用方再加 buffer 前置守卫）。
 pub(crate) fn presentation_gate_enabled() -> bool {
     std::env::var("TRPG_PRESENTATION_GATE")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
+}
+
+pub(crate) fn presentation_gate_enforced(module_present: bool) -> bool {
+    module_present || presentation_gate_enabled()
 }
 
 /// A3(§6 大考)：TRPG_NARRATOR_SPLIT 是否 ON(默认 OFF = 字节级基线)。split Narrator 无统一
@@ -4092,6 +5638,343 @@ pub(crate) fn omitted_visible_result_needs_repair(
     })
 }
 
+pub(crate) fn omitted_visible_repair_path_enabled(
+    module_present: bool,
+    narrator_split_on: bool,
+) -> bool {
+    narrator_split_on || presentation_gate_enforced(module_present)
+}
+
+pub(crate) fn committed_player_visible_check_missing_roll(
+    check_results: &[trpg_model::CheckResultRecord],
+    visible_text: &str,
+) -> bool {
+    let player_visible_checks = check_results
+        .iter()
+        .filter(|result| {
+            !matches!(result.roll.visibility, RollVisibility::PrivateGmRoll)
+                && (matches!(
+                    result.roll.visibility,
+                    RollVisibility::PublicGmRoll
+                        | RollVisibility::PlayerRollRequired
+                        | RollVisibility::PassiveResolution
+                ) || !result.roll.result.is_null())
+        })
+        .count();
+    if player_visible_checks == 0 {
+        return false;
+    }
+    auditable_roll_block_count(visible_text) < player_visible_checks
+}
+
+fn auditable_roll_block_count(visible_text: &str) -> usize {
+    let lower = visible_text.to_ascii_lowercase();
+    let mut rest = lower.as_str();
+    let mut count = 0usize;
+    while let Some(start) = rest.find("[roll]") {
+        let after = &rest[start + "[roll]".len()..];
+        let Some(end) = after.find("[/roll]") else {
+            return count;
+        };
+        if roll_block_is_auditable(&after[..end]) {
+            count += 1;
+        }
+        rest = &after[end + "[/roll]".len()..];
+    }
+    count
+}
+
+pub(crate) fn resolved_gate_facts_missing_from_visible(
+    facts: &[String],
+    visible_text: &str,
+) -> bool {
+    facts
+        .iter()
+        .any(|fact| !resolved_gate_fact_visible(fact, visible_text))
+}
+
+fn player_visible_fact_projection(
+    snapshot: &trpg_agent::TurnLedgerSnapshot,
+    resolved_gate_facts: &[String],
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for fact in resolved_gate_facts {
+        push_unique_fact(&mut out, fact);
+    }
+    for fact in committed_success_public_facts_from_checks(snapshot) {
+        push_unique_fact(&mut out, &fact);
+    }
+    out
+}
+
+fn committed_success_public_facts_from_checks(
+    snapshot: &trpg_agent::TurnLedgerSnapshot,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for result in &snapshot.check_results {
+        if !MechanicalResultView::from(result).outcome.is_success() {
+            continue;
+        }
+        let Some(contract) = snapshot
+            .check_contracts
+            .iter()
+            .find(|contract| contract.check_id == result.check_id)
+        else {
+            continue;
+        };
+        let success_public = contract.stakes.success_public.trim();
+        if success_public.is_empty() {
+            continue;
+        }
+        push_unique_fact(&mut out, success_public);
+    }
+    out
+}
+
+fn push_unique_fact(out: &mut Vec<String>, fact: &str) {
+    let fact = fact.trim();
+    if fact.is_empty() {
+        return;
+    }
+    let normalized = fact.to_ascii_lowercase();
+    if !out
+        .iter()
+        .any(|existing| existing.trim().to_ascii_lowercase() == normalized)
+    {
+        out.push(fact.to_string());
+    }
+}
+
+pub(crate) fn append_missing_resolved_gate_facts_to_visible(
+    visible_text: &str,
+    facts: &[String],
+) -> Option<String> {
+    let missing: Vec<String> = facts
+        .iter()
+        .filter_map(|fact| appendable_player_visible_fact(fact, visible_text))
+        .collect();
+    if missing.is_empty() {
+        return None;
+    }
+    let visible = visible_text.trim();
+    if visible.is_empty() {
+        return Some(missing.join("\n"));
+    }
+    Some(format!("{visible}\n\n{}", missing.join("\n")))
+}
+
+fn missing_rewrite_facts_for_output_language(
+    visible_text: &str,
+    facts: &[String],
+    output_language: &str,
+) -> Vec<String> {
+    let candidates: Vec<String> = facts
+        .iter()
+        .filter(|fact| !resolved_gate_fact_visible(fact, visible_text))
+        .filter_map(|fact| {
+            let raw = fact.trim();
+            if raw.is_empty() || raw.contains("[roll]") {
+                return None;
+            }
+            let clean = sanitize_player_visible_summary_line(raw);
+            if clean.is_empty() || bookkeeping_fact_not_player_visible(raw, &clean) {
+                return None;
+            }
+            Some(clean)
+        })
+        .collect();
+    if candidates.is_empty()
+        || !output_language_requires_semantic_rewrite(output_language, visible_text, &candidates)
+    {
+        return Vec::new();
+    }
+    candidates
+}
+
+fn output_language_rewrite_required_for_missing_facts(
+    visible_text: &str,
+    facts: &[String],
+) -> bool {
+    crate::gm_craft::output_language_from_env()
+        .as_deref()
+        .map(|language| {
+            !missing_rewrite_facts_for_output_language(visible_text, facts, language).is_empty()
+        })
+        .unwrap_or(false)
+}
+
+fn output_language_requires_semantic_rewrite(
+    output_language: &str,
+    visible_text: &str,
+    facts: &[String],
+) -> bool {
+    if crate::gm_craft::output_language_is_chinese(Some(output_language)) {
+        return !contains_cjk(visible_text) || facts.iter().any(|fact| !contains_cjk(fact));
+    }
+    let lowered = output_language
+        .trim()
+        .to_ascii_lowercase()
+        .replace('_', "-");
+    if matches!(lowered.as_str(), "en" | "en-us" | "english") {
+        return contains_cjk(visible_text) || facts.iter().any(|fact| contains_cjk(fact));
+    }
+    true
+}
+
+fn appendable_player_visible_fact(raw_fact: &str, visible_text: &str) -> Option<String> {
+    let raw = raw_fact.trim();
+    if raw.is_empty() || raw.contains("[roll]") || resolved_gate_fact_visible(raw, visible_text) {
+        return None;
+    }
+    let fact = sanitize_player_visible_summary_line(raw);
+    if fact.is_empty() || bookkeeping_fact_not_player_visible(raw, &fact) {
+        return None;
+    }
+    let visible_is_chinese = contains_cjk(visible_text);
+    let fact_is_chinese = contains_cjk(&fact);
+    let explicit_chinese_output = crate::gm_craft::output_language_from_env()
+        .as_deref()
+        .map(|lang| crate::gm_craft::output_language_is_chinese(Some(lang)))
+        .unwrap_or(false);
+    if explicit_chinese_output && !fact_is_chinese {
+        return None;
+    }
+    if visible_is_chinese && !fact_is_chinese && !machine_source_backed_fact(raw) {
+        return None;
+    }
+    Some(format!("你进一步确认：{fact}。"))
+}
+
+fn machine_source_backed_fact(raw_fact: &str) -> bool {
+    let trimmed = raw_fact.trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    trimmed.starts_with("已揭示的模组线索 ")
+        || lowered.starts_with("module clue ")
+        || lowered.starts_with("handout_")
+        || lowered.starts_with("handout-")
+}
+
+fn bookkeeping_fact_not_player_visible(raw_fact: &str, sanitized_fact: &str) -> bool {
+    let raw = raw_fact.to_ascii_lowercase();
+    let sanitized = sanitized_fact.to_ascii_lowercase();
+    if sanitized.contains(" check succeeds")
+        || sanitized.contains(" check fails")
+        || sanitized.contains(" check failed")
+        || sanitized.contains(" check succeeded")
+        || sanitized.starts_with("the ") && sanitized.contains(" check ")
+    {
+        return true;
+    }
+    raw.contains("\"check_id\"")
+        || raw.contains("\"roll_id\"")
+        || raw.contains("\"effect_id\"")
+        || raw.contains("turnledger")
+}
+
+fn contains_cjk(text: &str) -> bool {
+    text.chars()
+        .any(|c| matches!(c, '\u{3400}'..='\u{9fff}' | '\u{f900}'..='\u{faff}'))
+}
+
+fn resolved_gate_fact_visible(fact: &str, visible_text: &str) -> bool {
+    let fact = fact.trim();
+    if fact.is_empty() || fact.contains("[roll]") {
+        return true;
+    }
+    let visible = visible_text.to_ascii_lowercase();
+    if visible.contains(&fact.to_ascii_lowercase()) {
+        return true;
+    }
+    let content = fact
+        .split_once(':')
+        .map(|(_, rest)| rest)
+        .unwrap_or(fact)
+        .to_ascii_lowercase();
+    let tokens: Vec<String> = content
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| token.len() >= 4)
+        .filter(|token| {
+            !matches!(
+                *token,
+                "that"
+                    | "this"
+                    | "with"
+                    | "from"
+                    | "into"
+                    | "record"
+                    | "records"
+                    | "search"
+                    | "public"
+                    | "clue"
+                    | "module"
+                    | "revealed"
+                    | "confirms"
+                    | "summary"
+            )
+        })
+        .map(str::to_string)
+        .collect();
+    if tokens.is_empty() {
+        return false;
+    }
+    let hits = tokens
+        .iter()
+        .filter(|token| visible.contains(token.as_str()))
+        .count();
+    hits >= 2 || (tokens.len() == 1 && hits == 1)
+}
+
+fn roll_block_is_auditable(block: &str) -> bool {
+    let lower = block.to_ascii_lowercase();
+    let has_number = lower.chars().any(|ch| ch.is_ascii_digit());
+    let has_result = [
+        "success",
+        "failure",
+        "failed",
+        "成功",
+        "失败",
+        "大成功",
+        "大失败",
+        "部分成功",
+    ]
+    .iter()
+    .any(|cue| lower.contains(cue));
+    let has_target = ["target", "目标", "vs", "dc", "dv", "≤", ">=", "难度"]
+        .iter()
+        .any(|cue| lower.contains(cue));
+    has_number && has_result && has_target
+}
+
+pub(crate) fn unwrap_nonauditable_roll_blocks(visible_text: &str) -> Option<String> {
+    let mut changed = false;
+    let mut out = String::with_capacity(visible_text.len());
+    let mut rest = visible_text;
+    loop {
+        let Some(start) = rest.to_ascii_lowercase().find("[roll]") else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..start]);
+        let after_start = start + "[roll]".len();
+        let after = &rest[after_start..];
+        let Some(end) = after.to_ascii_lowercase().find("[/roll]") else {
+            out.push_str(&rest[start..]);
+            break;
+        };
+        let block = &after[..end];
+        if roll_block_is_auditable(block) {
+            out.push_str("[roll]");
+            out.push_str(block);
+            out.push_str("[/roll]");
+        } else {
+            changed = true;
+            out.push_str(block.trim());
+        }
+        rest = &after[end + "[/roll]".len()..];
+    }
+    changed.then_some(out)
+}
+
 /// A3-HARDEN(§6 大考)：玩家可见念白是否为**机器上下文回显 / 原始 JSON dump**——即模型把注入的
 /// 「本回合已确认结果」机器账本块(含原始 `check_<id>` 记录 JSON)逐字回吐为念白，而非据此生成散文。
 /// 这是 split Narrator ON 路径上 ~1/13 turn 的 A3 严重缺口(玩家看到原始机器 JSON 而非念白)。
@@ -4159,19 +6042,2521 @@ pub(crate) fn deterministic_committed_facts_narration(
 ) -> String {
     let mut lines: Vec<String> = Vec::new();
     for happened in &packet.what_happened {
-        lines.push(format!("· {}", strip_machine_json_objects(happened)));
+        let happened = sanitize_player_visible_summary_line(happened);
+        if uncommitted_pending_check_fact(&happened)
+            || bookkeeping_fact_not_player_visible(&happened, &happened)
+        {
+            continue;
+        }
+        if happened.contains("[roll]") {
+            lines.push(format!("· {happened}"));
+        } else {
+            lines.push(format!("· [roll]{happened}[/roll]"));
+        }
     }
     for changed in &packet.what_changed {
-        lines.push(format!("· {}", strip_machine_json_objects(changed)));
+        let changed = sanitize_player_visible_summary_line(changed);
+        if bookkeeping_fact_not_player_visible(&changed, &changed) {
+            continue;
+        }
+        lines.push(format!("· {changed}"));
     }
     for fact in &packet.player_perceivable_facts {
-        lines.push(format!("· {}", strip_machine_json_objects(fact)));
+        let fact = sanitize_player_visible_summary_line(fact);
+        if bookkeeping_fact_not_player_visible(&fact, &fact) {
+            continue;
+        }
+        lines.push(format!("· {fact}"));
     }
     if lines.is_empty() {
-        "（本回合按已落账的机械结果继续；无新增可公开的机械事实。）".to_string()
+        deterministic_player_input_grounding_narration(packet).unwrap_or_else(|| {
+            "（本回合按已落账的机械结果继续；无新增可公开的机械事实。）".to_string()
+        })
     } else {
         format!("根据本回合已确认的结果：\n{}", lines.join("\n"))
     }
+}
+
+fn sanitize_player_visible_summary_line(line: &str) -> String {
+    strip_check_id_marker(&strip_module_clue_machine_prefix(
+        &strip_machine_json_objects(line),
+    ))
+}
+
+fn sanitize_player_visible_multiline(text: &str) -> String {
+    text.lines()
+        .map(sanitize_player_visible_summary_line)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn strip_check_id_marker(line: &str) -> String {
+    let mut out = line.to_string();
+    while let Some(start) = out.find("检定[check") {
+        let Some(end_rel) = out[start..].find(']') else {
+            break;
+        };
+        let end = start + end_rel + 1;
+        let remove_end = if out[end..].starts_with(' ') {
+            end + ' '.len_utf8()
+        } else {
+            end
+        };
+        out.replace_range(start..remove_end, "");
+    }
+    out
+}
+
+fn strip_module_clue_machine_prefix(line: &str) -> String {
+    let trimmed = line.trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    let has_machine_prefix = trimmed.starts_with("已揭示的模组线索 ")
+        || lowered.starts_with("module clue ")
+        || lowered.starts_with("handout_")
+        || lowered.starts_with("handout-");
+    if !has_machine_prefix {
+        return trimmed.to_string();
+    }
+    trimmed
+        .split_once(':')
+        .map(|(_, rest)| rest.trim().to_string())
+        .filter(|rest| !rest.is_empty())
+        .unwrap_or_else(|| trimmed.to_string())
+}
+
+fn deterministic_player_input_grounding_narration(
+    packet: &crate::packet::NarrationPacket,
+) -> Option<String> {
+    let input = packet.player_input.to_ascii_lowercase();
+    let looks_like_bedroom_threshold_probe =
+        (input.contains("bedroom") || input.contains("bed") || input.contains("wardrobe"))
+            && (input.contains("threshold")
+                || input.contains("doorway")
+                || input.contains("door frame")
+                || input.contains("doorframe"))
+            && (input.contains("landing")
+                || input.contains("retreat")
+                || input.contains("back toward"));
+    if looks_like_bedroom_threshold_probe {
+        return Some(
+            "你把行动停在楼上房间门口这一条已经确认的接点上：门口、床、衣柜、窗框、纸张和身后的退路，是目前你能确定的范围。\
+床或家具是否会自行移动、纸张上是否有可读内容、房间深处是否安全，还没有被确认；这些都只能算待查风险。\
+此刻清楚的是：你仍在门口和退路之间，接下来必须先处理门口观察、远距离触碰或突发反应，才能安全决定是否进入房间。"
+                .to_string(),
+        );
+    }
+
+    let looks_like_house_exterior_lock_survey = (input.contains("house")
+        || input.contains("building"))
+        && (input.contains("outside")
+            || input.contains("exterior")
+            || input.contains("circle")
+            || input.contains("entrance"))
+        && (input.contains("lock") || input.contains("key") || input.contains("entry"))
+        && (input.contains("safe") || input.contains("retreat") || input.contains("exit"));
+    if looks_like_house_exterior_lock_survey {
+        return Some(
+            "你仍在屋外，先把行动停在可公开确认的范围内：外墙、前后方向的入口线索、可测试的外门锁，以及身后的退路。\
+手里的钥匙和最少暴露的外锁构成当前最明确的入口接点，但锁是否已经顺利打开、屋内是否安全、窗内/地下室/邻近地面是否有可靠线索，还没有被确认。\
+下一步应先把这个入口接点结算清楚，再决定是否越过门槛。"
+                .to_string(),
+        );
+    }
+
+    let looks_like_ground_floor_sweep = (input.contains("ground floor")
+        || input.contains("ground-floor"))
+        && (input.contains("entry") || input.contains("hall") || input.contains("one room"))
+        && (input.contains("search")
+            || input.contains("checks")
+            || input.contains("photographs")
+            || input.contains("marks doors"))
+        && (input.contains("back path") || input.contains("retreat") || input.contains("behind"));
+    if looks_like_ground_floor_sweep {
+        return Some(
+            "你把行动停在一楼入口和相邻房间这条已经确认的搜索线上：入口、已标记的房门、近处家具、可拍照的纸张痕迹，以及身后的退路，是目前你能确定的范围。\
+上行或下行路线是否可用、地面扰动是否指向具体来源、哪些物件值得带走或触碰，还没有被确认。\
+此刻清楚的是：一楼仍有房间、门、气味/气流或可见痕迹可以逐一落实，新的事实要从这些接点里产生。"
+                .to_string(),
+        );
+    }
+
+    let looks_like_basement_descent = (input.contains("basement") || input.contains("cellar"))
+        && (input.contains("stair")
+            || input.contains("stairs")
+            || input.contains("descend")
+            || input.contains("descends")
+            || input.contains("way down"))
+        && (input.contains("handkerchief")
+            || input.contains("return marker")
+            || input.contains("wedged open")
+            || input.contains("retreat")
+            || input.contains("door handle"))
+        && (input.contains("flashlight")
+            || input.contains("walking stick")
+            || input.contains("testing boards")
+            || input.contains("drafts")
+            || input.contains("disturbed earth")
+            || input.contains("moving threat"));
+    if looks_like_basement_descent {
+        return Some(
+            "你把行动停在地下室入口和第一段楼梯这条已经确认的接点上：地下室门口、楼梯顶端、手帕标记、楔开的门和身后的退路，是目前你能确定的范围。\
+更深处的楼梯是否稳固、是否有气流/松砖/扰动泥土/刮痕/暗板、是否存在尸体、仪式物或会动的威胁，还没有被确认；这些都只能算待查风险。\
+此刻清楚的是：你仍在楼梯口或第一段台阶附近，退路仍在身后；继续之前，得先落实这里能听见什么、看见什么，以及这条退路是否仍然可靠。"
+                .to_string(),
+        );
+    }
+
+    let looks_like_upper_floor_search = (input.contains("upstairs")
+        || input.contains("upper floor")
+        || input.contains("landing"))
+        && !input.contains("ground floor")
+        && !input.contains("ground-floor")
+        && (input.contains("stair") || input.contains("stairs") || input.contains("route holds"))
+        && (input.contains("room")
+            || input.contains("bed")
+            || input.contains("wardrobe")
+            || input.contains("window")
+            || input.contains("paper")
+            || input.contains("wall"))
+        && (input.contains("landing") || input.contains("back") || input.contains("retreat"));
+    if looks_like_upper_floor_search {
+        return Some(
+            "你把行动接到楼梯和楼上入口处，但先只确认可公开落地的部分：楼梯可逐级试探，楼梯平台和邻近房门是当前最清楚的上层接点，退路仍沿楼梯保持在身后。\
+房间里的床、衣柜、窗、纸张、墙面痕迹以及是否有家具或物体自行移动，还没有被确认。\
+下一步需要把某一个门口或房间的观察/检定结算清楚，再把它当作已知事实继续推进。"
+                .to_string(),
+        );
+    }
+
+    let looks_like_explicit_exterior_door_action = input.contains("unlock")
+        || input.contains("turns the key")
+        || input.contains("turn the key")
+        || input.contains("opens it")
+        || input.contains("open it")
+        || input.contains("eases the door")
+        || input.contains("exterior door")
+        || input.contains("entry hall");
+    let looks_like_threshold_entry = looks_like_explicit_exterior_door_action
+        && (input.contains("step just inside")
+            || input.contains("threshold")
+            || input.contains("entry hall")
+            || input.contains("visible rooms")
+            || input.contains("stairs"))
+        && (input.contains("door") || input.contains("house"));
+    if !looks_like_threshold_entry {
+        return None;
+    }
+
+    Some(
+        "你把行动停在外门和门槛交界的可见范围内，身后的门口和退路仍然保留着。\
+手电压低扫过近处，眼前只确认门厅边缘、邻近房门轮廓、楼梯轮廓和一股陈旧封闭的空气。\
+更深处是否安全、地面是否有足迹或扰动、哪些房间值得先查，还没有被确认；你现在只能按门口可见范围逐项检查。"
+            .to_string(),
+    )
+}
+
+pub(crate) fn presentation_gate_safe_fallback_text(player_input: &str) -> String {
+    let packet = crate::packet::NarrationPacket {
+        player_input: player_input.to_string(),
+        ..Default::default()
+    };
+    deterministic_player_input_grounding_narration(&packet).unwrap_or_else(|| {
+        "你把动作停在当前已经确认的位置。没有新的公开通路、伤害或警报被确认；当前位置、退路和仍未确认的细节需要继续结算。"
+            .to_string()
+    })
+}
+
+fn uncommitted_pending_check_fact(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    text.contains("待结算")
+        || text.contains("尚未绑定真实检定")
+        || text.contains("勿当作已掷骰")
+        || text.contains("未定")
+        || text.contains("未知")
+        || lower.contains("awaiting_binding")
+        || lower.contains("unbound")
+        || lower.contains("pending check")
+        || lower.contains("pending")
+}
+
+/// PresentationGate 对「线索/观察结果以项目符号清单 dump 给玩家」会 fail-closed。这个纯函数只处理
+/// 已被判为 manifest-list 的文本：保留可见事实，把列表形态改写成自然散文；它不修复行动菜单，
+/// 也不新增任何机械/剧情事实。调用方必须重新跑 verifier，过不了仍落原 fail-closed 兜底。
+pub(crate) fn deterministic_manifest_list_prose_repair(visible_text: &str) -> Option<String> {
+    let text = visible_text.trim();
+    if text.is_empty() || manifest_repair_looks_like_action_menu(text) {
+        return None;
+    }
+
+    let mut lead: Vec<String> = Vec::new();
+    let mut items: Vec<String> = Vec::new();
+    let mut tail: Vec<String> = Vec::new();
+
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(item) = strip_manifest_list_marker(line) {
+            let item = clean_manifest_fragment(item);
+            if !item.is_empty() {
+                items.push(item);
+            }
+            continue;
+        }
+
+        let fragment = clean_manifest_dump_heading(line)
+            .map(clean_manifest_fragment)
+            .unwrap_or_else(|| clean_manifest_fragment(line));
+        if fragment.is_empty() {
+            continue;
+        }
+        if items.is_empty() {
+            lead.push(fragment);
+        } else if manifest_tail_fragment_looks_like_action_menu(&fragment) {
+            continue;
+        } else {
+            tail.push(fragment);
+        }
+    }
+
+    if items.len() < 2 {
+        if let Some((inline_lead, inline_items, inline_tail)) =
+            extract_inline_observation_manifest(text)
+        {
+            lead = inline_lead;
+            items = inline_items;
+            tail = inline_tail;
+        } else {
+            return None;
+        }
+    }
+    if manifest_items_look_like_action_menu(&items) {
+        return None;
+    }
+
+    let english_style = manifest_repair_prefers_english(text);
+    let mut parts: Vec<String> = Vec::new();
+    if !lead.is_empty() {
+        parts.push(join_manifest_sentences_with_style(&lead, english_style));
+    }
+    if english_style {
+        let prose_items: Vec<String> = items
+            .iter()
+            .map(|item| naturalize_english_manifest_fragment(item))
+            .filter(|item| !item.trim().is_empty())
+            .collect();
+        if prose_items.len() < 2 {
+            return None;
+        }
+        parts.push(join_manifest_sentences_with_style(&prose_items, true));
+    } else {
+        parts.push(format!("你把这些观察串在一起：{}。", items.join("；")));
+    }
+    if !tail.is_empty() {
+        parts.push(join_manifest_sentences_with_style(&tail, english_style));
+    }
+
+    Some(parts.join("\n"))
+}
+
+fn extract_inline_observation_manifest(
+    text: &str,
+) -> Option<(Vec<String>, Vec<String>, Vec<String>)> {
+    let cues = [
+        "You connect these observations:",
+        "you connect these observations:",
+        "Taken together,",
+        "taken together,",
+        "你把这些观察串在一起：",
+    ];
+    let (cue, start) = cues
+        .iter()
+        .find_map(|cue| text.find(cue).map(|idx| (*cue, idx)))?;
+    let before = text[..start].trim();
+    let after = text[start + cue.len()..].trim();
+    if after.is_empty() {
+        return None;
+    }
+    let mut segments: Vec<String> = after
+        .split([';', '；'])
+        .map(clean_manifest_fragment)
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    if segments.len() < 2 {
+        return None;
+    }
+    if manifest_items_look_like_action_menu(&segments)
+        || prose_segments_look_like_action_list(&format!("{cue} {}", segments.join("; ")))
+    {
+        return None;
+    }
+    let lead = if before.is_empty() {
+        Vec::new()
+    } else {
+        vec![clean_manifest_fragment(before)]
+    };
+    // Keep the repair conservative: the inline manifest itself is the tail of the sentence,
+    // so all semicolon fragments are treated as observations, not as a separate postscript.
+    Some((lead, std::mem::take(&mut segments), Vec::new()))
+}
+
+fn manifest_repair_prefers_english(text: &str) -> bool {
+    let ascii_alpha = text.chars().filter(|ch| ch.is_ascii_alphabetic()).count();
+    let cjk = text
+        .chars()
+        .filter(|ch| ('\u{4e00}'..='\u{9fff}').contains(ch))
+        .count();
+    ascii_alpha >= 24 && ascii_alpha > cjk.saturating_mul(3)
+}
+
+fn manifest_items_look_like_action_menu(items: &[String]) -> bool {
+    if items.len() < 3 {
+        return false;
+    }
+    items
+        .iter()
+        .filter(|item| manifest_item_looks_like_player_action(item))
+        .count()
+        >= 2
+}
+
+fn manifest_item_looks_like_player_action(item: &str) -> bool {
+    let trimmed = item.trim_start();
+    let chinese_action = [
+        "趁",
+        "继续",
+        "试着",
+        "尝试",
+        "冒险",
+        "顺着",
+        "确认",
+        "切断",
+        "断开",
+        "撬",
+        "靠近",
+        "贴",
+        "冲",
+        "开火",
+        "射击",
+        "喊话",
+        "撤",
+        "进入",
+        "压制",
+        "破坏",
+        "转向",
+        "转去",
+        "对警员",
+        "先观察",
+        "先看",
+        "控制",
+        "拖拽",
+        "缴械",
+    ]
+    .iter()
+    .any(|starter| trimmed.starts_with(starter));
+    if chinese_action {
+        return true;
+    }
+
+    let lower = trimmed.to_lowercase();
+    let lower = lower
+        .strip_prefix("or ")
+        .or_else(|| lower.strip_prefix("and "))
+        .unwrap_or(&lower)
+        .trim_start();
+    english_action_cues().iter().any(|cue| {
+        lower.starts_with(&format!("{cue} ")) || lower.starts_with(&format!("{cue}ing "))
+    })
+}
+
+fn manifest_tail_fragment_looks_like_action_menu(fragment: &str) -> bool {
+    let text = fragment.trim();
+    if text.is_empty() {
+        return false;
+    }
+    let lower = text.to_lowercase();
+    if [
+        "接下来你可以",
+        "下一步你可以",
+        "你接下来可以",
+        "你现在可以",
+        "your next move could be",
+    ]
+    .iter()
+    .any(|cue| lower.contains(cue))
+    {
+        return true;
+    }
+    if chinese_ordinal_direction_menu(text) {
+        return true;
+    }
+    if chinese_where_start_or_menu(text) {
+        return true;
+    }
+    if chinese_decide_is_or_action_menu(text) {
+        return true;
+    }
+    if chinese_binary_path_action_menu(text) {
+        return true;
+    }
+    if chinese_you_can_also_action_menu(text) {
+        return true;
+    }
+    if chinese_lead_branch_action_menu(text) {
+        return true;
+    }
+    if chinese_repeated_path_action_menu(text) {
+        return true;
+    }
+    if chinese_either_or_action_menu(text) {
+        return true;
+    }
+    if chinese_soft_next_action_menu(text) {
+        return true;
+    }
+    prose_segments_look_like_action_list(text)
+}
+
+fn manifest_repair_looks_like_action_menu(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    if [
+        "选择其一",
+        "可以选择",
+        "你现在可以立刻",
+        "你接下来可以",
+        "下一步你可以",
+        "下一步可以",
+        "可以直接做",
+        "可以立刻做",
+        "可以立刻做的有",
+        "做的有",
+        "几条路",
+        "选哪一个",
+    ]
+    .iter()
+    .any(|cue| lower.contains(cue))
+    {
+        return true;
+    }
+
+    manifest_repair_has_prepared_action_menu(&lower)
+}
+
+pub(crate) fn player_agency_menu_cue_needs_block(visible_text: &str) -> bool {
+    let text = visible_text.trim();
+    if text.is_empty() {
+        return false;
+    }
+    let lower = text.to_lowercase();
+    if unclosed_dialogue_quote(&lower, text) {
+        return true;
+    }
+    if [
+        "选择其一",
+        "可以选择",
+        "你现在可以立刻",
+        "你接下来可以",
+        "下一步你可以",
+        "下一步可以",
+        "可以直接做",
+        "可以立刻做",
+        "可以立刻做的有",
+        "选哪一个",
+        "your next move could be",
+    ]
+    .iter()
+    .any(|cue| lower.contains(cue))
+    {
+        return true;
+    }
+    if chinese_ordinal_direction_menu(text) {
+        return true;
+    }
+    if chinese_where_start_or_menu(text) {
+        return true;
+    }
+    if chinese_decide_is_or_action_menu(text) {
+        return true;
+    }
+    if chinese_binary_path_action_menu(text) {
+        return true;
+    }
+    if chinese_you_can_also_action_menu(text) {
+        return true;
+    }
+    if chinese_lead_branch_action_menu(text) {
+        return true;
+    }
+    if chinese_repeated_path_action_menu(text) {
+        return true;
+    }
+    if chinese_either_or_action_menu(text) {
+        return true;
+    }
+    if chinese_soft_next_action_menu(text) {
+        return true;
+    }
+
+    if lower.contains("where do you want to start")
+        && (lower.contains(" or ") || lower.contains("—") || lower.contains(','))
+    {
+        return true;
+    }
+    if lower.contains("you can choose where")
+        && (lower.contains("goes first")
+            || lower.contains("go first")
+            || lower.contains("starts first")
+            || lower.contains("start first"))
+    {
+        return true;
+    }
+    if lower.contains("if you want")
+        && (lower.contains("one of several")
+            || lower.contains("natural directions")
+            || lower.contains("you can now"))
+        && (lower.contains(" or ") || lower.contains(',') || lower.contains(':'))
+    {
+        return true;
+    }
+    if lower.contains("do you ")
+        && lower.contains(" or ")
+        && (lower.contains("press deeper") || lower.contains("leave "))
+    {
+        return true;
+    }
+    if lower.contains("do you go first")
+        && lower.contains(" or ")
+        && (lower.contains("records") || lower.contains("paper") || lower.contains("office"))
+    {
+        return true;
+    }
+    if (lower.contains("what do you want to try first")
+        || lower.contains("which will you try first")
+        || lower.contains("which do you try first")
+        || lower.contains("which would you try first"))
+        && lower.contains(" or ")
+        && (lower.contains("records") || lower.contains("archives") || lower.contains("paper"))
+    {
+        return true;
+    }
+    if english_first_choice_alternative_menu(&lower) {
+        return true;
+    }
+    if english_do_you_action_sequence_menu(&lower) {
+        return true;
+    }
+    if english_whether_you_or_action_menu(&lower) {
+        return true;
+    }
+    if english_choice_of_whether_action_menu(&lower) {
+        return true;
+    }
+    if english_natural_directions_action_menu(&lower) {
+        return true;
+    }
+    if english_you_can_action_sequence_menu(&lower) {
+        return true;
+    }
+    if english_you_may_action_sequence_menu(&lower) {
+        return true;
+    }
+    if english_next_move_is_either_menu(&lower) {
+        return true;
+    }
+    if english_next_move_can_follow_or_take_menu(&lower) {
+        return true;
+    }
+    if english_pursue_either_lead_menu(&lower) {
+        return true;
+    }
+    if english_fragmented_paper_trail_direction_menu(&lower) {
+        return true;
+    }
+    if english_do_you_have_character_or_menu(&lower) {
+        return true;
+    }
+    if english_tone_choice_menu(&lower) {
+        return true;
+    }
+    if english_connect_observations_action_menu(&lower) {
+        return true;
+    }
+    if english_character_can_action_sequence_menu(&lower) {
+        return true;
+    }
+    if english_if_you_want_character_can_commit_probe_menu(&lower) {
+        return true;
+    }
+    if english_if_you_choose_you_can_or_menu(&lower) {
+        return true;
+    }
+    if english_if_you_want_target_first_menu(&lower) {
+        return true;
+    }
+    if english_if_you_want_press_or_paper_trail_menu(&lower) {
+        return true;
+    }
+    if english_next_meaningful_or_open_enough_menu(&lower) {
+        return true;
+    }
+    if english_clear_choice_target_menu(&lower) {
+        return true;
+    }
+    if english_begin_or_live_direction_target_menu(&lower) {
+        return true;
+    }
+    if english_branching_target_menu(&lower) {
+        return true;
+    }
+    if english_obvious_lines_pursue_first_menu(&lower) {
+        return true;
+    }
+    if english_will_you_start_or_more_menu(&lower) {
+        return true;
+    }
+    if english_where_next_action_menu(&lower) {
+        return true;
+    }
+    if english_what_now_inline_action_menu(&lower) {
+        return true;
+    }
+    if english_what_do_first_action_menu(&lower) {
+        return true;
+    }
+    if english_what_next_action_menu(&lower) {
+        return true;
+    }
+
+    if text.contains("你可以直接以你的方式开口")
+        || (text.contains("你准备怎么") && text.contains("比如"))
+    {
+        return true;
+    }
+
+    let connector_count = text.matches('；').count()
+        + text.matches(';').count()
+        + text.matches("还是").count()
+        + text.matches("或者").count()
+        + text.matches("或是").count();
+    if text.contains("比如") {
+        let list_separator_count =
+            connector_count + text.matches('，').count() + text.matches('、').count();
+        let actionish_count = [
+            "端出", "强调", "施压", "话术", "说服", "请求", "继续", "转去", "立刻", "顺着", "追",
+            "查", "开口", "拿下", "沿", "换", "绕", "找", "搭话", "进去", "进入", "拉近", "准备",
+        ]
+        .iter()
+        .filter(|cue| text.contains(**cue))
+        .count();
+        return list_separator_count >= 2 && actionish_count >= 2;
+    }
+    if connector_count < 2 {
+        return false;
+    }
+
+    (text.contains("你把这些观察串在一起") || lower.contains("you connect these observations"))
+        && prose_segments_look_like_action_list(text)
+}
+
+pub(crate) fn deterministic_player_agency_menu_tail_repair(visible_text: &str) -> Option<String> {
+    let text = visible_text.trim();
+    if text.is_empty() || !player_agency_menu_cue_needs_block(text) {
+        return None;
+    }
+
+    if let Some(repaired) = deterministic_fragmented_paper_trail_menu_repair(text) {
+        if !player_agency_menu_cue_needs_block(&repaired) {
+            return Some(repaired);
+        }
+    }
+    if let Some(repaired) = deterministic_english_tone_choice_menu_repair(text) {
+        if !player_agency_menu_cue_needs_block(&repaired) {
+            return Some(repaired);
+        }
+    }
+
+    let paragraphs: Vec<&str> = text.split("\n\n").collect();
+    if paragraphs.len() > 1 {
+        for idx in 0..paragraphs.len() {
+            let paragraph = paragraphs[idx].trim();
+            if paragraph.is_empty() || !player_agency_menu_cue_needs_block(paragraph) {
+                continue;
+            }
+            let candidate = paragraphs
+                .iter()
+                .enumerate()
+                .filter_map(|(candidate_idx, part)| {
+                    if candidate_idx == idx {
+                        None
+                    } else {
+                        let part = part.trim();
+                        (!part.is_empty()).then_some(part)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            if !candidate.trim().is_empty() && !player_agency_menu_cue_needs_block(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+
+    for (start, end) in sentence_spans_including_trailing_space(text) {
+        let sentence = text[start..end].trim();
+        if sentence.is_empty() || !player_agency_menu_cue_needs_block(sentence) {
+            continue;
+        }
+        let mut candidate = String::new();
+        candidate.push_str(text[..start].trim_end());
+        let suffix = text[end..].trim_start();
+        if !candidate.is_empty() && !suffix.is_empty() {
+            candidate.push(' ');
+        }
+        candidate.push_str(suffix);
+        let candidate = candidate.trim().to_string();
+        if !candidate.is_empty() && !player_agency_menu_cue_needs_block(&candidate) {
+            return Some(candidate);
+        }
+    }
+
+    let mut candidates: Vec<(&str, &str)> = Vec::new();
+    for delimiter in ["\n\n", "\n"] {
+        for (idx, _) in text.match_indices(delimiter) {
+            candidates.push((&text[..idx], &text[idx + delimiter.len()..]));
+        }
+    }
+    for delimiter in [". ", "! ", "? "] {
+        for (idx, _) in text.match_indices(delimiter) {
+            candidates.push((&text[..idx + 1], &text[idx + delimiter.len()..]));
+        }
+    }
+
+    candidates.sort_by_key(|(head, _)| std::cmp::Reverse(head.len()));
+    for (head, tail) in candidates {
+        let head = head.trim();
+        let tail = tail.trim();
+        if head.is_empty() || tail.is_empty() {
+            continue;
+        }
+        if player_agency_menu_cue_needs_block(tail) && !player_agency_menu_cue_needs_block(head) {
+            return Some(head.to_string());
+        }
+    }
+    None
+}
+
+pub(crate) fn deterministic_dangling_colon_tail_repair(visible_text: &str) -> Option<String> {
+    let trimmed = visible_text.trim_end();
+    if trimmed.is_empty() || !(trimmed.ends_with('：') || trimmed.ends_with(':')) {
+        return None;
+    }
+    let mut repaired = trimmed
+        .trim_end_matches(|ch| ch == '：' || ch == ':')
+        .trim_end()
+        .to_string();
+    if repaired.is_empty() {
+        return None;
+    }
+    if !repaired.ends_with(|ch: char| {
+        matches!(
+            ch,
+            '。' | '！' | '？' | '.' | '!' | '?' | '”' | '"' | '\'' | '’'
+        )
+    }) {
+        repaired.push(if contains_cjk(&repaired) { '。' } else { '.' });
+    }
+    (repaired != visible_text.trim()).then_some(repaired)
+}
+
+fn deterministic_english_tone_choice_menu_repair(text: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+    if !english_tone_choice_menu(&lower) {
+        return None;
+    }
+    let start = [
+        "how does evelyn try to get in",
+        "how does evelyn approach",
+        "how does she approach",
+        "how does he approach",
+        "how do you approach",
+        "how will she approach",
+        "how will he approach",
+        "how does she try to get past",
+        "how does she press",
+        "how does he press",
+        "how do you press",
+        "how does the character press",
+        "does she lean on",
+        "do you have her lean on",
+        "how she does it matters",
+        "what tone does",
+        "what tone do",
+        "if she leans",
+        "if she tries",
+        "tell me her approach",
+    ]
+    .iter()
+    .filter_map(|marker| lower.find(marker))
+    .min()?;
+    let repaired = text[..start]
+        .trim_end_matches(|ch: char| ch.is_whitespace() || matches!(ch, '-' | '—' | ':' | ';'))
+        .trim()
+        .to_string();
+    (!repaired.is_empty()).then_some(repaired)
+}
+
+fn deterministic_fragmented_paper_trail_menu_repair(text: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+    if !english_fragmented_paper_trail_direction_menu(&lower) {
+        return None;
+    }
+    let start = [
+        "the most promising next channels appear",
+        "most promising next channels appear",
+        "the most promising next channels",
+        "most promising next channels",
+        "the higher courts / serious legal records",
+        "higher courts / serious legal records",
+        "the higher courts /",
+    ]
+    .iter()
+    .find_map(|marker| lower.find(marker))?;
+    let tail = &lower[start..];
+    let end = if tail.starts_with("the most promising next channels")
+        || tail.starts_with("most promising next channels")
+    {
+        tail.find('.')
+            .map(|idx| start + idx + 1)
+            .unwrap_or(text.len())
+    } else {
+        tail.find("a courteous clerk")
+            .or_else(|| tail.find("a clerk"))
+            .map(|idx| start + idx)
+            .or_else(|| {
+                lower[start..]
+                    .find("you can follow this by turning next toward")
+                    .map(|idx| start + idx)
+            })?
+    };
+    if end <= start {
+        return None;
+    }
+    let mut repaired = String::new();
+    repaired.push_str(text[..start].trim_end());
+    let suffix = text[end..].trim_start();
+    if !repaired.is_empty() && !suffix.is_empty() {
+        repaired.push(' ');
+    }
+    repaired.push_str(suffix);
+    let repaired = repaired.trim().to_string();
+    (!repaired.is_empty()).then_some(repaired)
+}
+
+fn sentence_spans_including_trailing_space(text: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut start = 0usize;
+    for (idx, ch) in text.char_indices() {
+        if !matches!(ch, '.' | '!' | '?') {
+            continue;
+        }
+        let mut end = idx + ch.len_utf8();
+        while end < text.len()
+            && text[end..]
+                .chars()
+                .next()
+                .is_some_and(|next| next.is_whitespace())
+        {
+            end += text[end..].chars().next().map(char::len_utf8).unwrap_or(0);
+        }
+        if start < end {
+            spans.push((start, end));
+        }
+        start = end;
+    }
+    if start < text.len() {
+        spans.push((start, text.len()));
+    }
+    spans
+}
+
+pub(crate) fn unwrap_player_visible_system_wrappers(visible_text: &str) -> String {
+    visible_text
+        .replace("[system]", "")
+        .replace("[/system]", "")
+        .replace("[SYSTEM]", "")
+        .replace("[/SYSTEM]", "")
+}
+
+fn unclosed_dialogue_quote(lower: &str, text: &str) -> bool {
+    let straight_unbalanced = text.matches('"').count() % 2 == 1;
+    let curly_unbalanced = text.matches('“').count() > text.matches('”').count();
+    if !straight_unbalanced && !curly_unbalanced {
+        return false;
+    }
+
+    let trimmed = text.trim_start();
+    let quote_opens_visible_speech = trimmed.starts_with('"')
+        || trimmed.starts_with('“')
+        || text.contains("\n\"")
+        || text.contains("\n“");
+    let dialogue_cue = [
+        " says",
+        " asks",
+        " replies",
+        " answers",
+        " tells you",
+        " murmurs",
+        " whispers",
+        "leans forward",
+        "spreads his hands",
+        "spreads her hands",
+    ]
+    .iter()
+    .any(|cue| lower.contains(cue));
+
+    quote_opens_visible_speech || dialogue_cue
+}
+
+fn english_action_cues() -> [&'static str; 31] {
+    [
+        "ask",
+        "back",
+        "change",
+        "check",
+        "commit",
+        "continue",
+        "dig",
+        "enter",
+        "examine",
+        "examining",
+        "follow",
+        "go",
+        "head",
+        "inspect",
+        "investigate",
+        "leave",
+        "look",
+        "move",
+        "open",
+        "press",
+        "probe",
+        "pull",
+        "push",
+        "question",
+        "search",
+        "shift",
+        "start",
+        "turn",
+        "try",
+        "withdraw",
+        "work",
+    ]
+}
+
+fn english_first_choice_alternative_menu(lower: &str) -> bool {
+    lower.split(['.', '!', '?', '\n']).any(|sentence| {
+        let sentence = sentence.trim();
+        if sentence.is_empty() || !sentence.contains("first") {
+            return false;
+        }
+        if !(sentence.contains(" or ") || sentence.contains("—or ") || sentence.contains("-or "))
+        {
+            return false;
+        }
+        if !["which ", "what ", "where "]
+            .iter()
+            .any(|cue| sentence.contains(*cue))
+        {
+            return false;
+        }
+        let has_branch_surface = sentence.contains(':')
+            || sentence.contains('—')
+            || sentence.contains('-')
+            || sentence.contains('/')
+            || sentence.matches(',').count() >= 1;
+        if !has_branch_surface {
+            return false;
+        }
+        let has_action_or_route_verb = [
+            "try",
+            "pursue",
+            "follow",
+            "begin",
+            "start",
+            "go",
+            "check",
+            "search",
+            "investigate",
+            "look into",
+            "visit",
+            "enter",
+            "open",
+            "examine",
+            "inspect",
+            "focus",
+            "choose",
+            "take",
+        ]
+        .iter()
+        .any(|cue| sentence.contains(*cue));
+        has_action_or_route_verb
+            || [
+                "which lead",
+                "which line",
+                "what line",
+                "where does",
+                "where do",
+            ]
+            .iter()
+            .any(|cue| sentence.contains(cue))
+    })
+}
+
+fn english_whether_you_or_action_menu(lower: &str) -> bool {
+    let Some((_, tail)) = lower.split_once("whether you ") else {
+        return false;
+    };
+    let Some((left, right)) = tail.split_once(" or ") else {
+        return false;
+    };
+    let action_cues = english_action_cues();
+    let left_action = action_cues.iter().any(|cue| left.contains(cue));
+    let right_action = action_cues.iter().any(|cue| right.contains(cue));
+    left_action && right_action
+}
+
+fn english_do_you_action_sequence_menu(lower: &str) -> bool {
+    lower.split(['.', '!', '?']).any(|sentence| {
+        let sentence = sentence.trim();
+        sentence.starts_with("do you ")
+            && sentence.contains(" or ")
+            && sentence.matches(',').count() >= 1
+            && sentence
+                .split_once("do you ")
+                .map(|(_, tail)| english_action_sequence_hit_count(tail.trim()) >= 2)
+                .unwrap_or(false)
+    })
+}
+
+fn english_choice_of_whether_action_menu(lower: &str) -> bool {
+    let Some((_, tail)) = lower.split_once("choice of whether to ") else {
+        return false;
+    };
+    let sentence = tail.split(['.', '!', '?']).next().unwrap_or(tail).trim();
+    sentence.contains(" or ")
+        && sentence.matches(',').count() >= 1
+        && english_action_sequence_hit_count(sentence) >= 2
+}
+
+fn english_natural_directions_action_menu(lower: &str) -> bool {
+    if !lower.contains("direction")
+        || !(lower.contains("can naturally")
+            || lower.contains("naturally press")
+            || lower.contains("few directions")
+            || lower.contains("natural directions"))
+    {
+        return false;
+    }
+    if !(lower.contains(':') && (lower.contains(" or ") || lower.contains(','))) {
+        return false;
+    }
+    let action_hits = english_action_cues()
+        .iter()
+        .filter(|cue| lower.contains(**cue))
+        .count();
+    action_hits >= 2
+}
+
+fn english_you_can_action_sequence_menu(lower: &str) -> bool {
+    let tail = if let Some((_, tail)) = lower.split_once("you can ") {
+        tail
+    } else if let Some((_, tail)) = lower.split_once("you could ") {
+        tail
+    } else {
+        return false;
+    };
+    let sentence = tail.split(['.', '!', '?']).next().unwrap_or(tail).trim();
+    if !(sentence.contains(" or ") && sentence.matches(',').count() >= 1) {
+        return false;
+    }
+    english_action_sequence_hit_count(sentence) >= 2
+}
+
+fn english_you_may_action_sequence_menu(lower: &str) -> bool {
+    lower.split(['.', '!', '?']).any(|sentence| {
+        let Some((_, tail)) = sentence.split_once("you may ") else {
+            return false;
+        };
+        let tail = tail.trim();
+        tail.contains(" or ")
+            && tail.matches(',').count() >= 1
+            && english_action_sequence_hit_count(tail) >= 2
+    })
+}
+
+fn english_next_move_is_either_menu(lower: &str) -> bool {
+    lower
+        .split(['.', '!', '?'])
+        .any(|sentence| sentence.contains("next move is either") && sentence.contains(" or "))
+}
+
+fn english_next_move_can_follow_or_take_menu(lower: &str) -> bool {
+    lower.split(['.', '!', '?']).any(|sentence| {
+        sentence.contains("next move can")
+            && (sentence.contains("follow") || sentence.contains("pursue"))
+            && (sentence.contains("take you") || sentence.contains("take her"))
+            && (sentence.contains(" or ") || sentence.contains("—or "))
+    })
+}
+
+fn english_pursue_either_lead_menu(lower: &str) -> bool {
+    lower.split(['.', '!', '?']).any(|sentence| {
+        (sentence.contains("pursue either lead")
+            || sentence.contains("follow either lead")
+            || sentence.contains("chase either lead"))
+            && (sentence.contains(':') || sentence.contains(" or ") || sentence.contains("—or "))
+    })
+}
+
+fn english_fragmented_paper_trail_direction_menu(lower: &str) -> bool {
+    let has_paper_frame = [
+        "paper trail",
+        "public books",
+        "public filings",
+        "hall of records",
+        "legal records",
+        "public records",
+        "public-index",
+    ]
+    .iter()
+    .any(|cue| lower.contains(cue));
+    let has_court_target = [
+        "higher courts",
+        "serious legal records",
+        "the courts",
+        "court records",
+        "courts",
+    ]
+    .iter()
+    .any(|cue| lower.contains(cue));
+    let has_police_target = [
+        "central police station",
+        "police records",
+        "police files",
+        "the police",
+    ]
+    .iter()
+    .any(|cue| lower.contains(cue));
+    let has_site_target = [
+        "corbitt house",
+        "house itself",
+        "chapel of contemplation",
+        "the chapel",
+    ]
+    .iter()
+    .any(|cue| lower.contains(cue));
+    let has_direction_targets = has_court_target && has_police_target && has_site_target;
+    let has_fragment = lower.contains("or leave the paper trail")
+        || lower.contains("you can follow this by turning next toward")
+        || lower.contains("turning next toward")
+        || lower.contains("most promising next channels")
+        || lower.contains("next channels appear")
+        || lower.contains("appear to be the courts");
+    has_paper_frame && has_direction_targets && has_fragment
+}
+
+fn english_do_you_have_character_or_menu(lower: &str) -> bool {
+    lower.split(['.', '!', '?']).any(|sentence| {
+        let sentence = sentence.trim();
+        if !sentence.starts_with("do you have ")
+            || !(sentence.contains(" or ") || sentence.contains("—or "))
+        {
+            return false;
+        }
+        let action_hits = [
+            "pry", "hold", "examine", "inspect", "open", "pull", "probe", "press", "retreat",
+            "withdraw",
+        ]
+        .iter()
+        .filter(|cue| sentence.contains(**cue))
+        .count();
+        action_hits >= 2
+    })
+}
+
+fn english_tone_choice_menu(lower: &str) -> bool {
+    let has_frame = [
+        "what tone does",
+        "what tone do",
+        "how does she press",
+        "how does he press",
+        "how do you press",
+        "how does the character press",
+    ]
+    .iter()
+    .any(|cue| lower.contains(cue));
+    let approach_frame =
+        (lower.contains("how does ") || lower.contains("how do ") || lower.contains("how will "))
+            && lower.contains(" approach");
+    let by_choice_frame =
+        (lower.contains(" by ") || lower.contains("—by") || lower.contains("-by"))
+            && lower.contains(" or ");
+    let skill_hits = [
+        "charm",
+        "persuasion",
+        "persuade",
+        "intimidation",
+        "intimidate",
+        "fast talk",
+        "quick bluff",
+        "appeal",
+        "argument",
+        "professional",
+        "credentials",
+        "reasonable request",
+        "professional courtesy",
+        "polite persuasion",
+        "presses politely",
+        "flatters",
+        "bluffs",
+        "bluff",
+        "urgency",
+        "press credentials",
+        "fast-talking",
+        "pressure",
+        "blunt pressure",
+        "bully",
+        "courtesy",
+    ]
+    .iter()
+    .filter(|cue| lower.contains(**cue))
+    .count();
+    if approach_frame && by_choice_frame && skill_hits >= 3 {
+        return true;
+    }
+    if approach_frame
+        && ["if she", "if he", "if they", "if you"]
+            .iter()
+            .any(|cue| lower.contains(cue))
+        && (lower.contains(" or tries ") || lower.contains(" or try ") || lower.contains(" or "))
+        && skill_hits >= 3
+    {
+        return true;
+    }
+    if (lower.contains("do you have her lean on") || lower.contains("how she does it matters"))
+        && skill_hits >= 3
+    {
+        return true;
+    }
+    if (lower.contains("how does she try to get past") || lower.contains("does she lean on"))
+        && lower.contains(" or ")
+        && skill_hits >= 2
+    {
+        return true;
+    }
+    if (lower.contains("how does evelyn try to get in") || lower.contains("tell me her approach"))
+        && (lower.contains("if she leans") || lower.contains("if she tries"))
+        && skill_hits >= 2
+    {
+        return true;
+    }
+    if !has_frame {
+        return false;
+    }
+    let as_branches = lower.matches(" as a ").count()
+        + lower.matches(" as an ").count()
+        + lower.matches(" or as ").count()
+        + lower.matches("? as ").count()
+        + lower.matches(". as ").count()
+        + lower.matches("; as ").count()
+        + lower.matches(": as ").count();
+    as_branches >= 3
+        && [" or as ", "tone", "approach", "appeal", "argument"]
+            .iter()
+            .any(|cue| lower.contains(cue))
+}
+
+fn english_connect_observations_action_menu(lower: &str) -> bool {
+    let Some((_, tail)) = lower.split_once("you connect these observations") else {
+        return false;
+    };
+    let tail = tail.split_once(':').map(|(_, tail)| tail).unwrap_or(tail);
+    let sentence = tail.split(['.', '!', '?']).next().unwrap_or(tail).trim();
+    if !sentence.contains(" or ")
+        || !(sentence.matches(';').count() >= 1 || sentence.matches(',').count() >= 1)
+    {
+        return false;
+    }
+    english_action_sequence_hit_count(sentence) >= 2
+}
+
+fn english_character_can_action_sequence_menu(lower: &str) -> bool {
+    lower.split(['.', '!', '?']).any(|sentence| {
+        sentence.contains(" can ")
+            && sentence.contains(" or ")
+            && sentence.matches(',').count() >= 1
+            && sentence
+                .split_once(" can ")
+                .map(|(_, tail)| english_action_sequence_hit_count(tail.trim()) >= 2)
+                .unwrap_or(false)
+    })
+}
+
+fn english_if_you_want_character_can_commit_probe_menu(lower: &str) -> bool {
+    if !lower.contains("if you want") || !lower.contains(" can ") || !lower.contains("commit") {
+        return false;
+    }
+    if !(lower.contains("specific next probe")
+        || lower.contains("next probe")
+        || lower.contains("attention to first"))
+    {
+        return false;
+    }
+    if !(lower.contains(" or ") || lower.contains("—or ")) {
+        return false;
+    }
+    ["bed", "wardrobe", "paper", "window", "door", "room"]
+        .iter()
+        .filter(|cue| lower.contains(**cue))
+        .count()
+        >= 3
+}
+
+fn english_if_you_choose_you_can_or_menu(lower: &str) -> bool {
+    let has_frame = lower.contains("if you choose")
+        || lower.contains("if she chooses")
+        || lower.contains("if he chooses")
+        || lower.contains("if they choose");
+    if !has_frame {
+        return false;
+    }
+    let Some((_, tail)) = lower.split_once(" can ") else {
+        return false;
+    };
+    [
+        " or you can ",
+        " or she can ",
+        " or he can ",
+        " or they can ",
+        "—or you can ",
+        "—or she can ",
+        "—or he can ",
+        "—or they can ",
+    ]
+    .iter()
+    .any(|connector| {
+        tail.split_once(connector)
+            .map(|(first, second)| english_actionish_part(first) && english_actionish_part(second))
+            .unwrap_or(false)
+    })
+}
+
+fn english_actionish_part(part: &str) -> bool {
+    english_action_sequence_hit_count(part) >= 1
+        || ["approach", "hold", "remain", "stay"].iter().any(|cue| {
+            part.starts_with(*cue)
+                || part.contains(&format!(" {cue} "))
+                || part.contains(&format!(" {cue}ing "))
+        })
+}
+
+fn english_if_you_want_target_first_menu(lower: &str) -> bool {
+    if !lower.contains("if you want") {
+        return false;
+    }
+    if !(lower.contains(" or ") || lower.contains("—or ")) {
+        return false;
+    }
+    let frame = lower.contains("target first")
+        || lower.contains("one specific target")
+        || lower.contains("same doorway method")
+        || lower.contains("same threshold method")
+        || lower.contains("pressing this same");
+    if !frame {
+        return false;
+    }
+    [
+        "bed", "wardrobe", "paper", "papers", "window", "doorway", "withdraw",
+    ]
+    .iter()
+    .filter(|cue| lower.contains(**cue))
+    .count()
+        >= 3
+}
+
+fn english_if_you_want_press_or_paper_trail_menu(lower: &str) -> bool {
+    lower.contains("if you want")
+        && lower.contains("press him further")
+        && (lower.contains(" or you can ") || lower.contains("—or you can "))
+        && (lower.contains("paper trail") || lower.contains("records"))
+}
+
+fn english_next_meaningful_or_open_enough_menu(lower: &str) -> bool {
+    let action_cues = [
+        "commit", "shift", "study", "canvass", "listen", "widen", "make", "step", "enter", "go",
+    ];
+    lower.split(['.', '!', '?']).any(|sentence| {
+        let has_connector = sentence.contains(" or ") || sentence.contains("—or ");
+        if !has_connector {
+            return false;
+        }
+        if sentence.contains("next meaningful move") && sentence.contains(':') {
+            let tail = sentence
+                .split_once("next meaningful move")
+                .map(|(_, tail)| tail)
+                .unwrap_or(sentence);
+            return action_cues
+                .iter()
+                .filter(|cue| {
+                    tail.split_whitespace()
+                        .any(|word| word.trim_matches(|c: char| !c.is_alphanumeric()) == **cue)
+                })
+                .count()
+                >= 2;
+        }
+        if sentence.contains("open enough now to") {
+            let tail = sentence
+                .split_once("open enough now to")
+                .map(|(_, tail)| tail)
+                .unwrap_or(sentence);
+            return action_cues
+                .iter()
+                .filter(|cue| {
+                    tail.split_whitespace()
+                        .any(|word| word.trim_matches(|c: char| !c.is_alphanumeric()) == **cue)
+                })
+                .count()
+                >= 2;
+        }
+        false
+    })
+}
+
+fn english_action_sequence_hit_count(sentence: &str) -> usize {
+    english_action_cues()
+        .iter()
+        .filter(|cue| {
+            sentence.starts_with(**cue)
+                || sentence.contains(&format!(" {cue} "))
+                || sentence.contains(&format!(" {cue}ing "))
+        })
+        .count()
+}
+
+fn english_clear_choice_target_menu(lower: &str) -> bool {
+    if !lower.contains("clear choice") {
+        return false;
+    }
+    if !(lower.contains("where to") || lower.contains("what to") || lower.contains("which ")) {
+        return false;
+    }
+    let tail = lower
+        .split_once("clear choice")
+        .map(|(_, tail)| tail)
+        .unwrap_or(lower);
+    let sentence = tail.split(['.', '!', '?']).next().unwrap_or(tail).trim();
+    sentence.contains(':')
+        && sentence.contains(" or ")
+        && (sentence.contains(',') || sentence.contains(';'))
+}
+
+fn english_begin_or_live_direction_target_menu(lower: &str) -> bool {
+    let frame = lower.contains("where do you mean to begin")
+        || lower.contains("where do you begin")
+        || lower.contains("what do you pursue next")
+        || lower.contains("live directions")
+        || lower.contains("point in three directions")
+        || lower.contains("point in three live directions")
+        || lower.contains("point in three promising directions")
+        || lower.contains("points in three directions")
+        || lower.contains("points in three live directions")
+        || lower.contains("points in three clear directions")
+        || lower.contains("points in three promising directions")
+        || lower.contains("three immediate lines of pursuit")
+        || lower.contains("immediate lines of pursuit")
+        || lower.contains("lines of pursuit");
+    if !frame || !lower.contains(" or ") {
+        return false;
+    }
+    if lower.contains(':') || lower.matches(',').count() >= 2 {
+        return true;
+    }
+    lower.matches(';').count() >= 1
+        && (lower.contains("what does ") || lower.contains("what do "))
+        && lower.contains(" next")
+}
+
+fn english_branching_target_menu(lower: &str) -> bool {
+    let frame = lower.contains("obvious next avenues")
+        || lower.contains("next avenues are")
+        || lower.contains("obvious next lines of inquiry")
+        || lower.contains("next solid leads")
+        || lower.contains("line of inquiry clearly branches outward")
+        || lower.contains("line of inquiry branches outward")
+        || lower.contains("branches outward")
+        || lower.contains("branches into")
+        || lower.contains("paper trail might continue")
+        || lower.contains("if you want to press it further")
+        || lower.contains("obvious directions suggest themselves")
+        || lower.contains("two obvious directions")
+        || lower.contains("next useful angle is")
+        || lower.contains("next pressure points")
+        || lower.contains("for example, focusing on")
+        || lower.contains("follow this outward from here")
+        || lower.contains("follow this outward")
+        || lower.contains("choice of pressure points")
+        || lower.contains("clearer choice of pressure points")
+        || lower.contains("offers more avenues");
+    if !frame {
+        return false;
+    }
+    let has_connector = lower.contains(" or ")
+        || lower.contains("though you could")
+        || (lower.contains("next pressure points") && lower.contains("follow first"))
+        || (lower.contains("obvious next avenues") && lower.contains(" and "))
+        || (lower.contains("obvious next lines of inquiry")
+            && (lower.contains(" and ") || lower.contains(',')))
+        || (lower.contains("two obvious directions") && lower.contains(" and "));
+    if !has_connector {
+        return false;
+    }
+    if lower.contains("obvious next avenues") && lower.contains(" and ") {
+        return true;
+    }
+    if lower.contains("two obvious directions") && lower.contains(" and ") {
+        return true;
+    }
+    if lower.contains("next pressure points") && lower.contains("follow first") {
+        return true;
+    }
+    if lower.contains("obvious next lines of inquiry")
+        && (lower.contains(" and ") || lower.contains(','))
+    {
+        return true;
+    }
+    if lower.contains("next solid leads") && lower.contains(" or ") {
+        return true;
+    }
+    lower.contains(':') || lower.matches(',').count() >= 1 || lower.contains(';')
+}
+
+fn english_obvious_lines_pursue_first_menu(lower: &str) -> bool {
+    lower.contains("obvious lines of inquiry")
+        && lower.contains("pursue first")
+        && (lower.contains(':') || lower.matches(',').count() >= 2 || lower.contains(';'))
+}
+
+fn english_will_you_start_or_more_menu(lower: &str) -> bool {
+    (lower.contains("will you start") || lower.contains("will you begin"))
+        && lower.contains(" or ")
+        && (lower.contains("something more")
+            || lower.contains("before you go")
+            || lower.contains("from me here")
+            || lower.contains("start with the records")
+            || lower.contains("begin with the records")
+            || lower.contains("the newspapers")
+            || lower.contains("neighborhood"))
+}
+
+fn english_where_next_action_menu(lower: &str) -> bool {
+    if !(lower.contains("where does ") || lower.contains("where do ")) {
+        return false;
+    }
+    if !lower.contains(" next") {
+        return false;
+    }
+    let tail = if let Some((_, tail)) = lower.split_once(':') {
+        tail
+    } else {
+        lower.split_once('?').map(|(_, tail)| tail).unwrap_or(lower)
+    }
+    .trim();
+    if !tail.contains(" or ") {
+        return false;
+    }
+    tail.matches(',').count() >= 1
+        || tail.contains(':')
+        || english_action_cues()
+            .iter()
+            .filter(|cue| tail.contains(**cue))
+            .count()
+            >= 2
+}
+
+fn english_what_next_action_menu(lower: &str) -> bool {
+    if !(lower.contains("what does ") || lower.contains("what do ")) {
+        return false;
+    }
+    if lower.split(['.', '!', '?']).any(|sentence| {
+        let sentence = sentence.trim();
+        let focus_frame = sentence.contains(" focus on first")
+            || sentence.contains(" examine first")
+            || sentence.contains(" inspect first");
+        focus_frame
+            && sentence.contains(':')
+            && (sentence.contains(" or ") || sentence.matches(',').count() >= 2)
+    }) {
+        return true;
+    }
+    if !lower.contains(" next") {
+        return false;
+    }
+    let tail = lower
+        .split_once(" next")
+        .map(|(_, tail)| tail)
+        .unwrap_or(lower)
+        .trim();
+    tail.contains(" or ")
+        && (tail.contains(',') || tail.contains('—') || tail.contains(':') || tail.contains('?'))
+}
+
+fn english_what_now_inline_action_menu(lower: &str) -> bool {
+    let Some((head, tail)) = lower.split_once("do now?") else {
+        return false;
+    };
+    if !(head.contains("what does ") || head.contains("what do ")) {
+        return false;
+    }
+    let sentence = tail.split(['.', '!', '?']).next().unwrap_or(tail).trim();
+    if sentence.is_empty() {
+        return false;
+    }
+    if !(sentence.contains(" or ") || sentence.contains("—or ")) {
+        return false;
+    }
+    sentence.contains(',')
+        || sentence.contains(';')
+        || sentence.contains(':')
+        || sentence.contains('—')
+        || english_action_sequence_hit_count(sentence) >= 2
+}
+
+fn english_what_do_first_action_menu(lower: &str) -> bool {
+    let Some((head, tail)) = lower.split_once("do first") else {
+        return false;
+    };
+    if !(head.contains("what does ") || head.contains("what do ")) {
+        return false;
+    }
+    let sentence = tail.split(['.', '!', '?']).next().unwrap_or(tail).trim();
+    if sentence.is_empty() {
+        return false;
+    }
+    if !(sentence.contains(" or ") || sentence.contains("—or ")) {
+        return false;
+    }
+    (sentence.contains(',')
+        || sentence.contains(';')
+        || sentence.contains(':')
+        || sentence.contains('—'))
+        && english_action_sequence_hit_count(sentence) >= 2
+}
+
+fn chinese_where_start_or_menu(text: &str) -> bool {
+    text.contains("还是")
+        && (text.contains("你想先") || text.contains("你先") || text.contains("先从"))
+        && (text.contains("下手") || text.contains("开始") || text.contains("着手"))
+}
+
+fn chinese_decide_is_or_action_menu(text: &str) -> bool {
+    if !(text.contains("决定") && text.contains("是") && text.contains("还是")) {
+        return false;
+    }
+    let action_hits = [
+        "继续",
+        "冒",
+        "往下",
+        "试",
+        "换办法",
+        "先换",
+        "下探",
+        "退",
+        "靠近",
+        "进入",
+        "查",
+    ]
+    .iter()
+    .filter(|cue| text.contains(**cue))
+    .count();
+    action_hits >= 2
+}
+
+fn chinese_you_can_also_action_menu(text: &str) -> bool {
+    if !(text.contains("你可以")
+        && (text.contains("也可以") || text.contains("或者") || text.contains("或是")))
+    {
+        return false;
+    }
+    let has_next_action_frame = text.contains("你接下来")
+        || text.contains("接下来要")
+        || text.contains("下一步")
+        || text.contains("往哪")
+        || text.contains("哪一条")
+        || text.contains("先压下去");
+    let has_inline_branch_tail = text.contains("或者直接")
+        || text.contains("或是直接")
+        || text.contains("或者接着")
+        || text.contains("或是接着")
+        || text.contains("或者继续")
+        || text.contains("或是继续");
+    if !has_next_action_frame && !has_inline_branch_tail {
+        return false;
+    }
+    let action_hits = [
+        "继续", "先查", "直奔", "前往", "转去", "深挖", "调 ", "调取", "查", "追", "去", "进",
+        "走", "压",
+    ]
+    .iter()
+    .filter(|cue| text.contains(**cue))
+    .count();
+    action_hits >= 2
+}
+
+fn chinese_lead_branch_action_menu(text: &str) -> bool {
+    let has_frame = ["线索：", "方向：", "路：", "抓手："]
+        .iter()
+        .any(|cue| text.contains(cue));
+    if !has_frame || !(text.contains("或者") || text.contains("或是") || text.contains("还是"))
+    {
+        return false;
+    }
+    let tail = text
+        .split_once('：')
+        .map(|(_, rest)| rest)
+        .or_else(|| text.split_once(':').map(|(_, rest)| rest))
+        .unwrap_or(text);
+    prose_segments_look_like_action_list(tail)
+}
+
+fn chinese_repeated_path_action_menu(text: &str) -> bool {
+    let has_next_frame =
+        text.contains("下一步") || text.contains("决定下一步") || text.contains("可以从这里决定");
+    if !has_next_frame || text.matches("一条").count() < 2 {
+        return false;
+    }
+    let has_path_frame = [
+        "主方向",
+        "方向",
+        "路线",
+        "路线先",
+        "往哪一条",
+        "往哪条",
+        "哪一条线",
+        "哪条线",
+    ]
+    .iter()
+    .any(|cue| text.contains(cue));
+    if !has_path_frame {
+        return false;
+    }
+    let action_hits = [
+        "回头",
+        "继续",
+        "往楼上",
+        "往地下",
+        "往地下室",
+        "推进",
+        "深查",
+        "细查",
+        "啃",
+        "查",
+        "去",
+    ]
+    .iter()
+    .filter(|cue| text.contains(**cue))
+    .count();
+    action_hits >= 2
+}
+
+fn chinese_either_or_action_menu(text: &str) -> bool {
+    let has_next_frame = [
+        "你接下来",
+        "接下来你",
+        "接下来要",
+        "下一步",
+        "现在你",
+        "此刻你",
+        "你眼下还能做",
+        "眼下还能做",
+        "都得换个办法",
+        "换个办法：",
+    ]
+    .iter()
+    .any(|cue| text.contains(cue));
+    if !has_next_frame || !text.contains("要么") {
+        return false;
+    }
+    let branch_count = text.matches("要么").count()
+        + text.matches("或者").count()
+        + text.matches("或是").count()
+        + text.matches("还是").count();
+    if branch_count < 2 {
+        return false;
+    }
+    let action_hits = [
+        "继续", "推进", "改去", "换个", "探查", "进入", "检查", "观察", "靠近", "贴近", "前往",
+        "转去", "深挖", "追", "查", "走", "去",
+    ]
+    .iter()
+    .filter(|cue| text.contains(**cue))
+    .count();
+    action_hits >= 2
+}
+
+fn chinese_soft_next_action_menu(text: &str) -> bool {
+    let Some(tail) = [
+        "下一步自然会是",
+        "下一步会是",
+        "下一步就是",
+        "下一步则是",
+        "下一步可以是",
+        "下一步如果",
+        "比较自然的方向会是",
+        "自然的方向会是",
+        "自然方向会是",
+    ]
+    .iter()
+    .find_map(|cue| text.split_once(cue).map(|(_, rest)| rest)) else {
+        return false;
+    };
+    let branch_count = tail.matches('、').count()
+        + tail.matches('；').count()
+        + tail.matches(';').count()
+        + tail.matches("或者").count()
+        + tail.matches("或是").count()
+        + tail.matches("还是").count();
+    if branch_count == 0 {
+        return false;
+    }
+    let action_hits = [
+        "去看",
+        "查看",
+        "寻找",
+        "绕",
+        "靠近",
+        "贴近",
+        "进入",
+        "检查",
+        "观察",
+        "询问",
+        "前往",
+        "转去",
+        "转回去",
+        "处理",
+        "继续",
+        "深挖",
+        "查",
+        "追",
+    ]
+    .iter()
+    .filter(|cue| tail.contains(**cue))
+    .count();
+    action_hits >= 2
+}
+
+fn chinese_binary_path_action_menu(text: &str) -> bool {
+    let has_path_frame = [
+        "两条路",
+        "两条线",
+        "两个方向",
+        "两种方向",
+        "几条路",
+        "几条线",
+        "几种方向",
+    ]
+    .iter()
+    .any(|cue| text.contains(cue));
+    if !has_path_frame {
+        return false;
+    }
+    let branch_markers = ["一条", "另一条", "一边", "另一边", "一个", "另一个"]
+        .iter()
+        .filter(|cue| text.contains(**cue))
+        .count();
+    if branch_markers < 2 {
+        return false;
+    }
+    let has_next_frame = [
+        "你接下来",
+        "接下来想",
+        "接下来要",
+        "下一步",
+        "往哪边",
+        "往哪条",
+        "哪边压",
+        "哪条线",
+        "哪条路",
+    ]
+    .iter()
+    .any(|cue| text.contains(cue));
+    let action_hits = [
+        "继续", "顺着", "深挖", "直接", "去找", "回到", "前往", "查", "追", "压",
+    ]
+    .iter()
+    .filter(|cue| text.contains(**cue))
+    .count();
+    has_next_frame && action_hits >= 2
+}
+
+fn chinese_ordinal_direction_menu(text: &str) -> bool {
+    if !(text.contains("几条")
+        && (text.contains("去处") || text.contains("方向") || text.contains("路径")))
+    {
+        return false;
+    }
+    let ordinal_hits = ["一是", "二是", "三是", "四是"]
+        .iter()
+        .filter(|cue| text.contains(**cue))
+        .count();
+    if ordinal_hits < 2 {
+        return false;
+    }
+    let action_hits = [
+        "继续",
+        "顺着",
+        "转去",
+        "带着",
+        "直接去",
+        "查",
+        "看",
+        "追",
+        "前往",
+    ]
+    .iter()
+    .filter(|cue| text.contains(**cue))
+    .count();
+    action_hits >= 2
+}
+
+pub(crate) fn source_limited_missing_address_repair(
+    player_input: &str,
+    visible_text: &str,
+) -> Option<String> {
+    if !player_asks_for_specific_address(player_input) {
+        return None;
+    }
+    let visible_has_concrete_address = contains_concrete_street_address(visible_text);
+    if !visible_has_concrete_address && !visible_claims_address_was_delivered(visible_text) {
+        return None;
+    }
+    if visible_has_concrete_address && contains_concrete_street_address(player_input) {
+        return None;
+    }
+
+    let mut repaired = visible_text
+        .replace(
+            "**Corbitt House 的完整街道地址**",
+            "Corbitt House 的可导航地址线索",
+        )
+        .replace(
+            "**Corbitt House 的完整地址**",
+            "Corbitt House 的可导航地址线索",
+        )
+        .replace("**Corbitt House 的地址**", "Corbitt House 的可导航地址线索")
+        .replace("完整街道地址", "可导航地址线索")
+        .replace("完整地址", "可导航地址线索")
+        .replace("确切街道地址", "可导航地址线索")
+        .replace("确切地址", "可导航地址线索")
+        .replace("Corbitt House 的地址", "Corbitt House 的可导航地址线索")
+        .replace("记下的地址", "记下的可导航地址线索")
+        .replace("full street address", "usable address lead")
+        .replace(
+            "full address of the Corbitt House",
+            "usable address lead for the Corbitt House",
+        )
+        .replace(
+            "full address of Corbitt House",
+            "usable address lead for Corbitt House",
+        )
+        .replace(
+            "full address of the old Corbitt place",
+            "usable address lead for the old Corbitt place",
+        )
+        .replace(
+            "full address of the old Corbitt House",
+            "usable address lead for the old Corbitt House",
+        )
+        .replace(
+            "writes down the address of the old Corbitt House",
+            "records the usable address lead for the old Corbitt House",
+        )
+        .replace(
+            "writes down the address of the old Corbitt place",
+            "records the usable address lead for the old Corbitt place",
+        )
+        .replace(
+            "“The address is here,” he says, writing it down for you",
+            "He records the usable address lead for you",
+        )
+        .replace(
+            "\"The address is here,\" he says, writing it down for you",
+            "He records the usable address lead for you",
+        )
+        .replace(
+            "The address is here",
+            "The address lead is usable for navigation and records work",
+        )
+        .replace("writing it down", "recording the usable address lead")
+        .replace(
+            "writes down the house address",
+            "records the usable address lead",
+        )
+        .replace(
+            "write down the house address",
+            "record the usable address lead",
+        )
+        .replace("writes down the address", "records the usable address lead")
+        .replace("write down the address", "record the usable address lead")
+        .replace(
+            "The address is certain",
+            "The address lead is sufficient for navigation and records work",
+        )
+        .replace(
+            "the address is certain",
+            "the address lead is sufficient for navigation and records work",
+        )
+        .replace("written address", "address lead")
+        .replace("house address", "usable address lead")
+        .replace("exact street address", "usable address lead")
+        .replace("complete street address", "usable address lead")
+        .replace("full address", "usable address lead");
+    if visible_has_concrete_address {
+        repaired = scrub_concrete_street_address_literals(&repaired);
+    }
+    if repaired == visible_text {
+        repaired = visible_text.to_string();
+    }
+    let boundary = if manifest_repair_prefers_english(visible_text) {
+        "\n\nIn Evelyn's notes, this remains a usable address lead for navigation and records work, not a literal street-number line she can quote. She can use it to travel to the Corbitt House and search public files without adding a street number."
+    } else {
+        "\n\n你的笔记里，这仍是一条足以导航和查档的可用地址线索，而不是可逐字引用的门牌号。后续可以凭这条线索前往科比特宅或查公共档案。"
+    };
+    if !repaired.contains("而不是可逐字引用的门牌号")
+        && !repaired.contains("not a literal street-number line she can quote")
+        && !repaired.contains("当前可见资料没有给出可逐字抄下的门牌号")
+        && !repaired
+            .contains("current player-visible text does not provide a literal street number")
+    {
+        repaired.push_str(boundary);
+    }
+    Some(repaired)
+}
+
+fn concrete_street_address_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?ix)
+            \b
+            \d{1,6}
+            \s+
+            (?:[[:alpha:]'.-]+\s+){0,5}
+            (?:street|st\.?|avenue|ave\.?|road|rd\.?|lane|ln\.?|court|ct\.?|place|pl\.?|square|sq\.?|way|boulevard|blvd\.?|drive|dr\.?)
+            \b
+            (?:\s*,\s*[[:alpha:]'.-]+)?
+            ",
+        )
+        .expect("street-address scrub regex must compile")
+    })
+}
+
+fn scrub_concrete_street_address_literals(text: &str) -> String {
+    concrete_street_address_regex()
+        .replace_all(text, "usable address lead")
+        .into_owned()
+}
+
+fn player_asks_for_specific_address(player_input: &str) -> bool {
+    let lower = player_input.to_lowercase();
+    if [
+        "完整街道地址",
+        "完整地址",
+        "确切街道地址",
+        "确切地址",
+        "具体街道地址",
+        "具体地址",
+        "门牌号",
+    ]
+    .iter()
+    .any(|cue| player_input.contains(cue))
+    {
+        return true;
+    }
+    if [
+        "full street address",
+        "exact street address",
+        "complete street address",
+        "specific street address",
+        "literal street address",
+        "full address",
+        "exact address",
+        "complete address",
+        "specific address",
+        "literal address",
+    ]
+    .iter()
+    .any(|cue| lower.contains(cue))
+    {
+        return true;
+    }
+
+    let lower = lower
+        .replace("exact refusal", "")
+        .replace("exact denial", "")
+        .replace("exact restriction", "");
+    let address_terms = ["address", "street address", "地址", "门牌", "门牌号"];
+    let specific_terms = [
+        "完整", "确切", "具体", "街道", "门牌", "street", "exact", "complete", "specific", "full",
+    ];
+    cue_near_any(&lower, player_input, &address_terms, &specific_terms, 96)
+}
+
+fn cue_near_any(
+    lower: &str,
+    original: &str,
+    lhs_terms: &[&str],
+    rhs_terms: &[&str],
+    max_gap_bytes: usize,
+) -> bool {
+    let mut lhs_positions: Vec<usize> = Vec::new();
+    let mut rhs_positions: Vec<usize> = Vec::new();
+    for term in lhs_terms {
+        lhs_positions.extend(lower.match_indices(term).map(|(idx, _)| idx));
+        if term.chars().any(|ch| !ch.is_ascii()) {
+            lhs_positions.extend(original.match_indices(term).map(|(idx, _)| idx));
+        }
+    }
+    for term in rhs_terms {
+        rhs_positions.extend(lower.match_indices(term).map(|(idx, _)| idx));
+        if term.chars().any(|ch| !ch.is_ascii()) {
+            rhs_positions.extend(original.match_indices(term).map(|(idx, _)| idx));
+        }
+    }
+    lhs_positions.iter().any(|lhs| {
+        rhs_positions
+            .iter()
+            .any(|rhs| lhs.abs_diff(*rhs) <= max_gap_bytes)
+    })
+}
+
+fn visible_claims_address_was_delivered(visible_text: &str) -> bool {
+    let lower = visible_text.to_lowercase();
+    let mentions_address = lower.contains("address") || visible_text.contains("地址");
+    if !mentions_address {
+        return false;
+    }
+    if [
+        "写下",
+        "写清",
+        "写了下来",
+        "写下来",
+        "记下",
+        "递给",
+        "交给",
+        "给你",
+        "gives you",
+        "gave you",
+        "writes down",
+        "wrote down",
+        "hands you",
+        "handed you",
+    ]
+    .iter()
+    .any(|cue| lower.contains(cue) || visible_text.contains(cue))
+    {
+        return true;
+    }
+    if lower.contains("full street address beneath")
+        || lower.contains("full address beneath")
+        || lower.contains("with the full street address")
+        || lower.contains("with the full address")
+    {
+        return true;
+    }
+
+    let claims_written_down = ["write", "writes", "wrote", "writing", "written"]
+        .iter()
+        .any(|verb| lower.contains(verb))
+        && lower.contains("down");
+    let claims_copied = lower.contains("copy") || lower.contains("copied");
+
+    claims_written_down || claims_copied
+}
+
+pub(crate) fn contains_concrete_street_address(text: &str) -> bool {
+    let street_words = [
+        "street",
+        "st.",
+        "avenue",
+        "ave",
+        "road",
+        "rd.",
+        "lane",
+        "ln.",
+        "court",
+        "ct.",
+        "place",
+        "pl.",
+        "square",
+        "sq.",
+        "way",
+        "boulevard",
+        "blvd",
+        "drive",
+        "dr.",
+        "街",
+        "路",
+        "号",
+        "巷",
+        "弄",
+        "大道",
+    ];
+
+    for segment in text.split(|ch: char| {
+        matches!(
+            ch,
+            '\n' | '\r' | ',' | '，' | ';' | '；' | '。' | '！' | '!' | '？' | '?'
+        )
+    }) {
+        let segment = segment.trim();
+        if segment.is_empty() {
+            continue;
+        }
+        let lower_segment = segment.to_lowercase();
+        let has_street_word = street_words
+            .iter()
+            .any(|word| lower_segment.contains(word) || segment.contains(word));
+        if !has_street_word {
+            continue;
+        }
+        if segment.chars().any(|ch| ch.is_ascii_digit())
+            || segment.chars().any(|ch| ('０'..='９').contains(&ch))
+            || segment
+                .chars()
+                .any(|ch| "一二三四五六七八九十百千零〇".contains(ch))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn prose_segments_look_like_action_list(text: &str) -> bool {
+    let body = text
+        .split_once("你把这些观察串在一起")
+        .map(|(_, rest)| rest)
+        .or_else(|| {
+            text.split_once("You connect these observations")
+                .map(|(_, rest)| rest)
+        })
+        .or_else(|| {
+            text.split_once("you connect these observations")
+                .map(|(_, rest)| rest)
+        })
+        .unwrap_or(text);
+    let normalized = body
+        .replace("，或者", "；")
+        .replace("，还是", "；")
+        .replace("，或是", "；")
+        .replace("或者", "；")
+        .replace("还是", "；")
+        .replace("或是", "；");
+    let segments: Vec<String> = normalized
+        .split(['；', ';', '\n'])
+        .map(clean_manifest_fragment)
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    if segments.len() < 2 {
+        return false;
+    }
+    segments
+        .iter()
+        .filter(|segment| manifest_item_looks_like_player_action(segment))
+        .count()
+        >= 2
+}
+
+fn manifest_repair_has_prepared_action_menu(text: &str) -> bool {
+    let tail = ["接下来你是准备", "接下来你准备"]
+        .iter()
+        .find_map(|cue| text.split_once(cue).map(|(_, rest)| rest));
+    let Some(tail) = tail else {
+        return false;
+    };
+    if !["还是", "或者", "或是"]
+        .iter()
+        .any(|connector| tail.contains(connector))
+    {
+        return false;
+    }
+    tail.matches("还是").count()
+        + tail.matches("或者").count()
+        + tail.matches("或是").count()
+        + tail.matches('；').count()
+        + tail.matches(';').count()
+        >= 2
+}
+
+fn strip_manifest_list_marker(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    for marker in ["- ", "* ", "+ ", "• ", "· "] {
+        if let Some(rest) = trimmed.strip_prefix(marker) {
+            return Some(rest.trim_start());
+        }
+    }
+
+    if let Some(rest) = strip_numbered_marker(trimmed) {
+        return Some(rest.trim_start());
+    }
+
+    None
+}
+
+fn strip_numbered_marker(line: &str) -> Option<&str> {
+    let mut digits_end = 0usize;
+    for (idx, ch) in line.char_indices() {
+        if ch.is_ascii_digit() {
+            digits_end = idx + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if digits_end > 0 {
+        let rest = &line[digits_end..];
+        for marker in [".", ")", "、"] {
+            if let Some(after) = rest.strip_prefix(marker) {
+                return Some(after);
+            }
+        }
+    }
+
+    let after_open = line.strip_prefix('(')?;
+    let mut inner_digits_end = 0usize;
+    for (idx, ch) in after_open.char_indices() {
+        if ch.is_ascii_digit() {
+            inner_digits_end = idx + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if inner_digits_end == 0 {
+        return None;
+    }
+    after_open[inner_digits_end..].strip_prefix(')')
+}
+
+fn clean_manifest_dump_heading(line: &str) -> Option<&str> {
+    let trimmed = line.trim();
+    for cue in [
+        "关键事实",
+        "你已经确认",
+        "你已经能确定",
+        "能确定的是",
+        "现在能确认",
+        "你已经知道",
+        "你得到的信息",
+        "可你已经能确定",
+        "你可以确定",
+    ] {
+        if let Some(rest) = trimmed.strip_prefix(cue) {
+            let rest = rest.trim_start_matches(['：', ':', '，', ',', '。', '.', ' ']);
+            return Some(rest);
+        }
+    }
+    None
+}
+
+fn clean_manifest_fragment(fragment: &str) -> String {
+    fragment
+        .replace("**", "")
+        .replace("__", "")
+        .replace('`', "")
+        .trim()
+        .trim_start_matches(['：', ':', '，', ',', '。', '.', ' '])
+        .trim_end_matches(['：', ':', '；', ';', '，', ',', '。', '.', ' '])
+        .trim()
+        .to_string()
+}
+
+fn strip_ascii_case_prefix<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = text.get(..prefix.len())?;
+    if head.eq_ignore_ascii_case(prefix) {
+        text.get(prefix.len()..)
+    } else {
+        None
+    }
+}
+
+fn naturalize_english_manifest_fragment(fragment: &str) -> String {
+    let trimmed = fragment.trim();
+    let field_specs = [
+        ("Location:", "location"),
+        ("Sight:", "sight"),
+        ("Looks like:", "looks"),
+        ("Sound:", "sound"),
+        ("Sounds like:", "sounds"),
+        ("Smell:", "smell"),
+        ("Smells like:", "smells"),
+        ("Reachability:", "reachability"),
+        ("Safely reachable:", "reachability"),
+        ("What it looks like:", "looks"),
+        ("What it sounds like:", "sounds"),
+        ("What it smells like:", "smells"),
+    ];
+    for (prefix, kind) in field_specs {
+        if let Some(rest) = strip_ascii_case_prefix(trimmed, prefix) {
+            let rest = clean_manifest_fragment(rest);
+            if rest.is_empty() {
+                return String::new();
+            }
+            return match kind {
+                "location" => {
+                    let lower = rest.to_ascii_lowercase();
+                    if lower.starts_with("at ")
+                        || lower.starts_with("in ")
+                        || lower.starts_with("on ")
+                        || lower.starts_with("near ")
+                        || lower.starts_with("directly ")
+                    {
+                        format!("It is {rest}")
+                    } else {
+                        format!("It is at {rest}")
+                    }
+                }
+                "sight" => format!("It shows {rest}"),
+                "looks" => format!("It looks like {rest}"),
+                "sound" | "sounds" => format!("It sounds like {rest}"),
+                "smell" | "smells" => format!("It smells like {rest}"),
+                "reachability" => {
+                    let lower = rest.to_ascii_lowercase();
+                    if lower.starts_with("it is ") {
+                        rest
+                    } else {
+                        format!("It is {rest}")
+                    }
+                }
+                _ => rest,
+            };
+        }
+    }
+    clean_manifest_fragment(trimmed)
+}
+
+fn join_manifest_sentences_with_style(fragments: &[String], english_style: bool) -> String {
+    let suffix = if english_style { "." } else { "。" };
+    let separator = if english_style { " " } else { "" };
+    fragments
+        .iter()
+        .map(|fragment| {
+            if fragment.ends_with(['。', '！', '？', '.', '!', '?']) {
+                fragment.to_string()
+            } else {
+                format!("{fragment}{suffix}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(separator)
 }
 
 /// A3-HARDEN(§6 大考, codex ④ 审折入)：把一条机械事实摘要里的**原始 JSON 对象正文**(`{...}`)

@@ -1,18 +1,125 @@
 //! 场景导航 + 模组深抽：extract_module_scenes / scene_navigator / validate_transition /
 //! build_nav_prompt / prefetch_frontier。从 trpg-api 下沉至 trpg-runtime，
 //! 供 trpg-gm 执行器 phase_scene_navigate 调用，也供 trpg-cli 直接引用。
-use tracing::info;
+use tracing::{info, warn};
 use trpg_db::Db;
 use trpg_llm::LlmClient;
-use trpg_model::{ScenarioNode, SceneExtractionStatus};
+use trpg_model::{LinkType, ModuleGraph, ScenarioNode, SceneExtractionStatus, SourceDocument};
 
 const FRONTIER_PREFETCH_MAX: usize = 5;
+
+fn semantic_units_exact_path(data_dir: &std::path::Path, source_id: &str) -> std::path::PathBuf {
+    data_dir
+        .join("parsed/source_units")
+        .join(format!("{source_id}.semantic_units.jsonl"))
+}
+
+fn resolve_semantic_units_path(
+    data_dir: &std::path::Path,
+    source_id: &str,
+    source_documents: &[SourceDocument],
+) -> std::path::PathBuf {
+    let exact = semantic_units_exact_path(data_dir, source_id);
+    if exact.exists() {
+        return exact;
+    }
+    let mut dirs = vec![data_dir.join("parsed/source_units")];
+    for doc in source_documents {
+        if let Some(markdown_path) = doc.markdown_path.as_deref() {
+            if let Some(root) = parse_root_from_markdown_path(std::path::Path::new(markdown_path)) {
+                dirs.push(root.join("parsed/source_units"));
+            }
+        }
+    }
+    best_semantic_units_candidate(source_id, dirs).unwrap_or(exact)
+}
+
+fn parse_root_from_markdown_path(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut cur = path.parent();
+    while let Some(dir) = cur {
+        if dir.file_name().and_then(|s| s.to_str()) == Some("markdown") {
+            return dir.parent().map(std::path::Path::to_path_buf);
+        }
+        cur = dir.parent();
+    }
+    None
+}
+
+fn best_semantic_units_candidate<I>(source_id: &str, dirs: I) -> Option<std::path::PathBuf>
+where
+    I: IntoIterator<Item = std::path::PathBuf>,
+{
+    let mut best: Option<(f64, std::path::PathBuf)> = None;
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let Some(candidate_id) = name.strip_suffix(".semantic_units.jsonl") else {
+                continue;
+            };
+            let score = source_id_similarity(source_id, candidate_id);
+            if score >= 0.45 && best.as_ref().map(|(s, _)| score > *s).unwrap_or(true) {
+                best = Some((score, path));
+            }
+        }
+    }
+    best.map(|(_, path)| path)
+}
+
+fn source_id_similarity(a: &str, b: &str) -> f64 {
+    let a_tokens = normalized_source_tokens(a);
+    let b_tokens = normalized_source_tokens(b);
+    if a_tokens.is_empty() || b_tokens.is_empty() {
+        return 0.0;
+    }
+    if a_tokens == b_tokens {
+        return 1.0;
+    }
+    let intersection = a_tokens
+        .iter()
+        .filter(|token| b_tokens.iter().any(|other| other == *token))
+        .count();
+    (2.0 * intersection as f64) / (a_tokens.len() + b_tokens.len()) as f64
+}
+
+fn normalized_source_tokens(source_id: &str) -> Vec<String> {
+    let normalized: String = source_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let mut out = Vec::new();
+    for token in normalized.split('_').filter(|t| t.len() >= 2) {
+        let token = match token {
+            "of" | "the" | "and" | "pdf" => continue,
+            other => other,
+        };
+        if !out.iter().any(|existing| existing == token) {
+            out.push(token.to_string());
+        }
+    }
+    out
+}
 
 const SCENE_NAV_SYS: &str = "你是模组场景导航器。给定『当前场景』『模组全部场景列表(node_id|kind|title)』\
 『玩家输入』『本回合 GM 叙事』，综合两者语义判断玩家党是否离开当前场景、\
 走到列表里另一个真实存在的场景。玩家明确说出移动意图（如「我去 X」「开车到 X」）\
 或 GM 叙事描述了到达新地点，均应判为 moved=true。按语义判断（人物移动/进入新地点/任务推进），\
-不要按标题字面猜。输出 JSON：{\"moved\": bool, \"target_node_id\": string|null, \"reason\": string}。\
+不要按标题字面猜。输出 JSON：{\"moved\": bool, \"target_node_id\": string|null, \"explicit_player_move_to_target\": bool, \"reason\": string}。\
+explicit_player_move_to_target 只有在玩家输入本身明确表示去/进入/前往/抵达目标地点时才为 true；只是记录线索、提到目标、或仅 GM 叙事到达则为 false。\
 fail-closed：不确定、没有明确移动、或目标不在列表里 → moved=false。target_node_id 必须是给定列表中的 node_id，绝不编造。";
 
 /// L-C 内容引力（理念§4 content-gravity / §7 导演选焦不强制）：在保留全部 fail-closed
@@ -170,10 +277,12 @@ pub async fn extract_module_scenes(
         );
         return Ok(0);
     };
-    // Load the same semantic units parse_module read, from the same data dir path.
-    let units_path = data_dir
-        .join("parsed/source_units")
-        .join(format!("{source_id}.semantic_units.jsonl"));
+    // Load the same semantic units parse_module read. Older bundles may carry a
+    // source_id whose filename drifted from the current source_documents row, so
+    // resolve by exact path first, then by source-document parse roots + generic
+    // normalized token similarity.
+    let source_documents = db.list_source_documents().await.unwrap_or_default();
+    let units_path = resolve_semantic_units_path(data_dir, &source_id, &source_documents);
     let units = match trpg_rule_agent::reader::load_units(&units_path) {
         Ok(u) if !u.is_empty() => u,
         Ok(_) => {
@@ -181,7 +290,7 @@ pub async fn extract_module_scenes(
             return Ok(0);
         }
         Err(err) => {
-            tracing::error!(error = %err, path = %units_path.display(), "extract_module_scenes: load_units failed; nothing to do");
+            warn!(error = %err, path = %units_path.display(), "extract_module_scenes: load_units failed; nothing to do");
             return Ok(0);
         }
     };
@@ -393,7 +502,8 @@ pub fn resolve_offgraph_to_neighbor(
         .filter(|(id, title)| {
             let idl = id.to_lowercase();
             let id_match = idl.contains(&tl) || tl.contains(&idl);
-            let title_match = title.chars().count() >= 3 && (title.contains(&tl) || tl.contains(title));
+            let title_match =
+                title.chars().count() >= 3 && (title.contains(&tl) || tl.contains(title));
             id_match || title_match
         })
         .map(|(id, _)| *id)
@@ -410,6 +520,420 @@ pub fn resolve_offgraph_to_neighbor(
 mod tiered;
 pub use tiered::{scene_navigate_critical, scene_navigate_heavy, scene_navigator, SceneNavCommit};
 
+/// Resolve an explicit player-stated move to a directly linked scene before GM
+/// context assembly. This is conservative and deterministic: only authored
+/// neighbors of the current scene are considered, and the player input must name
+/// the target by node id, title, or referenced location id.
+pub fn resolve_explicit_neighbor_scene(
+    graph: &ModuleGraph,
+    current_scene_id: &str,
+    player_input: &str,
+) -> Option<String> {
+    let current = graph
+        .scenes
+        .iter()
+        .find(|scene| scene.node_id.trim() == current_scene_id.trim())?;
+    let hay = normalize_nav_match(player_input);
+    if hay.trim().is_empty() {
+        return None;
+    }
+    for link in &current.links {
+        let target = graph
+            .scenes
+            .iter()
+            .find(|scene| scene.node_id.trim() == link.to_node_id.trim())?;
+        if scene_nav_aliases(target).into_iter().any(|alias| {
+            let needle = normalize_nav_match(&alias);
+            let needle = needle.trim();
+            needle.chars().count() >= 4
+                && hay.contains(needle)
+                && nav_alias_has_explicit_move_intent(&hay, needle)
+        }) {
+            return Some(target.node_id.clone());
+        }
+    }
+    None
+}
+
+/// Resolve a player-declared movement to a real authored scene before context
+/// assembly. Direct neighbors are preferred; otherwise the whole authored graph
+/// is considered only when the player explicitly names exactly one scene with
+/// movement intent. This covers investigative jumps through an already-known
+/// lead without treating ordinary scene mentions as relocation.
+pub fn resolve_explicit_authored_scene(
+    graph: &ModuleGraph,
+    current_scene_id: &str,
+    player_input: &str,
+) -> Option<String> {
+    if let Some(target) = resolve_explicit_neighbor_scene(graph, current_scene_id, player_input) {
+        return Some(target);
+    }
+    let hay = normalize_nav_match(player_input);
+    if hay.trim().is_empty() {
+        return None;
+    }
+
+    let mut hits: Vec<(String, usize)> = Vec::new();
+    for scene in graph
+        .scenes
+        .iter()
+        .filter(|scene| scene.node_id.trim() != current_scene_id.trim())
+    {
+        let best = scene_nav_aliases(scene)
+            .into_iter()
+            .filter_map(|alias| {
+                let needle = normalize_nav_match(&alias);
+                let needle = needle.trim().to_string();
+                if needle.chars().count() >= 4
+                    && hay.contains(&needle)
+                    && nav_alias_has_explicit_move_intent(&hay, &needle)
+                {
+                    Some(needle.len())
+                } else {
+                    None
+                }
+            })
+            .max();
+        if let Some(score) = best {
+            hits.push((scene.node_id.clone(), score));
+        }
+    }
+    hits.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let (best_id, best_score) = hits.first()?;
+    if hits
+        .get(1)
+        .is_some_and(|(_, next_score)| next_score == best_score)
+    {
+        return None;
+    }
+    Some(best_id.clone())
+}
+
+/// LLM semantic fallback for explicit player-authored movement before context
+/// assembly. Deterministic alias matching stays first; this path covers
+/// cross-language or paraphrased destinations without adding per-module word
+/// tables. It is read-only and fail-closed: the caller owns any scene write.
+pub async fn resolve_explicit_authored_scene_semantic(
+    llm: &dyn LlmClient,
+    graph: &ModuleGraph,
+    current_scene_id: &str,
+    player_input: &str,
+) -> Option<String> {
+    if player_input.trim().is_empty() || graph.scenes.is_empty() {
+        return None;
+    }
+    let current = current_scene_id.trim();
+    let cur_node = graph.scenes.iter().find(|s| s.node_id == current)?;
+    let scene_list = semantic_scene_list(graph);
+    let prompt = build_nav_prompt(current, &cur_node.title, &scene_list, player_input, "");
+    let decision = llm
+        .complete_json(
+            vec![trpg_llm::system(SCENE_NAV_SYS), trpg_llm::user(&prompt)],
+            0.0,
+        )
+        .await
+        .ok()?;
+    let target = validate_transition(&decision, &graph.scenes, current)
+        .or_else(|| resolve_offgraph_to_authored_scene(&decision, graph, current))?;
+    let decision_says_explicit = decision
+        .get("explicit_player_move_to_target")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if trigger_transition_lacks_explicit_player_move(graph, current, &target, player_input)
+        && !decision_says_explicit
+        && !player_input_has_location_intent(player_input)
+    {
+        return None;
+    }
+    Some(target)
+}
+
+fn semantic_scene_list(graph: &ModuleGraph) -> String {
+    graph
+        .scenes
+        .iter()
+        .map(semantic_scene_line)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn semantic_scene_line(scene: &ScenarioNode) -> String {
+    let mut parts = vec![
+        scene.node_id.trim().to_string(),
+        scene.node_type.trim().to_string(),
+        scene.title.trim().to_string(),
+    ];
+    let summary = scene.summary.trim();
+    if !summary.is_empty() {
+        parts.push(format!("summary: {summary}"));
+    }
+    if !scene.referenced_location_ids.is_empty() {
+        parts.push(format!(
+            "locations: {}",
+            scene.referenced_location_ids.join(", ")
+        ));
+    }
+    parts.join(" | ")
+}
+
+fn resolve_offgraph_to_authored_scene(
+    decision: &serde_json::Value,
+    graph: &ModuleGraph,
+    current: &str,
+) -> Option<String> {
+    if !decision
+        .get("moved")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let target_raw = decision
+        .get("target_node_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    let target = normalize_nav_match(target_raw);
+    if target.chars().count() < 3 {
+        return None;
+    }
+    let mut hits: Vec<(String, usize)> = Vec::new();
+    for scene in graph
+        .scenes
+        .iter()
+        .filter(|scene| scene.node_id.trim() != current)
+    {
+        let best = scene_nav_aliases(scene)
+            .into_iter()
+            .filter_map(|alias| {
+                let alias = normalize_nav_match(&alias);
+                let alias = alias.trim().to_string();
+                if alias.chars().count() >= 3 && (target == alias || target.contains(&alias)) {
+                    Some(alias.len())
+                } else {
+                    None
+                }
+            })
+            .max();
+        if let Some(score) = best {
+            hits.push((scene.node_id.clone(), score));
+        }
+    }
+    hits.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let (best_id, best_score) = hits.first()?;
+    if hits
+        .get(1)
+        .is_some_and(|(_, next_score)| next_score == best_score)
+    {
+        return None;
+    }
+    Some(best_id.clone())
+}
+
+/// Trigger links express clue/beat availability, not physical relocation. A
+/// trigger transition is allowed only when the player explicitly names movement
+/// to that target; otherwise the clue can guide future action but must not write
+/// `current_scene`.
+pub(crate) fn trigger_transition_lacks_explicit_player_move(
+    graph: &ModuleGraph,
+    current_scene_id: &str,
+    target_scene_id: &str,
+    player_input: &str,
+) -> bool {
+    let Some(current) = graph
+        .scenes
+        .iter()
+        .find(|scene| scene.node_id.trim() == current_scene_id.trim())
+    else {
+        return false;
+    };
+    let has_trigger_link = current.links.iter().any(|link| {
+        link.to_node_id.trim() == target_scene_id.trim()
+            && matches!(link.link_type, LinkType::Trigger)
+    });
+    if !has_trigger_link {
+        return false;
+    }
+    !player_input_explicitly_moves_to_scene(graph, target_scene_id, player_input)
+}
+
+fn player_input_explicitly_moves_to_scene(
+    graph: &ModuleGraph,
+    target_scene_id: &str,
+    player_input: &str,
+) -> bool {
+    let Some(target) = graph
+        .scenes
+        .iter()
+        .find(|scene| scene.node_id.trim() == target_scene_id.trim())
+    else {
+        return false;
+    };
+    let hay = normalize_nav_match(player_input);
+    scene_nav_aliases(target).into_iter().any(|alias| {
+        let needle = normalize_nav_match(&alias);
+        let needle = needle.trim();
+        needle.chars().count() >= 4
+            && hay.contains(needle)
+            && nav_alias_has_explicit_move_intent(&hay, needle)
+    })
+}
+
+fn player_input_has_location_intent(player_input: &str) -> bool {
+    let mut hay = normalize_nav_match(player_input);
+    for negated in [
+        "不去",
+        "不前往",
+        "不进入",
+        "不回到",
+        "不要去",
+        "不要前往",
+        "不要进入",
+        "不在",
+        "notgoto",
+        "dontgoto",
+        "donotgoto",
+        "doesnotgoto",
+    ] {
+        hay = hay.replace(negated, "");
+    }
+    [
+        "去",
+        "前往",
+        "赶往",
+        "来到",
+        "进入",
+        "走到",
+        "转去",
+        "回到",
+        "抵达",
+        "到",
+        "在",
+        "goto",
+        "headto",
+        "goesto",
+        "headsto",
+        "walksto",
+        "drivesto",
+        "returnto",
+        "enterthe",
+        "enter",
+        "moveto",
+        "makefor",
+        "travelt",
+        "travelsto",
+        "leavefor",
+        "at",
+    ]
+    .iter()
+    .any(|cue| hay.contains(cue))
+}
+
+fn scene_nav_aliases(scene: &ScenarioNode) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |value: &str| {
+        let trimmed = value.trim();
+        if trimmed.chars().count() >= 4 && !out.iter().any(|existing| *existing == trimmed) {
+            out.push(trimmed.to_string());
+        }
+    };
+    push(scene.node_id.as_str());
+    push(scene.title.as_str());
+    for location_id in &scene.referenced_location_ids {
+        push(location_id.as_str());
+    }
+    for part in scene
+        .title
+        .split(&[';', '/', '&', '、', '；', '和'][..])
+        .flat_map(|part| part.split(" and "))
+    {
+        push(part);
+    }
+    out
+}
+
+fn nav_alias_has_explicit_move_intent(hay: &str, needle: &str) -> bool {
+    for (idx, _) in hay.match_indices(needle) {
+        let before = hay[..idx]
+            .chars()
+            .rev()
+            .take(18)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<String>();
+        let compact = before
+            .replace(' ', "")
+            .replace("不进入", "")
+            .replace("不去", "")
+            .replace("不前往", "")
+            .replace("不回到", "")
+            .replace("不要进入", "")
+            .replace("不要去", "");
+        if [
+            "不去",
+            "不前往",
+            "不进入",
+            "不回到",
+            "notgoto",
+            "dontgoto",
+            "donotgoto",
+            "doesnotgoto",
+        ]
+        .iter()
+        .any(|cue| compact.ends_with(cue))
+        {
+            continue;
+        }
+        if [
+            "去",
+            "前往",
+            "赶往",
+            "来到",
+            "进入",
+            "走到",
+            "转去",
+            "回到",
+            "抵达",
+            "goto",
+            "headto",
+            "goesto",
+            "headsto",
+            "walksto",
+            "drivesto",
+            "returnto",
+            "enterthe",
+            "enter",
+            "moveto",
+            "makefor",
+            "travelt",
+            "travelsto",
+            "leavefor",
+            "leavesfor",
+        ]
+        .iter()
+        .any(|cue| compact.contains(cue))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn normalize_nav_match(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(|c| c.to_lowercase())
+        .map(|c| {
+            if c.is_alphanumeric() || ('\u{4e00}'..='\u{9fff}').contains(&c) {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+}
+
 // J3 FLOW-LINK CONSUMER（TRPG_NAV_FOLLOW_FLOW_LINKS，默认 OFF）：消费侧脊跟随逻辑（exits
 // 类型排序 + ⑥流转脊优先子句 + flag）。新子模块守 ≤400 行、不改写 navigator；经 pub use 暴露。
 mod flow_links;
@@ -418,7 +942,9 @@ pub use flow_links::{
 };
 
 mod frontier_focus;
-pub use frontier_focus::{build_frontier_block, with_frontier_clause as with_frontier_focus_clause};
+pub use frontier_focus::{
+    build_frontier_block, with_frontier_clause as with_frontier_focus_clause,
+};
 
 /// 前探当前 target 场景的衔接场景（一跳，best-effort）。在 target 已深抽、其出口 links
 /// 已写回 bundle 后调用：重新加载图 → 取 target 的出口 `to_node_id` → 去重 + 限只抽仍
@@ -480,6 +1006,33 @@ pub async fn prefetch_frontier(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use serde_json::{json, Value};
+    use std::pin::Pin;
+    use trpg_llm::LlmClient;
+    use trpg_model::ChatMessage;
+    use trpg_model::{LinkType, ScenarioLink};
+
+    struct NavStubLlm(Value);
+    #[async_trait]
+    impl LlmClient for NavStubLlm {
+        async fn complete_text(&self, _m: Vec<ChatMessage>, _t: f32) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+
+        async fn complete_json(&self, _m: Vec<ChatMessage>, _t: f32) -> anyhow::Result<Value> {
+            Ok(self.0.clone())
+        }
+
+        async fn stream_chat(
+            &self,
+            _m: Vec<ChatMessage>,
+            _t: f32,
+        ) -> anyhow::Result<Pin<Box<dyn futures_util::Stream<Item = anyhow::Result<String>> + Send>>>
+        {
+            anyhow::bail!("stub: stream_chat unused")
+        }
+    }
 
     fn scenes() -> Vec<ScenarioNode> {
         let mk = |id: &str| {
@@ -488,6 +1041,311 @@ mod tests {
             n
         };
         vec![mk("loc1"), mk("loc2"), mk("loc3")]
+    }
+
+    fn linked_graph() -> ModuleGraph {
+        let mut globe = ScenarioNode::default();
+        globe.node_id = "loc_boston_globe".into();
+        globe.title = "The Boston Globe".into();
+        globe.links = vec![ScenarioLink {
+            to_node_id: "loc_hall_records".into(),
+            reason: "Civil records may predate surviving newspaper files.".into(),
+            clue_id: Some("handout_7".into()),
+            link_type: LinkType::Trigger,
+            source_anchor: None,
+        }];
+        let mut hall = ScenarioNode::default();
+        hall.node_id = "loc_hall_records".into();
+        hall.title = "Hall of Records".into();
+        hall.summary = "Civil records reveal property, executor, and church links.".into();
+        hall.referenced_location_ids = vec!["hall_records".into()];
+        hall.links = vec![ScenarioLink {
+            to_node_id: "loc_corbitt_house_exterior".into(),
+            reason: "The property address can lead investigators to the house.".into(),
+            clue_id: None,
+            link_type: LinkType::Trigger,
+            source_anchor: None,
+        }];
+        let mut courts = ScenarioNode::default();
+        courts.node_id = "loc_courts_police".into();
+        courts.title = "Higher Courts and Central Police Station".into();
+        courts.referenced_location_ids =
+            vec!["higher_courts".into(), "central_police_station".into()];
+        let mut house = ScenarioNode::default();
+        house.node_id = "loc_corbitt_house_exterior".into();
+        house.title = "Corbitt House Exterior".into();
+        house.referenced_location_ids = vec!["corbitt_house".into()];
+        ModuleGraph {
+            scenes: vec![globe, hall, courts, house],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn semantic_units_path_resolves_source_id_drift_from_source_document_parse_root() {
+        let root = std::env::temp_dir().join(format!(
+            "semantic_units_resolve_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let units_dir = root.join("parsed/source_units");
+        let markdown_dir = root.join("markdown/rulebooks");
+        std::fs::create_dir_all(&units_dir).unwrap();
+        std::fs::create_dir_all(&markdown_dir).unwrap();
+        let candidate = units_dir.join(
+            "call_of_cthulhu_keeper_rulebook_40th_anniversary_sandy_petersen.semantic_units.jsonl",
+        );
+        std::fs::write(&candidate, "{}\n").unwrap();
+        let markdown_path =
+            markdown_dir.join("call_of_cthulhu_keeper_rulebook_40th_anniversary_sandy_petersen.md");
+        std::fs::write(&markdown_path, "# Keeper\n").unwrap();
+        let doc = SourceDocument {
+            id: uuid::Uuid::new_v4(),
+            source_id: "call_of_cthulhu_keeper_rulebook_40th_anniversary_sandy_petersen".into(),
+            source_kind: trpg_model::SourceKind::Rulebook,
+            title: "Call of Cthulhu Keeper Rulebook".into(),
+            file_path: String::new(),
+            markdown_path: Some(markdown_path.to_string_lossy().to_string()),
+            source_hash: String::new(),
+            parse_config_hash: String::new(),
+            metadata: serde_json::Value::Null,
+        };
+        let unrelated_data = root.join("unrelated_data");
+
+        let resolved = resolve_semantic_units_path(
+            &unrelated_data,
+            "coc7e_keeper_rulebook_40th_anniversary",
+            &[doc],
+        );
+
+        assert_eq!(resolved, candidate);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn explicit_neighbor_scene_resolves_named_link_target() {
+        let graph = linked_graph();
+        let target = resolve_explicit_neighbor_scene(
+            &graph,
+            "loc_boston_globe",
+            "我转去 Hall of Records 查 Corbitt House 的房产链。",
+        );
+        assert_eq!(target.as_deref(), Some("loc_hall_records"));
+    }
+
+    #[test]
+    fn explicit_neighbor_scene_resolves_english_goes_to_named_link_target() {
+        let graph = linked_graph();
+        let target = resolve_explicit_neighbor_scene(
+            &graph,
+            "loc_boston_globe",
+            "Evelyn goes to Boston's Hall of Records and searches the property indexes.",
+        );
+        assert_eq!(target.as_deref(), Some("loc_hall_records"));
+    }
+
+    #[test]
+    fn explicit_authored_scene_resolves_non_neighbor_with_move_intent() {
+        let graph = linked_graph();
+        let target = resolve_explicit_authored_scene(
+            &graph,
+            "loc_boston_globe",
+            "Evelyn leaves the Hall notes and goes to the higher courts and then the Central Police Station records desk.",
+        );
+        assert_eq!(target.as_deref(), Some("loc_courts_police"));
+    }
+
+    #[tokio::test]
+    async fn explicit_authored_scene_semantic_fallback_resolves_cross_language_destination() {
+        let mut intro = ScenarioNode::default();
+        intro.node_id = "loc_intro".into();
+        intro.title = "Introduction".into();
+        let mut library = ScenarioNode::default();
+        library.node_id = "loc_central_library".into();
+        library.title = "The Central Library".into();
+        library.node_type = "investigation_location".into();
+        library.referenced_location_ids = vec!["central_library".into()];
+        let graph = ModuleGraph {
+            scenes: vec![intro, library],
+            ..Default::default()
+        };
+        let llm = NavStubLlm(json!({
+            "moved": true,
+            "target_node_id": "loc_central_library",
+            "reason": "玩家明确前往中央图书馆进行档案检索"
+        }));
+
+        let target = resolve_explicit_authored_scene_semantic(
+            &llm,
+            &graph,
+            "loc_intro",
+            "我先去波士顿中央图书馆，查科宾宅的旧档案。",
+        )
+        .await;
+
+        assert_eq!(target.as_deref(), Some("loc_central_library"));
+    }
+
+    #[tokio::test]
+    async fn semantic_fallback_maps_llm_title_target_back_to_node_id() {
+        let mut intro = ScenarioNode::default();
+        intro.node_id = "loc_intro".into();
+        intro.title = "Introduction".into();
+        let mut library = ScenarioNode::default();
+        library.node_id = "loc_central_library".into();
+        library.title = "The Central Library".into();
+        let graph = ModuleGraph {
+            scenes: vec![intro, library],
+            ..Default::default()
+        };
+        let llm = NavStubLlm(json!({
+            "moved": true,
+            "target_node_id": "The Central Library",
+            "reason": "title instead of node id"
+        }));
+
+        let target = resolve_explicit_authored_scene_semantic(
+            &llm,
+            &graph,
+            "loc_intro",
+            "我先去波士顿中央图书馆，查科宾宅的旧档案。",
+        )
+        .await;
+
+        assert_eq!(target.as_deref(), Some("loc_central_library"));
+    }
+
+    #[tokio::test]
+    async fn semantic_trigger_move_allows_cross_language_explicit_destination() {
+        let mut intro = ScenarioNode::default();
+        intro.node_id = "loc_intro".into();
+        intro.title = "Introduction".into();
+        intro.links = vec![ScenarioLink {
+            to_node_id: "loc_central_library".into(),
+            reason: "Library research can reveal Corbitt property history.".into(),
+            clue_id: Some("handout_3".into()),
+            link_type: LinkType::Trigger,
+            source_anchor: None,
+        }];
+        let mut library = ScenarioNode::default();
+        library.node_id = "loc_central_library".into();
+        library.title = "The Central Library".into();
+        library.referenced_location_ids = vec!["central_library".into()];
+        let graph = ModuleGraph {
+            scenes: vec![intro, library],
+            ..Default::default()
+        };
+        let llm = NavStubLlm(json!({
+            "moved": true,
+            "target_node_id": "loc_central_library",
+            "explicit_player_move_to_target": true,
+            "reason": "玩家明确说先去波士顿中央图书馆检索旧档案。"
+        }));
+
+        let target = resolve_explicit_authored_scene_semantic(
+            &llm,
+            &graph,
+            "loc_intro",
+            "我先不去鬼屋，而是去波士顿中央图书馆和旧报纸档案，用图书馆使用检索科宾宅。",
+        )
+        .await;
+
+        assert_eq!(target.as_deref(), Some("loc_central_library"));
+    }
+
+    #[tokio::test]
+    async fn semantic_trigger_move_allows_location_intent_when_explicit_flag_missing() {
+        let graph = linked_graph();
+        let llm = NavStubLlm(json!({
+            "moved": true,
+            "target_node_id": "loc_hall_records",
+            "reason": "玩家说在市政档案馆查公开房产记录，语义上已进入 Hall of Records。"
+        }));
+
+        let target = resolve_explicit_authored_scene_semantic(
+            &llm,
+            &graph,
+            "loc_boston_globe",
+            "我先在市政档案馆查科宾宅的公开房产、遗嘱和诉讼记录。",
+        )
+        .await;
+
+        assert_eq!(target.as_deref(), Some("loc_hall_records"));
+    }
+
+    #[test]
+    fn semantic_scene_list_includes_summary_and_location_ids_for_multilingual_matching() {
+        let graph = linked_graph();
+        let list = semantic_scene_list(&graph);
+
+        assert!(
+            list.contains("summary: Civil records reveal property, executor, and church links."),
+            "semantic prompt needs authored scene semantics, not only opaque ids: {list}"
+        );
+        assert!(list.contains("locations: hall_records"), "{list}");
+    }
+
+    #[test]
+    fn explicit_neighbor_scene_ignores_generic_followup_without_target_name() {
+        let graph = linked_graph();
+        assert_eq!(
+            resolve_explicit_neighbor_scene(&graph, "loc_boston_globe", "我继续深挖这些线索。"),
+            None
+        );
+    }
+
+    #[test]
+    fn explicit_neighbor_scene_ignores_referenced_place_without_movement_intent() {
+        let graph = linked_graph();
+        assert_eq!(
+            resolve_explicit_neighbor_scene(
+                &graph,
+                "loc_hall_records",
+                "我先停在 Hall of Records 的桌前，不进入新方向；请列出这些记录与 Corbitt House 的关系。",
+            ),
+            None,
+            "mentioning a linked place as an object of research must not teleport the scene"
+        );
+    }
+
+    #[test]
+    fn trigger_transition_requires_explicit_player_move() {
+        let graph = linked_graph();
+
+        assert!(
+            trigger_transition_lacks_explicit_player_move(
+                &graph,
+                "loc_boston_globe",
+                "loc_hall_records",
+                "The newspaper trail points toward municipal records, so I write that lead down before deciding where to go.",
+            ),
+            "a trigger clue may point at a scene, but must not move the current scene by itself"
+        );
+        assert!(
+            !trigger_transition_lacks_explicit_player_move(
+                &graph,
+                "loc_boston_globe",
+                "loc_hall_records",
+                "I go to the Hall of Records and search the municipal property indexes.",
+            ),
+            "explicit player movement to the trigger target may commit the scene"
+        );
+    }
+
+    #[test]
+    fn spatial_transition_is_not_blocked_by_trigger_guard() {
+        let mut graph = linked_graph();
+        graph.scenes[1].links[0].link_type = LinkType::Spatial;
+
+        assert!(
+            !trigger_transition_lacks_explicit_player_move(
+                &graph,
+                "loc_hall_records",
+                "loc_corbitt_house_exterior",
+                "The property file names the house as important.",
+            ),
+            "the trigger guard only constrains trigger links; spatial movement is checked elsewhere"
+        );
     }
 
     #[test]
@@ -552,7 +1410,11 @@ mod tests {
             n
         };
         vec![
-            mk("sc_warehouse", "Scavv Warehouse", &["sc_talk_athena", "sc_street"]),
+            mk(
+                "sc_warehouse",
+                "Scavv Warehouse",
+                &["sc_talk_athena", "sc_street"],
+            ),
             mk("sc_talk_athena", "Talking to Athena", &["sc_ending"]),
             mk("sc_street", "Heywood Street", &[]),
             mk("sc_ending", "Homecoming Finale", &[]),
@@ -774,7 +1636,10 @@ mod tests {
             p.contains("fail-closed") || p.contains("原地观察"),
             "④子句应保留 fail-closed 守卫"
         );
-        assert!(!p.contains("目标承接"), "departure-only 不应含⑤目标承接子句");
+        assert!(
+            !p.contains("目标承接"),
+            "departure-only 不应含⑤目标承接子句"
+        );
         assert!(p.len() > SCENE_NAV_SYS_GRAVITY.len(), "ON 严格更长（追加）");
     }
 

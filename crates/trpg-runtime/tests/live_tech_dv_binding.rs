@@ -147,6 +147,64 @@ async fn technical_action_resolves_against_source_backed_module_dv() {
         "a source-backed technical check must not be blocked"
     );
 
+    let coverage_cases = [
+        (
+            "Rip the tether free at the wall entry point",
+            "Rip the tether free at the wall entry point",
+            14,
+        ),
+        (
+            "Trace the tether signal from the damaged sheath toward its warehouse entry point",
+            "Trace the tether signal from the damaged sheath toward its warehouse entry point",
+            14,
+        ),
+        (
+            "Blast the tether path with interference pulses to destabilize the rogue drone for a moment",
+            "Blast the tether path with interference pulses to destabilize the rogue drone for a moment",
+            14,
+        ),
+        (
+            "Scan the live terminal's recent remote commands and hard-route the control channel through your deck",
+            "Scan the live terminal's recent remote commands and hard-route the control channel through your deck",
+            12,
+        ),
+        (
+            "Seize the rogue drone control node and lock its weapon permissions",
+            "Seize the rogue drone control node and lock its weapon permissions",
+            12,
+        ),
+    ];
+    for (label, summary, expected_target) in coverage_cases {
+        let c = tech_contract(&session, label, summary);
+        let e = engine
+            .execute_system_roll_bundle(&session, "turn_test", &c)
+            .await
+            .expect("coverage expression must resolve");
+        let out = &e.primary.outcome;
+        println!(
+            "[tech-dv coverage] target={} outcome={}",
+            expected_target,
+            serde_json::to_string(out).unwrap()
+        );
+        assert_eq!(
+            out.get("target").and_then(|v| v.as_i64()),
+            Some(expected_target),
+            "live scene expression must bind source-backed target: {out}"
+        );
+        assert!(
+            out.get("success").map(|v| v.is_boolean()).unwrap_or(false),
+            "success must be resolved for live scene expression: {out}"
+        );
+        assert!(
+            out.get("degree").map(|v| v.is_string()).unwrap_or(false),
+            "degree must be resolved for live scene expression: {out}"
+        );
+        assert!(
+            out.get("awaiting_binding").is_none(),
+            "coverage expression must not await binding: {out}"
+        );
+    }
+
     // —— ② FAIL-CLOSED preserved: a pure perception action (the live-gap text) has
     //    no matching DV row, so it stays honestly unresolved (awaiting_binding) —
     //    the TC-JRNY-01 gate still classifies it TRIGGERED_NO_MECHANISM, not PASS.

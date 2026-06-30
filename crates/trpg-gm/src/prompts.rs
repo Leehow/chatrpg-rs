@@ -943,7 +943,10 @@ mod evidence_offer_wiring_tests {
         let m = TurnMessages::assemble(&compiled(), "SKILL", &history, &tail_with(Some(OFFER)));
         let dynamic = last_dynamic(&m);
         assert!(dynamic.contains("[BP3: Dynamic Context]"));
-        assert!(dynamic.contains("cap_2a0d946812d6"), "offer cap must reach BP3");
+        assert!(
+            dynamic.contains("cap_2a0d946812d6"),
+            "offer cap must reach BP3"
+        );
         assert!(
             dynamic.find("cap_2a0d946812d6").unwrap() < dynamic.find("[Player Input]").unwrap(),
             "offer block must precede Player Input within the [gm] BP3 message"

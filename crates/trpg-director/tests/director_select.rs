@@ -6,9 +6,9 @@
 
 use trpg_director::{build_director_brief_packet, DirectorMode};
 use trpg_model::{
-    BeatKind, CharacterArcState, DirectorPlan, NpcActionIntent, NpcActionKind, PlayerInterestSignal,
-    SpotlightState, StoryState, StoryThread, StoryThreadStatus, WorldCandidateRef,
-    WorldReactionCandidate,
+    BeatKind, CharacterArcState, DirectorPlan, NpcActionIntent, NpcActionKind,
+    PlayerInterestSignal, SpotlightState, StoryState, StoryThread, StoryThreadStatus,
+    WorldCandidateRef, WorldReactionCandidate,
 };
 
 fn cand(npc: &str, events: Vec<&str>, action: Option<NpcActionKind>) -> WorldReactionCandidate {
@@ -116,7 +116,10 @@ fn reveal_is_gm_truth_minus_player_known() {
         &[],
         "pc_1",
     );
-    assert_eq!(plan.reveal_candidate_fact_ids, vec!["fact_secret".to_string()]);
+    assert_eq!(
+        plan.reveal_candidate_fact_ids,
+        vec!["fact_secret".to_string()]
+    );
 }
 
 #[test]
@@ -284,7 +287,9 @@ fn empty_story_folds_in_fallback_beat_plan() {
 fn all_rejected_threads_fall_back_to_playable_plan() {
     let pool = vec![cand("npc_a", vec!["e1"], Some(NpcActionKind::Speak))];
     let mut story = StoryState::default();
-    story.active_threads.push(thread("t_rejected", "npc_a", 1.0));
+    story
+        .active_threads
+        .push(thread("t_rejected", "npc_a", 1.0));
     let plan = build_director_brief_packet(
         DirectorMode::OnDemand,
         &pool,

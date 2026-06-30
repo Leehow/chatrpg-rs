@@ -20,13 +20,19 @@ pub struct UnpaidSetupCheckpoint {
 
 impl Default for UnpaidSetupCheckpoint {
     fn default() -> Self {
-        Self { active: false, ripe_threshold: 0.8 }
+        Self {
+            active: false,
+            ripe_threshold: 0.8,
+        }
     }
 }
 
 impl UnpaidSetupCheckpoint {
     pub fn active() -> Self {
-        Self { active: true, ripe_threshold: 0.8 }
+        Self {
+            active: true,
+            ripe_threshold: 0.8,
+        }
     }
     pub fn is_active(&self) -> bool {
         self.active

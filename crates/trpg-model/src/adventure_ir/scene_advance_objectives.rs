@@ -152,7 +152,11 @@ mod tests {
         let leaves = scene_advance_guard_leaves(&g, "scene_001");
         assert_eq!(leaves.len(), ev_p3.len(), "same scene atoms, re-roled");
         for l in &leaves {
-            assert_eq!(l.progress_role, ProgressRole::GuardLeaf, "re-roled GuardLeaf");
+            assert_eq!(
+                l.progress_role,
+                ProgressRole::GuardLeaf,
+                "re-roled GuardLeaf"
+            );
             assert!(
                 ev_p3.iter().any(|a| a.atom_id == l.atom_id),
                 "atom_id matches the live-admitted EV-P3 atom: {}",
@@ -170,7 +174,10 @@ mod tests {
         let leaves = scene_advance_guard_leaves(&g, "scene_001");
         let obj = scene_advance_objective(&g, "scene_001").expect("scene has an atom ⇒ objective");
 
-        assert_eq!(obj.id, "obj.scene_advance.scene_001", "distinct id namespace");
+        assert_eq!(
+            obj.id, "obj.scene_advance.scene_001",
+            "distinct id namespace"
+        );
         assert_eq!(obj.mission_id.as_deref(), Some("scene_001"), "scene-scoped");
         assert!(!obj.source_evidence.is_empty(), "source-grounded");
         match &obj.success_when {
@@ -185,7 +192,10 @@ mod tests {
             }
             other => panic!("expected EvidenceAnyOf, got {other:?}"),
         }
-        assert!(obj.success_when.is_executable(), "evidence guard is executable");
+        assert!(
+            obj.success_when.is_executable(),
+            "evidence guard is executable"
+        );
     }
 
     #[test]
@@ -224,7 +234,9 @@ mod tests {
         // admissible kind the witness/exact path can land in the ledger).
         let g = graph_with_scene_affordance();
         let leaves = scene_advance_guard_leaves(&g, "scene_001");
-        assert!(leaves.iter().any(|a| a.kind == EvidenceKind::ActionResolved));
+        assert!(leaves
+            .iter()
+            .any(|a| a.kind == EvidenceKind::ActionResolved));
     }
 
     #[test]

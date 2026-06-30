@@ -28,7 +28,11 @@ const PLAYER_AGENCY_GUIDANCE: &str = r#"## 玩家自主权守则
 不要替玩家角色做决定、说台词或采取重大行动：
 - 呈现情境、给出可感知的信息和后果，让玩家自己选择如何行动。
 - 不替玩家宣布他的选择、内心想法、对话或重大动作。
-- 可以推进 NPC 和世界的反应，但玩家角色的行动权留给玩家。"#;
+- 可以推进 NPC 和世界的反应，但玩家角色的行动权留给玩家。
+- 玩家当前位置也是行动权的一部分：以连续性锚、玩家最近行动和既成事实为权威；玩家已经在内部、纵深、机柜旁或其他明确位置时，不把他重置回入口、外景或旧开场图景。
+- 世界状态同样服从既成事实：供电切断、灯灭、设备停止、接口未接通、物件已收起/放下等状态一旦成立，后续玩家措辞或失败尝试不能把它复活、反转或无声覆盖，除非有新的 runtime/工具事实明确改变它。
+- 不提供显式选项菜单，不列编号、A/B/C 或“选择其一”的行动清单；除非规则或 runtime 明确打开 required choice/reaction gate。
+- 不把线索、发现或模组内容写成“关键事实”式清单；把可感知事实织进场景，让玩家自己判断含义。"#;
 
 /// 玩家自主权守卫（内置 policy 插件，Safety 等级，always-on）。
 pub struct PlayerAgencyGuard;
@@ -135,5 +139,37 @@ mod tests {
             ..Default::default()
         };
         assert!(PlayerAgencyGuard.on_hook(&ctx).await.is_empty());
+    }
+
+    #[test]
+    fn player_agency_guidance_forbids_menus_and_dumps() {
+        assert!(
+            PLAYER_AGENCY_GUIDANCE.contains("选项菜单"),
+            "always-on agency guard must forbid explicit option menus"
+        );
+        assert!(
+            PLAYER_AGENCY_GUIDANCE.contains("编号"),
+            "always-on agency guard must forbid numbered action lists"
+        );
+        assert!(
+            PLAYER_AGENCY_GUIDANCE.contains("清单"),
+            "always-on agency guard must forbid raw clue/content dumps"
+        );
+    }
+
+    #[test]
+    fn player_agency_guidance_preserves_position_and_world_state() {
+        assert!(
+            PLAYER_AGENCY_GUIDANCE.contains("当前位置"),
+            "always-on agency guard must preserve the player's current position"
+        );
+        assert!(
+            PLAYER_AGENCY_GUIDANCE.contains("既成事实"),
+            "always-on agency guard must treat committed facts as authoritative"
+        );
+        assert!(
+            PLAYER_AGENCY_GUIDANCE.contains("世界状态"),
+            "always-on agency guard must preserve established world/object state"
+        );
     }
 }

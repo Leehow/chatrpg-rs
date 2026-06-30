@@ -228,7 +228,11 @@ fn lh_resolve_active_npc_refs_skips_empty_and_unknown() {
         ..Default::default()
     };
     let refs = resolve_active_npc_refs(
-        &["".to_string(), "ghost".to_string(), "npc_athena".to_string()],
+        &[
+            "".to_string(),
+            "ghost".to_string(),
+            "npc_athena".to_string(),
+        ],
         &graph,
     );
     assert_eq!(refs.len(), 1, "空 id 跳过、图谱外 ghost 跳过");
@@ -469,7 +473,10 @@ fn opening_seed_flag_default_on_and_off_values() {
         );
     }
     for on in ["1", "true", "on", "yes", "whatever"] {
-        assert!(opening_durable_seed_flag_on(Some(on)), "{on} ⇒ ON(非关值即开)");
+        assert!(
+            opening_durable_seed_flag_on(Some(on)),
+            "{on} ⇒ ON(非关值即开)"
+        );
     }
 }
 
@@ -519,7 +526,10 @@ fn opening_seed_falls_back_to_scene_when_no_npc() {
 #[test]
 fn opening_seed_fail_closed_no_npc_no_scene() {
     let facts = opening_seed_facts("sess_o", None, &[]);
-    assert!(facts.is_empty(), "无 NPC 且无 scene ⇒ 不凭空造行(fail-closed)");
+    assert!(
+        facts.is_empty(),
+        "无 NPC 且无 scene ⇒ 不凭空造行(fail-closed)"
+    );
     // 空白也算无效。
     let facts2 = opening_seed_facts("sess_o", Some("   "), &["  ".to_string()]);
     assert!(facts2.is_empty(), "空白 scene/npc ⇒ 不写");

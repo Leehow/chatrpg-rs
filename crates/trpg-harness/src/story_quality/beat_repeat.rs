@@ -19,13 +19,19 @@ pub struct RepeatedBeatCheckpoint {
 
 impl Default for RepeatedBeatCheckpoint {
     fn default() -> Self {
-        Self { active: false, max_consecutive: 2 }
+        Self {
+            active: false,
+            max_consecutive: 2,
+        }
     }
 }
 
 impl RepeatedBeatCheckpoint {
     pub fn active() -> Self {
-        Self { active: true, max_consecutive: 2 }
+        Self {
+            active: true,
+            max_consecutive: 2,
+        }
     }
     pub fn is_active(&self) -> bool {
         self.active

@@ -1,0 +1,38 @@
+{
+  "action_menus": [
+    {
+      "id": "which_try_first_records_papers",
+      "text": "Knott sits back. So, which will you try first-the records, or the papers?"
+    },
+    {
+      "id": "which_lead_pursue_first",
+      "text": "The file gives you several public leads. Which lead does Evelyn pursue first: the Globe archive, the courthouse file, or the old house itself?"
+    },
+    {
+      "id": "what_line_follow_first",
+      "text": "The trail is clearer now. What line does Evelyn follow first-the chapel ruins, the police file, or the Corbitt house?"
+    },
+    {
+      "id": "where_begin_first",
+      "text": "Where does she begin first: with the title index, the newspaper morgue, or the front door?"
+    }
+  ],
+  "allowed": [
+    {
+      "id": "open_prompt_no_options",
+      "text": "Knott sits back, waiting to see what Evelyn does next."
+    },
+    {
+      "id": "open_question_no_options",
+      "text": "The room settles into silence. What does Evelyn do next?"
+    },
+    {
+      "id": "facts_with_or_no_player_menu",
+      "text": "The file mentions courts or police records as possible sources, but it does not settle the matter."
+    },
+    {
+      "id": "diegetic_uncertainty_no_prompt",
+      "text": "The records and the papers both remain possible sources; neither has yet been checked."
+    }
+  ]
+}

@@ -105,7 +105,28 @@
     ]
   },
   "_note_skill_stat_links": "L-U engine-dehardcode: heals a reader under-extraction (same hazard as the luck/humanity track note). The CPR Core skill list (p131-152) organizes every skill under its governing STAT — a Skill Check is '1d10 + STAT + Skill Level vs DV' (p130 Resolving Actions with Skills). The pass-one chargen reader captured each skill's LEVEL but dropped the skill->STAT linkage, so the runtime mechanical_profile carried skill level only and roll-high checks composed '1d10 + Skill' (missing the STAT addend ~6-8) => structurally under-powered vs CPR DVs (smokeLT census: Persuasion total 8 vs DV14 = die2 + Persuasion6, COOL8 omitted). This map restores the linkage as DATA (no per-ruleset Rust). dice_core shallow-merge keeps base 'compare'. Keyed by skill TITLE (case-insensitive consumer lookup); value = STAT field in mechanical_profile.stats. Consumed by trpg-contest resolve_roll_high_modifiers (flag TRPG_SKILL_COMPETENCE_STAT, OFF==skill-only byte-equal baseline). source_ref: cyberpunk_red CPR Core p130-152 skill list.",
+  "_note_success_bands_fail_closed": "Read-time kernel override replaces the under-extracted Cyberpunk RED success_bands. CPR critical success/failure depends on the first natural action die (10 explodes upward, 1 explodes downward), but the current generic success_tier evaluator only receives final total/target/success and cannot audit the first natural die. Fail closed: expose only ordinary success/failure tiers until natural-die tier predicates are modeled in the kernel/evaluator. This prevents ordinary DV successes such as total 15 vs DV14 from being mislabeled critical_success. Pure data; no per-ruleset Rust.",
   "dice_core": {
+    "success_bands": [
+      {
+        "id": "success",
+        "label": "Success",
+        "rank": 2,
+        "test": {
+          "kind": "otherwise"
+        },
+        "semantics": "The final total meets or beats the DV, or wins the opposed roll. Critical natural-die tiers are intentionally not emitted by the generic evaluator until the first action die is auditable."
+      },
+      {
+        "id": "failure",
+        "label": "Failure",
+        "rank": 0,
+        "test": {
+          "kind": "otherwise"
+        },
+        "semantics": "The final total does not meet the DV, or loses the opposed roll."
+      }
+    ],
     "skill_stat_links": {
       "Accounting": "INT", "Acting": "COOL", "Air Vehicle Tech": "TECH",
       "Animal Handling": "INT", "Archery": "REF", "Athletics": "DEX",

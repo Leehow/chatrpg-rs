@@ -11,7 +11,8 @@ use trpg_model::{BeatKind, DirectorPlan, SpotlightState, StoryState};
 
 /// Beat kinds the empty-story fallback is allowed to emit. All are low-commitment,
 /// player-facing beats that never assert un-established lore.
-const FALLBACK_BEAT_KINDS: [BeatKind; 3] = [BeatKind::Respond, BeatKind::Consequence, BeatKind::Choice];
+const FALLBACK_BEAT_KINDS: [BeatKind; 3] =
+    [BeatKind::Respond, BeatKind::Consequence, BeatKind::Choice];
 
 /// Build a playable plan for an empty [`StoryState`] (§二十四-#2: Director-off / empty
 /// story still yields a playable turn). Guarantees:
@@ -53,7 +54,9 @@ pub fn pick_spotlight_target(
 ) -> Option<String> {
     spotlights
         .iter()
-        .filter(|s| s.player_id != acting_actor_id && s.character_id.as_deref() != Some(acting_actor_id))
+        .filter(|s| {
+            s.player_id != acting_actor_id && s.character_id.as_deref() != Some(acting_actor_id)
+        })
         .min_by(|a, b| {
             a.spotlight_count
                 .cmp(&b.spotlight_count)

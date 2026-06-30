@@ -432,8 +432,7 @@ pub async fn run_module_reader(
     // sequential/trigger/branch 有向边（每条带摘自原文的 source_anchor），与上面的实体共享
     // spatial 桥**并存**（桥保留为 fallback）。OFF ⇒ 此 pass 不被调用 ⇒ bundle 字节级不变。
     if super::module_flow_links::flow_links_enabled() {
-        let typed =
-            super::module_flow_links::extract_flow_links_all(client, &ctx, &mut out).await;
+        let typed = super::module_flow_links::extract_flow_links_all(client, &ctx, &mut out).await;
         tracing::info!(
             target: "module_reader", phase = "flow_links",
             typed_authored_links = typed, scenes = out.scenes.len(),

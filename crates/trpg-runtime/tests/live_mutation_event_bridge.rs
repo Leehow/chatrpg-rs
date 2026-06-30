@@ -58,7 +58,11 @@ mod bridge {
             "delete from domain_events where session_id=$1",
             "delete from sessions where session_id=$1",
         ] {
-            sqlx::query(sql).bind(session).execute(&db.pool).await.unwrap();
+            sqlx::query(sql)
+                .bind(session)
+                .execute(&db.pool)
+                .await
+                .unwrap();
         }
     }
 
@@ -134,7 +138,10 @@ mod bridge {
             "RAN: OFF session WorldFactChanged={off_wfc} PlayerLearnedFact={off_plf} total={}",
             off.len()
         );
-        assert_eq!(off_wfc, 0, "OFF must emit ZERO WorldFactChanged (baseline carrier was empty)");
+        assert_eq!(
+            off_wfc, 0,
+            "OFF must emit ZERO WorldFactChanged (baseline carrier was empty)"
+        );
         assert_eq!(
             off_plf, 1,
             "OFF baseline: exactly the knows_true reveal's PlayerLearnedFact (no bridge double-emit)"
@@ -162,7 +169,10 @@ mod bridge {
             eprintln!("  ev kind={k} id={id} data={d}");
         }
         // Headline: WorldFactChanged now present (was 0), with a resolvable fact_id.
-        assert!(on_wfc >= 1, "ON must emit ≥1 WorldFactChanged (previously 0)");
+        assert!(
+            on_wfc >= 1,
+            "ON must emit ≥1 WorldFactChanged (previously 0)"
+        );
         let wfc = on
             .iter()
             .find(|(_, k, _)| k == "WorldFactChanged")
@@ -184,7 +194,10 @@ mod bridge {
             .find(|(id, _, _)| id.starts_with("de_pp_edge_"))
             .expect("a bridged PlayerPartyEdge PlayerLearnedFact");
         assert_eq!(pp.1, "PlayerLearnedFact");
-        assert_eq!(pp.2.get("knowledge_state").and_then(Value::as_str), Some("suspects"));
+        assert_eq!(
+            pp.2.get("knowledge_state").and_then(Value::as_str),
+            Some("suspects")
+        );
 
         purge(&db, &on_session).await;
         drop(guard);

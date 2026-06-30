@@ -76,6 +76,7 @@ enum Commands {
         command: InspectCommand,
     },
     CreateCharacter(CreateCharacterArgs),
+    BindCharacter(BindCharacterArgs),
     Play {
         #[arg(long)]
         ruleset: String,
@@ -83,6 +84,12 @@ enum Commands {
         module: Option<String>,
         #[arg(long)]
         session_id: Option<String>,
+        /// Runtime quality profile for live playtests. Default leaves env/baseline untouched.
+        #[arg(long, value_enum)]
+        runtime_profile: Option<RuntimeProfileArg>,
+        /// Player-visible output language, e.g. zh-Hans or en.
+        #[arg(long)]
+        output_language: Option<String>,
     },
     /// Run exactly one GM turn without opening the interactive play shell.
     /// Useful for pipes, regression tests, scripts, and LLM-driven debugging.
@@ -100,6 +107,12 @@ enum Commands {
         module: Option<String>,
         #[arg(long)]
         session_id: String,
+        /// Runtime quality profile for live playtests. Default leaves env/baseline untouched.
+        #[arg(long, value_enum)]
+        runtime_profile: Option<RuntimeProfileArg>,
+        /// Player-visible output language, e.g. zh-Hans or en.
+        #[arg(long)]
+        output_language: Option<String>,
     },
     /// Dump a turn's Flight-Recorder trace (phases, Need source refs, BP hashes, failure/warnings).
     Explain {
@@ -228,6 +241,35 @@ struct CreateCharacterArgs {
 }
 
 #[derive(Debug, Args)]
+struct BindCharacterArgs {
+    /// Ruleset id for the character sheet.
+    #[arg(long)]
+    ruleset: String,
+    /// Module id for the target session.
+    #[arg(long)]
+    module: Option<String>,
+    /// Session to bind the saved character into. If omitted, a new session is started.
+    #[arg(long)]
+    session_id: Option<String>,
+    /// Actor id to bind the character as (default pc.current).
+    #[arg(long, default_value = "pc.current")]
+    actor_id: String,
+    /// Stable character id to reuse or save. With no --sheet-json/--sheet-file,
+    /// this loads the saved character from the Rust DB and binds it into the session.
+    #[arg(long)]
+    character_id: Option<String>,
+    /// Structured character sheet JSON for importing/binding a card not already stored in DB.
+    #[arg(long)]
+    sheet_json: Option<String>,
+    /// Read structured character sheet JSON from a file, or '-' for stdin.
+    #[arg(long)]
+    sheet_file: Option<String>,
+    /// Output stream format for automation.
+    #[arg(long, value_enum, default_value = "text")]
+    stream_format: StreamFormat,
+}
+
+#[derive(Debug, Args)]
 struct TurnArgs {
     /// Ruleset id. May also be supplied by --request-json.
     #[arg(long)]
@@ -260,6 +302,12 @@ struct TurnArgs {
     /// Output stream format for automation.
     #[arg(long, value_enum, default_value = "text")]
     stream_format: StreamFormat,
+    /// Runtime quality profile for live playtests. Default leaves env/baseline untouched.
+    #[arg(long, value_enum)]
+    runtime_profile: Option<RuntimeProfileArg>,
+    /// Player-visible output language, e.g. zh-Hans or en.
+    #[arg(long)]
+    output_language: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -493,9 +541,59 @@ enum StreamFormat {
     Sse,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum RuntimeProfileArg {
+    /// Enable the source-grounded live playtest gates used by journey/eval runs.
+    Playtest,
+}
+
 #[derive(Debug, Subcommand)]
 enum AuthCommand {
     Set,
+}
+
+fn runtime_profile_env(
+    profile: Option<RuntimeProfileArg>,
+    output_language: Option<&str>,
+) -> BTreeMap<&'static str, String> {
+    let mut env = BTreeMap::new();
+    if matches!(profile, Some(RuntimeProfileArg::Playtest)) {
+        for key in [
+            "TRPG_NARRATOR_SPLIT",
+            "TRPG_PRESENTATION_GATE",
+            "TRPG_GM_CRAFT",
+            "TRPG_REVEAL_GATING",
+            "TRPG_CLUE_PROJECTION",
+        ] {
+            env.insert(key, "true".to_string());
+        }
+    }
+    if let Some(language) = normalize_output_language_arg(output_language) {
+        env.insert("TRPG_OUTPUT_LANGUAGE", language);
+    }
+    env
+}
+
+fn apply_runtime_profile(profile: Option<RuntimeProfileArg>, output_language: Option<&str>) {
+    for (key, value) in runtime_profile_env(profile, output_language) {
+        std::env::set_var(key, value);
+    }
+}
+
+fn normalize_output_language_arg(output_language: Option<&str>) -> Option<String> {
+    let raw = output_language?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let lowered = raw.to_ascii_lowercase().replace('_', "-");
+    let normalized = match lowered.as_str() {
+        "zh" | "zh-cn" | "zh-hans" | "chinese" | "simplified-chinese" | "简体中文" | "中文" => {
+            "zh-Hans".to_string()
+        }
+        "en" | "en-us" | "english" => "en".to_string(),
+        _ => raw.to_string(),
+    };
+    Some(normalized)
 }
 
 #[derive(Debug, Subcommand)]
@@ -637,17 +735,34 @@ async fn main() -> Result<()> {
         }
         Commands::Inspect { command } => inspect(command).await,
         Commands::CreateCharacter(args) => create_character_cli(args).await,
+        Commands::BindCharacter(args) => bind_character_cli(args).await,
         Commands::Play {
             ruleset,
             module,
             session_id,
-        } => agent_play::play_cli_agent(&ruleset, module.as_deref(), session_id.as_deref()).await,
+            runtime_profile,
+            output_language,
+        } => {
+            apply_runtime_profile(runtime_profile, output_language.as_deref());
+            agent_play::play_cli_agent(&ruleset, module.as_deref(), session_id.as_deref()).await
+        }
         Commands::Turn(args) => turn_cli(args).await,
         Commands::Opening {
             ruleset,
             module,
             session_id,
-        } => opening_cli(&ruleset, module.as_deref(), &session_id).await,
+            runtime_profile,
+            output_language,
+        } => {
+            apply_runtime_profile(runtime_profile, output_language.as_deref());
+            opening_cli(
+                &ruleset,
+                module.as_deref(),
+                &session_id,
+                output_language.as_deref(),
+            )
+            .await
+        }
         Commands::Explain { session, turn } => explain_cli(&session, &turn).await,
         Commands::Coverage { session } => coverage_cli(&session).await,
         Commands::Rg(args) => search_query_cli(args).await,
@@ -1003,6 +1118,96 @@ async fn create_character_cli(args: CreateCharacterArgs) -> Result<()> {
     Ok(())
 }
 
+async fn bind_character_cli(args: BindCharacterArgs) -> Result<()> {
+    emit_phase(
+        args.stream_format,
+        "start",
+        json!({
+            "kind": "character_bind",
+            "ruleset_id": &args.ruleset,
+            "module_id": &args.module,
+            "character_id": &args.character_id,
+        }),
+    )?;
+
+    let db = connect_db().await?;
+    let (sheet, character_id) = match (args.sheet_json, args.sheet_file, args.character_id) {
+        (Some(text), None, character_id) => {
+            let sheet = serde_json::from_str::<Value>(&text)
+                .context("invalid character sheet JSON for bind-character")?;
+            (sheet, character_id)
+        }
+        (None, Some(path), character_id) => {
+            let text = read_path_or_stdin(&path)
+                .await
+                .context("failed to read --sheet-file")?;
+            let sheet = serde_json::from_str::<Value>(&text)
+                .context("invalid character sheet JSON for bind-character")?;
+            (sheet, character_id)
+        }
+        (Some(_), Some(_), _) => {
+            return Err(anyhow!(
+                "pass only one of --sheet-json or --sheet-file when binding a character"
+            ))
+        }
+        (None, None, Some(character_id)) => {
+            let character = db
+                .load_character(&character_id)
+                .await?
+                .ok_or_else(|| anyhow!("saved character not found: {character_id}"))?;
+            if character.ruleset_id != args.ruleset {
+                return Err(anyhow!(
+                    "saved character ruleset mismatch: character_id={} has ruleset {}, requested {}",
+                    character.character_id,
+                    character.ruleset_id,
+                    args.ruleset
+                ));
+            }
+            (character.sheet, Some(character.character_id))
+        }
+        (None, None, None) => {
+            return Err(anyhow!(
+                "missing --character-id, --sheet-json, or --sheet-file for bind-character"
+            ))
+        }
+    };
+    let runtime = RuntimeEngine::new(db.clone());
+    let created = runtime
+        .bind_character_sheet(
+            &args.ruleset,
+            args.module.as_deref(),
+            args.session_id.as_deref(),
+            &args.actor_id,
+            character_id.as_deref(),
+            sheet,
+        )
+        .await?;
+    emit_phase(
+        args.stream_format,
+        "character_created",
+        json!({
+            "character_id": created.character_id,
+            "name": created.name,
+            "status": created.status,
+            "session_id": created.session_id,
+            "actor_id": created.actor_id,
+            "validation": created.validation,
+            "sheet": created.sheet,
+        }),
+    )?;
+    emit_phase(
+        args.stream_format,
+        "bound",
+        json!({
+            "session_id": created.session_id,
+            "actor_id": created.actor_id,
+            "play_hint": format!("trpg turn --ruleset {} --session-id {} --input \"...\"", args.ruleset, created.session_id),
+        }),
+    )?;
+    emit_phase(args.stream_format, "done", json!({}))?;
+    Ok(())
+}
+
 async fn grow_cli(
     session: &str,
     actor: &str,
@@ -1033,7 +1238,12 @@ async fn grow_cli(
 /// L-P Q3 opening-scene delivery: print the module entry scene's pre-turn establishing
 /// narration to stdout (empty when the flag is off / no module / no establishing material).
 /// Search-free runtime — opening delivery only reads the DB. Never opens a turn.
-async fn opening_cli(ruleset: &str, module: Option<&str>, session_id: &str) -> Result<()> {
+async fn opening_cli(
+    ruleset: &str,
+    module: Option<&str>,
+    session_id: &str,
+    output_language: Option<&str>,
+) -> Result<()> {
     let db = connect_db().await?;
     db.migrate().await?;
     let engine = RuntimeEngine::new(db.clone());
@@ -1041,13 +1251,83 @@ async fn opening_cli(ruleset: &str, module: Option<&str>, session_id: &str) -> R
         .opening_scene_delivery(session_id, ruleset, module)
         .await?
     {
+        let text = rewrite_opening_for_output_language(&text, output_language).await?;
         print!("{text}");
         io::stdout().flush().ok();
     }
     Ok(())
 }
 
+async fn rewrite_opening_for_output_language(
+    text: &str,
+    output_language: Option<&str>,
+) -> Result<String> {
+    let Some(language) = normalize_output_language_arg(output_language) else {
+        return Ok(text.to_string());
+    };
+    if !opening_language_rewrite_needed(text, &language) {
+        return Ok(text.to_string());
+    }
+    let llm = make_llm()?;
+    let messages = vec![
+        ChatMessage {
+            role: "system".to_string(),
+            content:
+                "You rewrite TRPG player-visible opening narration into the requested output language.\n\
+                 Preserve all concrete facts, dates, money, proper nouns, locations, and module-grounded framing.\n\
+                 Do not add choices, action menus, hidden Keeper information, new facts, or advice.\n\
+                 Return only the final player-visible opening narration."
+                    .to_string(),
+        },
+        ChatMessage {
+            role: "user".to_string(),
+            content: format!(
+                "Output language: {language}\n\nOriginal opening narration:\n{text}"
+            ),
+        },
+    ];
+    let rewritten = llm
+        .complete_text(messages, 0.0)
+        .await
+        .context("failed to rewrite opening narration for output language")?;
+    let rewritten = rewritten.trim();
+    if rewritten.is_empty() {
+        return Err(anyhow!(
+            "opening language rewrite returned empty narration for output language {language}"
+        ));
+    }
+    Ok(rewritten.to_string())
+}
+
+fn opening_language_rewrite_needed(text: &str, output_language: &str) -> bool {
+    let language = output_language.trim().to_ascii_lowercase();
+    if language.starts_with("zh") {
+        return !contains_cjk_cli(text);
+    }
+    if language == "en" || language.starts_with("en-") {
+        return contains_cjk_cli(text);
+    }
+    true
+}
+
+fn contains_cjk_cli(text: &str) -> bool {
+    text.chars().any(|ch| {
+        matches!(
+            ch as u32,
+            0x3400..=0x4DBF
+                | 0x4E00..=0x9FFF
+                | 0xF900..=0xFAFF
+                | 0x20000..=0x2A6DF
+                | 0x2A700..=0x2B73F
+                | 0x2B740..=0x2B81F
+                | 0x2B820..=0x2CEAF
+        )
+    })
+}
+
 async fn turn_cli(args: TurnArgs) -> Result<()> {
+    apply_runtime_profile(args.runtime_profile, args.output_language.as_deref());
+
     let mut req = if let Some(path) = args.request_json.as_deref() {
         let text = read_path_or_stdin(path)
             .await
@@ -1176,6 +1456,7 @@ async fn turn_cli(args: TurnArgs) -> Result<()> {
     }
 
     let turn_id = format!("turn_{}", uuid::Uuid::new_v4().simple());
+    let turn_id_for_wait = turn_id.clone();
     let request = ContextRequest {
         ruleset_id: ruleset_id.clone(),
         module_id: module_id.clone(),
@@ -1276,7 +1557,7 @@ async fn turn_cli(args: TurnArgs) -> Result<()> {
     // R5 T3：一次性 turn 等 heavy 落账（确定性退出），轮询 pp_lifecycle=complete。
     // 仅成功路径才等 heavy——失败回合无 heavy spawn。
     if turn_failure.is_none() && cli_wait_mode(true) == WaitMode::WaitHeavy {
-        await_heavy_complete(&db, &session_id).await;
+        await_heavy_complete(&db, &turn_id_for_wait).await;
     }
     if let Some((phase, message)) = turn_failure {
         // 非零退出（anyhow::Error → main 返非零）——脚本/回归判失败，绝不伪装成功。
@@ -1507,9 +1788,20 @@ fn format_coverage_report(session: &str, traces: &[TurnTrace], events: &[DomainE
     // 计数（clue/npc）。P0c 后 `PlayerExposed` 是主语义；旧 `EntitySurfaced`
     // 仍向后兼容。event_id 幂等 per-session，但仍按 (kind,id) 去重兜底。
     let mut surfaced_seen: Vec<(String, String)> = Vec::new();
+    let mut learned_fact_ids: Vec<String> = Vec::new();
     for ev in events {
         match ev.kind {
             DomainEventKind::DiceRolled => dice_rolled += 1,
+            DomainEventKind::PlayerLearnedFact => {
+                let fact_id = ev
+                    .data
+                    .get("fact_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if !fact_id.is_empty() && !learned_fact_ids.iter().any(|id| id == fact_id) {
+                    learned_fact_ids.push(fact_id.to_string());
+                }
+            }
             DomainEventKind::EntitySurfaced | DomainEventKind::PlayerExposed => {
                 let id = ev
                     .data
@@ -1565,6 +1857,10 @@ fn format_coverage_report(session: &str, traces: &[TurnTrace], events: &[DomainE
     let npcs_seen = surfaced_seen.iter().filter(|(k, _)| k == "npc").count();
     out.push_str(&format!(
         "player_knowledge (surfaced entities): {clues_seen} clues, {npcs_seen} npcs\n"
+    ));
+    out.push_str(&format!(
+        "player_knowledge (learned facts): {} facts\n",
+        learned_fact_ids.len()
     ));
 
     // ── 绑定覆盖（from traces[].binding_trace）────────────────
@@ -1742,15 +2038,15 @@ fn emit_sse(event: &str, data: &str) {
     io::stdout().flush().ok();
 }
 
-/// R5 T3：等待 session 最近 turn 的 pp_lifecycle 到达 "complete"，上限 30s，间隔 500ms。
+/// R5 T3：等待当前 turn 的 pp_lifecycle 到达 "complete"，上限 30s，间隔 500ms。
 /// fail-closed 超时放行（warn），绝不阻死进程。仅 `trpg turn` 一次性模式调用。
-async fn await_heavy_complete(db: &Db, session_id: &str) {
+async fn await_heavy_complete(db: &Db, turn_id: &str) {
     use std::time::{Duration, Instant};
     const TIMEOUT: Duration = Duration::from_secs(30);
     const INTERVAL: Duration = Duration::from_millis(500);
     let start = Instant::now();
     loop {
-        match db.load_last_turn_pp_lifecycle(session_id).await {
+        match db.load_turn_pp_lifecycle(turn_id).await {
             Ok(Some(ref s)) if s == trpg_model::PP_COMPLETE => return,
             Ok(_) => {}
             Err(err) => {
@@ -1760,7 +2056,7 @@ async fn await_heavy_complete(db: &Db, session_id: &str) {
         }
         if start.elapsed() >= TIMEOUT {
             tracing::warn!(
-                session_id,
+                turn_id,
                 "await_heavy_complete: timeout ({}s) waiting for pp_lifecycle=complete; proceeding",
                 TIMEOUT.as_secs()
             );
@@ -2383,6 +2679,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn playtest_runtime_profile_enables_progression_gates_and_language() {
+        let env = runtime_profile_env(Some(RuntimeProfileArg::Playtest), Some("zh-Hans"));
+
+        assert_eq!(
+            env.get("TRPG_NARRATOR_SPLIT").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            env.get("TRPG_PRESENTATION_GATE").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(env.get("TRPG_GM_CRAFT").map(String::as_str), Some("true"));
+        assert_eq!(
+            env.get("TRPG_REVEAL_GATING").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            env.get("TRPG_CLUE_PROJECTION").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            env.get("TRPG_OUTPUT_LANGUAGE").map(String::as_str),
+            Some("zh-Hans")
+        );
+    }
+
+    #[test]
+    fn opening_language_rewrite_needed_detects_language_mismatch_without_module_hardcoding() {
+        assert!(opening_language_rewrite_needed(
+            "It is 1920 in Boston. Mr. Knott gives you the keys.",
+            "zh-Hans"
+        ));
+        assert!(!opening_language_rewrite_needed(
+            "1920 年的波士顿，Knott 先生把钥匙交给你。",
+            "zh-Hans"
+        ));
+        assert!(opening_language_rewrite_needed(
+            "1920 年的波士顿，Knott 先生把钥匙交给你。",
+            "en"
+        ));
+        assert!(!opening_language_rewrite_needed(
+            "It is 1920 in Boston. Mr. Knott gives you the keys.",
+            "en"
+        ));
+    }
+
+    #[test]
     fn format_turn_trace_renders_failure_and_need_refs() {
         let source_ref = SourceRef {
             source_id: "coc_rulebook".to_string(),
@@ -2700,6 +3043,20 @@ mod tests {
             surfaced("clue_map", "clue"),
             surfaced("npc_ras", "npc"),
             exposed("npc_russ_williams", "npc"),
+            DomainEvent::new(
+                "de_learned_session-tg_handout_3",
+                "session-tg",
+                "turn-1",
+                DomainEventKind::PlayerLearnedFact,
+                serde_json::json!({ "fact_id": "handout_3" }),
+            ),
+            DomainEvent::new(
+                "de_learned_session-tg_handout_4",
+                "session-tg",
+                "turn-1",
+                DomainEventKind::PlayerLearnedFact,
+                serde_json::json!({ "fact_id": "handout_4" }),
+            ),
             // 同 (kind,id) 重复（再 surface）→ 不双算。
             surfaced("clue_letter", "clue"),
         ];
@@ -2707,6 +3064,10 @@ mod tests {
         assert!(
             out.contains("player_knowledge (surfaced entities): 2 clues, 2 npcs"),
             "surfaced player knowledge line:\n{out}"
+        );
+        assert!(
+            out.contains("player_knowledge (learned facts): 2 facts"),
+            "learned player facts line:\n{out}"
         );
     }
 

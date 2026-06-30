@@ -119,7 +119,10 @@ async fn story_state_roundtrips() {
         .await
         .unwrap()
         .expect("after upsert, load must return Some");
-    assert_eq!(got, story, "StoryState round-trips through story_state jsonb");
+    assert_eq!(
+        got, story,
+        "StoryState round-trips through story_state jsonb"
+    );
     // rejected 标记确有持久化（§24-#13 selector 读得到）。
     let rejected: Vec<&str> = got
         .player_interests
@@ -147,12 +150,11 @@ async fn story_state_replay_is_idempotent() {
     for turn in ["t1", "t1", "t2"] {
         db.upsert_story_state(&session, &story, turn).await.unwrap();
     }
-    let rows: i64 =
-        sqlx::query_scalar("select count(*) from story_state where session_id=$1")
-            .bind(&session)
-            .fetch_one(&db.pool)
-            .await
-            .unwrap();
+    let rows: i64 = sqlx::query_scalar("select count(*) from story_state where session_id=$1")
+        .bind(&session)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
     assert_eq!(rows, 1, "重放只一行（按 session_id 幂等 upsert）");
     let updated_turn: Option<String> =
         sqlx::query_scalar("select updated_turn from story_state where session_id=$1")

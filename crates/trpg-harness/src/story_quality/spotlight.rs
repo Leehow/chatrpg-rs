@@ -19,13 +19,19 @@ pub struct SpotlightDebtCheckpoint {
 
 impl Default for SpotlightDebtCheckpoint {
     fn default() -> Self {
-        Self { active: false, max_debt: 0.7 }
+        Self {
+            active: false,
+            max_debt: 0.7,
+        }
     }
 }
 
 impl SpotlightDebtCheckpoint {
     pub fn active() -> Self {
-        Self { active: true, max_debt: 0.7 }
+        Self {
+            active: true,
+            max_debt: 0.7,
+        }
     }
     pub fn is_active(&self) -> bool {
         self.active

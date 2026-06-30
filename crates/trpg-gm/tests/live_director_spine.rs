@@ -276,7 +276,9 @@ async fn live_spine_turn(buf: &Arc<Mutex<Vec<u8>>>, skill: i64) -> Result<String
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    println!("\n──── director_spine capture (session={session}, seeded dodge={skill}) ────\n{captured}");
+    println!(
+        "\n──── director_spine capture (session={session}, seeded dodge={skill}) ────\n{captured}"
+    );
     Ok(captured)
 }
 
@@ -338,8 +340,7 @@ async fn post_adjudication_beat_reflects_committed_result_live() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::new("director_spine=info"))
         .without_time()
         .finish();
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("install global subscriber once");
+    tracing::subscriber::set_global_default(subscriber).expect("install global subscriber once");
 
     // high skill ⇒ expected committed PASS ⇒ Escalate.
     let pass_trace = live_spine_turn(&buf, 99).await?;

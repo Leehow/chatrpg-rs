@@ -1,11 +1,14 @@
 //! GM-craft prompt overlays (EXAM_QUALITY_BAR Q-1 / Q-4 / Q-6, design-philosophy §2a.1/§2b.1/§2b.2).
 //!
-//! All additions are **flag-gated** behind `TRPG_GM_CRAFT` (default OFF). When OFF the
-//! prompt bytes are identical to baseline (the appenders return the base string unchanged),
-//! so `OFF==baseline` holds. When ON (exam runs) the craft overlays are appended to the
-//! relevant system prompt:
-//!   - narrator overlay → Q-1 Chinese-only output + Q-4 no option-menus / no content-dumps;
+//! Craft additions are **flag-gated** behind `TRPG_GM_CRAFT` (default OFF). When OFF and no
+//! explicit product language is configured, prompt bytes are identical to baseline. When ON
+//! (exam runs) the craft overlays are appended to the relevant system prompt:
+//!   - narrator overlay → Q-1 configured output language + Q-4 no option-menus / no content-dumps;
 //!   - adjudicator overlay → Q-6 the GM adjudicates (referee) and does not rubber-stamp.
+//!
+//! `TRPG_OUTPUT_LANGUAGE` is a product setting, not a craft-only diagnostic. If explicitly set,
+//! the language contract is appended even when `TRPG_GM_CRAFT` is OFF; the heavier craft overlays
+//! remain gated.
 //!
 //! The overlays are pure source-backed instruction text — no ruleset_id/module_id branching.
 
@@ -16,18 +19,52 @@ pub(crate) fn enabled() -> bool {
         .unwrap_or(false)
 }
 
+pub(crate) fn output_language_from_env() -> Option<String> {
+    std::env::var("TRPG_OUTPUT_LANGUAGE")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+pub(crate) fn output_language_contract(output_language: Option<&str>) -> String {
+    let raw = output_language.unwrap_or("zh-Hans").trim();
+    let lowered = raw.to_ascii_lowercase().replace('_', "-");
+    match lowered.as_str() {
+        "" | "zh" | "zh-cn" | "zh-hans" | "chinese" | "simplified-chinese" => {
+            "输出语言：必须全程使用简体中文叙述；即使玩家输入夹带英文，也绝不输出整句、整段英文，或未翻译英文普通词；仅玩家/角色专名、规则标签、原文标题、缩写和必要单位可保留原文。"
+                .to_string()
+        }
+        "en" | "en-us" | "english" => {
+            "Output language: use English for all player-visible narration. Do not switch to Chinese except for quoted source titles or player-provided proper nouns."
+                .to_string()
+        }
+        other => format!(
+            "Output language: use {other} for all player-visible narration. Preserve proper nouns and quoted source titles only when necessary."
+        ),
+    }
+}
+
+pub(crate) fn output_language_is_chinese(output_language: Option<&str>) -> bool {
+    let raw = output_language.unwrap_or("zh-Hans").trim();
+    let lowered = raw.to_ascii_lowercase().replace('_', "-");
+    matches!(
+        lowered.as_str(),
+        "" | "zh" | "zh-cn" | "zh-hans" | "chinese" | "simplified-chinese"
+    )
+}
+
 /// Q-1 (§2a.1 single-language) + Q-4 (§2b.1 no-menu / no-dump). Appended to the
 /// Narrator system prompt — the Narrator is the player-facing voice on the layered-ON path.
 pub(crate) const NARRATOR_CRAFT: &str = "\
-输出语言：必须全程使用简体中文叙述；即使玩家输入夹带英文，也绝不输出整句或整段英文。\n\
 杜绝选项菜单与清单：绝不向玩家罗列「你可以选择 A/B/C」式备选项，也绝不把线索或发现写成编号清单（①②③）或逐条罗列；把可能性与发现编织进场景——借 NPC 的反常反应、一个神情、一处不对劲的细节去暗示，让玩家自行体会与决定（展示而非告知）。\n\
 标记规范：机械数值、掷骰算式、裁定推理等「台下」信息一律不写进散文（如需留给系统，用 [meta]…[/meta] 包裹——[meta] 专放台下元信息）；[system]…[/system] 只用于玩家可见的流程/操作提示（如「请投骰」「等待回应」），绝不在其中写台下数值或推理。\n\
 检定可见化（每次真实检定都必须做）：每当本回合发生一次真实的骰子检定，必须输出一个 [roll]…[/roll] 块，写明骰子算式、目标值/难度与结果（成功/失败/部分成功/大成功/大失败），例如 [roll]侦查 1d100=63 ≤ 65 通常成功[/roll]；[roll] 只包裹这一次真实检定，绝不把纯叙事、资源增减或「没有检定」的内容塞进 [roll]，也绝不输出空的 [roll]。\n\
 [roll] 必须是绑定完整的真实检定（R-1，零容忍）：一个 [roll] 必须同时含有骰子算式、明确的目标值/难度（如 ≤65 或 ≥DV13）与已定的结果；严禁在 [roll] 里写「未定」「未知」「目标：?」「DV?」「结果：未定」等未绑定占位——这种未定检定一律视为无效。若此刻目标值/难度尚未绑定，就不要用 [roll] 包裹：要么从角色卡/规则/模组取到真实难度后作为一次绑定检定结算，要么改用普通散文叙述，绝不输出结果未定的 [roll]。\n\
 检定数据必须忠实（R-3，零容忍）：[roll] 里的骰子算式、骰值与目标值，必须逐字采用系统在「本回合机械事实」中提供的那一行真实检定数据（形如「检定[...] 6d4=[2,2,3,2,1,1] 目标:面值≥3 需≥1个，结果:成功」）——直接照搬其中的骰子算式（如 6d4）、骰值与目标，绝不自行编造或按看到的点数反推骰型（严禁把 6d4 写成 6d6/6d3/6d?，也严禁把不存在的检定凭空写成 [roll]）。系统没有给出某次检定的真实数据，就不要为它编一个 [roll]。\n\
 检定必有叙事（绝不空壳）：凡有检定发生的回合，[roll] 之外必须另写真实的第二人称中文散文，把这次检定的结果作为故事呈现出来——角色此刻看到/听到/感受到什么、世界如何回应、因果如何推进；严禁只丢一行机械结果或「（机械结果）」之类占位而没有真正的情节叙述。\n\
+调查成功必须给信息（绝不空心线索）：调查/搜索类检定成功时，必须把玩家赢得的具体信息写出来，例如具体名字、日期、地点、事件类型、物件特征、明确关系或可核查事实；不得只说「有一个名字」「某个事故」「能继续深挖」「通往下一步」「有线索/着力点/实线」而不交付内容。若当前素材无法支持具体信息，就不要把它包装成成功线索；改写成清楚的失败、部分成功代价、或只说明还需要另寻来源。\n\
 NPC 台词标记（[dialogue]）：当在场且玩家可见的 NPC 真正开口说话时，把这句台词用 [dialogue actor=\"NPC的名字或称谓\"]……[/dialogue] 包裹（actor 取该角色在故事里的名字或身份，例如「郊狼麦克」「酒保」「警员」）；台词本身仍是自然口语、随情境流动，不要因加了标记就变成一问一答的机械对白；没有人真正说话的回合就不要硬塞 [dialogue]。\n\
-可选行动提示（[choice]，须极克制）：仅当本回合自然收束于一个真实、当下、二到三选一级别的关键抉择点（如：是否冒险一搏、走哪条路、是否当面摊牌）时，才可在散文之后附最多 2-3 个 [choice]……[/choice] 作为【可选】提示；这绝不是强制菜单——玩家永远可以无视它自由行动，你也绝不能因此停止用散文把世界推进下去。严禁用 [choice] 罗列线索、把调查/探索拆成选单、或在琐碎回合给选项（那会退化成菜单，违反「展示而非告知」）。";
+行动权禁止外包：不要使用选择标签，不要在散文末尾替玩家列出二选一、三选一、下一步先做哪条线、你可以做 A 也可以做 B 之类 GM 自拟行动分支；只呈现已经发生的事实、NPC/环境反应、明确风险与可感知线索。只有 runtime 明确发出的 required choice、反应门或掷骰门，才可以把必要的规则选择交给玩家；普通调查、移动、社交和探索回合一律保持开放，让玩家自己声明行动。";
 
 /// Q-6 (§2b.2 referee, not yes-man). Appended to the adjudicator/GM system prompt — this is
 /// where the decision to run a check vs. just narrate, and how the world resists, is made.
@@ -97,9 +134,7 @@ pub(crate) fn extract_offstage_blocks(text: &str) -> String {
 /// the tags. Engine-authored from committed facts ⇒ zero invention (constitution: structured
 /// facts come from the kernel/ledger, never narrated guesswork). Returns "" when the turn had no
 /// adjudicated check. The caller is `TRPG_GM_CRAFT`-gated and split-ON only ⇒ OFF==baseline holds.
-pub(crate) fn synthesize_offstage_from_ledger(
-    snap: &trpg_agent::TurnLedgerSnapshot,
-) -> String {
+pub(crate) fn synthesize_offstage_from_ledger(snap: &trpg_agent::TurnLedgerSnapshot) -> String {
     use trpg_model::RollVisibility;
     let mut out = String::new();
     if snap.check_results.is_empty() {
@@ -124,9 +159,13 @@ pub(crate) fn synthesize_offstage_from_ledger(
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .or_else(|| {
-                oc.get("success")
-                    .and_then(|v| v.as_bool())
-                    .map(|b| if b { "成功".into() } else { "失败".into() })
+                oc.get("success").and_then(|v| v.as_bool()).map(|b| {
+                    if b {
+                        "成功".into()
+                    } else {
+                        "失败".into()
+                    }
+                })
             })
             .unwrap_or_else(|| "待结算".into());
         summaries.push(format!("{label}({expr})→{band}"));
@@ -331,13 +370,31 @@ pub(crate) fn narrator_no_scene_reestablish_enabled() -> bool {
 pub(crate) const NARRATOR_NO_SCENE_REESTABLISH: &str = "\
 【不复述场景定场 · 从玩家当前所在处续写】场景的**到达/入口定场图景**(玩家如何抵达此地、初见此地的那幅固定外景/环境画面——例如「警笛把你引到小仓库外、警车横在建筑两侧、地上倒着人影」这类**首次进入时**铺陈的定场描写)**只在玩家首次进入该场景时铺陈一次**,绝不在其后的每个回合开篇被重新painting。本回合的叙述必须**从「连续性锚」与玩家自己最近一次声明所确立的当前所在位置继续向前**,而不是把开篇重置回场景的到达/入口图景。具体:① 若玩家已自述移动到场景内部更深处(钻进通风道、进入内室、绕到建筑另一侧、深入走廊),就以其**当前的内部/纵深位置**为准续写,绝不在开篇又把镜头拉回入口外景、把玩家写成仍在/又回到入口或建筑外;② 入口处的固定景物(门外的警车、外墙、街道、到场时的人影)不要每回合重复铺陈成「此刻就在眼前」——除非玩家本回合确实回到了那个位置;③ 推进氛围靠描写玩家**当前所在处**此刻的新感官与新变化,而不是靠复述那幅已交付过的到达定场图景。一句话:开场定场只念一次,之后每回合都从玩家此刻真正所在的地方往前讲。";
 
-/// Append the narrator craft overlay when `craft_on`. OFF ⇒ returns `base` unchanged (byte-equal).
-/// 全部追加 flag 关时 ⇒ `base\n{NARRATOR_CRAFT}`(历史基线字节等价)。
 pub(crate) fn narrator_system(base: String, craft_on: bool) -> String {
+    let output_language = output_language_from_env();
+    if !craft_on {
+        return output_language
+            .as_deref()
+            .map(|lang| format!("{base}\n{}", output_language_contract(Some(lang))))
+            .unwrap_or(base);
+    }
+    narrator_system_with_language(base, craft_on, output_language.as_deref())
+}
+
+/// Append the narrator craft overlay when `craft_on`. OFF ⇒ returns `base` unchanged (byte-equal).
+/// 全部追加 flag 关时 ⇒ `base\n{output_language_contract}\n{NARRATOR_CRAFT}`。
+pub(crate) fn narrator_system_with_language(
+    base: String,
+    craft_on: bool,
+    output_language: Option<&str>,
+) -> String {
     if !craft_on {
         return base;
     }
-    let mut out = format!("{base}\n{NARRATOR_CRAFT}");
+    let mut out = format!(
+        "{base}\n{}\n{NARRATOR_CRAFT}",
+        output_language_contract(output_language)
+    );
     if narrator_single_advance_enabled() {
         out.push('\n');
         out.push_str(NARRATOR_SINGLE_ADVANCE);
@@ -407,13 +464,31 @@ pub(crate) fn gm_object_state_authority_enabled() -> bool {
 pub(crate) const ADJUDICATOR_OBJECT_STATE: &str = "\
 [物体/世界状态主权 · §6] 「绝不替玩家声明结果」同样适用于**物体与世界的状态、以及地点特征是否存在**:以「连续性锚」与「本回合机械事实」中既成的物体/世界/场景状态为唯一权威。当玩家本回合的声明**预设了一个与既成事实矛盾、或既成事实尚未确认的状态/存在**——例如把已被丢出/甩开/脱手的工具当作还握在手里、把仅被刮伤/未断/未开启/未损坏的东西当作已断/已破/已开/已露芯、把一次尚未成功的结果当作已经达成、**或把一个既成事实尚未确认存在的入口/出口/侧门/通道/线缆接点或其他地点特征当作已经存在·已被找到·可直接通过（例如既成事实仅记「未确认入口」时玩家径直「滑到最近的侧门」并摸索门缝）**——你绝不默认采纳这个虚构前提，也绝不因玩家这样指称就把它确认为既成存在。要么据既成事实当场纠正它（指出工具已不在手、缆线仍未断、该侧门尚未被发现，玩家须先重新够到、重做或先去搜寻确认），要么把玩家的真实**意图**当作一次按既成状态进行的**新尝试**——包括一次去寻找/确认该地点特征是否存在的探查——其有无与成败由你依既成事实裁定；绝不因玩家这样措辞就把世界状态径直翻转、或把未确认的特征凭空坐实。你只依据 Kernel 既成事实推进，不创造玩家凭空声称的状态改变或地点特征。";
 
-/// Append the adjudicator craft overlay when `craft_on`. OFF ⇒ returns `base` unchanged.
-/// 全部追加 flag 关时 ⇒ `base\n\n{ADJUDICATOR_CRAFT}`(历史基线字节等价)。
 pub(crate) fn adjudicator_system(base: String, craft_on: bool) -> String {
+    let output_language = output_language_from_env();
+    if !craft_on {
+        return output_language
+            .as_deref()
+            .map(|lang| format!("{base}\n{}", output_language_contract(Some(lang))))
+            .unwrap_or(base);
+    }
+    adjudicator_system_with_language(base, craft_on, output_language.as_deref())
+}
+
+/// Append the adjudicator craft overlay when `craft_on`. OFF ⇒ returns `base` unchanged.
+/// 全部追加 flag 关时 ⇒ `base\n\n{output_language_contract}\n{ADJUDICATOR_CRAFT}`。
+pub(crate) fn adjudicator_system_with_language(
+    base: String,
+    craft_on: bool,
+    output_language: Option<&str>,
+) -> String {
     if !craft_on {
         return base;
     }
-    let mut out = format!("{base}\n\n{ADJUDICATOR_CRAFT}");
+    let mut out = format!(
+        "{base}\n\n{}\n{ADJUDICATOR_CRAFT}",
+        output_language_contract(output_language)
+    );
     if gm_no_relocate_player_enabled() {
         out.push('\n');
         out.push_str(ADJUDICATOR_NO_RELOCATE);
@@ -438,6 +513,61 @@ mod tests {
     }
 
     #[test]
+    fn narrator_craft_accepts_explicit_output_language() {
+        let out = narrator_system_with_language("BASE".to_string(), true, Some("en"));
+
+        assert!(out.contains("Output language: use English"));
+        assert!(!out.contains("必须全程使用简体中文"));
+        assert!(out.contains(NARRATOR_CRAFT));
+    }
+
+    #[test]
+    fn adjudicator_craft_accepts_explicit_output_language() {
+        let out = adjudicator_system_with_language("BASE".to_string(), true, Some("en"));
+
+        assert!(out.contains("Output language: use English"));
+        assert!(!out.contains("必须全程使用简体中文"));
+        assert!(out.contains(ADJUDICATOR_CRAFT));
+    }
+
+    #[test]
+    fn chinese_output_language_contract_forbids_untranslated_english_common_words() {
+        let contract = output_language_contract(Some("zh-Hans"));
+
+        assert!(contract.contains("简体中文"));
+        assert!(
+            contract.contains("未翻译英文普通词"),
+            "Chinese language contract should prevent leaks like 'reasonably': {contract}"
+        );
+    }
+
+    #[test]
+    fn explicit_output_language_applies_when_craft_is_off() {
+        let _g = env_guard();
+        let prev = std::env::var("TRPG_OUTPUT_LANGUAGE").ok();
+        std::env::set_var("TRPG_OUTPUT_LANGUAGE", "zh-Hans");
+
+        let narrator = narrator_system("BASE".to_string(), false);
+        let adjudicator = adjudicator_system("BASE".to_string(), false);
+
+        assert!(
+            narrator.contains("必须全程使用简体中文"),
+            "configured language is a product setting, not a craft-only overlay: {narrator}"
+        );
+        assert!(
+            adjudicator.contains("必须全程使用简体中文"),
+            "configured language is a product setting, not a craft-only overlay: {adjudicator}"
+        );
+        assert!(!narrator.contains(NARRATOR_CRAFT));
+        assert!(!adjudicator.contains(ADJUDICATOR_CRAFT));
+
+        match prev {
+            Some(v) => std::env::set_var("TRPG_OUTPUT_LANGUAGE", v),
+            None => std::env::remove_var("TRPG_OUTPUT_LANGUAGE"),
+        }
+    }
+
+    #[test]
     fn narrator_single_advance_flag_and_overlay() {
         let _g = env_guard();
         let prev = std::env::var("TRPG_NARRATOR_SINGLE_ADVANCE").ok();
@@ -450,12 +580,15 @@ mod tests {
         std::env::remove_var("TRPG_NARRATOR_SINGLE_ADVANCE");
         assert!(narrator_single_advance_enabled(), "未设 ⇒ 默认 ON");
         let on = narrator_system("BASE".to_string(), true);
-        assert!(on.contains("单步推进 · 禁回合内复述"), "ON 应追加单步推进纪律: {on}");
+        assert!(
+            on.contains("单步推进 · 禁回合内复述"),
+            "ON 应追加单步推进纪律: {on}"
+        );
         assert!(on.contains("不要回头重新铺陈"), "ON 应含禁复述子句");
         assert!(on.contains("时间线只向前推进"), "ON 应含时间单向子句");
         assert!(on.contains(NARRATOR_CRAFT), "ON 仍保留既有 NARRATOR_CRAFT");
 
-        // 显式 OFF(全部追加 flag 关)⇒ 与既有 NARRATOR_CRAFT 字节等价(不追加任何 overlay)。
+        // 显式 OFF(全部追加 flag 关)⇒ 只保留输出语言 contract + 既有 NARRATOR_CRAFT。
         std::env::set_var("TRPG_NARRATOR_SINGLE_ADVANCE", "off");
         std::env::set_var("TRPG_NARRATOR_NO_HOLLOW_SUSPENSION", "off");
         std::env::set_var("TRPG_NARRATOR_LOCATION_FIDELITY", "off");
@@ -464,12 +597,23 @@ mod tests {
         std::env::set_var("TRPG_NARRATOR_NO_SCENE_REESTABLISH", "off");
         assert!(!narrator_single_advance_enabled(), "off ⇒ OFF");
         let off = narrator_system("BASE".to_string(), true);
-        assert_eq!(off, format!("BASE\n{NARRATOR_CRAFT}"), "OFF 须与历史 craft overlay 字节等价");
-        assert!(!off.contains("单步推进 · 禁回合内复述"), "OFF 不得追加单步推进");
+        assert_eq!(
+            off,
+            format!("BASE\n{}\n{NARRATOR_CRAFT}", output_language_contract(None)),
+            "OFF 须与历史 craft overlay 字节等价"
+        );
+        assert!(
+            !off.contains("单步推进 · 禁回合内复述"),
+            "OFF 不得追加单步推进"
+        );
 
         // craft_on=false ⇒ 永远 base(我 flag 不触此路径)。
         std::env::remove_var("TRPG_NARRATOR_SINGLE_ADVANCE");
-        assert_eq!(narrator_system("B2".to_string(), false), "B2", "craft OFF 永远 base");
+        assert_eq!(
+            narrator_system("B2".to_string(), false),
+            "B2",
+            "craft OFF 永远 base"
+        );
 
         match prev {
             Some(v) => std::env::set_var("TRPG_NARRATOR_SINGLE_ADVANCE", v),
@@ -504,7 +648,10 @@ mod tests {
         std::env::remove_var("TRPG_NARRATOR_NO_SCENE_REESTABLISH");
         assert!(narrator_no_scene_reestablish_enabled(), "未设 ⇒ 默认 ON");
         let on = narrator_system("BASE".to_string(), true);
-        assert!(on.contains("不复述场景定场 · 从玩家当前所在处续写"), "ON 应追加不复述场景定场纪律: {on}");
+        assert!(
+            on.contains("不复述场景定场 · 从玩家当前所在处续写"),
+            "ON 应追加不复述场景定场纪律: {on}"
+        );
         assert!(
             on.contains("只在玩家首次进入该场景时铺陈一次"),
             "ON 应含'到达定场只念一次'子句(直击每回合重painting开篇)"
@@ -521,7 +668,10 @@ mod tests {
         std::env::set_var("TRPG_NARRATOR_NO_SCENE_REESTABLISH", "off");
         assert!(!narrator_no_scene_reestablish_enabled(), "off ⇒ OFF");
         let off = narrator_system("BASE".to_string(), true);
-        assert!(!off.contains("不复述场景定场 · 从玩家当前所在处续写"), "OFF 不得追加不复述场景定场纪律");
+        assert!(
+            !off.contains("不复述场景定场 · 从玩家当前所在处续写"),
+            "OFF 不得追加不复述场景定场纪律"
+        );
 
         match prev {
             Some(v) => std::env::set_var("TRPG_NARRATOR_NO_SCENE_REESTABLISH", v),
@@ -536,22 +686,46 @@ mod tests {
         std::env::remove_var("TRPG_NARRATOR_STATE_PERSISTENCE");
         assert!(narrator_state_persistence_enabled(), "未设 ⇒ 默认 ON");
         let on = narrator_system("BASE".to_string(), true);
-        assert!(on.contains("既成状态忠实 · 持久不复活、不反转"), "ON 应追加既成状态忠实纪律: {on}");
-        assert!(on.contains("不把已完成的变更倒回旧状态"), "ON 应含方向①(终止态不复活,直击 turn10)");
-        assert!(on.contains("不把仍持续的既成状态反转"), "ON 应含方向②(持续态不反转,直击 turn13)");
-        assert!(on.contains("残留的**物理痕迹**可以如实描写"), "ON 应含'物理痕迹可写但不复活活动状态'子句(不伤真实描写)");
-        assert!(on.contains("区别于既成那个状态的新来源"), "ON 应含'新来源须明确区分而非旧状态复活'子句(不伤 J3 新事件)");
+        assert!(
+            on.contains("既成状态忠实 · 持久不复活、不反转"),
+            "ON 应追加既成状态忠实纪律: {on}"
+        );
+        assert!(
+            on.contains("不把已完成的变更倒回旧状态"),
+            "ON 应含方向①(终止态不复活,直击 turn10)"
+        );
+        assert!(
+            on.contains("不把仍持续的既成状态反转"),
+            "ON 应含方向②(持续态不反转,直击 turn13)"
+        );
+        assert!(
+            on.contains("残留的**物理痕迹**可以如实描写"),
+            "ON 应含'物理痕迹可写但不复活活动状态'子句(不伤真实描写)"
+        );
+        assert!(
+            on.contains("区别于既成那个状态的新来源"),
+            "ON 应含'新来源须明确区分而非旧状态复活'子句(不伤 J3 新事件)"
+        );
         assert!(
             on.contains("不把未完成的操作叙述成已完成、也不把已完成的操作倒退成进行中"),
             "ON 应含方向③(完成度忠实,L-Z 扩面,直击 smokeLY t7 夸成已完成 + t1 倒退回进行中)"
         );
-        assert!(on.contains("要推进到完成须经下一回合的真实机械结果"), "ON 应含③(a)子句:未完成不夸成已完成(直击 t7'仅松脱'→'已断开')");
-        assert!(on.contains("已完成就保持完成,不在叙述里无声地把进度往回拨"), "ON 应含③(b)子句:已完成不倒退(直击 t1'已接入'→'准备接入')");
+        assert!(
+            on.contains("要推进到完成须经下一回合的真实机械结果"),
+            "ON 应含③(a)子句:未完成不夸成已完成(直击 t7'仅松脱'→'已断开')"
+        );
+        assert!(
+            on.contains("已完成就保持完成,不在叙述里无声地把进度往回拨"),
+            "ON 应含③(b)子句:已完成不倒退(直击 t1'已接入'→'准备接入')"
+        );
 
         std::env::set_var("TRPG_NARRATOR_STATE_PERSISTENCE", "off");
         assert!(!narrator_state_persistence_enabled(), "off ⇒ OFF");
         let off = narrator_system("BASE".to_string(), true);
-        assert!(!off.contains("既成状态忠实 · 持久不复活、不反转"), "OFF 不得追加既成状态忠实纪律");
+        assert!(
+            !off.contains("既成状态忠实 · 持久不复活、不反转"),
+            "OFF 不得追加既成状态忠实纪律"
+        );
 
         match prev {
             Some(v) => std::env::set_var("TRPG_NARRATOR_STATE_PERSISTENCE", v),
@@ -566,7 +740,10 @@ mod tests {
         std::env::remove_var("TRPG_NARRATOR_DIALOGUE_FIDELITY");
         assert!(narrator_dialogue_fidelity_enabled(), "未设 ⇒ 默认 ON");
         let on = narrator_system("BASE".to_string(), true);
-        assert!(on.contains("台词忠实 · 既定台词与说话者不改写"), "ON 应追加台词忠实纪律: {on}");
+        assert!(
+            on.contains("台词忠实 · 既定台词与说话者不改写"),
+            "ON 应追加台词忠实纪律: {on}"
+        );
         assert!(
             on.contains("让 NPC 说**一句新的台词**"),
             "ON 应含'推进靠新台词而非改写旧台词'子句(不伤对话推进)"
@@ -579,7 +756,10 @@ mod tests {
         std::env::set_var("TRPG_NARRATOR_DIALOGUE_FIDELITY", "off");
         assert!(!narrator_dialogue_fidelity_enabled(), "off ⇒ OFF");
         let off = narrator_system("BASE".to_string(), true);
-        assert!(!off.contains("台词忠实 · 既定台词与说话者不改写"), "OFF 不得追加台词忠实纪律");
+        assert!(
+            !off.contains("台词忠实 · 既定台词与说话者不改写"),
+            "OFF 不得追加台词忠实纪律"
+        );
 
         match prev {
             Some(v) => std::env::set_var("TRPG_NARRATOR_DIALOGUE_FIDELITY", v),
@@ -594,14 +774,26 @@ mod tests {
         std::env::remove_var("TRPG_NARRATOR_LOCATION_FIDELITY");
         assert!(narrator_location_fidelity_enabled(), "未设 ⇒ 默认 ON");
         let on = narrator_system("BASE".to_string(), true);
-        assert!(on.contains("地点忠实 · 只渲染既定场景"), "ON 应追加地点忠实纪律: {on}");
-        assert!(on.contains("狭窄的设备间里"), "ON 应含 smokeGND3 turn8 失败模式示例");
-        assert!(on.contains("地点的改变只能来自既成的场景转移"), "ON 应含'地点改变源自committed场景转移'子句(不伤 J3)");
+        assert!(
+            on.contains("地点忠实 · 只渲染既定场景"),
+            "ON 应追加地点忠实纪律: {on}"
+        );
+        assert!(
+            on.contains("狭窄的设备间里"),
+            "ON 应含 smokeGND3 turn8 失败模式示例"
+        );
+        assert!(
+            on.contains("地点的改变只能来自既成的场景转移"),
+            "ON 应含'地点改变源自committed场景转移'子句(不伤 J3)"
+        );
 
         std::env::set_var("TRPG_NARRATOR_LOCATION_FIDELITY", "off");
         assert!(!narrator_location_fidelity_enabled(), "off ⇒ OFF");
         let off = narrator_system("BASE".to_string(), true);
-        assert!(!off.contains("地点忠实 · 只渲染既定场景"), "OFF 不得追加地点忠实纪律");
+        assert!(
+            !off.contains("地点忠实 · 只渲染既定场景"),
+            "OFF 不得追加地点忠实纪律"
+        );
 
         match prev {
             Some(v) => std::env::set_var("TRPG_NARRATOR_LOCATION_FIDELITY", v),
@@ -616,14 +808,23 @@ mod tests {
         std::env::remove_var("TRPG_NARRATOR_NO_HOLLOW_SUSPENSION");
         assert!(narrator_no_hollow_suspension_enabled(), "未设 ⇒ 默认 ON");
         let on = narrator_system("BASE".to_string(), true);
-        assert!(on.contains("收束于既成结果 · 不悬置"), "ON 应追加不悬置纪律: {on}");
+        assert!(
+            on.contains("收束于既成结果 · 不悬置"),
+            "ON 应追加不悬置纪律: {on}"
+        );
         assert!(on.contains("一切悬而未决"), "ON 应含悬置语禁止子句");
-        assert!(on.contains("没发生的别写"), "ON 应含'不捏造未发生'子句(理念 no-invention)");
+        assert!(
+            on.contains("没发生的别写"),
+            "ON 应含'不捏造未发生'子句(理念 no-invention)"
+        );
 
         std::env::set_var("TRPG_NARRATOR_NO_HOLLOW_SUSPENSION", "off");
         assert!(!narrator_no_hollow_suspension_enabled(), "off ⇒ OFF");
         let off = narrator_system("BASE".to_string(), true);
-        assert!(!off.contains("收束于既成结果 · 不悬置"), "OFF 不得追加不悬置纪律");
+        assert!(
+            !off.contains("收束于既成结果 · 不悬置"),
+            "OFF 不得追加不悬置纪律"
+        );
 
         match prev {
             Some(v) => std::env::set_var("TRPG_NARRATOR_NO_HOLLOW_SUSPENSION", v),
@@ -640,17 +841,34 @@ mod tests {
         assert!(gm_no_relocate_player_enabled(), "未设 ⇒ 默认 ON");
         let on = adjudicator_system("BASE".to_string(), true);
         assert!(on.contains("玩家位置主权"), "ON 应追加位置主权守则: {on}");
-        assert!(on.contains("把 beat 搬到玩家处"), "ON 应含§4 relocation-toward-player");
-        assert!(on.contains(ADJUDICATOR_CRAFT), "ON 仍保留既有 ADJUDICATOR_CRAFT");
+        assert!(
+            on.contains("把 beat 搬到玩家处"),
+            "ON 应含§4 relocation-toward-player"
+        );
+        assert!(
+            on.contains(ADJUDICATOR_CRAFT),
+            "ON 仍保留既有 ADJUDICATOR_CRAFT"
+        );
 
-        // 两个追加 flag 全关 ⇒ 与既有 ADJUDICATOR_CRAFT 字节等价。
+        // 两个追加 flag 全关 ⇒ 只保留输出语言 contract + 既有 ADJUDICATOR_CRAFT。
         std::env::set_var("TRPG_GM_NO_RELOCATE_PLAYER", "off");
         std::env::set_var("TRPG_GM_OBJECT_STATE_AUTHORITY", "off");
         assert!(!gm_no_relocate_player_enabled(), "off ⇒ OFF");
         let off = adjudicator_system("BASE".to_string(), true);
-        assert_eq!(off, format!("BASE\n\n{ADJUDICATOR_CRAFT}"), "OFF 须与历史 adjudicator overlay 字节等价");
+        assert_eq!(
+            off,
+            format!(
+                "BASE\n\n{}\n{ADJUDICATOR_CRAFT}",
+                output_language_contract(None)
+            ),
+            "OFF 须与历史 adjudicator overlay 字节等价"
+        );
         assert!(!off.contains("玩家位置主权"), "OFF 不得追加位置主权守则");
-        assert_eq!(adjudicator_system("B2".to_string(), false), "B2", "craft OFF 永远 base");
+        assert_eq!(
+            adjudicator_system("B2".to_string(), false),
+            "B2",
+            "craft OFF 永远 base"
+        );
 
         match prev {
             Some(v) => std::env::set_var("TRPG_GM_NO_RELOCATE_PLAYER", v),
@@ -669,15 +887,30 @@ mod tests {
         std::env::remove_var("TRPG_GM_OBJECT_STATE_AUTHORITY");
         assert!(gm_object_state_authority_enabled(), "未设 ⇒ 默认 ON");
         let on = adjudicator_system("BASE".to_string(), true);
-        assert!(on.contains("物体/世界状态主权"), "ON 应追加物体状态主权守则: {on}");
-        assert!(on.contains("已被丢出/甩开/脱手的工具当作还握在手里"), "ON 应含 turn3 失败模式");
-        assert!(on.contains("尚未确认存在的入口/出口/侧门/通道/线缆接点"), "ON 应含 smokeGND2 turn3 地点特征虚构模式");
-        assert!(on.contains("不创造玩家凭空声称的状态改变或地点特征"), "ON 应含§二.9 不造新事实子句");
+        assert!(
+            on.contains("物体/世界状态主权"),
+            "ON 应追加物体状态主权守则: {on}"
+        );
+        assert!(
+            on.contains("已被丢出/甩开/脱手的工具当作还握在手里"),
+            "ON 应含 turn3 失败模式"
+        );
+        assert!(
+            on.contains("尚未确认存在的入口/出口/侧门/通道/线缆接点"),
+            "ON 应含 smokeGND2 turn3 地点特征虚构模式"
+        );
+        assert!(
+            on.contains("不创造玩家凭空声称的状态改变或地点特征"),
+            "ON 应含§二.9 不造新事实子句"
+        );
 
         std::env::set_var("TRPG_GM_OBJECT_STATE_AUTHORITY", "off");
         assert!(!gm_object_state_authority_enabled(), "off ⇒ OFF");
         let off = adjudicator_system("BASE".to_string(), true);
-        assert!(!off.contains("物体/世界状态主权"), "OFF 不得追加物体状态主权守则");
+        assert!(
+            !off.contains("物体/世界状态主权"),
+            "OFF 不得追加物体状态主权守则"
+        );
 
         match prev {
             Some(v) => std::env::set_var("TRPG_GM_OBJECT_STATE_AUTHORITY", v),
@@ -722,6 +955,9 @@ mod tests {
         assert!(out.contains("检定必有叙事"));
         assert!(out.contains("（机械结果）"));
         assert!(out.contains("严禁只丢一行机械结果"));
+        assert!(out.contains("调查/搜索类检定成功"));
+        assert!(out.contains("具体信息"));
+        assert!(out.contains("不得只说"));
     }
 
     #[test]
@@ -819,12 +1055,12 @@ mod tests {
     }
 
     #[test]
-    fn on_instructs_choice_channel_conservatively_ob_system_choice() {
+    fn on_forbids_choice_channel_and_gm_authored_action_options() {
         let out = narrator_system("BASE".to_string(), true);
-        // [choice] is an OPTIONAL affordance at a real decision point — never a forced menu (Q-4).
-        assert!(out.contains("[choice]"));
-        assert!(out.contains("绝不是强制菜单"));
-        assert!(out.contains("玩家永远可以无视它自由行动"));
+        // No narrator-side action-option channel: required choices must come from runtime gates.
+        assert!(!out.contains("[choice]"));
+        assert!(out.contains("不要使用选择标签"));
+        assert!(out.contains("只有 runtime 明确发出的 required choice"));
         // [system] remains the player-visible flow channel (A.0) — still present.
         assert!(out.contains("只用于玩家可见的流程"));
     }
@@ -838,7 +1074,10 @@ mod tests {
         assert!(adj.contains("Proposal"));
         assert!(adj.contains("绝不替系统提交状态"));
         let narr = narrator_system("BASE".to_string(), true);
-        assert!(!narr.contains("[hide kind="), "Narrator must not author [hide]");
+        assert!(
+            !narr.contains("[hide kind="),
+            "Narrator must not author [hide]"
+        );
     }
 
     #[test]

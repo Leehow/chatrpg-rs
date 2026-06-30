@@ -83,8 +83,16 @@ mod tests {
     #[test]
     fn seam_kinds_are_mechanical_and_survive_the_guard() {
         let blocks = vec![
-            block("memory.snapshot", BlockKind::MemorySnapshot, Visibility::GmOnly),
-            block("memory.retrieved", BlockKind::RetrievedMemory, Visibility::GmOnly),
+            block(
+                "memory.snapshot",
+                BlockKind::MemorySnapshot,
+                Visibility::GmOnly,
+            ),
+            block(
+                "memory.retrieved",
+                BlockKind::RetrievedMemory,
+                Visibility::GmOnly,
+            ),
         ];
         for b in &blocks {
             assert_eq!(layer_of(b), MemoryLayer::Mechanical);
@@ -97,7 +105,11 @@ mod tests {
                 MemoryLayer::World,
             ],
         );
-        assert_eq!(guarded.len(), blocks.len(), "seam blocks all survive (byte-equal corpus)");
+        assert_eq!(
+            guarded.len(),
+            blocks.len(),
+            "seam blocks all survive (byte-equal corpus)"
+        );
     }
 
     /// Fail-closed: a Story/Director block injected into the seam is stripped, while legitimate
@@ -105,9 +117,17 @@ mod tests {
     #[test]
     fn guard_strips_story_block_keeps_the_rest() {
         let blocks = vec![
-            block("mem.retrieved", BlockKind::RetrievedMemory, Visibility::GmOnly), // Mechanical
-            block("director.policy", BlockKind::DirectorPolicy, Visibility::GmOnly), // Story → drop
-            block("world.state", BlockKind::WorldState, Visibility::GmOnly),        // World
+            block(
+                "mem.retrieved",
+                BlockKind::RetrievedMemory,
+                Visibility::GmOnly,
+            ), // Mechanical
+            block(
+                "director.policy",
+                BlockKind::DirectorPolicy,
+                Visibility::GmOnly,
+            ), // Story → drop
+            block("world.state", BlockKind::WorldState, Visibility::GmOnly), // World
         ];
         let guarded = project_blocks_by_layers(
             blocks,
@@ -161,7 +181,10 @@ mod tests {
                 vec![block("k", kind.clone(), Visibility::PlayerVisible)],
                 &allowed,
             );
-            assert!(pv.is_empty(), "{kind:?} (player-visible) must be stripped from Adjudicator");
+            assert!(
+                pv.is_empty(),
+                "{kind:?} (player-visible) must be stripped from Adjudicator"
+            );
         }
     }
 
@@ -172,15 +195,29 @@ mod tests {
         std::env::set_var("TRPG_MEMORY_LAYER_GUARD", "off");
         let layers = adjudicator_memory_layers();
         std::env::remove_var("TRPG_MEMORY_LAYER_GUARD");
-        assert!(layers.is_empty(), "OFF ⇒ empty layers ⇒ monolithic baseline");
+        assert!(
+            layers.is_empty(),
+            "OFF ⇒ empty layers ⇒ monolithic baseline"
+        );
 
         let blocks = vec![
-            block("director.policy", BlockKind::DirectorPolicy, Visibility::GmOnly),
-            block("mem.retrieved", BlockKind::RetrievedMemory, Visibility::GmOnly),
+            block(
+                "director.policy",
+                BlockKind::DirectorPolicy,
+                Visibility::GmOnly,
+            ),
+            block(
+                "mem.retrieved",
+                BlockKind::RetrievedMemory,
+                Visibility::GmOnly,
+            ),
         ];
         let before: Vec<String> = blocks.iter().map(|b| b.block_id.clone()).collect();
         let after = project_blocks_by_layers(blocks, &layers);
         let after_ids: Vec<String> = after.iter().map(|b| b.block_id.clone()).collect();
-        assert_eq!(after_ids, before, "OFF guard passes Story blocks through (identity)");
+        assert_eq!(
+            after_ids, before,
+            "OFF guard passes Story blocks through (identity)"
+        );
     }
 }

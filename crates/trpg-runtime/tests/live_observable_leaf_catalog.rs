@@ -60,7 +60,12 @@ async fn the_vault_observable_leaf_catalog_fires_and_offers_actions() {
     let clue_atoms = off_catalog
         .atoms()
         .iter()
-        .filter(|a| matches!(a.kind, EvidenceKind::FactLearned | EvidenceKind::FactRevealed))
+        .filter(|a| {
+            matches!(
+                a.kind,
+                EvidenceKind::FactLearned | EvidenceKind::FactRevealed
+            )
+        })
         .count();
     eprintln!(
         "RAN: the_vault scenes={} clues={} | OFF catalog len={} (clue atoms={})",
@@ -74,7 +79,10 @@ async fn the_vault_observable_leaf_catalog_fires_and_offers_actions() {
         clue_atoms,
         "OFF ⇒ catalog is clue-only (EV-2 byte baseline)"
     );
-    assert_eq!(clue_atoms, 7, "the_vault has 7 authored clues ⇒ 7 clue atoms");
+    assert_eq!(
+        clue_atoms, 7,
+        "the_vault has 7 authored clues ⇒ 7 clue atoms"
+    );
 
     // ---- (2) catalog with the EV-P3 flag ON = clue + observable-action atoms ----
     std::env::set_var(FLAG, "1");
@@ -95,7 +103,10 @@ async fn the_vault_observable_leaf_catalog_fires_and_offers_actions() {
             action_state_loc_entity += 1;
         }
     }
-    eprintln!("RAN: ON catalog len={} | breakdown by kind = {by_kind:#?}", on_catalog.len());
+    eprintln!(
+        "RAN: ON catalog len={} | breakdown by kind = {by_kind:#?}",
+        on_catalog.len()
+    );
     eprintln!("RAN: action/state/location/entity atom count = {action_state_loc_entity}");
 
     // all enriched atoms are CarrierOnly (no live objective GuardLeaf — honest scope)
@@ -104,7 +115,9 @@ async fn the_vault_observable_leaf_catalog_fires_and_offers_actions() {
         .iter()
         .filter(|a| a.progress_role == ProgressRole::GuardLeaf)
         .count();
-    eprintln!("RAN: GuardLeaf atoms = {guard_leaf} (expected 0 live: no objectives in module_graph)");
+    eprintln!(
+        "RAN: GuardLeaf atoms = {guard_leaf} (expected 0 live: no objectives in module_graph)"
+    );
 
     // ---- (3) print 5 atoms with their verbatim authored source span (anti-fabrication) ----
     eprintln!("RAN: sample observable atoms (verbatim authored source):");
@@ -112,7 +125,10 @@ async fn the_vault_observable_leaf_catalog_fires_and_offers_actions() {
         .atoms()
         .iter()
         .filter(|a| {
-            !matches!(a.kind, EvidenceKind::FactLearned | EvidenceKind::FactRevealed)
+            !matches!(
+                a.kind,
+                EvidenceKind::FactLearned | EvidenceKind::FactRevealed
+            )
         })
         .take(5)
     {
@@ -186,7 +202,10 @@ async fn the_vault_observable_leaf_catalog_fires_and_offers_actions() {
         .offers()
         .iter()
         .filter(|o| {
-            !matches!(o.kind, EvidenceKind::FactLearned | EvidenceKind::FactRevealed)
+            !matches!(
+                o.kind,
+                EvidenceKind::FactLearned | EvidenceKind::FactRevealed
+            )
         })
         .count();
     assert_eq!(

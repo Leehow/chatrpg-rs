@@ -209,17 +209,41 @@ fn post_adjudication_core_reflects_committed_failure() {
         ..Default::default()
     }];
     let post = build_director_plan_post_adjudication(
-        &candidates, &story, None, None, &[], &[], "pc_1", &failed,
+        &candidates,
+        &story,
+        None,
+        None,
+        &[],
+        &[],
+        "pc_1",
+        &failed,
     );
     assert_eq!(post.beat_kind, BeatKind::Complicate);
-    assert_eq!(post.desired_change, trpg_director::DESIRED_CHANGE_FAIL_FORWARD);
+    assert_eq!(
+        post.desired_change,
+        trpg_director::DESIRED_CHANGE_FAIL_FORWARD
+    );
 
     // Fail-closed: no committed result ⇒ identical to the plain Beat build.
     let plain = build_director_plan_post_adjudication(
-        &candidates, &story, None, None, &[], &[], "pc_1", &[],
+        &candidates,
+        &story,
+        None,
+        None,
+        &[],
+        &[],
+        "pc_1",
+        &[],
     );
     let base = build_director_brief_packet(
-        DirectorMode::OnDemand, &candidates, &story, None, None, &[], &[], "pc_1",
+        DirectorMode::OnDemand,
+        &candidates,
+        &story,
+        None,
+        None,
+        &[],
+        &[],
+        "pc_1",
     );
     assert_eq!(plain, base, "no committed result ⇒ no overlay");
 }

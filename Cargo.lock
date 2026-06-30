@@ -3480,6 +3480,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "trpg-eval"
+version = "1.20.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "trpg-formula"
 version = "1.20.0"
 dependencies = [
@@ -3497,6 +3506,7 @@ dependencies = [
  "chrono",
  "futures-core",
  "futures-util",
+ "regex",
  "serde",
  "serde_json",
  "sha2",
@@ -3536,6 +3546,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "tokio",
+ "trpg-eval",
  "trpg-model",
  "trpg-runtime",
 ]

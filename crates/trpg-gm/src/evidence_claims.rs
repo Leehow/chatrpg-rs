@@ -185,11 +185,21 @@ mod tests {
         let events = vec![learned_event("de_clue_learn", TURN, CLUE)];
         let claims = vec![claim_citing(&set, vec![TurnLocalRef::Commit(0)])];
 
-        let (ledger, decisions) =
-            admit_gm_claims(SESSION, TURN, &set, &catalog, &events, &claims, &EvidenceLedger::new());
+        let (ledger, decisions) = admit_gm_claims(
+            SESSION,
+            TURN,
+            &set,
+            &catalog,
+            &events,
+            &claims,
+            &EvidenceLedger::new(),
+        );
 
         assert_eq!(ledger.len(), 1, "one GmWitnessed evidence admitted");
-        assert_eq!(ledger.entries()[0].authority, EvidenceAuthority::GmWitnessed);
+        assert_eq!(
+            ledger.entries()[0].authority,
+            EvidenceAuthority::GmWitnessed
+        );
         assert_eq!(
             ledger.entries()[0].atom_id,
             set.offers()[0].atom_id,
@@ -216,10 +226,21 @@ mod tests {
         let events = vec![learned_event("de_clue_learn", real, CLUE)];
         let claims = vec![claim_citing(&set, vec![TurnLocalRef::Commit(0)])];
 
-        let (ledger, decisions) =
-            admit_gm_claims(SESSION, derived, &set, &catalog, &events, &claims, &EvidenceLedger::new());
+        let (ledger, decisions) = admit_gm_claims(
+            SESSION,
+            derived,
+            &set,
+            &catalog,
+            &events,
+            &claims,
+            &EvidenceLedger::new(),
+        );
 
-        assert_eq!(ledger.len(), 0, "no admission when the cap's turn ≠ the event's turn");
+        assert_eq!(
+            ledger.len(),
+            0,
+            "no admission when the cap's turn ≠ the event's turn"
+        );
         assert_eq!(
             decisions[0].result,
             Err(RejectionReason::CausationMismatch),
@@ -238,8 +259,15 @@ mod tests {
             basis: NonEmpty::from_vec(vec![TurnLocalRef::Commit(0)]).unwrap(),
         };
 
-        let (ledger, decisions) =
-            admit_gm_claims(SESSION, TURN, &set, &catalog, &events, &[forged], &EvidenceLedger::new());
+        let (ledger, decisions) = admit_gm_claims(
+            SESSION,
+            TURN,
+            &set,
+            &catalog,
+            &events,
+            &[forged],
+            &EvidenceLedger::new(),
+        );
 
         assert_eq!(ledger.len(), 0);
         assert_eq!(decisions[0].result, Err(RejectionReason::UnknownCapability));
@@ -256,8 +284,14 @@ mod tests {
     fn non_empty_offer_block_carries_cap_and_basis_never_atom_id() {
         let set = offer_set_for(CLUE, 8, TURN);
         let block = render_gm_offer_and_claim_block(&set);
-        assert!(block.contains(set.offers()[0].cap_id.as_str()), "shows the opaque cap handle");
-        assert!(block.contains("[progress_claims]"), "tells the GM the markup format");
+        assert!(
+            block.contains(set.offers()[0].cap_id.as_str()),
+            "shows the opaque cap handle"
+        );
+        assert!(
+            block.contains("[progress_claims]"),
+            "tells the GM the markup format"
+        );
         assert!(block.contains("basis"), "explains the basis requirement");
         // LLM-never-evaluates-guard: the atom id never leaks into the prompt.
         assert!(

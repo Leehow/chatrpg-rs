@@ -168,7 +168,9 @@ pub fn derive_threat_objective(
     ];
     let normalization = ProgressRule::classify(&success_when, &then);
     let mut rule_sr = SourceRef::default();
-    rule_sr.note = Some(format!("outcome-gated on neutralization vector: {evidence_note}"));
+    rule_sr.note = Some(format!(
+        "outcome-gated on neutralization vector: {evidence_note}"
+    ));
     let outcome_rule = ProgressRule {
         id: format!("rule.outcome.{objective_id}"),
         on: EventPattern::WorldFactChanged,
@@ -187,7 +189,7 @@ pub fn derive_threat_objective(
 mod tests {
     use super::*;
     use trpg_model::adventure_ir::NormalizationStatus;
-    use trpg_model::{ScenarioNode};
+    use trpg_model::ScenarioNode;
 
     fn link(to: &str, lt: LinkType, anchor: Option<&str>) -> ScenarioLink {
         ScenarioLink {
@@ -216,7 +218,10 @@ mod tests {
     #[test]
     fn sequential_ridge_makes_executable_activate_rule() {
         let g = graph(vec![
-            node("A", vec![link("B", LinkType::Sequential, Some("press deeper"))]),
+            node(
+                "A",
+                vec![link("B", LinkType::Sequential, Some("press deeper"))],
+            ),
             node("B", vec![]),
         ]);
         let p = program_from_module_graph(&g);
@@ -226,20 +231,33 @@ mod tests {
         assert_eq!(r.then, vec![EffectExpr::Activate("B".into())]);
         assert_eq!(r.normalization, NormalizationStatus::Executable);
         assert!(r.may_autofire(), "sequential ridge is executable");
-        assert!(!r.source_evidence.is_empty(), "carries the anchor as evidence");
+        assert!(
+            !r.source_evidence.is_empty(),
+            "carries the anchor as evidence"
+        );
     }
 
     #[test]
     fn trigger_ridge_is_opaque_and_never_autofires() {
         let g = graph(vec![
-            node("A", vec![link("C", LinkType::Trigger, Some("Once they hack the server"))]),
+            node(
+                "A",
+                vec![link(
+                    "C",
+                    LinkType::Trigger,
+                    Some("Once they hack the server"),
+                )],
+            ),
             node("C", vec![]),
         ]);
         let p = program_from_module_graph(&g);
         assert_eq!(p.rules.len(), 1);
         let r = &p.rules[0];
         assert_eq!(r.normalization, NormalizationStatus::Opaque);
-        assert!(!r.may_autofire(), "un-normalizable authored condition must never auto-fire");
+        assert!(
+            !r.may_autofire(),
+            "un-normalizable authored condition must never auto-fire"
+        );
         assert!(matches!(r.when, PredicateExpr::OpaqueAuthoredText { .. }));
     }
 
@@ -249,7 +267,10 @@ mod tests {
             node("A", vec![link("D", LinkType::Spatial, None)]),
             node("D", vec![]),
         ]);
-        assert!(program_from_module_graph(&g).rules.is_empty(), "spatial bridge is not a ridge");
+        assert!(
+            program_from_module_graph(&g).rules.is_empty(),
+            "spatial bridge is not a ridge"
+        );
     }
 
     #[test]
@@ -268,13 +289,20 @@ mod tests {
     fn engine_consumes_program_and_frontier_surfaces_next() {
         use crate::progression::{compute_frontier, evaluate, ProgressEvent, ProgressionState};
         let g = graph(vec![
-            node("A", vec![link("B", LinkType::Sequential, Some("press deeper"))]),
+            node(
+                "A",
+                vec![link("B", LinkType::Sequential, Some("press deeper"))],
+            ),
             node("B", vec![]),
         ]);
         let p = program_from_module_graph(&g);
         let mut state = ProgressionState::default();
         // Focus is in A → seed Entered(A); the sequential ridge activates B.
-        evaluate(&mut state, &[ProgressEvent::Entered("A".into())], &p.borrow());
+        evaluate(
+            &mut state,
+            &[ProgressEvent::Entered("A".into())],
+            &p.borrow(),
+        );
         let f = compute_frontier(&state, &p.objectives, &p.trackers);
         assert!(
             f.active_units.contains(&"B".to_string()),
@@ -314,7 +342,10 @@ mod tests {
             d.objective.success_when,
             PredicateExpr::AnyFactMatches { .. }
         ));
-        assert!(!d.objective.source_evidence.is_empty(), "carries real anchor");
+        assert!(
+            !d.objective.source_evidence.is_empty(),
+            "carries real anchor"
+        );
 
         // Outcome-gated rule: on the neutralization fact, complete + reveal coords.
         let r = &d.outcome_rule;
@@ -336,20 +367,20 @@ mod tests {
     fn threat_objective_fail_closed_on_blank_vocab() {
         // No tokens, or only blank/whitespace tokens → never invent an objective.
         assert!(derive_threat_objective("obj.x", &[], "rev.x", "n").is_none());
-        assert!(derive_threat_objective(
-            "obj.x",
-            &["".into(), "   ".into()],
-            "rev.x",
-            "n"
-        )
-        .is_none());
+        assert!(
+            derive_threat_objective("obj.x", &["".into(), "   ".into()], "rev.x", "n").is_none()
+        );
     }
 
     #[test]
     fn threat_objective_fixes_starvation_then_completes_on_live_fact() {
         use crate::progression::{compute_frontier, evaluate, ProgressEvent, ProgressionState};
         use trpg_model::adventure_ir::{IrValue, ProgressSignalKind};
-        let tokens = vec!["drone".to_string(), "hack".to_string(), "server".to_string()];
+        let tokens = vec![
+            "drone".to_string(),
+            "hack".to_string(),
+            "server".to_string(),
+        ];
         let d = derive_threat_objective("obj.threat", &tokens, "rev.coords", "cfg").unwrap();
         let mut program = OwnedProgram::default();
         program.objectives.push(d.objective);

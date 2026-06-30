@@ -152,8 +152,7 @@ fn push_tag_block(doc: &mut TurnDocument, tag: WireTag, inner: &str) {
             if let Ok(arr) = serde_json::from_str::<serde_json::Value>(trimmed.trim()) {
                 if arr.is_array() {
                     let wrapped = serde_json::json!({ "progress_claims": arr });
-                    let claims =
-                        trpg_runtime::evidence_gateway::parse_progress_claims(&wrapped);
+                    let claims = trpg_runtime::evidence_gateway::parse_progress_claims(&wrapped);
                     doc.progress_claims.extend(claims);
                 }
             }
@@ -163,9 +162,9 @@ fn push_tag_block(doc: &mut TurnDocument, tag: WireTag, inner: &str) {
             // Fail-closed: a non-object / forged / malformed audit ⇒ `None` (the live
             // completeness check then logs a ProducerProtocolFailure — never guessed).
             // NO player-visible block ⇒ GM-only, like `[meta]`. Last well-formed tag wins.
-            if let Ok(audit) = serde_json::from_str::<trpg_model::adventure_ir::EvidenceAudit>(
-                trimmed.trim(),
-            ) {
+            if let Ok(audit) =
+                serde_json::from_str::<trpg_model::adventure_ir::EvidenceAudit>(trimmed.trim())
+            {
                 doc.evidence_audit = Some(audit);
             }
         }
@@ -193,9 +192,8 @@ fn push_tag_block(doc: &mut TurnDocument, tag: WireTag, inner: &str) {
                 serde_json::from_str::<serde_json::Value>(trimmed.trim())
             {
                 for entry in arr {
-                    if let Ok(cd) = serde_json::from_value::<
-                        trpg_model::adventure_ir::ContentDelivery,
-                    >(entry)
+                    if let Ok(cd) =
+                        serde_json::from_value::<trpg_model::adventure_ir::ContentDelivery>(entry)
                     {
                         doc.materialized_content.push(cd);
                     }
@@ -232,8 +230,22 @@ fn inner_has_real_roll(inner: &str) -> bool {
 /// Markers signalling a `[roll]` fired but its target/difficulty/result is unbound. Such a block is
 /// MALFORMED → unwrapped to Narration (R-1), even if it carries an unrelated digit. Zero survive.
 const MALFORMED_ROLL_MARKERS: &[&str] = &[
-    "未定", "未知", "未绑定", "待定", "结果：未", "结果:未",
-    "目标：?", "目标:?", "目标？", "目标?", "DV?", "DV：?", "DV:?", "DC?", "DC：?", "DC:?",
+    "未定",
+    "未知",
+    "未绑定",
+    "待定",
+    "结果：未",
+    "结果:未",
+    "目标：?",
+    "目标:?",
+    "目标？",
+    "目标?",
+    "DV?",
+    "DV：?",
+    "DV:?",
+    "DC?",
+    "DC：?",
+    "DC:?",
 ];
 
 /// True iff the inner `[roll]` content signals an unbound / undetermined check (R-1).
@@ -390,7 +402,10 @@ mod tests {
     #[test]
     fn malformed_unbound_roll_unwrapped_even_with_digit() {
         // R-1: even WITH a stray digit, an unbound-target/DV marker means malformed → unwrap.
-        for s in ["[roll]侦查 1d100 目标：? 结果未定[/roll]", "[roll]入侵终端 1d10 DV? 未知[/roll]"] {
+        for s in [
+            "[roll]侦查 1d100 目标：? 结果未定[/roll]",
+            "[roll]入侵终端 1d10 DV? 未知[/roll]",
+        ] {
             let doc = parse_turn_document(s);
             assert_eq!(doc.malformed_rolls_unwrapped, 1, "{s}");
             assert_eq!(doc.empty_rolls_unwrapped, 0, "{s}");
@@ -520,7 +535,11 @@ mod tests {
             "][/progress_claims]",
         ));
         // Only the well-formed entry survives; the three forged ones are dropped.
-        assert_eq!(doc.progress_claims.len(), 1, "forged entries must be dropped");
+        assert_eq!(
+            doc.progress_claims.len(),
+            1,
+            "forged entries must be dropped"
+        );
         assert_eq!(doc.progress_claims[0].cap_id.as_str(), "cap_good00000001");
     }
 
@@ -530,12 +549,21 @@ mod tests {
         // (not leaked into narration).
         for inner in ["not json at all", "{\"progress_claims\":1}", ""] {
             let doc = parse_turn_document(&format!("[progress_claims]{inner}[/progress_claims]"));
-            assert!(doc.progress_claims.is_empty(), "inner {inner:?} must yield no claims");
+            assert!(
+                doc.progress_claims.is_empty(),
+                "inner {inner:?} must yield no claims"
+            );
             // The tag is consumed (no player block) ⇒ neither the tag nor a non-empty inner leaks.
             let pt = doc.player_text();
-            assert!(!pt.contains("progress_claims"), "tag leaked for inner {inner:?}: {pt}");
+            assert!(
+                !pt.contains("progress_claims"),
+                "tag leaked for inner {inner:?}: {pt}"
+            );
             if !inner.is_empty() {
-                assert!(!pt.contains(inner), "inner {inner:?} leaked to player: {pt}");
+                assert!(
+                    !pt.contains(inner),
+                    "inner {inner:?} leaked to player: {pt}"
+                );
             }
         }
     }
@@ -582,9 +610,15 @@ mod tests {
             "",
         ] {
             let doc = parse_turn_document(&format!("[evidence_audit]{inner}[/evidence_audit]"));
-            assert!(doc.evidence_audit.is_none(), "inner {inner:?} must yield no audit");
+            assert!(
+                doc.evidence_audit.is_none(),
+                "inner {inner:?} must yield no audit"
+            );
             let pt = doc.player_text();
-            assert!(!pt.contains("evidence_audit"), "tag leaked for inner {inner:?}: {pt}");
+            assert!(
+                !pt.contains("evidence_audit"),
+                "tag leaked for inner {inner:?}: {pt}"
+            );
         }
     }
 
@@ -605,7 +639,11 @@ mod tests {
             "[evidence_attempts][{\"cap_id\":\"cap_2a0d946812d6\"},",
             "{\"cap_id\":\"cap_forge\",\"completed\":true}][/evidence_attempts]",
         ));
-        assert_eq!(doc.evidence_attempts.len(), 1, "only the closed-schema attempt parses");
+        assert_eq!(
+            doc.evidence_attempts.len(),
+            1,
+            "only the closed-schema attempt parses"
+        );
         assert_eq!(doc.evidence_attempts[0].as_str(), "cap_2a0d946812d6");
         let pt = doc.player_text();
         assert_eq!(pt, "特工撬开异常体的取样面板。");
@@ -632,7 +670,10 @@ mod tests {
             "\"recipient\":\"player\",\"basis\":[\"commit:0\"]}][/materialized_content]",
         ));
         assert_eq!(doc.materialized_content.len(), 1, "one delivery parsed");
-        assert_eq!(doc.materialized_content[0].delivery_cap.as_str(), "cap_2a0d946812d6");
+        assert_eq!(
+            doc.materialized_content[0].delivery_cap.as_str(),
+            "cap_2a0d946812d6"
+        );
         assert_eq!(doc.materialized_content[0].basis.len(), 1);
         let pt = doc.player_text();
         assert_eq!(pt, "你把广告分镜递到她面前，逐格讲解。");
@@ -653,18 +694,32 @@ mod tests {
             "{\"delivery_cap\":\"cap_forged0004\",\"recipient\":\"player\",\"basis\":[]}",
             "][/materialized_content]",
         ));
-        assert_eq!(doc.materialized_content.len(), 1, "forged/bad entries must be dropped");
-        assert_eq!(doc.materialized_content[0].delivery_cap.as_str(), "cap_good00000001");
+        assert_eq!(
+            doc.materialized_content.len(),
+            1,
+            "forged/bad entries must be dropped"
+        );
+        assert_eq!(
+            doc.materialized_content[0].delivery_cap.as_str(),
+            "cap_good00000001"
+        );
     }
 
     #[test]
     fn materialized_content_malformed_inner_is_empty_no_panic() {
         for inner in ["not json at all", "{\"materialized_content\":1}", ""] {
-            let doc =
-                parse_turn_document(&format!("[materialized_content]{inner}[/materialized_content]"));
-            assert!(doc.materialized_content.is_empty(), "inner {inner:?} must yield no deliveries");
+            let doc = parse_turn_document(&format!(
+                "[materialized_content]{inner}[/materialized_content]"
+            ));
+            assert!(
+                doc.materialized_content.is_empty(),
+                "inner {inner:?} must yield no deliveries"
+            );
             let pt = doc.player_text();
-            assert!(!pt.contains("materialized_content"), "tag leaked for inner {inner:?}: {pt}");
+            assert!(
+                !pt.contains("materialized_content"),
+                "tag leaked for inner {inner:?}: {pt}"
+            );
         }
     }
 

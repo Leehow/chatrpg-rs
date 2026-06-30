@@ -106,12 +106,19 @@ fn phase_kind(marker: &str) -> UnitKind {
 
 /// Recognize the repeated mission template in `pages` and slice first-class
 /// [`MissionSpec`]s. Returns empty when the document is not a mission anthology.
-pub fn induct_missions(module_id: &str, source_id: &str, pages: &[MissionPage]) -> Vec<MissionSpec> {
+pub fn induct_missions(
+    module_id: &str,
+    source_id: &str,
+    pages: &[MissionPage],
+) -> Vec<MissionSpec> {
     // 1. Mission starts = `ANOMALY PROFILE` markers, merging ones within a page or
     //    two (the same profile spilling across a page).
     let mut starts: Vec<usize> = Vec::new();
     for (i, p) in pages.iter().enumerate() {
-        if p.text.lines().any(|l| marker_of(l) == Some("ANOMALY PROFILE")) {
+        if p.text
+            .lines()
+            .any(|l| marker_of(l) == Some("ANOMALY PROFILE"))
+        {
             if let Some(&last) = starts.last() {
                 if p.page.saturating_sub(pages[last].page) < MIN_MISSION_GAP {
                     continue;
@@ -139,7 +146,8 @@ pub fn induct_missions(module_id: &str, source_id: &str, pages: &[MissionPage]) 
 
         // distinct phase markers present (structural template signature)
         let mut markers_seen: Vec<&'static str> = Vec::new();
-        let mut header_freq: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut header_freq: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
         for p in window {
             for l in p.text.lines() {
                 if let Some(m) = marker_of(l) {
@@ -237,7 +245,11 @@ pub fn induct_missions(module_id: &str, source_id: &str, pages: &[MissionPage]) 
 
 /// The Campaign root unit for a mission anthology (parent of every Mission unit).
 pub fn campaign_root(module_id: &str, title: &str) -> ContentUnit {
-    let mut u = ContentUnit::new(format!("campaign.{}", slug(module_id)), UnitKind::Campaign, title);
+    let mut u = ContentUnit::new(
+        format!("campaign.{}", slug(module_id)),
+        UnitKind::Campaign,
+        title,
+    );
     u.visibility = VisibilityPolicy::Public;
     u
 }
@@ -333,8 +345,16 @@ mod tests {
     fn mission_title_comes_from_repeated_running_header() {
         let m = induct_missions("triangle_agency.the_vault", "the_vault", &anthology_pages());
         let titles: Vec<&str> = m.iter().map(|x| x.unit.title.as_str()).collect();
-        assert!(titles.iter().any(|t| t.eq_ignore_ascii_case("Springs Eternal")), "got {titles:?}");
-        assert!(titles.iter().any(|t| t.eq_ignore_ascii_case("Dead Quiet")), "got {titles:?}");
+        assert!(
+            titles
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case("Springs Eternal")),
+            "got {titles:?}"
+        );
+        assert!(
+            titles.iter().any(|t| t.eq_ignore_ascii_case("Dead Quiet")),
+            "got {titles:?}"
+        );
     }
 
     #[test]
@@ -342,7 +362,10 @@ mod tests {
         let m = induct_missions("triangle_agency.the_vault", "the_vault", &anthology_pages());
         let first = &m[0];
         // scored objectives (Commendation + Demerit)
-        assert!(!first.objectives.is_empty(), "mission must carry scored objectives");
+        assert!(
+            !first.objectives.is_empty(),
+            "mission must carry scored objectives"
+        );
         assert!(first
             .objectives
             .iter()
@@ -364,7 +387,10 @@ mod tests {
         let m = induct_missions("triangle_agency.the_vault", "the_vault", &anthology_pages());
         let first = &m[0];
         assert!(first.phases.len() >= MIN_PHASES);
-        assert!(first.phases.iter().all(|p| p.parent_id.as_deref() == Some(first.unit.id.as_str())));
+        assert!(first
+            .phases
+            .iter()
+            .all(|p| p.parent_id.as_deref() == Some(first.unit.id.as_str())));
     }
 
     #[test]
@@ -386,9 +412,18 @@ mod tests {
         let mut pages = Vec::new();
         // only 2 template instances < MIN_MISSIONS
         for (name, p0) in [("SPRINGS ETERNAL", 8u32), ("DEAD QUIET", 22)] {
-            pages.push(MissionPage::new(p0, format!("{name}\nANOMALY PROFILE\nDomain")));
-            pages.push(MissionPage::new(p0 + 1, format!("{name}\nCHAOS EFFECTS\n2 Chaos Refresh")));
-            pages.push(MissionPage::new(p0 + 2, format!("{name}\nAFTERMATH\n\nDone\n\nThe end of this little tale arrives.")));
+            pages.push(MissionPage::new(
+                p0,
+                format!("{name}\nANOMALY PROFILE\nDomain"),
+            ));
+            pages.push(MissionPage::new(
+                p0 + 1,
+                format!("{name}\nCHAOS EFFECTS\n2 Chaos Refresh"),
+            ));
+            pages.push(MissionPage::new(
+                p0 + 2,
+                format!("{name}\nAFTERMATH\n\nDone\n\nThe end of this little tale arrives."),
+            ));
         }
         assert!(induct_missions("m", "s", &pages).is_empty());
     }

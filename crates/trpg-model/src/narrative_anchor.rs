@@ -57,7 +57,11 @@ pub struct NarrativeAnchor {
     pub related_ids: Vec<String>,
 }
 
-fn push_unique(out: &mut Vec<NarrativeAnchor>, seen: &mut HashSet<String>, anchor: NarrativeAnchor) {
+fn push_unique(
+    out: &mut Vec<NarrativeAnchor>,
+    seen: &mut HashSet<String>,
+    anchor: NarrativeAnchor,
+) {
     if seen.insert(anchor.anchor_id.clone()) {
         out.push(anchor);
     }
@@ -213,9 +217,10 @@ mod tests {
             .iter()
             .any(|a| a.kind == NarrativeAnchorKind::SetupPayoff));
         // s2 is terminal → a ClimaxCondition
-        assert!(anchors.iter().any(
-            |a| a.kind == NarrativeAnchorKind::ClimaxCondition && a.source_node_id.as_deref() == Some("s2")
-        ));
+        assert!(anchors
+            .iter()
+            .any(|a| a.kind == NarrativeAnchorKind::ClimaxCondition
+                && a.source_node_id.as_deref() == Some("s2")));
     }
 
     #[test]
@@ -223,7 +228,10 @@ mod tests {
         let scenes = two_scene_module();
         let first = extract_narrative_anchors(&scenes);
         let second = extract_narrative_anchors(&scenes);
-        assert_eq!(first, second, "pure extraction must be deterministic/idempotent");
+        assert_eq!(
+            first, second,
+            "pure extraction must be deterministic/idempotent"
+        );
 
         // a duplicate clue reference must not create a duplicate anchor (dedup by anchor_id).
         let mut dup = node("s1", "重复线索引用");
@@ -234,7 +242,11 @@ mod tests {
             .filter(|a| a.kind == NarrativeAnchorKind::RevealCandidate)
             .map(|a| a.anchor_id.as_str())
             .collect();
-        assert_eq!(reveal_ids.len(), 1, "duplicate clue ref must dedup to one anchor");
+        assert_eq!(
+            reveal_ids.len(),
+            1,
+            "duplicate clue ref must dedup to one anchor"
+        );
     }
 
     #[test]
@@ -252,6 +264,9 @@ mod tests {
 
     #[test]
     fn anchor_kind_defaults_to_potential_thread() {
-        assert_eq!(NarrativeAnchorKind::default(), NarrativeAnchorKind::PotentialThread);
+        assert_eq!(
+            NarrativeAnchorKind::default(),
+            NarrativeAnchorKind::PotentialThread
+        );
     }
 }

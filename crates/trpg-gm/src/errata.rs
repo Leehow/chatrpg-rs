@@ -135,6 +135,7 @@ fn kind_key(kind: VerifierFindingKind) -> String {
         VerifierFindingKind::InventedEffect => "invented_effect",
         VerifierFindingKind::OmittedVisibleResult => "omitted_visible_result",
         VerifierFindingKind::ManualRollRequest => "manual_roll_request",
+        VerifierFindingKind::PlayerAgencyViolation => "player_agency_violation",
         VerifierFindingKind::SecretLeak => "secret_leak",
     }
     .to_string()

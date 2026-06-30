@@ -135,6 +135,9 @@ mod tests {
         let engaged = engaged_set(&story, &signal);
         assert!(engaged.contains("thr_turn"));
         assert!(engaged.contains("thr_pos"));
-        assert!(!engaged.contains("thr_rej"), "rejected interest is not engagement");
+        assert!(
+            !engaged.contains("thr_rej"),
+            "rejected interest is not engagement"
+        );
     }
 }

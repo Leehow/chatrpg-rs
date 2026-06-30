@@ -123,7 +123,10 @@ async fn the_vault_main_gm_audit_admits_through_live_pipeline_and_flags_incomple
         serde_json::to_string(&complete).unwrap(),
     );
     let doc = parse_turn_document(&gm_output);
-    assert!(doc.evidence_audit.is_some(), "main-GM markup parses one EvidenceAudit");
+    assert!(
+        doc.evidence_audit.is_some(),
+        "main-GM markup parses one EvidenceAudit"
+    );
     assert!(!doc.player_text().contains("evidence_audit"));
     assert!(!doc.player_text().contains(offer0.cap_id.as_str()));
 
@@ -136,13 +139,26 @@ async fn the_vault_main_gm_audit_admits_through_live_pipeline_and_flags_incomple
         doc.evidence_audit.as_ref(),
         &trpg_model::adventure_ir::EvidenceLedger::new(),
     );
-    assert_eq!(out.telemetry.completeness, 1.0, "every offered cap had exactly one decision");
-    assert_eq!(out.telemetry.protocol_failure, None, "complete audit ⇒ no protocol failure");
+    assert_eq!(
+        out.telemetry.completeness, 1.0,
+        "every offered cap had exactly one decision"
+    );
+    assert_eq!(
+        out.telemetry.protocol_failure, None,
+        "complete audit ⇒ no protocol failure"
+    );
     assert_eq!(out.telemetry.observed, 1, "exactly one observed decision");
-    assert_eq!(out.ledger.len(), 1, "the observed decision ⇒ one AcceptedEvidence");
+    assert_eq!(
+        out.ledger.len(),
+        1,
+        "the observed decision ⇒ one AcceptedEvidence"
+    );
     let ev = &out.ledger.entries()[0];
     assert_eq!(ev.authority, EvidenceAuthority::GmWitnessed);
-    assert_eq!(ev.atom_id, offer0.atom_id, "atom Rust-resolved from the OfferSet (GM never named it)");
+    assert_eq!(
+        ev.atom_id, offer0.atom_id,
+        "atom Rust-resolved from the OfferSet (GM never named it)"
+    );
     assert_eq!(ev.basis_event_ids, vec![event_id.clone()]);
     assert_eq!(ev.turn_id, TURN);
     assert!(!ev.source_refs.is_empty(), "source-grounded");
@@ -170,7 +186,11 @@ async fn the_vault_main_gm_audit_admits_through_live_pipeline_and_flags_incomple
         Some(&incomplete),
         &trpg_model::adventure_ir::EvidenceLedger::new(),
     );
-    assert_eq!(inc_out.ledger.len(), 0, "incomplete audit ⇒ no admission (fail-closed)");
+    assert_eq!(
+        inc_out.ledger.len(),
+        0,
+        "incomplete audit ⇒ no admission (fail-closed)"
+    );
     assert_eq!(
         inc_out.telemetry.protocol_failure,
         Some(ProtocolFailureKind::IncompleteDecisions),

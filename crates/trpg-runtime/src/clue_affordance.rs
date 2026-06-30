@@ -63,6 +63,15 @@ pub struct ResolvedCheck<'a> {
 /// 词典，不绑定任何具体规则集的技能名（CoC 的 Spot Hidden / DND 的 Investigation 等都落入）。
 const INVESTIGATIVE_TERMS: &[&str] = &[
     "spot hidden",
+    "library use",
+    "library",
+    "archive",
+    "archives",
+    "record",
+    "records",
+    "research",
+    "clipping",
+    "clippings",
     "search",
     "investigat",
     "perception",
@@ -79,7 +88,40 @@ const INVESTIGATIVE_TERMS: &[&str] = &[
     "勘查",
     "勘察",
     "翻找",
+    "查档",
+    "档案",
+    "资料",
+    "文献",
+    "记录",
+    "剪报",
 ];
+
+/// 档案/文献研究类调查。与一般「环视四周」不同，这类动作的自然目标常是当前
+/// 场景唯一的 source-backed handout/clue，而不是线索内部 id/title。
+fn is_source_research_haystack(hay: &str) -> bool {
+    const TERMS: &[&str] = &[
+        "library use",
+        "library",
+        "archive",
+        "archives",
+        "record",
+        "records",
+        "research",
+        "clipping",
+        "clippings",
+        "morgue",
+        "查档",
+        "档案",
+        "图书馆",
+        "检索",
+        "馆藏",
+        "资料",
+        "文献",
+        "记录",
+        "剪报",
+    ];
+    TERMS.iter().any(|t| hay.contains(t))
+}
 
 /// 判断一次检定文本是否带侦查语义（generic、data-driven）。
 pub(crate) fn is_investigative(check: &ResolvedCheck<'_>) -> bool {
@@ -95,9 +137,13 @@ pub(crate) fn is_investigative(check: &ResolvedCheck<'_>) -> bool {
     INVESTIGATIVE_TERMS.iter().any(|t| hay.contains(t))
 }
 
-/// 取某线索 Value 的 id（`id` 字段）。脏数据 → None。
+/// 取某线索 Value 的 id（`id` / `clue_id` 字段）。脏数据 → None。
 fn clue_id(clue: &Value) -> Option<&str> {
-    clue.get("id").and_then(Value::as_str).filter(|s| !s.trim().is_empty())
+    clue.get("id")
+        .or_else(|| clue.get("clue_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
 }
 
 /// 取某线索 Value 的可匹配别名（id + name/title/label）。
@@ -146,6 +192,19 @@ pub fn clue_reveal_candidates(
     mode: MaterializationAffordanceMode,
     gating_on: bool,
 ) -> Vec<ClueRevealCandidate> {
+    clue_reveal_candidates_with_known(check, scene, graph, mode, gating_on, &[])
+}
+
+/// Same as [`clue_reveal_candidates`], but lets callers provide already learned
+/// fact ids so authored success sequences can reveal the next unseen clue.
+pub fn clue_reveal_candidates_with_known(
+    check: &ResolvedCheck<'_>,
+    scene: &ScenarioNode,
+    graph: &ModuleGraph,
+    mode: MaterializationAffordanceMode,
+    gating_on: bool,
+    known_fact_ids: &[String],
+) -> Vec<ClueRevealCandidate> {
     // 双闸：Enforce ∧ gating ON 才产玩家可见提名（Off/Shadow/gating-off ⇒ 严格无操作）。
     if !mode.is_enforce() || !gating_on {
         return Vec::new();
@@ -164,6 +223,23 @@ pub fn clue_reveal_candidates(
     hay.push_str(check.action_summary);
     let hay = hay.to_lowercase();
 
+    if let Some(cid) =
+        next_authored_success_sequence_clue(check, scene, graph, &hay, known_fact_ids)
+    {
+        return vec![ClueRevealCandidate {
+            fact_id: cid,
+            reason: format!(
+                "successful {} archive/research check advanced the scene's authored clue sequence",
+                check
+                    .tested_parameter
+                    .filter(|p| !p.trim().is_empty())
+                    .unwrap_or("investigation")
+            ),
+        }];
+    }
+
+    let mut resolvable_scene_clues = Vec::new();
+
     // 按当前场景引用顺序找第一条「别名出现在检定文本里」的线索 → 单条候选。
     for clue_ref in &scene.referenced_clue_ids {
         let cid = clue_ref.trim();
@@ -174,6 +250,7 @@ pub fn clue_reveal_candidates(
         let Some(clue) = find_clue(graph, cid) else {
             continue;
         };
+        resolvable_scene_clues.push(cid);
         let hit = clue_aliases(clue)
             .iter()
             .any(|alias| hay.contains(&alias.to_lowercase()));
@@ -190,7 +267,88 @@ pub fn clue_reveal_candidates(
             }];
         }
     }
+    if resolvable_scene_clues.len() == 1 && is_source_research_haystack(&hay) {
+        let cid = resolvable_scene_clues[0];
+        return vec![ClueRevealCandidate {
+            fact_id: cid.to_string(),
+            reason: format!(
+                "successful {} archive/research check examined the sole source-backed clue in the current scene",
+                check
+                    .tested_parameter
+                    .filter(|p| !p.trim().is_empty())
+                    .unwrap_or("investigation")
+            ),
+        }];
+    }
     Vec::new()
+}
+
+fn next_authored_success_sequence_clue(
+    check: &ResolvedCheck<'_>,
+    scene: &ScenarioNode,
+    graph: &ModuleGraph,
+    hay: &str,
+    known_fact_ids: &[String],
+) -> Option<String> {
+    if !is_source_research_haystack(hay) {
+        return None;
+    }
+    let checks = scene.data.get("checks")?.as_array()?;
+    let sequence_checks: Vec<&Value> = checks
+        .iter()
+        .filter(|entry| {
+            entry
+                .get("success_sequence")
+                .and_then(Value::as_array)
+                .is_some_and(|seq| !seq.is_empty())
+        })
+        .collect();
+    if sequence_checks.is_empty() {
+        return None;
+    }
+    let selected = if sequence_checks.len() == 1 {
+        sequence_checks[0]
+    } else {
+        sequence_checks
+            .iter()
+            .copied()
+            .find(|entry| sequence_check_matches(entry, check, hay))?
+    };
+    let sequence = selected.get("success_sequence")?.as_array()?;
+    sequence
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|cid| !cid.is_empty())
+        .find(|cid| {
+            scene
+                .referenced_clue_ids
+                .iter()
+                .any(|scene_cid| scene_cid.trim() == *cid)
+                && find_clue(graph, cid).is_some()
+                && !known_fact_ids
+                    .iter()
+                    .any(|known| known.trim().eq_ignore_ascii_case(cid))
+        })
+        .map(str::to_string)
+}
+
+fn sequence_check_matches(entry: &Value, check: &ResolvedCheck<'_>, hay: &str) -> bool {
+    let Some(skill) = entry
+        .get("skill")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return true;
+    };
+    let skill = skill.to_lowercase();
+    if hay.contains(&skill) {
+        return true;
+    }
+    check
+        .tested_parameter
+        .is_some_and(|p| p.trim().eq_ignore_ascii_case(skill.as_str()))
 }
 
 #[cfg(test)]
@@ -229,7 +387,9 @@ mod tests {
     #[test]
     fn success_on_scene_clue_target_yields_one_candidate() {
         let scene = scene_with(&["clue_diary"]);
-        let graph = graph_with(vec![json!({"id":"clue_diary","name":"血迹斑斑的日记","body":"全文不该逐字揭示"})]);
+        let graph = graph_with(vec![
+            json!({"id":"clue_diary","name":"血迹斑斑的日记","body":"全文不该逐字揭示"}),
+        ]);
         let check = investig(true, "侦查血迹斑斑的日记");
         let out = clue_reveal_candidates(&check, &scene, &graph, Enforce, true);
         assert_eq!(out.len(), 1, "成功侦查命中线索应恰好提名 1 条: {out:?}");
@@ -293,7 +453,10 @@ mod tests {
         let graph = graph_with(vec![json!({"id":"clue_diary","name":"血迹斑斑的日记"})]);
         let check = investig(true, "侦查血迹斑斑的日记");
         let out = clue_reveal_candidates(&check, &scene, &graph, Enforce, false);
-        assert!(out.is_empty(), "gating OFF: 回退 F13 即时 commit 基线，线索能供不偷揭");
+        assert!(
+            out.is_empty(),
+            "gating OFF: 回退 F13 即时 commit 基线，线索能供不偷揭"
+        );
     }
 
     // ===== fail-closed：非侦查检定 / 目标不在场景引用 / 解析不到线索 =====
@@ -349,6 +512,93 @@ mod tests {
         };
         let out = clue_reveal_candidates(&check, &scene, &graph, Enforce, true);
         assert!(out.is_empty(), "无线索别名命中 → 目标未解析到线索");
+    }
+
+    #[test]
+    fn successful_library_archive_check_reveals_single_scene_clue_without_internal_alias() {
+        // The Haunting / Boston Globe shape: the player says "read the Corbitt House
+        // archive clippings"; the authored clue id is an internal handout id. A hard
+        // success must not require the GM/player to spell "handout_2" before the
+        // source-backed clue can be nominated.
+        let scene = scene_with(&["handout_2"]);
+        let graph = graph_with(vec![json!({
+            "id": "handout_2",
+            "title": "Boston Globe 1918 Unpublished Story",
+            "summary": "The address file contains prior tenant tragedies."
+        })]);
+        let check = ResolvedCheck {
+            success: true,
+            tested_parameter: Some("Library Use"),
+            check_label: "sift and fully read the key Corbitt House clippings",
+            action_summary: "spend archive time reading the address file",
+        };
+        let out = clue_reveal_candidates(&check, &scene, &graph, Enforce, true);
+        assert_eq!(
+            out.len(),
+            1,
+            "single source-backed scene clue should reveal"
+        );
+        assert_eq!(out[0].fact_id, "handout_2");
+    }
+
+    #[test]
+    fn authored_success_sequence_reveals_next_unlearned_clue() {
+        let mut scene = scene_with(&["handout_3", "handout_4", "handout_5", "handout_6"]);
+        scene.data = json!({
+            "checks": [{
+                "skill": "Library Use",
+                "difficulty": "regular",
+                "success_sequence": ["handout_3", "handout_4", "handout_5", "handout_6"]
+            }]
+        });
+        let graph = graph_with(vec![
+            json!({"clue_id": "handout_3", "title": "1835 Property Note", "summary": "A merchant builds the house."}),
+            json!({"clue_id": "handout_4", "title": "1852 Neighbor Lawsuit", "summary": "Neighbors petition against Corbitt."}),
+            json!({"clue_id": "handout_5", "title": "Corbitt Obituary and Burial Lawsuit", "summary": "A second lawsuit contests basement burial."}),
+            json!({"clue_id": "handout_6", "title": "Missing Lawsuit Outcome", "summary": "No outcome is recorded."}),
+        ]);
+        let check = ResolvedCheck {
+            success: true,
+            tested_parameter: Some("检定"),
+            check_label: "在中央图书馆检索科宾宅产权与旧档案",
+            action_summary: "玩家进行图书馆和档案研究",
+        };
+
+        let first = clue_reveal_candidates_with_known(&check, &scene, &graph, Enforce, true, &[]);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].fact_id, "handout_3");
+
+        let known = vec!["handout_3".to_string()];
+        let second =
+            clue_reveal_candidates_with_known(&check, &scene, &graph, Enforce, true, &known);
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].fact_id, "handout_4");
+    }
+
+    #[test]
+    fn clue_id_field_is_a_valid_authored_clue_identifier() {
+        // Module clue/handout JSON often uses `clue_id` rather than bare `id`.
+        // The affordance layer should consume the normalized authored identifier,
+        // not require every module reader to rename fields before runtime.
+        let scene = scene_with(&["handout_2"]);
+        let graph = graph_with(vec![json!({
+            "clue_id": "handout_2",
+            "title": "Boston Globe 1918 Unpublished Story",
+            "summary": "The address file contains prior tenant tragedies."
+        })]);
+        let check = ResolvedCheck {
+            success: true,
+            tested_parameter: Some("Library Use"),
+            check_label: "sift and fully read the key Corbitt House clippings",
+            action_summary: "spend archive time reading the address file",
+        };
+        let out = clue_reveal_candidates(&check, &scene, &graph, Enforce, true);
+        assert_eq!(
+            out.len(),
+            1,
+            "`clue_id` should resolve as the authored clue id"
+        );
+        assert_eq!(out[0].fact_id, "handout_2");
     }
 
     // ===== TDD: 多线索命中取场景引用首条（确定性，单条 fact）=====

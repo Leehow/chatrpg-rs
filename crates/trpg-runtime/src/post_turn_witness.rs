@@ -434,8 +434,12 @@ mod tests {
     }
 
     fn fact_atom(clue: &str) -> EvidenceAtomSpec {
-        let atom_id =
-            AtomId::from_parts("the_vault", "p9", EvidenceKind::FactLearned, &[clue.to_string()]);
+        let atom_id = AtomId::from_parts(
+            "the_vault",
+            "p9",
+            EvidenceKind::FactLearned,
+            &[clue.to_string()],
+        );
         EvidenceAtomSpec {
             atom_id,
             kind: EvidenceKind::FactLearned,
@@ -483,7 +487,11 @@ mod tests {
         let (set, _catalog, cap) = offer_for(action_atom("npc_fount_anomaly"));
         let events = vec![check_event("de_chk_1", true)];
         let cands = structural_candidates(SESSION, TURN, &set, &events);
-        assert_eq!(cands, vec![cap], "a committed success on a check-bindable offer ⇒ candidate");
+        assert_eq!(
+            cands,
+            vec![cap],
+            "a committed success on a check-bindable offer ⇒ candidate"
+        );
     }
 
     #[test]
@@ -538,13 +546,8 @@ mod tests {
         let (set, _catalog, cap) = offer_for(action_atom("npc_fount_anomaly"));
         let events = vec![check_event("de_chk_1", true)];
         let cands = structural_candidates(SESSION, TURN, &set, &events);
-        let view = build_extractor_view(
-            "I experiment on the anomaly",
-            &set,
-            &events,
-            vec![],
-            &cands,
-        );
+        let view =
+            build_extractor_view("I experiment on the anomaly", &set, &events, vec![], &cands);
         // the candidate is surfaced with its meaning + opaque handle …
         assert_eq!(view.candidates.len(), 1);
         assert_eq!(view.candidates[0].cap_id, cap.as_str());
@@ -554,10 +557,20 @@ mod tests {
         // … and the SERIALIZED view leaks no progression vocabulary.
         let json = serde_json::to_string(&view).unwrap();
         for forbidden in [
-            "objective", "guard", "reward", "next_scene", "atom:", "atom_id",
-            "success_when", "progress_role", set.offers()[0].atom_id.as_str(),
+            "objective",
+            "guard",
+            "reward",
+            "next_scene",
+            "atom:",
+            "atom_id",
+            "success_when",
+            "progress_role",
+            set.offers()[0].atom_id.as_str(),
         ] {
-            assert!(!json.contains(forbidden), "view leaked `{forbidden}`: {json}");
+            assert!(
+                !json.contains(forbidden),
+                "view leaked `{forbidden}`: {json}"
+            );
         }
     }
 
@@ -572,12 +585,28 @@ mod tests {
             basis: NonEmpty::from_vec(vec![TurnLocalRef::Commit(0)]).unwrap(),
         }];
         let (ledger, adm) = admit_witness_proposals(
-            SESSION, TURN, &set, &catalog, &events, &proposals, &EvidenceLedger::new(),
+            SESSION,
+            TURN,
+            &set,
+            &catalog,
+            &events,
+            &proposals,
+            &EvidenceLedger::new(),
         );
-        assert_eq!(ledger.len(), 1, "one admitted AcceptedEvidence via reused EV-P4 binding");
-        assert_eq!(ledger.entries()[0].evidence_kind, EvidenceKind::ActionResolved);
+        assert_eq!(
+            ledger.len(),
+            1,
+            "one admitted AcceptedEvidence via reused EV-P4 binding"
+        );
+        assert_eq!(
+            ledger.entries()[0].evidence_kind,
+            EvidenceKind::ActionResolved
+        );
         // Rust decided success (ExactDomain), the LLM only proposed which action.
-        assert_eq!(ledger.entries()[0].authority, EvidenceAuthority::ExactDomain);
+        assert_eq!(
+            ledger.entries()[0].authority,
+            EvidenceAuthority::ExactDomain
+        );
         assert!(adm[0].result.is_ok());
     }
 
@@ -591,7 +620,13 @@ mod tests {
             basis: NonEmpty::from_vec(vec![TurnLocalRef::Commit(0)]).unwrap(),
         }];
         let (ledger, adm) = admit_witness_proposals(
-            SESSION, TURN, &set, &catalog, &events, &proposals, &EvidenceLedger::new(),
+            SESSION,
+            TURN,
+            &set,
+            &catalog,
+            &events,
+            &proposals,
+            &EvidenceLedger::new(),
         );
         assert_eq!(ledger.len(), 0);
         assert!(adm[0].result.is_err());
@@ -606,7 +641,13 @@ mod tests {
             basis: NonEmpty::from_vec(vec![TurnLocalRef::Commit(0)]).unwrap(),
         }];
         let (ledger, adm) = admit_witness_proposals(
-            SESSION, TURN, &set, &catalog, &events, &proposals, &EvidenceLedger::new(),
+            SESSION,
+            TURN,
+            &set,
+            &catalog,
+            &events,
+            &proposals,
+            &EvidenceLedger::new(),
         );
         assert_eq!(ledger.len(), 0);
         assert_eq!(adm[0].result, Err("unknown_capability".to_string()));
@@ -621,7 +662,11 @@ mod tests {
     impl EvidenceClaimProducer for MockProducer {
         async fn propose(&self, view: &WitnessExtractorView) -> Vec<EvidenceClaim> {
             // confirm the single candidate it was shown, citing the committed outcome
-            assert_eq!(view.candidates.len(), 1, "extractor only sees narrowed candidates");
+            assert_eq!(
+                view.candidates.len(),
+                1,
+                "extractor only sees narrowed candidates"
+            );
             vec![EvidenceClaim {
                 cap_id: self.cap.clone(),
                 basis: NonEmpty::from_vec(vec![TurnLocalRef::Commit(0)]).unwrap(),
@@ -637,11 +682,25 @@ mod tests {
         let view = build_extractor_view("experiment", &set, &events, vec![], &cands);
         let producer = MockProducer { cap: cap.clone() };
         let proposals = producer.propose(&view).await;
-        assert_eq!(proposals.len(), 1, "the focused extractor proposed the candidate");
-        let (ledger, _adm) = admit_witness_proposals(
-            SESSION, TURN, &set, &catalog, &events, &proposals, &EvidenceLedger::new(),
+        assert_eq!(
+            proposals.len(),
+            1,
+            "the focused extractor proposed the candidate"
         );
-        assert_eq!(ledger.len(), 1, "proposal → reused admission → one AcceptedEvidence");
+        let (ledger, _adm) = admit_witness_proposals(
+            SESSION,
+            TURN,
+            &set,
+            &catalog,
+            &events,
+            &proposals,
+            &EvidenceLedger::new(),
+        );
+        assert_eq!(
+            ledger.len(),
+            1,
+            "proposal → reused admission → one AcceptedEvidence"
+        );
     }
 
     #[test]
@@ -659,7 +718,11 @@ mod tests {
             {"cap_id": "cap_empty", "basis": []}
         ]});
         let claims = parse_witness_claims(&forged);
-        assert_eq!(claims.len(), 1, "only the closed-schema, non-empty-basis claim survives");
+        assert_eq!(
+            claims.len(),
+            1,
+            "only the closed-schema, non-empty-basis claim survives"
+        );
         assert_eq!(claims[0].cap_id.as_str(), "cap_ok");
     }
 

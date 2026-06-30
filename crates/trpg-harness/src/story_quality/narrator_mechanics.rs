@@ -49,15 +49,46 @@ pub struct NarratorMechanicsEvidence {
 
 /// Dice-notation / resolution tokens — UNAMBIGUOUS authoring of a check or roll in prose.
 const RESOLUTION_TOKENS: &[&str] = &[
-    "d4", "d6", "d8", "d10", "d12", "d20", "d100", "1d", "2d", "3d", "roll a ", "rolled ",
-    "you roll", "dice", "dc ", "saving throw", "skill check", "投骰", "掷骰", "骰子", "检定值",
+    "d4",
+    "d6",
+    "d8",
+    "d10",
+    "d12",
+    "d20",
+    "d100",
+    "1d",
+    "2d",
+    "3d",
+    "roll a ",
+    "rolled ",
+    "you roll",
+    "dice",
+    "dc ",
+    "saving throw",
+    "skill check",
+    "投骰",
+    "掷骰",
+    "骰子",
+    "检定值",
     "难度等级",
 ];
 
 /// Numbered mechanical-effect tokens — authoring of a damage / resource / state change in prose.
 const EFFECT_TOKENS: &[&str] = &[
-    "damage", "hit points", " hp", "takes 1", "takes 2", "takes 3", "lose ", "loses ", "heals ",
-    "healed ", "点伤害", "生命值", "理智值", "san 值",
+    "damage",
+    "hit points",
+    " hp",
+    "takes 1",
+    "takes 2",
+    "takes 3",
+    "lose ",
+    "loses ",
+    "heals ",
+    "healed ",
+    "点伤害",
+    "生命值",
+    "理智值",
+    "san 值",
 ];
 
 fn text_contains_any(haystack: &str, needles: &[&str]) -> bool {
@@ -172,7 +203,8 @@ mod tests {
     fn passing_fixture_pure_prose_is_not_triggered() {
         // The ideal split Narrator output: sensory description, zero mechanics.
         let ev = NarratorMechanicsEvidence {
-            narrator_text: "你推开吱呀作响的木门，霉味扑面而来，烛光在墙上投下摇曳的影子。".to_string(),
+            narrator_text: "你推开吱呀作响的木门，霉味扑面而来，烛光在墙上投下摇曳的影子。"
+                .to_string(),
             committed_check: false,
             committed_effect: false,
         };
@@ -186,7 +218,8 @@ mod tests {
     fn passing_fixture_resolution_backed_by_committed_check() {
         // Narrator references a roll AND the ledger committed a check ⇒ backed, not invented.
         let ev = NarratorMechanicsEvidence {
-            narrator_text: "You roll the dice and the latch gives way under your steady hands.".to_string(),
+            narrator_text: "You roll the dice and the latch gives way under your steady hands."
+                .to_string(),
             committed_check: true,
             committed_effect: false,
         };

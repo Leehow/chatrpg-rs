@@ -43,9 +43,9 @@ use trpg_model::{
 use trpg_runtime::world::reaction::load_world_reaction_plans;
 use trpg_runtime::{
     build_verifier_private_view, prepare_director_brief, prepare_director_plan_post_adjudication,
-    project_for_npc_action, project_for_npc_speech, project_for_player_narration, AutoRollExecution,
-    NpcActionProjection, NpcSpeechProjection, PlayerNarrationProjection, RuntimeEngine,
-    VerifierPrivateView,
+    project_for_npc_action, project_for_npc_speech, project_for_player_narration,
+    AutoRollExecution, NpcActionProjection, NpcSpeechProjection, PlayerNarrationProjection,
+    RuntimeEngine, VerifierPrivateView,
 };
 
 use crate::packet::NarrationPacket;

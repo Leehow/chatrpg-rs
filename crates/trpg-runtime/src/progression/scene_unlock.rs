@@ -253,9 +253,19 @@ mod tests {
         // homecoming: scene_01's links are all anchorless spatial ⇒ no authored out-edge ⇒
         // continuous-spine fallback ⇒ scene_02 (page order).
         let g = one_shot_graph();
-        assert_eq!(resolve_next_scene(&g, "scene_01").as_deref(), Some("scene_02"));
-        assert_eq!(resolve_next_scene(&g, "scene_02").as_deref(), Some("scene_03"));
-        assert_eq!(resolve_next_scene(&g, "scene_03"), None, "terminal ⇒ fail-closed");
+        assert_eq!(
+            resolve_next_scene(&g, "scene_01").as_deref(),
+            Some("scene_02")
+        );
+        assert_eq!(
+            resolve_next_scene(&g, "scene_02").as_deref(),
+            Some("scene_03")
+        );
+        assert_eq!(
+            resolve_next_scene(&g, "scene_03"),
+            None,
+            "terminal ⇒ fail-closed"
+        );
     }
 
     #[test]
@@ -275,7 +285,11 @@ mod tests {
         // Even a ScenarioCollection honors a REAL authored flow link (non-spatial + anchored):
         // that is an author-intended transition (e.g. a sub-beat within one mission).
         let mut g = anthology_graph();
-        g.scenes[0].links = vec![link("scene_002", LinkType::Sequential, Some("press onward"))];
+        g.scenes[0].links = vec![link(
+            "scene_002",
+            LinkType::Sequential,
+            Some("press onward"),
+        )];
         assert_eq!(
             resolve_next_scene(&g, "scene_001").as_deref(),
             Some("scene_002"),
@@ -357,7 +371,10 @@ mod tests {
         let g = anthology_graph();
         assert!(scene_unlock_event("s", "t", &g, "scene_001").is_none());
         let one = one_shot_graph();
-        assert!(scene_unlock_event("s", "t", &one, "scene_03").is_none(), "terminal ⇒ none");
+        assert!(
+            scene_unlock_event("s", "t", &one, "scene_03").is_none(),
+            "terminal ⇒ none"
+        );
     }
 
     // ── consume gate ──────────────────────────────────────────────────────────────────────
@@ -383,7 +400,10 @@ mod tests {
     #[test]
     fn consume_returns_next_for_pending_unlock_at_current() {
         let events = vec![unlock_ev("scene_01", "scene_02")];
-        assert_eq!(pending_unlock_target(&events, "scene_01").as_deref(), Some("scene_02"));
+        assert_eq!(
+            pending_unlock_target(&events, "scene_01").as_deref(),
+            Some("scene_02")
+        );
     }
 
     #[test]
@@ -413,14 +433,26 @@ mod tests {
         // On the firing turn the SceneTransitioned is not yet committed (execute.rs writes it AFTER
         // the navigator returns) ⇒ consume returns the target.
         let events = vec![unlock_ev("scene_01", "scene_02")];
-        assert_eq!(pending_unlock_target(&events, "scene_01").as_deref(), Some("scene_02"));
+        assert_eq!(
+            pending_unlock_target(&events, "scene_01").as_deref(),
+            Some("scene_02")
+        );
     }
 
     #[test]
     fn consume_fail_closed_on_blank_or_self_target() {
         assert_eq!(pending_unlock_target(&[], "scene_01"), None);
-        assert_eq!(pending_unlock_target(&[unlock_ev("scene_01", "scene_01")], "scene_01"), None);
-        assert_eq!(pending_unlock_target(&[unlock_ev("scene_01", "  ")], "scene_01"), None);
-        assert_eq!(pending_unlock_target(&[unlock_ev("scene_01", "scene_02")], "   "), None);
+        assert_eq!(
+            pending_unlock_target(&[unlock_ev("scene_01", "scene_01")], "scene_01"),
+            None
+        );
+        assert_eq!(
+            pending_unlock_target(&[unlock_ev("scene_01", "  ")], "scene_01"),
+            None
+        );
+        assert_eq!(
+            pending_unlock_target(&[unlock_ev("scene_01", "scene_02")], "   "),
+            None
+        );
     }
 }

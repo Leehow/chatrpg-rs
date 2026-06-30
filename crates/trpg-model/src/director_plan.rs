@@ -181,7 +181,11 @@ mod tests {
     use crate::story::BeatKind;
     use crate::world_reaction::{NpcActionIntent, NpcActionKind};
 
-    fn candidate(npc: &str, events: Vec<&str>, action: Option<NpcActionKind>) -> WorldReactionCandidate {
+    fn candidate(
+        npc: &str,
+        events: Vec<&str>,
+        action: Option<NpcActionKind>,
+    ) -> WorldReactionCandidate {
         WorldReactionCandidate {
             npc_id: npc.into(),
             stance: String::new(),
@@ -263,7 +267,10 @@ mod tests {
         let ka = WorldCandidateRef::from_candidate(&a);
         let kb = WorldCandidateRef::from_candidate(&b);
         assert_eq!(ka, kb);
-        assert_eq!(ka.source_event_ids, vec!["e1".to_string(), "e2".to_string()]);
+        assert_eq!(
+            ka.source_event_ids,
+            vec!["e1".to_string(), "e2".to_string()]
+        );
         // Usable as a set key: both map to one entry.
         let set: std::collections::HashSet<_> = vec![ka, kb].into_iter().collect();
         assert_eq!(set.len(), 1);

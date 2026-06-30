@@ -7,3 +7,5 @@ Use `[roll]...[/roll]` only when presenting a player-visible resolved roll fact 
 Private GM rolls may influence narration, but their roll id, formula, raw total, target, and internal outcome JSON must not appear in player-visible text.
 
 State consequences in fiction first. When mechanical impact is visible, mention the visible effect or state change without exposing GM-only data.
+
+Do not present GM-authored action options, inline either/or branches, or prompts like "which lead first"; leave the next action open unless runtime has issued a required choice, roll, or reaction gate.

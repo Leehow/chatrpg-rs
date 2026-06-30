@@ -852,8 +852,9 @@ impl ProjectParseService {
                     sidecar_text: sidecar_text.clone(),
                     located_pages,
                     skill_names: skill_names.clone(),
-                    pool_scaling_parameter:
-                        trpg_db::kernel_override_pool_scaling_parameter(&ruleset_id),
+                    pool_scaling_parameter: trpg_db::kernel_override_pool_scaling_parameter(
+                        &ruleset_id,
+                    ),
                     option_catalogs,
                 };
                 // The chargen compile pass is LOW-VOLUME (once per ruleset) but needs

@@ -112,10 +112,7 @@ const VERB_LEXICON: &[(&str, EvidenceKind)] = &[
 /// closed lexicon; `None` if it is not a known affordance verb (fail-closed).
 pub fn classify_verb(token: &str) -> Option<EvidenceKind> {
     let t = token.trim().to_ascii_lowercase();
-    VERB_LEXICON
-        .iter()
-        .find(|(v, _)| *v == t)
-        .map(|(_, k)| *k)
+    VERB_LEXICON.iter().find(|(v, _)| *v == t).map(|(_, k)| *k)
 }
 
 /// Short grounding prefix per kind (used to build `grounding = "<prefix>:<ref>"`).
@@ -274,13 +271,14 @@ pub fn parse_action_phrase(
     // Resolve target bindings from candidate hints + phrase nouns.
     let mut resolved: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    let mut try_resolve = |raw: &str, resolved: &mut Vec<String>, seen: &mut std::collections::HashSet<String>| {
-        if let Some(canon) = graph_index.resolve(raw) {
-            if seen.insert(canon.clone()) {
-                resolved.push(canon);
+    let mut try_resolve =
+        |raw: &str, resolved: &mut Vec<String>, seen: &mut std::collections::HashSet<String>| {
+            if let Some(canon) = graph_index.resolve(raw) {
+                if seen.insert(canon.clone()) {
+                    resolved.push(canon);
+                }
             }
-        }
-    };
+        };
     for cand in candidate_bindings {
         try_resolve(cand, &mut resolved, &mut seen);
     }
@@ -375,9 +373,14 @@ pub fn compile_objective_leaves(
                 note: Some(raw_text.clone()),
                 ..Default::default()
             });
-        if let Some(atom) =
-            parse_action_phrase(raw_text, source, &[], index, ProgressRole::GuardLeaf, module_digest)
-        {
+        if let Some(atom) = parse_action_phrase(
+            raw_text,
+            source,
+            &[],
+            index,
+            ProgressRole::GuardLeaf,
+            module_digest,
+        ) {
             out.push(atom);
         }
     }
@@ -537,9 +540,7 @@ pub fn compile_authored_observations(graph: &ModuleGraph) -> Vec<EvidenceAtomSpe
     // for talk/combat scenes that carry no affordance/mechanic/gm-note (see
     // `super::npc_knowledge_observation`). Single gated extend; no other insertion.
     if super::npc_knowledge_observation::scene_npc_knowledge_enabled() {
-        atoms.extend(super::npc_knowledge_observation::from_referenced_npc_knowledge(
-            graph,
-        ));
+        atoms.extend(super::npc_knowledge_observation::from_referenced_npc_knowledge(graph));
     }
 
     // dedup by grounding (keep first) + validator pass.
@@ -614,10 +615,20 @@ mod tests {
         assert_eq!(atoms.len(), 1, "exactly one guard-leaf atom");
         let a = &atoms[0];
         assert_eq!(a.kind, EvidenceKind::ActionResolved);
-        assert!(a.grounding.starts_with("action:"), "action grounding prefix");
-        assert!(a.bindings.iter().any(|b| b == "loc_anomaly"), "binds the anomaly ref");
+        assert!(
+            a.grounding.starts_with("action:"),
+            "action grounding prefix"
+        );
+        assert!(
+            a.bindings.iter().any(|b| b == "loc_anomaly"),
+            "binds the anomaly ref"
+        );
         assert!(!a.source_refs.is_empty(), "source-grounded");
-        assert_eq!(a.progress_role, ProgressRole::GuardLeaf, "objective leaf = GuardLeaf");
+        assert_eq!(
+            a.progress_role,
+            ProgressRole::GuardLeaf,
+            "objective leaf = GuardLeaf"
+        );
     }
 
     #[test]
@@ -658,7 +669,10 @@ mod tests {
         let index = idx(&graph);
         let out = parse_action_phrase(
             "The room is dark and quiet",
-            SourceRef { source_id: "the_vault".into(), ..Default::default() },
+            SourceRef {
+                source_id: "the_vault".into(),
+                ..Default::default()
+            },
             &[],
             &index,
             ProgressRole::CarrierOnly,
@@ -674,13 +688,19 @@ mod tests {
         // verb present ("investigate") but the only target token resolves to nothing.
         let out = parse_action_phrase(
             "investigate the nonexistent_widget_9000",
-            SourceRef { source_id: "the_vault".into(), ..Default::default() },
+            SourceRef {
+                source_id: "the_vault".into(),
+                ..Default::default()
+            },
             &[],
             &index,
             ProgressRole::CarrierOnly,
             "the_vault",
         );
-        assert!(out.is_none(), "fail-closed: no resolvable target → no fabricated atom");
+        assert!(
+            out.is_none(),
+            "fail-closed: no resolvable target → no fabricated atom"
+        );
     }
 
     #[test]
@@ -698,7 +718,10 @@ mod tests {
         ] {
             let out = parse_action_phrase(
                 phrase,
-                SourceRef { source_id: "the_vault".into(), ..Default::default() },
+                SourceRef {
+                    source_id: "the_vault".into(),
+                    ..Default::default()
+                },
                 &[],
                 &index,
                 ProgressRole::CarrierOnly,
@@ -756,7 +779,9 @@ mod tests {
         let atoms = compile_authored_observations(&graph);
         assert!(!atoms.is_empty(), "affordance yields an atom");
         assert!(
-            atoms.iter().all(|a| a.progress_role == ProgressRole::CarrierOnly),
+            atoms
+                .iter()
+                .all(|a| a.progress_role == ProgressRole::CarrierOnly),
             "compiler emits CarrierOnly only"
         );
         // scene tag present
@@ -772,7 +797,10 @@ mod tests {
             atom_id: AtomId::from_parts("d", "p8", EvidenceKind::FactLearned, &["c".into()]),
             kind: EvidenceKind::FactLearned,
             bindings: vec!["c".into()],
-            source_refs: vec![SourceRef { source_id: "the_vault".into(), ..Default::default() }],
+            source_refs: vec![SourceRef {
+                source_id: "the_vault".into(),
+                ..Default::default()
+            }],
             grounding: "fact:c".into(),
             progress_role: ProgressRole::CarrierOnly,
         };
@@ -789,7 +817,10 @@ mod tests {
             atom_id: AtomId::from_parts("d", "p8", EvidenceKind::ActionResolved, &["c".into()]),
             kind: EvidenceKind::ActionResolved,
             bindings: vec!["c".into()],
-            source_refs: vec![SourceRef { source_id: "the_vault".into(), ..Default::default() }],
+            source_refs: vec![SourceRef {
+                source_id: "the_vault".into(),
+                ..Default::default()
+            }],
             grounding: "action:c".into(),
             progress_role: ProgressRole::GuardLeaf,
         };

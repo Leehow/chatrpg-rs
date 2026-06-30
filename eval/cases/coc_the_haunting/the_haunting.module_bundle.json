@@ -1,0 +1,2254 @@
+{
+  "schema_version": "chatrpg.module_bundle.v1",
+  "bundle_id": "module.call_of_cthulhu_7e.the_haunting.keeper_rulebook_40th",
+  "module_id": "call_of_cthulhu_7e.the_haunting",
+  "ruleset_id": "call_of_cthulhu_7e",
+  "title": "The Haunting",
+  "source_index": {
+    "sources": [
+      {
+        "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+        "title": "Call Of Cthulhu Keeper Rulebook 40th Anniversary (Sandy Petersen)",
+        "source_kind": "rulebook",
+        "source_hash": "sha256:a860499cf34b40cac385f51b6e667ab37ec0796c7329494def08c8b161fd71eb",
+        "file_path": "/Users/haoli/Documents/TRPG/coc英文/Call Of Cthulhu Keeper Rulebook 40th Anniversary (Sandy Petersen).pdf"
+      }
+    ],
+    "anchors": [
+      {
+        "anchor_id": "the_haunting.p435",
+        "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+        "page": 435,
+        "section_path": [
+          "The Haunting"
+        ],
+        "char_start": null,
+        "char_end": null,
+        "text_hash": "sha256:358f5e38530ea9493d39181e17a9ff749f9a69bc9e5bbb134024a3ec3c6d7c9c"
+      },
+      {
+        "anchor_id": "the_haunting.p436",
+        "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+        "page": 436,
+        "section_path": [
+          "The Haunting"
+        ],
+        "char_start": null,
+        "char_end": null,
+        "text_hash": null
+      },
+      {
+        "anchor_id": "the_haunting.p437",
+        "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+        "page": 437,
+        "section_path": [
+          "The Haunting"
+        ],
+        "char_start": null,
+        "char_end": null,
+        "text_hash": null
+      },
+      {
+        "anchor_id": "the_haunting.p438",
+        "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+        "page": 438,
+        "section_path": [
+          "The Haunting"
+        ],
+        "char_start": null,
+        "char_end": null,
+        "text_hash": null
+      },
+      {
+        "anchor_id": "the_haunting.p439",
+        "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+        "page": 439,
+        "section_path": [
+          "The Haunting"
+        ],
+        "char_start": null,
+        "char_end": null,
+        "text_hash": null
+      },
+      {
+        "anchor_id": "the_haunting.p440",
+        "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+        "page": 440,
+        "section_path": [
+          "The Haunting"
+        ],
+        "char_start": null,
+        "char_end": null,
+        "text_hash": null
+      },
+      {
+        "anchor_id": "the_haunting.p441",
+        "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+        "page": 441,
+        "section_path": [
+          "The Haunting"
+        ],
+        "char_start": null,
+        "char_end": null,
+        "text_hash": null
+      },
+      {
+        "anchor_id": "the_haunting.p442",
+        "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+        "page": 442,
+        "section_path": [
+          "The Haunting"
+        ],
+        "char_start": null,
+        "char_end": null,
+        "text_hash": null
+      },
+      {
+        "anchor_id": "the_haunting.p443",
+        "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+        "page": 443,
+        "section_path": [
+          "The Haunting"
+        ],
+        "char_start": null,
+        "char_end": null,
+        "text_hash": null
+      },
+      {
+        "anchor_id": "the_haunting.p444",
+        "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+        "page": 444,
+        "section_path": [
+          "The Haunting"
+        ],
+        "char_start": null,
+        "char_end": null,
+        "text_hash": null
+      },
+      {
+        "anchor_id": "the_haunting.p445",
+        "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+        "page": 445,
+        "section_path": [
+          "The Haunting"
+        ],
+        "char_start": null,
+        "char_end": null,
+        "text_hash": null
+      },
+      {
+        "anchor_id": "the_haunting.p446",
+        "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+        "page": 446,
+        "section_path": [
+          "The Haunting"
+        ],
+        "char_start": null,
+        "char_end": null,
+        "text_hash": null
+      },
+      {
+        "anchor_id": "the_haunting.p447",
+        "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+        "page": 447,
+        "section_path": [
+          "The Haunting"
+        ],
+        "char_start": null,
+        "char_end": null,
+        "text_hash": null
+      },
+      {
+        "anchor_id": "the_haunting.p448",
+        "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+        "page": 448,
+        "section_path": [
+          "The Haunting"
+        ],
+        "char_start": null,
+        "char_end": null,
+        "text_hash": null
+      },
+      {
+        "anchor_id": "the_haunting.p449",
+        "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+        "page": 449,
+        "section_path": [
+          "The Haunting"
+        ],
+        "char_start": null,
+        "char_end": null,
+        "text_hash": null
+      },
+      {
+        "anchor_id": "the_haunting.p450",
+        "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+        "page": 450,
+        "section_path": [
+          "The Haunting"
+        ],
+        "char_start": null,
+        "char_end": null,
+        "text_hash": null
+      },
+      {
+        "anchor_id": "the_haunting.p451",
+        "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+        "page": 451,
+        "section_path": [
+          "The Haunting"
+        ],
+        "char_start": null,
+        "char_end": null,
+        "text_hash": null
+      }
+    ]
+  },
+  "module_graph": {
+    "module_id": "call_of_cthulhu_7e.the_haunting",
+    "ruleset_id": "call_of_cthulhu_7e",
+    "title": "The Haunting",
+    "module_type": "one_shot",
+    "spine": {
+      "entry_node_id": "loc_intro",
+      "expected_turn_budget": "35-70",
+      "completion_node_id": "loc_conclusion",
+      "source": "Keeper Rulebook 40th Anniversary, The Haunting, book pp. 435-451",
+      "no_forced_menus": true,
+      "player_agency_note": "Describe affordances and consequences; do not present action menus unless the rules/runtime gate requires concrete clarification."
+    },
+    "chapters": [],
+    "missions": [],
+    "scenes": [
+      {
+        "node_id": "loc_intro",
+        "title": "Introduction",
+        "node_type": "entry_scene",
+        "summary": "Mr. Steven Knott hires the investigators to examine the Corbitt House in 1920s Boston after the Macario tragedy made it impossible to rent.",
+        "read_aloud": "It is 1920 in Boston. Mr. Steven Knott, a landlord with a problem property, meets you with the keys and a retainer. The old Corbitt House has a violent reputation after the Macario family fled or collapsed into illness and madness. Knott wants the truth found and the house made rentable again. He gives you the address, keys, and $20 in advance, then waits to hear how you intend to begin the investigation.",
+        "gm_notes": "Keep Mr. Knott mundane and anxious about money. He can confirm he recently inherited the property, cannot rent or sell it, and expects research before a risky visit. Do not expose the Keeper secret.",
+        "links": [
+          {
+            "to_node_id": "loc_boston_globe",
+            "reason": "Newspaper research can reveal the house history.",
+            "clue_id": "handout_2",
+            "link_type": "trigger",
+            "source_anchor": null
+          },
+          {
+            "to_node_id": "loc_central_library",
+            "reason": "Library research can reveal Corbitt property history.",
+            "clue_id": "handout_3",
+            "link_type": "trigger",
+            "source_anchor": null
+          },
+          {
+            "to_node_id": "loc_hall_records",
+            "reason": "Civil records can reveal the executor and chapel link.",
+            "clue_id": "handout_7",
+            "link_type": "trigger",
+            "source_anchor": null
+          },
+          {
+            "to_node_id": "loc_courts_police",
+            "reason": "Court and police files can reveal the 1912 raid.",
+            "clue_id": "handout_8",
+            "link_type": "trigger",
+            "source_anchor": null
+          },
+          {
+            "to_node_id": "loc_neighborhood",
+            "reason": "Neighbors may remember recent tenants and local rumors.",
+            "clue_id": null,
+            "link_type": "trigger",
+            "source_anchor": null
+          },
+          {
+            "to_node_id": "loc_roxbury_sanitarium",
+            "reason": "The surviving Macario family can provide firsthand testimony.",
+            "clue_id": null,
+            "link_type": "trigger",
+            "source_anchor": null
+          },
+          {
+            "to_node_id": "loc_chapel",
+            "reason": "The chapel clue can be physically followed up.",
+            "clue_id": "handout_9",
+            "link_type": "trigger",
+            "source_anchor": null
+          },
+          {
+            "to_node_id": "loc_corbitt_house_exterior",
+            "reason": "The investigators can visit the house once ready.",
+            "clue_id": null,
+            "link_type": "spatial",
+            "source_anchor": null
+          }
+        ],
+        "assets": [],
+        "data": {
+          "source_refs": [
+            {
+              "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+              "page": 436,
+              "anchor_id": "the_haunting.loc1",
+              "section_path": [
+                "The Haunting",
+                "Location 1: Introduction"
+              ],
+              "char_start": null,
+              "char_end": null,
+              "text_hash": null,
+              "note": "Premise and employer handout"
+            }
+          ]
+        },
+        "extraction_status": "deep_extracted",
+        "page_start": 436,
+        "page_end": 436,
+        "referenced_npc_ids": [
+          "mr_knott"
+        ],
+        "referenced_clue_ids": [
+          "handout_1"
+        ],
+        "referenced_location_ids": [
+          "corbitt_house"
+        ],
+        "referenced_encounter_ids": [],
+        "scene_mechanics": []
+      },
+      {
+        "node_id": "loc_boston_globe",
+        "title": "The Boston Globe",
+        "node_type": "investigation_location",
+        "summary": "The newspaper morgue can reveal the house has a long pattern of violent accidents, illness, suicide, and the Macario case.",
+        "read_aloud": "The Boston Globe offices smell of ink, paper dust, and hot machinery. Staff can point you toward the basement clippings morgue, but the files are not open to casual visitors; an editor named Arty Wilmot controls access.",
+        "gm_notes": "To access the clippings files, choose Charm/Persuade/Intimidate/Fast Talk according to player approach; Regular difficulty. On success, Ruth Blake takes them to the dusty morgue and Handout 2 becomes obvious by street address. On failure, Arty refuses; pushed failure should escalate beyond simple refusal.",
+        "links": [
+          {
+            "to_node_id": "loc_central_library",
+            "reason": "Follow up older property references at the library.",
+            "clue_id": "handout_3",
+            "link_type": "trigger",
+            "source_anchor": null
+          },
+          {
+            "to_node_id": "loc_hall_records",
+            "reason": "Civil records may predate surviving newspaper files.",
+            "clue_id": "handout_7",
+            "link_type": "trigger",
+            "source_anchor": null
+          },
+          {
+            "to_node_id": "loc_corbitt_house_exterior",
+            "reason": "The investigators can visit the house.",
+            "clue_id": null,
+            "link_type": "spatial",
+            "source_anchor": null
+          }
+        ],
+        "assets": [],
+        "data": {
+          "source_refs": [
+            {
+              "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+              "page": 436,
+              "anchor_id": "the_haunting.loc2",
+              "section_path": [
+                "The Haunting",
+                "Location 2: The Boston Globe"
+              ],
+              "char_start": null,
+              "char_end": null,
+              "text_hash": null,
+              "note": null
+            },
+            {
+              "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+              "page": 437,
+              "anchor_id": "the_haunting.handout2",
+              "section_path": [
+                "The Haunting",
+                "Handout 2"
+              ],
+              "char_start": null,
+              "char_end": null,
+              "text_hash": null,
+              "note": null
+            }
+          ],
+          "checks": [
+            {
+              "skill_options": [
+                "Charm",
+                "Persuade",
+                "Intimidate",
+                "Fast Talk"
+              ],
+              "difficulty": "regular",
+              "success": "gain access to clippings files",
+              "failure": "Arty denies access; pushed failure escalates"
+            }
+          ]
+        },
+        "extraction_status": "deep_extracted",
+        "page_start": 436,
+        "page_end": 437,
+        "referenced_npc_ids": [
+          "arty_wilmot",
+          "ruth_blake"
+        ],
+        "referenced_clue_ids": [
+          "handout_2"
+        ],
+        "referenced_location_ids": [
+          "boston_globe"
+        ],
+        "referenced_encounter_ids": [],
+        "scene_mechanics": []
+      },
+      {
+        "node_id": "loc_central_library",
+        "title": "The Central Library",
+        "node_type": "investigation_location",
+        "summary": "Library research can reveal the house was built in 1835, bought by Walter Corbitt, litigated over his behavior, and tied to a contested basement burial.",
+        "read_aloud": "The Central Library is quiet, formal, and full of old catalogues. The Corbitt House trail is not in one neat place; it will take careful half-day blocks of research to bring useful records together.",
+        "gm_notes": "Each half-day of research asks for Library Use. For each success, reveal handouts 3-6 in order. If research exceeds a day, Mr. Knott checks in and presses for progress.",
+        "links": [
+          {
+            "to_node_id": "loc_hall_records",
+            "reason": "The executor/church trail points toward civil records.",
+            "clue_id": "handout_7",
+            "link_type": "trigger",
+            "source_anchor": null
+          },
+          {
+            "to_node_id": "loc_courts_police",
+            "reason": "The chapel records may require higher court or police access.",
+            "clue_id": "handout_8",
+            "link_type": "trigger",
+            "source_anchor": null
+          },
+          {
+            "to_node_id": "loc_corbitt_house_exterior",
+            "reason": "The investigators can visit the house.",
+            "clue_id": null,
+            "link_type": "spatial",
+            "source_anchor": null
+          }
+        ],
+        "assets": [],
+        "data": {
+          "source_refs": [
+            {
+              "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+              "page": 437,
+              "anchor_id": "the_haunting.loc3",
+              "section_path": [
+                "The Haunting",
+                "Location 3: The Central Library"
+              ],
+              "char_start": null,
+              "char_end": null,
+              "text_hash": null,
+              "note": null
+            }
+          ],
+          "checks": [
+            {
+              "skill": "Library Use",
+              "difficulty": "regular",
+              "time_cost": "half_day_per_roll",
+              "success_sequence": [
+                "handout_3",
+                "handout_4",
+                "handout_5",
+                "handout_6"
+              ]
+            }
+          ]
+        },
+        "extraction_status": "deep_extracted",
+        "page_start": 437,
+        "page_end": 437,
+        "referenced_npc_ids": [],
+        "referenced_clue_ids": [
+          "handout_3",
+          "handout_4",
+          "handout_5",
+          "handout_6"
+        ],
+        "referenced_location_ids": [
+          "central_library"
+        ],
+        "referenced_encounter_ids": [],
+        "scene_mechanics": []
+      },
+      {
+        "node_id": "loc_hall_records",
+        "title": "Hall of Records",
+        "node_type": "investigation_location",
+        "summary": "Civil records reveal Corbitt’s executor was Reverend Michael Thomas of the Chapel of Contemplation; church records note the chapel closure in 1912.",
+        "read_aloud": "At the Hall of Records, bound registers and civil files sit behind clerks and indexes. The name Corbitt leads toward an executor, a church, and a closure date that does not feel ordinary.",
+        "gm_notes": "Ask for Library Use. On success reveal Handout 7. Courteous clerk or Law can point toward county/commonwealth/federal courts and Central Police Station for serious-crime records.",
+        "links": [
+          {
+            "to_node_id": "loc_courts_police",
+            "reason": "Serious-crime and police records may hold the missing chapel raid file.",
+            "clue_id": "handout_8",
+            "link_type": "trigger",
+            "source_anchor": null
+          },
+          {
+            "to_node_id": "loc_chapel",
+            "reason": "The Chapel of Contemplation can be investigated directly.",
+            "clue_id": "handout_9",
+            "link_type": "trigger",
+            "source_anchor": null
+          },
+          {
+            "to_node_id": "loc_corbitt_house_exterior",
+            "reason": "The investigators can visit the house.",
+            "clue_id": null,
+            "link_type": "spatial",
+            "source_anchor": null
+          }
+        ],
+        "assets": [],
+        "data": {
+          "source_refs": [
+            {
+              "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+              "page": 438,
+              "anchor_id": "the_haunting.loc4",
+              "section_path": [
+                "The Haunting",
+                "Location 4: Hall of Records"
+              ],
+              "char_start": null,
+              "char_end": null,
+              "text_hash": null,
+              "note": null
+            }
+          ],
+          "checks": [
+            {
+              "skill": "Library Use",
+              "difficulty": "regular",
+              "success": "reveal executor and Chapel of Contemplation connection"
+            }
+          ]
+        },
+        "extraction_status": "deep_extracted",
+        "page_start": 438,
+        "page_end": 438,
+        "referenced_npc_ids": [],
+        "referenced_clue_ids": [
+          "handout_7"
+        ],
+        "referenced_location_ids": [
+          "hall_records"
+        ],
+        "referenced_encounter_ids": [],
+        "scene_mechanics": []
+      },
+      {
+        "node_id": "loc_courts_police",
+        "title": "Higher Courts and Central Police Station",
+        "node_type": "investigation_location",
+        "summary": "Restricted records reveal a secret 1912 raid on the Chapel of Contemplation, deaths, missing autopsy detail, released cultists, official interference, and Michael Thomas’s conviction and escape.",
+        "read_aloud": "Court and police records are less welcoming than public archives. Clerks, officers, and locked files make this a social or professional access problem before it becomes a research problem.",
+        "gm_notes": "Access requires Law, Credit Rating 75+, Persuade, Charm, or Fast Talk as justified by roleplay. On success reveal Handout 8. On pushed failure, consequences can include police antipathy, threat, shakedown, or a bribe trap.",
+        "links": [
+          {
+            "to_node_id": "loc_chapel",
+            "reason": "The police file makes the chapel a concrete lead.",
+            "clue_id": "handout_8",
+            "link_type": "trigger",
+            "source_anchor": null
+          },
+          {
+            "to_node_id": "loc_corbitt_house_exterior",
+            "reason": "The investigators can visit the house.",
+            "clue_id": null,
+            "link_type": "spatial",
+            "source_anchor": null
+          }
+        ],
+        "assets": [],
+        "data": {
+          "source_refs": [
+            {
+              "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+              "page": 438,
+              "anchor_id": "the_haunting.loc5",
+              "section_path": [
+                "The Haunting",
+                "Location 5: Higher Courts; Central Police Station"
+              ],
+              "char_start": null,
+              "char_end": null,
+              "text_hash": null,
+              "note": null
+            }
+          ],
+          "checks": [
+            {
+              "skill_options": [
+                "Law",
+                "Credit Rating",
+                "Persuade",
+                "Charm",
+                "Fast Talk"
+              ],
+              "difficulty": "regular_or_source_conditioned",
+              "success": "access sealed raid file",
+              "failure": "access denied; pushed failure escalates"
+            }
+          ]
+        },
+        "extraction_status": "deep_extracted",
+        "page_start": 438,
+        "page_end": 438,
+        "referenced_npc_ids": [],
+        "referenced_clue_ids": [
+          "handout_8"
+        ],
+        "referenced_location_ids": [
+          "higher_courts",
+          "central_police_station"
+        ],
+        "referenced_encounter_ids": [],
+        "scene_mechanics": []
+      },
+      {
+        "node_id": "loc_neighborhood",
+        "title": "The Neighborhood",
+        "node_type": "investigation_location",
+        "summary": "Neighbors near the Corbitt House can provide rumors and firsthand color about the house and the Macario family.",
+        "read_aloud": "The streets around the Corbitt House carry the ordinary noise of Boston, but doors close a little faster when the address is mentioned. Some residents remember the Macarios; some would rather not talk.",
+        "gm_notes": "Roleplay questioning neighbors. Mr. Dooley is a useful local contact. Use social skills only when pressure, credibility, or deception matters; success should produce concrete rumor or firsthand detail.",
+        "links": [
+          {
+            "to_node_id": "loc_roxbury_sanitarium",
+            "reason": "Macario family testimony can be followed at the sanitarium.",
+            "clue_id": null,
+            "link_type": "trigger",
+            "source_anchor": null
+          },
+          {
+            "to_node_id": "loc_corbitt_house_exterior",
+            "reason": "The investigators can visit the house.",
+            "clue_id": null,
+            "link_type": "spatial",
+            "source_anchor": null
+          }
+        ],
+        "assets": [],
+        "data": {
+          "source_refs": [
+            {
+              "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+              "page": 439,
+              "anchor_id": "the_haunting.loc6",
+              "section_path": [
+                "The Haunting",
+                "Location 6: The Neighborhood"
+              ],
+              "char_start": null,
+              "char_end": null,
+              "text_hash": null,
+              "note": null
+            }
+          ]
+        },
+        "extraction_status": "deep_extracted",
+        "page_start": 439,
+        "page_end": 439,
+        "referenced_npc_ids": [
+          "mr_dooley"
+        ],
+        "referenced_clue_ids": [],
+        "referenced_location_ids": [
+          "neighborhood"
+        ],
+        "referenced_encounter_ids": [],
+        "scene_mechanics": []
+      },
+      {
+        "node_id": "loc_roxbury_sanitarium",
+        "title": "Roxbury Sanitarium",
+        "node_type": "investigation_location",
+        "summary": "The surviving Macario testimony points to something active in the house and may suggest Corbitt can be killed with his own dagger.",
+        "read_aloud": "Roxbury Sanitarium is sterile, controlled, and sad. The Macario name opens a narrow path to a damaged witness, but whatever happened in the Corbitt House has not left him whole.",
+        "gm_notes": "Vittorio Macario is unstable and frightened. Handle with care. If the investigators build enough trust or read his reactions, reveal that he fears the house and may understand that Corbitt can be killed with his own dagger.",
+        "links": [
+          {
+            "to_node_id": "loc_corbitt_house_basement",
+            "reason": "The dagger clue points toward the house basement and hidden threat.",
+            "clue_id": null,
+            "link_type": "trigger",
+            "source_anchor": null
+          },
+          {
+            "to_node_id": "loc_corbitt_house_exterior",
+            "reason": "The investigators can visit the house.",
+            "clue_id": null,
+            "link_type": "spatial",
+            "source_anchor": null
+          }
+        ],
+        "assets": [],
+        "data": {
+          "source_refs": [
+            {
+              "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+              "page": 439,
+              "anchor_id": "the_haunting.loc7",
+              "section_path": [
+                "The Haunting",
+                "Location 7: Roxbury Sanitarium"
+              ],
+              "char_start": null,
+              "char_end": null,
+              "text_hash": null,
+              "note": null
+            }
+          ]
+        },
+        "extraction_status": "deep_extracted",
+        "page_start": 439,
+        "page_end": 439,
+        "referenced_npc_ids": [
+          "vittorio_macario"
+        ],
+        "referenced_clue_ids": [],
+        "referenced_location_ids": [
+          "roxbury_sanitarium"
+        ],
+        "referenced_encounter_ids": [],
+        "scene_mechanics": []
+      },
+      {
+        "node_id": "loc_chapel",
+        "title": "The Chapel of Contemplation",
+        "node_type": "investigation_location",
+        "summary": "The ruined chapel can yield occult records, the symbol handout, and the decisive clue that Walter Corbitt was buried in the basement of his house.",
+        "read_aloud": "The Chapel of Contemplation is a ruin with a bad history and newer signs of disturbance. Dust, collapsed masonry, and a few surviving records make the place feel abandoned rather than empty.",
+        "gm_notes": "Searching the cabinet can reveal old records. Handout 9 is the symbol. A key record states Corbitt was buried in the basement of his house in accordance with his wishes. Treat that as a concrete clue, not flavor.",
+        "links": [
+          {
+            "to_node_id": "loc_corbitt_house_basement",
+            "reason": "The burial clue points to the basement.",
+            "clue_id": "buried_in_basement",
+            "link_type": "trigger",
+            "source_anchor": null
+          },
+          {
+            "to_node_id": "loc_corbitt_house_exterior",
+            "reason": "The investigators can visit the house.",
+            "clue_id": null,
+            "link_type": "spatial",
+            "source_anchor": null
+          }
+        ],
+        "assets": [],
+        "data": {
+          "source_refs": [
+            {
+              "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+              "page": 439,
+              "anchor_id": "the_haunting.loc8",
+              "section_path": [
+                "The Haunting",
+                "Location 8: The Chapel of Contemplation"
+              ],
+              "char_start": null,
+              "char_end": null,
+              "text_hash": null,
+              "note": null
+            },
+            {
+              "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+              "page": 440,
+              "anchor_id": "the_haunting.handout9",
+              "section_path": [
+                "The Haunting",
+                "Handout 9"
+              ],
+              "char_start": null,
+              "char_end": null,
+              "text_hash": null,
+              "note": null
+            }
+          ],
+          "obvious_clue": "Walter Corbitt was buried in his house basement."
+        },
+        "extraction_status": "deep_extracted",
+        "page_start": 439,
+        "page_end": 440,
+        "referenced_npc_ids": [
+          "michael_thomas",
+          "walter_corbitt"
+        ],
+        "referenced_clue_ids": [
+          "handout_9",
+          "buried_in_basement"
+        ],
+        "referenced_location_ids": [
+          "chapel_contemplation"
+        ],
+        "referenced_encounter_ids": [],
+        "scene_mechanics": []
+      },
+      {
+        "node_id": "loc_corbitt_house_exterior",
+        "title": "The Old Corbitt Place",
+        "node_type": "house_location",
+        "summary": "The investigators arrive at the old house; exterior entry and initial inspection set the frame for room exploration.",
+        "read_aloud": "The Corbitt House waits behind its old address with the tired look of a place that has been explained away too many times. The keys fit. The windows are still, the air around the threshold stale.",
+        "gm_notes": "Let players inspect entrances, windows, neighbors, or go inside. Do not force an option list. Keep hidden basement truth unrevealed until found through play.",
+        "links": [
+          {
+            "to_node_id": "loc_corbitt_house_ground_floor",
+            "reason": "Entering the house leads to the ground floor.",
+            "clue_id": null,
+            "link_type": "spatial",
+            "source_anchor": null
+          },
+          {
+            "to_node_id": "loc_neighborhood",
+            "reason": "The surrounding neighborhood can still be canvassed.",
+            "clue_id": null,
+            "link_type": "spatial",
+            "source_anchor": null
+          }
+        ],
+        "assets": [],
+        "data": {
+          "source_refs": [
+            {
+              "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+              "page": 440,
+              "anchor_id": "the_haunting.loc9",
+              "section_path": [
+                "The Haunting",
+                "Location 9: The Old Corbitt Place"
+              ],
+              "char_start": null,
+              "char_end": null,
+              "text_hash": null,
+              "note": null
+            }
+          ]
+        },
+        "extraction_status": "deep_extracted",
+        "page_start": 440,
+        "page_end": 441,
+        "referenced_npc_ids": [],
+        "referenced_clue_ids": [],
+        "referenced_location_ids": [
+          "corbitt_house"
+        ],
+        "referenced_encounter_ids": [],
+        "scene_mechanics": []
+      },
+      {
+        "node_id": "loc_corbitt_house_ground_floor",
+        "title": "Corbitt House: Ground Floor",
+        "node_type": "house_floor",
+        "summary": "Ground-floor rooms establish the derelict house, possible diaries/books, doors, kitchen, storage, and access toward upper floor or basement.",
+        "read_aloud": "Inside, the house smells of old plaster, dust, and trapped damp. Everyday rooms have gone stale: furniture under grime, corners gone dark, and the sense that small noises carry too far.",
+        "gm_notes": "Adjudicate room-by-room inspection. Searching can produce mundane details and any source-backed papers/books from rooms. Let player movement decide whether they go upstairs or down.",
+        "links": [
+          {
+            "to_node_id": "loc_corbitt_house_upper_floor",
+            "reason": "Stairs lead up to the bedrooms.",
+            "clue_id": null,
+            "link_type": "spatial",
+            "source_anchor": null
+          },
+          {
+            "to_node_id": "loc_corbitt_house_basement",
+            "reason": "A basement stair/door leads downward.",
+            "clue_id": null,
+            "link_type": "spatial",
+            "source_anchor": null
+          },
+          {
+            "to_node_id": "loc_corbitt_house_exterior",
+            "reason": "The exterior remains accessible.",
+            "clue_id": null,
+            "link_type": "spatial",
+            "source_anchor": null
+          }
+        ],
+        "assets": [],
+        "data": {
+          "source_refs": [
+            {
+              "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+              "page": 441,
+              "anchor_id": "the_haunting.house_ground",
+              "section_path": [
+                "The Haunting",
+                "Corbitt House Keeper Version / lower rooms"
+              ],
+              "char_start": null,
+              "char_end": null,
+              "text_hash": null,
+              "note": null
+            }
+          ]
+        },
+        "extraction_status": "deep_extracted",
+        "page_start": 441,
+        "page_end": 443,
+        "referenced_npc_ids": [],
+        "referenced_clue_ids": [],
+        "referenced_location_ids": [
+          "corbitt_house_ground_floor"
+        ],
+        "referenced_encounter_ids": [],
+        "scene_mechanics": []
+      },
+      {
+        "node_id": "loc_corbitt_house_upper_floor",
+        "title": "Corbitt House: Upper Floor",
+        "node_type": "house_floor",
+        "summary": "Upper-floor bedrooms include Macario family spaces and the dangerous animated bed event.",
+        "read_aloud": "Upstairs, the bedrooms still hold traces of a family interrupted: small beds, religious items, stale bedding, and a silence that makes every floorboard answer back.",
+        "gm_notes": "If the bed attack triggers, ask Spot Hidden if appropriate, then Dodge to avoid being hit/thrown; seeing impossible movement requires SAN 0/1 or 1/1D4 as source notes indicate. Keep window positioning clear and impartial.",
+        "links": [
+          {
+            "to_node_id": "loc_corbitt_house_ground_floor",
+            "reason": "The stairs return to the ground floor.",
+            "clue_id": null,
+            "link_type": "spatial",
+            "source_anchor": null
+          },
+          {
+            "to_node_id": "loc_corbitt_house_basement",
+            "reason": "The investigation can move downward.",
+            "clue_id": null,
+            "link_type": "spatial",
+            "source_anchor": null
+          }
+        ],
+        "assets": [],
+        "data": {
+          "source_refs": [
+            {
+              "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+              "page": 442,
+              "anchor_id": "the_haunting.upper_floor",
+              "section_path": [
+                "The Haunting",
+                "Upper rooms and bed attack"
+              ],
+              "char_start": null,
+              "char_end": null,
+              "text_hash": null,
+              "note": null
+            }
+          ],
+          "hazards": [
+            {
+              "id": "animated_bed",
+              "checks": [
+                "Spot Hidden",
+                "Dodge"
+              ],
+              "sanity": "1 point or 1D4 depending failure as source notes"
+            }
+          ]
+        },
+        "extraction_status": "deep_extracted",
+        "page_start": 442,
+        "page_end": 443,
+        "referenced_npc_ids": [
+          "walter_corbitt"
+        ],
+        "referenced_clue_ids": [],
+        "referenced_location_ids": [
+          "corbitt_house_upper_floor"
+        ],
+        "referenced_encounter_ids": [],
+        "scene_mechanics": []
+      },
+      {
+        "node_id": "loc_corbitt_house_basement",
+        "title": "Corbitt House: The Basement",
+        "node_type": "house_floor",
+        "summary": "The basement contains a dangerous stair/door, the floating magical dagger, storage spaces, rats, and the concealed path to Corbitt’s lair.",
+        "read_aloud": "The basement air is colder and wetter. Rough boards, old bins, and a dark under-space make the room feel less like storage than concealment.",
+        "gm_notes": "Resolve dangerous descent with DEX/Climb when warranted. The floating dagger uses Corbitt’s POW and source rules; seeing it attack calls for SAN 1/1D4. Breaking/removing boards reveals crawl space, rats, and the carved Chapel clue; the inner wall can lead to Corbitt’s hiding place.",
+        "links": [
+          {
+            "to_node_id": "loc_corbitt_hidden_lair",
+            "reason": "Breaking through the hidden wall reveals Corbitt’s hiding place.",
+            "clue_id": "chapel_carving",
+            "link_type": "spatial",
+            "source_anchor": null
+          },
+          {
+            "to_node_id": "loc_corbitt_house_ground_floor",
+            "reason": "The stairs return upward.",
+            "clue_id": null,
+            "link_type": "spatial",
+            "source_anchor": null
+          }
+        ],
+        "assets": [],
+        "data": {
+          "source_refs": [
+            {
+              "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+              "page": 444,
+              "anchor_id": "the_haunting.basement",
+              "section_path": [
+                "The Haunting",
+                "The Basement"
+              ],
+              "char_start": null,
+              "char_end": null,
+              "text_hash": null,
+              "note": null
+            },
+            {
+              "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+              "page": 445,
+              "anchor_id": "the_haunting.floating_knife",
+              "section_path": [
+                "The Haunting",
+                "The Floating Knife"
+              ],
+              "char_start": null,
+              "char_end": null,
+              "text_hash": null,
+              "note": null
+            }
+          ],
+          "hazards": [
+            {
+              "id": "floating_dagger",
+              "attack": "Corbitt POW vs Dodge",
+              "damage": "1D4+2; extreme impale 6+1D4+2",
+              "sanity": "1/1D4"
+            },
+            {
+              "id": "rat_pack",
+              "fighting": "40%",
+              "damage": "1D3 or overwhelm 2D6"
+            }
+          ],
+          "obvious_clue": "Carved words: Chapel of Contemplation"
+        },
+        "extraction_status": "deep_extracted",
+        "page_start": 444,
+        "page_end": 446,
+        "referenced_npc_ids": [
+          "walter_corbitt",
+          "rat_pack"
+        ],
+        "referenced_clue_ids": [
+          "chapel_carving"
+        ],
+        "referenced_location_ids": [
+          "corbitt_house_basement"
+        ],
+        "referenced_encounter_ids": [],
+        "scene_mechanics": []
+      },
+      {
+        "node_id": "loc_corbitt_hidden_lair",
+        "title": "Corbitt’s Hidden Lair",
+        "node_type": "finale_location",
+        "summary": "The hidden room contains Corbitt’s undead body, papers, final confrontation, Sanity loss, combat, possible Dominate, Flesh Ward, and victory/failure outcomes.",
+        "read_aloud": "Beyond the broken wall is a fouler space. On a pallet lies a tall, wasted figure, wood-dry and hairless, with a chain at its neck and a sweet rotten smell in the air. Curled papers sit on a small table in the corner.",
+        "gm_notes": "When Corbitt rises, call for SAN 1/1D8. He has STR 90, CON 115, SIZ 55, INT 80, POW 90, DEX 35, APP 05, EDU 80, HP 16, MP 18, Fighting 50%, Dodge 17%, Flesh Ward armor 2D6 already cast, Dominate variant, floating dagger. If reduced to 0 HP he crumbles. If stabbed with his own dagger he quickly turns to ash regardless of spells. Victory pays fee plus bonus and grants 1D6 SAN.",
+        "links": [
+          {
+            "to_node_id": "loc_conclusion",
+            "reason": "If Corbitt is destroyed or the investigators withdraw/fail, resolve the ending.",
+            "clue_id": null,
+            "link_type": "sequential",
+            "source_anchor": null
+          }
+        ],
+        "assets": [],
+        "data": {
+          "source_refs": [
+            {
+              "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+              "page": 446,
+              "anchor_id": "the_haunting.hidden_lair",
+              "section_path": [
+                "The Haunting",
+                "Corbitt Hidden Lair"
+              ],
+              "char_start": null,
+              "char_end": null,
+              "text_hash": null,
+              "note": null
+            },
+            {
+              "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+              "page": 447,
+              "anchor_id": "the_haunting.conclusion",
+              "section_path": [
+                "The Haunting",
+                "Conclusion"
+              ],
+              "char_start": null,
+              "char_end": null,
+              "text_hash": null,
+              "note": null
+            },
+            {
+              "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+              "page": 448,
+              "anchor_id": "the_haunting.corbitt_stats",
+              "section_path": [
+                "The Haunting",
+                "Walter Corbitt stat block"
+              ],
+              "char_start": null,
+              "char_end": null,
+              "text_hash": null,
+              "note": null
+            },
+            {
+              "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+              "page": 449,
+              "anchor_id": "the_haunting.corbitt_spells",
+              "section_path": [
+                "The Haunting",
+                "Corbitt spells"
+              ],
+              "char_start": null,
+              "char_end": null,
+              "text_hash": null,
+              "note": null
+            }
+          ],
+          "opponent": {
+            "id": "walter_corbitt",
+            "hp": 16,
+            "str": 90,
+            "con": 115,
+            "siz": 55,
+            "int": 80,
+            "pow": 90,
+            "dex": 35,
+            "app": 5,
+            "edu": 80,
+            "mp": 18,
+            "fighting": 50,
+            "dodge": 17,
+            "damage_bonus": "1D4",
+            "armor": "Flesh Ward 2D6, depletes by damage blocked",
+            "sanity_loss": "1/1D8 to see him move",
+            "spells": [
+              "Dominate variant",
+              "Flesh Ward",
+              "Summon/Bind Dimensional Shambler"
+            ],
+            "artifact": "floating dagger"
+          }
+        },
+        "extraction_status": "deep_extracted",
+        "page_start": 446,
+        "page_end": 449,
+        "referenced_npc_ids": [
+          "walter_corbitt"
+        ],
+        "referenced_clue_ids": [],
+        "referenced_location_ids": [
+          "corbitt_hidden_lair"
+        ],
+        "referenced_encounter_ids": [],
+        "scene_mechanics": []
+      },
+      {
+        "node_id": "loc_conclusion",
+        "title": "Conclusion",
+        "node_type": "conclusion",
+        "summary": "If Corbitt is destroyed, Knott pays promptly and each participating investigator gains 1D6 SAN; failure can leave Knott dead and police suspicion on the investigators.",
+        "read_aloud": null,
+        "gm_notes": "Use source ending conditions. Do not declare a win without resolving Corbitt or a credible alternative. If investigators knowingly leave the threat active, report consequences honestly.",
+        "links": [],
+        "assets": [],
+        "data": {
+          "source_refs": [
+            {
+              "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+              "page": 447,
+              "anchor_id": "the_haunting.conclusion",
+              "section_path": [
+                "The Haunting",
+                "Conclusion"
+              ],
+              "char_start": null,
+              "char_end": null,
+              "text_hash": null,
+              "note": null
+            }
+          ],
+          "rewards": [
+            "fee plus $30 bonus",
+            "1D6 SAN if Corbitt conquered/destroyed"
+          ]
+        },
+        "extraction_status": "deep_extracted",
+        "page_start": 447,
+        "page_end": 447,
+        "referenced_npc_ids": [
+          "mr_knott",
+          "walter_corbitt"
+        ],
+        "referenced_clue_ids": [],
+        "referenced_location_ids": [],
+        "referenced_encounter_ids": [],
+        "scene_mechanics": []
+      }
+    ],
+    "locations": [
+      {
+        "location_id": "corbitt_house",
+        "title": "Introduction",
+        "scene_id": "loc_intro"
+      },
+      {
+        "location_id": "boston_globe",
+        "title": "The Boston Globe",
+        "scene_id": "loc_boston_globe"
+      },
+      {
+        "location_id": "central_library",
+        "title": "The Central Library",
+        "scene_id": "loc_central_library"
+      },
+      {
+        "location_id": "hall_records",
+        "title": "Hall of Records",
+        "scene_id": "loc_hall_records"
+      },
+      {
+        "location_id": "higher_courts",
+        "title": "Higher Courts and Central Police Station",
+        "scene_id": "loc_courts_police"
+      },
+      {
+        "location_id": "neighborhood",
+        "title": "The Neighborhood",
+        "scene_id": "loc_neighborhood"
+      },
+      {
+        "location_id": "roxbury_sanitarium",
+        "title": "Roxbury Sanitarium",
+        "scene_id": "loc_roxbury_sanitarium"
+      },
+      {
+        "location_id": "chapel_contemplation",
+        "title": "The Chapel of Contemplation",
+        "scene_id": "loc_chapel"
+      },
+      {
+        "location_id": "corbitt_house",
+        "title": "The Old Corbitt Place",
+        "scene_id": "loc_corbitt_house_exterior"
+      },
+      {
+        "location_id": "corbitt_house_ground_floor",
+        "title": "Corbitt House: Ground Floor",
+        "scene_id": "loc_corbitt_house_ground_floor"
+      },
+      {
+        "location_id": "corbitt_house_upper_floor",
+        "title": "Corbitt House: Upper Floor",
+        "scene_id": "loc_corbitt_house_upper_floor"
+      },
+      {
+        "location_id": "corbitt_house_basement",
+        "title": "Corbitt House: The Basement",
+        "scene_id": "loc_corbitt_house_basement"
+      },
+      {
+        "location_id": "corbitt_hidden_lair",
+        "title": "Corbitt’s Hidden Lair",
+        "scene_id": "loc_corbitt_hidden_lair"
+      }
+    ],
+    "npcs": [
+      {
+        "npc_id": "mr_knott",
+        "name": "Mr. Steven Knott",
+        "role": "landlord/employer",
+        "public_summary": "Wants the Corbitt House investigated and its reputation restored. Recently inherited it and offers $20 per day plus advance.",
+        "source_refs": [
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 436,
+            "anchor_id": "the_haunting.knott",
+            "section_path": [
+              "The Haunting",
+              "Location 1: Introduction"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": null
+          }
+        ]
+      },
+      {
+        "npc_id": "arty_wilmot",
+        "name": "Arty Wilmot",
+        "role": "Boston Globe editor",
+        "public_summary": "Controls access to the clippings morgue and enjoys denying access unless persuaded or otherwise handled.",
+        "source_refs": [
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 436,
+            "anchor_id": "the_haunting.arty",
+            "section_path": [
+              "The Haunting",
+              "Location 2: The Boston Globe"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": null
+          }
+        ]
+      },
+      {
+        "npc_id": "ruth_blake",
+        "name": "Ruth Blake",
+        "role": "records keeper",
+        "public_summary": "Can guide investigators into the Globe morgue; may mention files do not survive before an 1878 fire.",
+        "source_refs": [
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 437,
+            "anchor_id": "the_haunting.ruth",
+            "section_path": [
+              "The Haunting",
+              "Location 2: Clippings Files"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": null
+          }
+        ]
+      },
+      {
+        "npc_id": "mr_dooley",
+        "name": "Mr. Dooley",
+        "role": "neighbor",
+        "public_summary": "A neighborhood contact for rumors and recent history around the Corbitt House.",
+        "source_refs": [
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 439,
+            "anchor_id": "the_haunting.dooley",
+            "section_path": [
+              "The Haunting",
+              "Location 6: The Neighborhood"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": null
+          }
+        ]
+      },
+      {
+        "npc_id": "vittorio_macario",
+        "name": "Vittorio Macario",
+        "role": "surviving former tenant",
+        "public_summary": "Traumatized witness at Roxbury Sanitarium; frightened by the house and may reveal the dagger clue if handled carefully.",
+        "source_refs": [
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 439,
+            "anchor_id": "the_haunting.vittorio",
+            "section_path": [
+              "The Haunting",
+              "Location 7: Roxbury Sanitarium"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": null
+          }
+        ]
+      },
+      {
+        "npc_id": "michael_thomas",
+        "name": "Reverend Michael Thomas",
+        "role": "Chapel pastor/executor",
+        "public_summary": "Corbitt executor and Chapel of Contemplation pastor; convicted after the 1912 raid and escaped prison in 1917.",
+        "source_refs": [
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 438,
+            "anchor_id": "the_haunting.michael_thomas",
+            "section_path": [
+              "The Haunting",
+              "Location 5: Handout 8"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": null
+          }
+        ]
+      },
+      {
+        "npc_id": "rat_pack",
+        "name": "Rat Pack",
+        "role": "basement hazard",
+        "stats": {
+          "str": 35,
+          "con": 55,
+          "siz": 35,
+          "pow": 50,
+          "dex": 70,
+          "hp": 9,
+          "fighting": 40,
+          "dodge": 42,
+          "damage": "1D3; overwhelm 2D6"
+        },
+        "source_refs": [
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 445,
+            "anchor_id": "the_haunting.rat_pack",
+            "section_path": [
+              "The Haunting",
+              "Room 3: Corbitt Hidden Lair"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": null
+          }
+        ]
+      },
+      {
+        "npc_id": "walter_corbitt",
+        "name": "Walter Corbitt",
+        "role": "undead sorcerer antagonist",
+        "secret_summary": "Buried in the house basement; his mind persists, haunts the house, animates his body, controls dagger, and tries to drive away or murder investigators.",
+        "stats": {
+          "str": 90,
+          "con": 115,
+          "siz": 55,
+          "int": 80,
+          "pow": 90,
+          "dex": 35,
+          "app": 5,
+          "edu": 80,
+          "san": 0,
+          "hp": 16,
+          "damage_bonus": "1D4",
+          "build": 1,
+          "move": 8,
+          "magic_points": 18,
+          "fighting": 50,
+          "dodge": 17,
+          "cthulhu_mythos": 17,
+          "intimidate": 64,
+          "listen": 60,
+          "sleight_of_hand": 30,
+          "stealth": 72,
+          "armor": "Flesh Ward 2D6 already cast",
+          "sanity_loss": "1/1D8 to see him move"
+        },
+        "source_refs": [
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 435,
+            "anchor_id": "the_haunting.keeper_secret",
+            "section_path": [
+              "The Haunting",
+              "Keeper Secret"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": null
+          },
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 448,
+            "anchor_id": "the_haunting.corbitt_stats",
+            "section_path": [
+              "The Haunting",
+              "Walter Corbitt, Undead Fiend"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": null
+          }
+        ]
+      }
+    ],
+    "factions": [
+      {
+        "faction_id": "chapel_contemplation",
+        "name": "Chapel of Contemplation",
+        "summary": "Closed cult church tied to Corbitt, Michael Thomas, child disappearances, and the 1912 raid.",
+        "source_refs": [
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 438,
+            "anchor_id": "the_haunting.chapel_faction",
+            "section_path": [
+              "The Haunting",
+              "Location 5: Handout 8"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": null
+          }
+        ]
+      }
+    ],
+    "clues": [
+      {
+        "clue_id": "handout_1",
+        "title": "Knott Hire Brief",
+        "summary": "Knott hires investigators, provides keys, address, $20 advance, and points them toward research before visiting the house.",
+        "source_refs": [
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 450,
+            "anchor_id": "the_haunting.handout_1",
+            "section_path": [
+              "The Haunting",
+              "Handouts"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": "Knott Hire Brief"
+          }
+        ]
+      },
+      {
+        "clue_id": "handout_2",
+        "title": "Boston Globe 1918 Unpublished Story",
+        "summary": "House history includes deaths, crippling accidents, illness, suicide by kitchen knife, and the Macario family leaving after simultaneous illness.",
+        "source_refs": [
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 450,
+            "anchor_id": "the_haunting.handout_2",
+            "section_path": [
+              "The Haunting",
+              "Handouts"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": "Boston Globe 1918 Unpublished Story"
+          }
+        ]
+      },
+      {
+        "clue_id": "handout_3",
+        "title": "1835 Property Note",
+        "summary": "A merchant builds the house and soon sells it to Walter Corbitt.",
+        "source_refs": [
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 450,
+            "anchor_id": "the_haunting.handout_3",
+            "section_path": [
+              "The Haunting",
+              "Handouts"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": "1835 Property Note"
+          }
+        ]
+      },
+      {
+        "clue_id": "handout_4",
+        "title": "1852 Neighbor Lawsuit",
+        "summary": "Neighbors petition to force Corbitt out for suspicious habits and demeanor.",
+        "source_refs": [
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 450,
+            "anchor_id": "the_haunting.handout_4",
+            "section_path": [
+              "The Haunting",
+              "Handouts"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": "1852 Neighbor Lawsuit"
+          }
+        ]
+      },
+      {
+        "clue_id": "handout_5",
+        "title": "Corbitt Obituary and Burial Lawsuit",
+        "summary": "Corbitt remains at the house until 1866; a second lawsuit tries to prevent basement burial under his will.",
+        "source_refs": [
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 450,
+            "anchor_id": "the_haunting.handout_5",
+            "section_path": [
+              "The Haunting",
+              "Handouts"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": "Corbitt Obituary and Burial Lawsuit"
+          }
+        ]
+      },
+      {
+        "clue_id": "handout_6",
+        "title": "Missing Lawsuit Outcome",
+        "summary": "No outcome to the second lawsuit is recorded.",
+        "source_refs": [
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 450,
+            "anchor_id": "the_haunting.handout_6",
+            "section_path": [
+              "The Haunting",
+              "Handouts"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": "Missing Lawsuit Outcome"
+          }
+        ]
+      },
+      {
+        "clue_id": "handout_7",
+        "title": "Executor and Chapel Record",
+        "summary": "Corbitt’s executor was Reverend Michael Thomas of the Chapel of Contemplation; the chapel closed in 1912.",
+        "source_refs": [
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 450,
+            "anchor_id": "the_haunting.handout_7",
+            "section_path": [
+              "The Haunting",
+              "Handouts"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": "Executor and Chapel Record"
+          }
+        ]
+      },
+      {
+        "clue_id": "handout_8",
+        "title": "Secret Chapel Raid File",
+        "summary": "A 1912 raid after child-disappearance affidavits killed police and cultists; records suggest cover-up and Michael Thomas later escaped prison.",
+        "source_refs": [
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 450,
+            "anchor_id": "the_haunting.handout_8",
+            "section_path": [
+              "The Haunting",
+              "Handouts"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": "Secret Chapel Raid File"
+          }
+        ]
+      },
+      {
+        "clue_id": "handout_9",
+        "title": "Chapel Symbol",
+        "summary": "A symbol from the Chapel of Contemplation records.",
+        "source_refs": [
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 450,
+            "anchor_id": "the_haunting.handout_9",
+            "section_path": [
+              "The Haunting",
+              "Handouts"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": "Chapel Symbol"
+          }
+        ]
+      },
+      {
+        "clue_id": "buried_in_basement",
+        "title": "Basement Burial Record",
+        "summary": "A chapel record states Walter Corbitt was buried in the basement of his house according to his wishes.",
+        "source_refs": [
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 440,
+            "anchor_id": "the_haunting.buried_in_basement",
+            "section_path": [
+              "The Haunting",
+              "Location"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": "Basement Burial Record"
+          }
+        ]
+      },
+      {
+        "clue_id": "chapel_carving",
+        "title": "Cellar Carving",
+        "summary": "The words Chapel of Contemplation are carved into the crawl-space wall and should be treated as obvious once found.",
+        "source_refs": [
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 446,
+            "anchor_id": "the_haunting.chapel_carving",
+            "section_path": [
+              "The Haunting",
+              "Location"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": "Cellar Carving"
+          }
+        ]
+      }
+    ],
+    "handouts": [
+      {
+        "clue_id": "handout_1",
+        "title": "Knott Hire Brief",
+        "summary": "Knott hires investigators, provides keys, address, $20 advance, and points them toward research before visiting the house.",
+        "source_refs": [
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 450,
+            "anchor_id": "the_haunting.handout_1",
+            "section_path": [
+              "The Haunting",
+              "Handouts"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": "Knott Hire Brief"
+          }
+        ]
+      },
+      {
+        "clue_id": "handout_2",
+        "title": "Boston Globe 1918 Unpublished Story",
+        "summary": "House history includes deaths, crippling accidents, illness, suicide by kitchen knife, and the Macario family leaving after simultaneous illness.",
+        "source_refs": [
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 450,
+            "anchor_id": "the_haunting.handout_2",
+            "section_path": [
+              "The Haunting",
+              "Handouts"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": "Boston Globe 1918 Unpublished Story"
+          }
+        ]
+      },
+      {
+        "clue_id": "handout_3",
+        "title": "1835 Property Note",
+        "summary": "A merchant builds the house and soon sells it to Walter Corbitt.",
+        "source_refs": [
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 450,
+            "anchor_id": "the_haunting.handout_3",
+            "section_path": [
+              "The Haunting",
+              "Handouts"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": "1835 Property Note"
+          }
+        ]
+      },
+      {
+        "clue_id": "handout_4",
+        "title": "1852 Neighbor Lawsuit",
+        "summary": "Neighbors petition to force Corbitt out for suspicious habits and demeanor.",
+        "source_refs": [
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 450,
+            "anchor_id": "the_haunting.handout_4",
+            "section_path": [
+              "The Haunting",
+              "Handouts"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": "1852 Neighbor Lawsuit"
+          }
+        ]
+      },
+      {
+        "clue_id": "handout_5",
+        "title": "Corbitt Obituary and Burial Lawsuit",
+        "summary": "Corbitt remains at the house until 1866; a second lawsuit tries to prevent basement burial under his will.",
+        "source_refs": [
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 450,
+            "anchor_id": "the_haunting.handout_5",
+            "section_path": [
+              "The Haunting",
+              "Handouts"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": "Corbitt Obituary and Burial Lawsuit"
+          }
+        ]
+      },
+      {
+        "clue_id": "handout_6",
+        "title": "Missing Lawsuit Outcome",
+        "summary": "No outcome to the second lawsuit is recorded.",
+        "source_refs": [
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 450,
+            "anchor_id": "the_haunting.handout_6",
+            "section_path": [
+              "The Haunting",
+              "Handouts"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": "Missing Lawsuit Outcome"
+          }
+        ]
+      },
+      {
+        "clue_id": "handout_7",
+        "title": "Executor and Chapel Record",
+        "summary": "Corbitt’s executor was Reverend Michael Thomas of the Chapel of Contemplation; the chapel closed in 1912.",
+        "source_refs": [
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 450,
+            "anchor_id": "the_haunting.handout_7",
+            "section_path": [
+              "The Haunting",
+              "Handouts"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": "Executor and Chapel Record"
+          }
+        ]
+      },
+      {
+        "clue_id": "handout_8",
+        "title": "Secret Chapel Raid File",
+        "summary": "A 1912 raid after child-disappearance affidavits killed police and cultists; records suggest cover-up and Michael Thomas later escaped prison.",
+        "source_refs": [
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 450,
+            "anchor_id": "the_haunting.handout_8",
+            "section_path": [
+              "The Haunting",
+              "Handouts"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": "Secret Chapel Raid File"
+          }
+        ]
+      },
+      {
+        "clue_id": "handout_9",
+        "title": "Chapel Symbol",
+        "summary": "A symbol from the Chapel of Contemplation records.",
+        "source_refs": [
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 450,
+            "anchor_id": "the_haunting.handout_9",
+            "section_path": [
+              "The Haunting",
+              "Handouts"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": "Chapel Symbol"
+          }
+        ]
+      },
+      {
+        "clue_id": "buried_in_basement",
+        "title": "Basement Burial Record",
+        "summary": "A chapel record states Walter Corbitt was buried in the basement of his house according to his wishes.",
+        "source_refs": [
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 440,
+            "anchor_id": "the_haunting.buried_in_basement",
+            "section_path": [
+              "The Haunting",
+              "Location"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": "Basement Burial Record"
+          }
+        ]
+      },
+      {
+        "clue_id": "chapel_carving",
+        "title": "Cellar Carving",
+        "summary": "The words Chapel of Contemplation are carved into the crawl-space wall and should be treated as obvious once found.",
+        "source_refs": [
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 446,
+            "anchor_id": "the_haunting.chapel_carving",
+            "section_path": [
+              "The Haunting",
+              "Location"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": "Cellar Carving"
+          }
+        ]
+      }
+    ],
+    "encounters": [
+      {
+        "encounter_id": "animated_bed",
+        "scene_id": "loc_corbitt_house_upper_floor",
+        "summary": "A bed can fly across the room; resolve Spot Hidden/Dodge and SAN as source notes.",
+        "source_refs": [
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 442,
+            "anchor_id": "the_haunting.bed_attack",
+            "section_path": [
+              "The Haunting",
+              "Upper Floor: Bed Attack"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": null
+          }
+        ]
+      },
+      {
+        "encounter_id": "floating_dagger",
+        "scene_id": "loc_corbitt_house_basement",
+        "summary": "Corbitt spends MP to make his dagger attack; compare Corbitt POW/success level with Dodge; SAN 1/1D4.",
+        "source_refs": [
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 445,
+            "anchor_id": "the_haunting.floating_knife",
+            "section_path": [
+              "The Haunting",
+              "The Floating Knife"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": null
+          }
+        ]
+      },
+      {
+        "encounter_id": "walter_corbitt_finale",
+        "scene_id": "loc_corbitt_hidden_lair",
+        "summary": "Corbitt rises, causes SAN 1/1D8, and fights with Flesh Ward/Dominate/floating dagger until destroyed, escaped, or victorious.",
+        "source_refs": [
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 446,
+            "anchor_id": "the_haunting.corbitt_attacks",
+            "section_path": [
+              "The Haunting",
+              "Corbitt Attacks"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": null
+          },
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 448,
+            "anchor_id": "the_haunting.corbitt_stats",
+            "section_path": [
+              "The Haunting",
+              "Walter Corbitt, Undead Fiend"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": null
+          }
+        ]
+      }
+    ],
+    "module_specific_rules": [
+      {
+        "rule_id": "the_haunting_research_rolls",
+        "summary": "Library/location research consumes half-day blocks and reveals handouts on success; failures can cost time rather than halt play.",
+        "source_refs": [
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 437,
+            "anchor_id": "the_haunting.research_rolls",
+            "section_path": [
+              "The Haunting",
+              "Location 3: The Central Library"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": null
+          }
+        ]
+      },
+      {
+        "rule_id": "the_haunting_dagger_grab",
+        "summary": "Grabbing the floating dagger is a Fighting maneuver opposed by Corbitt POW; creative protection may grant a bonus die.",
+        "source_refs": [
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 445,
+            "anchor_id": "the_haunting.grab_dagger",
+            "section_path": [
+              "The Haunting",
+              "Using a Fighting Maneuver to Grab the Knife"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": null
+          }
+        ]
+      },
+      {
+        "rule_id": "the_haunting_corbitt_destroyed_by_dagger",
+        "summary": "If investigators wrest control of Corbitt’s dagger and stab him with it, he turns to ash regardless of spells.",
+        "source_refs": [
+          {
+            "source_id": "coc7e_keeper_rulebook_40th_anniversary",
+            "page": 449,
+            "anchor_id": "the_haunting.dagger_destroy",
+            "section_path": [
+              "The Haunting",
+              "About W. Corbitt, Esq"
+            ],
+            "char_start": null,
+            "char_end": null,
+            "text_hash": null,
+            "note": null
+          }
+        ]
+      }
+    ],
+    "director_facilitation": {
+      "scene_facts": [
+        {
+          "text": "It is 1920 in Boston and Mr. Knott has hired the investigators to examine the Corbitt House.",
+          "source": "The Haunting Location 1"
+        },
+        {
+          "text": "The investigation can progress through archives, witnesses, chapel records, and then the house itself.",
+          "source": "The Haunting Locations 2-9"
+        },
+        {
+          "text": "The decisive hidden threat is tied to the house basement, but that fact should only be exposed through clues or play.",
+          "source": "The Haunting Keeper Secret"
+        }
+      ],
+      "pressure_items": [
+        {
+          "text": "Knott pays by the day and wants the matter resolved before the property loses more value.",
+          "clock_id": "knott_patience",
+          "severity": 2,
+          "consequence_hint": "If research drags on, Knott checks in and presses for action."
+        },
+        {
+          "text": "Corbitt can react to intruders inside the house through frightening phenomena and attacks.",
+          "clock_id": "house_threat",
+          "severity": 4,
+          "consequence_hint": "Unsafe exploration can trigger supernatural hazards."
+        }
+      ],
+      "affordance_items": [
+        {
+          "description": "question employer and witnesses",
+          "implies_vectors": [
+            "social",
+            "investigate"
+          ]
+        },
+        {
+          "description": "research archives and records",
+          "implies_vectors": [
+            "investigate"
+          ]
+        },
+        {
+          "description": "inspect rooms, doors, floors, and hidden spaces",
+          "implies_vectors": [
+            "explore",
+            "investigate"
+          ]
+        },
+        {
+          "description": "fight, flee, restrain, or improvise protection when supernatural hazards attack",
+          "implies_vectors": [
+            "combat",
+            "escape",
+            "interact"
+          ]
+        }
+      ],
+      "risk_items": [
+        {
+          "text": "Do not reveal Keeper-only truth before player-visible clues justify it.",
+          "related_vectors": [
+            "investigate"
+          ],
+          "severity": 5
+        },
+        {
+          "text": "Physical harm and Sanity loss are possible in the house.",
+          "related_vectors": [
+            "explore",
+            "combat"
+          ],
+          "severity": 4
+        },
+        {
+          "text": "If the investigators falsely report the house safe, Knott may die and police suspicion can follow.",
+          "related_vectors": [
+            "social",
+            "retreat"
+          ],
+          "severity": 3
+        }
+      ],
+      "npc_advice": [
+        {
+          "npc_id": "mr_knott",
+          "speaker_label": "Mr. Knott",
+          "advice_text": "Research first if you think it will help, but I need this house made safe and respectable again.",
+          "bias_or_goal": "Wants a profitable resolution quickly and may minimize danger.",
+          "not_official_solution": true
+        }
+      ],
+      "known_facts": [
+        "1920 Boston",
+        "Corbitt House",
+        "Macario tragedy",
+        "Mr. Knott provides keys and advance payment"
+      ],
+      "open_question": "What happened in the Corbitt House, and can the investigators end it?",
+      "open_question_points_to": [
+        "investigate_records",
+        "question_witnesses",
+        "explore_house"
+      ],
+      "prompt_kind": "choose_goal",
+      "reason": "The Haunting is an investigation-first one-shot; the GM should surface concrete information and consequences without forcing menus.",
+      "forbid_single_correct_path": true,
+      "min_costed_examples": 0
+    },
+    "content_units": []
+  },
+  "module_prep_packets": [],
+  "module_locators": [],
+  "material_index": [],
+  "context_blocks": [],
+  "validation_report": {
+    "status": "ok",
+    "errors": [],
+    "warnings": [
+      {
+        "code": "MANUAL_SOURCE_SLICE",
+        "message": "Bundle generated from Keeper Rulebook The Haunting pp. 435-451 with paraphrased scene summaries for local evaluation.",
+        "target": "call_of_cthulhu_7e.the_haunting"
+      }
+    ],
+    "info": [
+      {
+        "code": "SOURCE_HASH",
+        "message": "sha256:a860499cf34b40cac385f51b6e667ab37ec0796c7329494def08c8b161fd71eb",
+        "target": "/Users/haoli/Documents/TRPG/coc英文/Call Of Cthulhu Keeper Rulebook 40th Anniversary (Sandy Petersen).pdf"
+      }
+    ]
+  },
+  "conversion_trace": [
+    {
+      "at": "2026-06-27T14:16:22Z",
+      "event_type": "manual_source_index",
+      "message": "Generated CoC The Haunting source-backed evaluation module slice from Keeper Rulebook 40th Anniversary pp. 435-451.",
+      "data": {
+        "pdf_pages": [
+          447,
+          463
+        ],
+        "book_pages": [
+          435,
+          451
+        ],
+        "text_slice_hash": "sha256:358f5e38530ea9493d39181e17a9ff749f9a69bc9e5bbb134024a3ec3c6d7c9c"
+      }
+    }
+  ]
+}

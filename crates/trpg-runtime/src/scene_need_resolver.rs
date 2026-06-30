@@ -25,8 +25,7 @@ pub(crate) fn resolve_scene_blocks(
     scenes: &[ScenarioNode],
     include_read_aloud: bool,
 ) -> Vec<ContextBlock> {
-    let blocks =
-        scene_node_to_blocks_with_opts(module_id, node, npcs, scenes, include_read_aloud);
+    let blocks = scene_node_to_blocks_with_opts(module_id, node, npcs, scenes, include_read_aloud);
     if !blocks.is_empty() {
         tracing::info!(
             target: "module_scene",
@@ -266,7 +265,10 @@ mod tests {
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].source_id, "call_of_cthulhu_7e.document");
         assert_eq!(refs[0].page, Some(42));
-        assert_eq!(refs[0].anchor_id.as_deref(), Some("scene_017_welcome_to_abattoir"));
+        assert_eq!(
+            refs[0].anchor_id.as_deref(),
+            Some("scene_017_welcome_to_abattoir")
+        );
         assert_eq!(refs[0].section_path, vec!["欢迎来到阿巴托尔".to_string()]);
     }
 

@@ -8,6 +8,17 @@ AiChatTrpg is a source-grounded JSON asset runtime.
 
 Do not turn it into a universal TRPG rule compiler. Do not fall back to free-form LLM GM adjudication.
 
+## Implementation language boundary
+
+This project is Rust-native. Product behavior, runtime logic, CLI surfaces,
+orchestration, gameplay/playtest runners, caching, character-card lifecycle,
+evaluation runners, and durable state handling belong in Rust.
+
+Python is allowed only for test scripts and test fixtures. It must not own
+product decisions, runtime state, scheduling, character pools, semantic policy,
+or gameplay/evaluation execution paths. If a capability is useful beyond tests,
+port or expose it through Rust before relying on it.
+
 ## Runtime authority
 
 ```text

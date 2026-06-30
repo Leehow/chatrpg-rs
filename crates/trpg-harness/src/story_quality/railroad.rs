@@ -52,8 +52,11 @@ impl RejectedThreadEvidence {
 
     /// Rejected threads that nonetheless got spotlighted — the railroad violation set (empty ⇒ ok).
     pub fn spotlighted_rejected_ids(&self) -> Vec<String> {
-        let rejected: std::collections::HashSet<&str> =
-            self.rejected_thread_ids.iter().map(String::as_str).collect();
+        let rejected: std::collections::HashSet<&str> = self
+            .rejected_thread_ids
+            .iter()
+            .map(String::as_str)
+            .collect();
         self.spotlighted()
             .into_iter()
             .filter(|id| rejected.contains(id))
@@ -81,7 +84,9 @@ impl RejectedThreadCheckpointState {
         match self {
             RejectedThreadCheckpointState::InvalidSetup => "INVALID_SETUP",
             RejectedThreadCheckpointState::NotTriggered => "NOT_TRIGGERED",
-            RejectedThreadCheckpointState::RejectedThreadSpotlighted => "REJECTED_THREAD_SPOTLIGHTED",
+            RejectedThreadCheckpointState::RejectedThreadSpotlighted => {
+                "REJECTED_THREAD_SPOTLIGHTED"
+            }
             RejectedThreadCheckpointState::Pass => "PASS",
         }
     }
@@ -171,9 +176,15 @@ mod tests {
             secondary_thread_ids: vec![],
         };
         let state = classify_rejected_thread_checkpoint(&active(), &ev);
-        assert_eq!(state, RejectedThreadCheckpointState::RejectedThreadSpotlighted);
+        assert_eq!(
+            state,
+            RejectedThreadCheckpointState::RejectedThreadSpotlighted
+        );
         assert!(state.is_failing());
-        assert_eq!(ev.spotlighted_rejected_ids(), vec!["t_rejected".to_string()]);
+        assert_eq!(
+            ev.spotlighted_rejected_ids(),
+            vec!["t_rejected".to_string()]
+        );
     }
 
     #[test]

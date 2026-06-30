@@ -245,15 +245,9 @@ mod tests {
             .iter()
             .map(|e| (e.data["promise_id"].as_str().unwrap().to_string(), e))
             .collect();
-        assert_eq!(
-            by_id["p_adv"].kind,
-            DomainEventKind::StoryPromiseReinforced
-        );
+        assert_eq!(by_id["p_adv"].kind, DomainEventKind::StoryPromiseReinforced);
         assert_eq!(by_id["p_adv"].event_id, "de_promise_s_p_adv_Developing");
-        assert_eq!(
-            by_id["p_mat"].kind,
-            DomainEventKind::StoryPromiseReinforced
-        );
+        assert_eq!(by_id["p_mat"].kind, DomainEventKind::StoryPromiseReinforced);
         assert!(!by_id.contains_key("p_flat"), "flat promise emits nothing");
     }
 

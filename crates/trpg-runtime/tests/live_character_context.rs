@@ -118,12 +118,24 @@ async fn live_pc_sheet_reaches_split_narrator_under_enforce() {
         "Enforce must populate character_context from the real PC sheet; got empty"
     );
     // The carrier must hold real competency buckets with real named skills/stats.
-    assert!(on_text.contains("stats:") && on_text.contains("skills:"), "buckets: {on_text}");
-    assert!(on_text.contains("Spot Hidden 50"), "named skill missing: {on_text}");
+    assert!(
+        on_text.contains("stats:") && on_text.contains("skills:"),
+        "buckets: {on_text}"
+    );
+    assert!(
+        on_text.contains("Spot Hidden 50"),
+        "named skill missing: {on_text}"
+    );
     assert!(on_text.contains("STR 55"), "named stat missing: {on_text}");
     // Defense-in-depth: derived noise + GM-only never leak into the player-safe carrier.
-    assert!(!on_text.contains("con_half"), "derived noise leaked: {on_text}");
-    assert!(!on_text.contains("truth") && !on_text.contains("anomaly"), "gm_only leaked: {on_text}");
+    assert!(
+        !on_text.contains("con_half"),
+        "derived noise leaked: {on_text}"
+    );
+    assert!(
+        !on_text.contains("truth") && !on_text.contains("anomaly"),
+        "gm_only leaked: {on_text}"
+    );
 
     // OFF path: explicit Off => field stays empty (byte-equal-for-this-field baseline).
     std::env::set_var("TRPG_MATERIALIZATION_AFFORDANCE", "off");

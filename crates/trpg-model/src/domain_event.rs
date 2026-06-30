@@ -405,7 +405,11 @@ mod tests {
         assert_eq!(k.as_str(), "SceneUnlocked");
         assert_eq!(DomainEventKind::from_str_token("SceneUnlocked"), k);
         let v = serde_json::to_value(k).unwrap();
-        assert_eq!(v.as_str(), Some("SceneUnlocked"), "serde token 必与 as_str 一致");
+        assert_eq!(
+            v.as_str(),
+            Some("SceneUnlocked"),
+            "serde token 必与 as_str 一致"
+        );
         let back: DomainEventKind = serde_json::from_value(v).unwrap();
         assert_eq!(back, k);
     }
@@ -507,7 +511,11 @@ mod tests {
             "FactRevealed",
             "RelationshipChanged",
         ] {
-            assert_ne!(k.as_str(), existing, "ResourceChanged token 必与既有 14 个不同");
+            assert_ne!(
+                k.as_str(),
+                existing,
+                "ResourceChanged token 必与既有 14 个不同"
+            );
         }
         // fail-closed 未知回退不受影响。
         assert_eq!(
@@ -585,7 +593,10 @@ mod tests {
             assert_eq!(back, k);
         }
         // 钉死 token 字面量，防日后改名悄悄破坏 db 兼容。
-        assert_eq!(DomainEventKind::StoryThreadOpened.as_str(), "StoryThreadOpened");
+        assert_eq!(
+            DomainEventKind::StoryThreadOpened.as_str(),
+            "StoryThreadOpened"
+        );
         assert_eq!(
             DomainEventKind::StoryThreadAdvanced.as_str(),
             "StoryThreadAdvanced"
@@ -677,7 +688,11 @@ mod tests {
             "StoryThreadDormant",
         ] {
             for k in new_kinds {
-                assert_ne!(k.as_str(), existing, "新 promise/scene/beat token 必与既有 21 个不同");
+                assert_ne!(
+                    k.as_str(),
+                    existing,
+                    "新 promise/scene/beat token 必与既有 21 个不同"
+                );
             }
         }
         for i in 0..new_kinds.len() {
@@ -738,7 +753,11 @@ mod tests {
             "BeatPlanned",
             "BeatObserved",
         ] {
-            assert_ne!(k.as_str(), existing, "WorldFactChanged token 必与既有 27 个不同");
+            assert_ne!(
+                k.as_str(),
+                existing,
+                "WorldFactChanged token 必与既有 27 个不同"
+            );
         }
         // fail-closed 未知回退不受影响。
         assert_eq!(
@@ -795,7 +814,11 @@ mod tests {
             "BeatObserved",
             "WorldFactChanged",
         ] {
-            assert_ne!(k.as_str(), existing, "ObjectiveResolved token 必与既有 28 个不同");
+            assert_ne!(
+                k.as_str(),
+                existing,
+                "ObjectiveResolved token 必与既有 28 个不同"
+            );
         }
         // fail-closed 未知回退不受影响。
         assert_eq!(

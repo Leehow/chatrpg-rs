@@ -117,7 +117,11 @@ pub fn parse_chaos_tracker(mission_id: &str, base: &SourceRef, text: &str) -> Op
             }
             if let Some(cost) = pending_cost {
                 if let Some(label) = lone_ability_label(cols[0]) {
-                    rungs.push(TrackerRung { cost, label, detail: String::new() });
+                    rungs.push(TrackerRung {
+                        cost,
+                        label,
+                        detail: String::new(),
+                    });
                     pending_cost = None;
                 }
             }
@@ -231,8 +235,7 @@ pub fn parse_aftermath_outcomes(
         paras.push(cur);
     }
     let is_prose = |p: &Vec<String>| p.iter().any(|l| l.split_whitespace().count() > 6);
-    let is_heading_block =
-        |p: &Vec<String>| p.len() <= 2 && is_outcome_head(&p[0]) && !is_prose(p);
+    let is_heading_block = |p: &Vec<String>| p.len() <= 2 && is_outcome_head(&p[0]) && !is_prose(p);
     let mut out = Vec::new();
     for i in 0..paras.len() {
         // A heading block (1-2 short title-case lines) followed by a prose block
@@ -275,7 +278,11 @@ fn is_outcome_head(line: &str) -> bool {
         return false;
     }
     let first = words[0];
-    first.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+    first
+        .chars()
+        .next()
+        .map(|c| c.is_uppercase())
+        .unwrap_or(false)
         && line.chars().any(|c| c.is_lowercase())
 }
 
@@ -320,10 +327,15 @@ CHAOS EFFECTS";
             PredicateExpr::OpaqueAuthoredText { .. }
         ));
         // the Demerit is captured with its own label and positive delta.
-        let dem = objs.iter().find(|o| o.score_effects[0].label == "Demerit").unwrap();
+        let dem = objs
+            .iter()
+            .find(|o| o.score_effects[0].label == "Demerit")
+            .unwrap();
         assert_eq!(dem.score_effects[0].delta, 1);
         // every scored objective is mission-scoped and not mandatory.
-        assert!(objs.iter().all(|o| o.mission_id.as_deref() == Some("springs_eternal")));
+        assert!(objs
+            .iter()
+            .all(|o| o.mission_id.as_deref() == Some("springs_eternal")));
         assert!(objs.iter().all(|o| !o.mandatory));
     }
 
@@ -341,8 +353,12 @@ CHAOS EFFECTS";
 
     #[test]
     fn no_optional_objectives_section_yields_none() {
-        let objs = parse_optional_objectives("m", &base(), "ANOMALY PROFILE\nsome prose\nCHAOS EFFECTS");
-        assert!(objs.is_empty(), "fail-closed: no section → no fabricated objectives");
+        let objs =
+            parse_optional_objectives("m", &base(), "ANOMALY PROFILE\nsome prose\nCHAOS EFFECTS");
+        assert!(
+            objs.is_empty(),
+            "fail-closed: no section → no fabricated objectives"
+        );
     }
 
     const CHAOS_TEXT: &str = "CHAOS EFFECTS
@@ -387,7 +403,11 @@ INVESTIGATION";
     #[test]
     fn parses_stacked_chaos_layout_into_rungs() {
         let t = parse_chaos_tracker("springs_eternal", &base(), CHAOS_STACKED).unwrap();
-        assert_eq!(t.rungs.len(), 2, "stacked cost+ability pairs, prose ignored");
+        assert_eq!(
+            t.rungs.len(),
+            2,
+            "stacked cost+ability pairs, prose ignored"
+        );
         assert_eq!(t.rungs[0].cost, 2);
         assert_eq!(t.rungs[0].label, "Refresh");
         assert_eq!(t.rungs[1].cost, 12);
@@ -424,7 +444,8 @@ ANOMALY PROFILE";
 
     #[test]
     fn aftermath_without_branch_heads_emits_one_outcome() {
-        let t = "AFTERMATH\njust a paragraph of prose with no headings at all here.\nANOMALY PROFILE";
+        let t =
+            "AFTERMATH\njust a paragraph of prose with no headings at all here.\nANOMALY PROFILE";
         let outs = parse_aftermath_outcomes("m", &base(), t);
         assert_eq!(outs.len(), 1, "fail-closed: phase captured as one outcome");
         assert_eq!(outs[0].title, "Aftermath");

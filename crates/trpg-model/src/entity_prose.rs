@@ -32,12 +32,7 @@ pub const NPC_BODY_KEY_NORMALIZE_ENV: &str = "TRPG_NPC_BODY_KEY_NORMALIZE";
 /// 未设置、无法识别的串如 `enabled`）→ OFF。严格白名单，避免误判真值放开行为。
 pub fn body_key_normalize_enabled() -> bool {
     std::env::var(NPC_BODY_KEY_NORMALIZE_ENV)
-        .map(|v| {
-            matches!(
-                v.to_ascii_lowercase().as_str(),
-                "1" | "true" | "on" | "yes"
-            )
-        })
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes"))
         .unwrap_or(false)
 }
 

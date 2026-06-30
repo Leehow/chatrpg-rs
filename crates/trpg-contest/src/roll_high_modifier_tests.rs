@@ -37,19 +37,25 @@ fn cyber_mech_flat() -> Value {
 fn meet_or_beat_adds_skill_value_and_passes_achievable_dv() {
     let mech = cyber_mech_flat();
     // tested skill "Handgun" → 卡上 6（skill-only：runtime 无 _base）。
-    let m = skill_modifier_from_label(&mech, "Handgun")
-        .expect("Handgun 在卡上必须解析出 modifier");
+    let m = skill_modifier_from_label(&mech, "Handgun").expect("Handgun 在卡上必须解析出 modifier");
     assert_eq!(m.value, 6, "skill-only：取 skills.Handgun=6");
     assert_eq!(m.label, "Handgun");
 
     // 静态 DV 14：裸骰 8 必败（旧行为），8 + Handgun 6 = 14 >= 14 通过（新行为）。
-    let model = CheckResolutionModel::StaticTargetNumber { value: 14, label: "DV".into() };
+    let model = CheckResolutionModel::StaticTargetNumber {
+        value: 14,
+        label: "DV".into(),
+    };
     let (_t, bare_success, _d, _a) = resolve_against_model(&model, 8, &[]);
     assert_eq!(bare_success, Some(false), "旧行为：裸骰 8 < DV 14 必败");
 
     let (composed, success) = compose_and_resolve(&model, 8, std::slice::from_ref(&m), &[]);
     assert_eq!(composed, 14, "8 + Handgun 6 = 14");
-    assert_eq!(success, Some(true), "新行为：14 >= DV 14 → 通过（能力 PC 不再必败）");
+    assert_eq!(
+        success,
+        Some(true),
+        "新行为：14 >= DV 14 → 通过（能力 PC 不再必败）"
+    );
 }
 
 // ─── (b) CoC roll_under：技能是 TARGET，不做加法 → 字节等价 ───
@@ -80,11 +86,28 @@ fn count_faces_pool_unchanged_no_additive_total() {
     // rolls 含 2 个 6 面 → hits=2 >= threshold 2 成功。total 入参对 pool 无意义（数 rolls）。
     let rolls = vec![6i64, 6, 3, 1];
     let (_total, success) = compose_and_resolve(&model, 0, &[], &rolls);
-    assert_eq!(success, Some(true), "2 hits >= threshold 2 → 成功，count_faces 不受 modifier 影响");
+    assert_eq!(
+        success,
+        Some(true),
+        "2 hits >= threshold 2 → 成功，count_faces 不受 modifier 影响"
+    );
 
     // mods 为空（guard compare!=meet_or_beat），且即使误加也只动 total 而 pool 数 rolls → 不变。
-    let (_t2, success2) = compose_and_resolve(&model, 0, &[CheckModifier{label:"x".into(),value:99,source_ref:None}], &rolls);
-    assert_eq!(success2, Some(true), "count_faces 数 hits，与 total/modifier 无关 → 字节等价");
+    let (_t2, success2) = compose_and_resolve(
+        &model,
+        0,
+        &[CheckModifier {
+            label: "x".into(),
+            value: 99,
+            source_ref: None,
+        }],
+        &rolls,
+    );
+    assert_eq!(
+        success2,
+        Some(true),
+        "count_faces 数 hits，与 total/modifier 无关 → 字节等价"
+    );
 }
 
 // ─── (d) fail-soft：卡上缺该技能值 → 不加 modifier，total 不变，不崩 ───
@@ -92,12 +115,21 @@ fn count_faces_pool_unchanged_no_additive_total() {
 fn missing_sheet_value_adds_nothing_fail_soft() {
     let mech = cyber_mech_flat();
     // 卡上没有 "Sniping" 技能 → 返回 None（不编造，不崩）。
-    assert!(skill_modifier_from_label(&mech, "Sniping").is_none(), "缺值必须返 None 不编造");
+    assert!(
+        skill_modifier_from_label(&mech, "Sniping").is_none(),
+        "缺值必须返 None 不编造"
+    );
 
     // 没解析出 modifier 时，total 保持裸骰，verdict 与旧行为一致。
-    let model = CheckResolutionModel::StaticTargetNumber { value: 14, label: "DV".into() };
+    let model = CheckResolutionModel::StaticTargetNumber {
+        value: 14,
+        label: "DV".into(),
+    };
     let (total, success) = compose_and_resolve(&model, 8, &[], &[]);
-    assert_eq!(total, 8, "无 modifier → total 保持裸骰 8（fail-soft = 旧行为）");
+    assert_eq!(
+        total, 8,
+        "无 modifier → total 保持裸骰 8（fail-soft = 旧行为）"
+    );
     assert_eq!(success, Some(false), "8 < 14 仍失败（与旧字节等价）");
 }
 
@@ -111,7 +143,10 @@ fn prefers_structured_skill_base_over_flat_skill() {
         "fields": {"handgun_base": 14}
     });
     let m = skill_modifier_from_label(&mech, "Handgun").expect("有 _base 时必须解析");
-    assert_eq!(m.value, 14, "优先 fields.handgun_base = STAT+level 全量 CPR（14），非扁平 skill 6");
+    assert_eq!(
+        m.value, 14,
+        "优先 fields.handgun_base = STAT+level 全量 CPR（14），非扁平 skill 6"
+    );
     assert!(m.label.contains("base"), "label 标注 base 来源");
 }
 
@@ -128,7 +163,11 @@ fn skill_field_slug_normalizes() {
 fn stat_typed_value_resolves_from_stats() {
     let mech = cyber_mech_flat();
     // 直接验 value_from_profile 对 stats 的读取（resolve_roll_high_modifiers 的 Stat 分支用它）。
-    assert_eq!(value_from_profile(mech.get("stats"), "REF"), Some(8), "无技能时取 linked STAT REF=8");
+    assert_eq!(
+        value_from_profile(mech.get("stats"), "REF"),
+        Some(8),
+        "无技能时取 linked STAT REF=8"
+    );
 }
 
 // ─── bare-die guard：防双加（player-reported / 已合成 1d10+N 都不再叠加 STAT+SKILL） ───
@@ -139,30 +178,46 @@ fn roll_with_result(result: Value) -> DiceRollRecord {
         "visibility": "public_gm_roll", "expression": "1d10",
         "result": result, "seed_commitment": "x", "revealed_at": null,
         "created_at": "2026-06-20T00:00:00Z", "roll_plan_id": null
-    })).unwrap()
+    }))
+    .unwrap()
 }
 
 #[test]
 fn bare_system_die_is_eligible_for_compose() {
     // 系统裸骰 mode=rolled & modifier=0 → 可加（D1 的唯一触发条件）。
-    let roll = roll_with_result(json!({"mode":"rolled","expression":"1d10","rolls":[8],"modifier":0,"total":8}));
+    let roll = roll_with_result(
+        json!({"mode":"rolled","expression":"1d10","rolls":[8],"modifier":0,"total":8}),
+    );
     assert!(roll_is_bare_system_die(&roll), "裸系统骰必须放行组合");
 }
 
 #[test]
 fn precomposed_expression_blocks_double_add() {
     // 已合成 1d10+14（combat compile_formula 写 modifier=14）→ total 已含加值 → 必须**不**再加。
-    let roll = roll_with_result(json!({"mode":"rolled","expression":"1d10+14","rolls":[8],"modifier":14,"total":22}));
-    assert!(!roll_is_bare_system_die(&roll), "modifier!=0 已含加值 → 禁止再加(防双加)");
+    let roll = roll_with_result(
+        json!({"mode":"rolled","expression":"1d10+14","rolls":[8],"modifier":14,"total":22}),
+    );
+    assert!(
+        !roll_is_bare_system_die(&roll),
+        "modifier!=0 已含加值 → 禁止再加(防双加)"
+    );
 }
 
 #[test]
 fn player_reported_modes_block_double_add() {
     // 玩家报总值 / 报分量(STAT+Skill+骰)→ total 已是最终值 → 禁止再加 actor modifier。
     let reported_total = roll_with_result(json!({"mode":"reported_total","total":18}));
-    assert!(!roll_is_bare_system_die(&reported_total), "reported_total 禁止再加");
-    let reported_components = roll_with_result(json!({"mode":"reported_components","die":8,"components":[6,4],"total":18}));
-    assert!(!roll_is_bare_system_die(&reported_components), "reported_components 禁止再加");
+    assert!(
+        !roll_is_bare_system_die(&reported_total),
+        "reported_total 禁止再加"
+    );
+    let reported_components = roll_with_result(
+        json!({"mode":"reported_components","die":8,"components":[6,4],"total":18}),
+    );
+    assert!(
+        !roll_is_bare_system_die(&reported_components),
+        "reported_components 禁止再加"
+    );
 }
 
 // ─── L-T: attack-vs-defense 也走 "1d10 + competence >= defense" 组合 ───
@@ -179,7 +234,11 @@ fn attack_vs_defense_bare_die_cannot_meet_dv14_but_competence_passes() {
     };
     // 旧行为:裸骰 10(满骰)对 defense 14 仍败 → 能力 PC 数学上不可能赢。
     let (_t, bare_success, _d, _a) = resolve_against_model(&model, 10, &[]);
-    assert_eq!(bare_success, Some(false), "旧行为:裸 1d10=10 < defense 14 必败(结构性不可达)");
+    assert_eq!(
+        bare_success,
+        Some(false),
+        "旧行为:裸 1d10=10 < defense 14 必败(结构性不可达)"
+    );
 
     // 新行为:10 + Basic Tech 8 = 18 >= 14 → 通过(攻击/竞技检定不再必败)。
     let m = skill_modifier_from_label(&cyber_mech_flat(), "Basic Tech")
@@ -194,10 +253,16 @@ fn attack_vs_defense_bare_die_cannot_meet_dv14_but_competence_passes() {
 fn attack_roll_competence_flag_defaults_on_and_off_excludes_attack_path() {
     let prev = std::env::var("TRPG_ATTACK_ROLL_COMPETENCE").ok();
     std::env::remove_var("TRPG_ATTACK_ROLL_COMPETENCE");
-    assert!(attack_roll_competence_enabled(), "默认(未设)= ON,eval 自动吃到");
+    assert!(
+        attack_roll_competence_enabled(),
+        "默认(未设)= ON,eval 自动吃到"
+    );
     for off in ["0", "false", "off", "no", "OFF"] {
         std::env::set_var("TRPG_ATTACK_ROLL_COMPETENCE", off);
-        assert!(!attack_roll_competence_enabled(), "OFF 形态 `{off}` 须关闭 attack 竞技绑定(字节等价)");
+        assert!(
+            !attack_roll_competence_enabled(),
+            "OFF 形态 `{off}` 须关闭 attack 竞技绑定(字节等价)"
+        );
     }
     std::env::set_var("TRPG_ATTACK_ROLL_COMPETENCE", "1");
     assert!(attack_roll_competence_enabled(), "显式 1 = ON");

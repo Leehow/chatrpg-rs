@@ -84,7 +84,11 @@ async fn homecoming_yields_nonempty_program_and_frontier() {
         other => panic!("executable ridge rule 的 ON 应为 Entered,实际 {other:?}"),
     };
     let mut state = ProgressionState::default();
-    let signals = evaluate(&mut state, &[ProgressEvent::Entered(from.clone())], &program.borrow());
+    let signals = evaluate(
+        &mut state,
+        &[ProgressEvent::Entered(from.clone())],
+        &program.borrow(),
+    );
     let frontier = compute_frontier(&state, &program.objectives, &program.trackers);
     eprintln!(
         "RAN: seed Entered({from}) → signals={} frontier.active_units={:?}",
@@ -133,7 +137,11 @@ async fn homecoming_threat_objective_ends_scene01_starvation() {
             vocab.extend(row.matcher.iter().cloned());
         }
     }
-    eprintln!("RAN: module_config vocab tokens={} -> {:?}", vocab.len(), vocab);
+    eprintln!(
+        "RAN: module_config vocab tokens={} -> {:?}",
+        vocab.len(),
+        vocab
+    );
     assert!(
         !vocab.is_empty(),
         "真 homecoming module_config 应含 npc/tech matcher 词表(实测空 = 配置缺失)"
@@ -162,7 +170,8 @@ async fn homecoming_threat_objective_ends_scene01_starvation() {
         f0.len()
     );
     assert!(
-        f0.open_objectives.contains(&"obj.neutralize_threat".to_string()),
+        f0.open_objectives
+            .contains(&"obj.neutralize_threat".to_string()),
         "scene_01 入场 frontier 必须非空(开放威胁目标 = 饥饿修复)"
     );
 
@@ -183,16 +192,19 @@ async fn homecoming_threat_objective_ends_scene01_starvation() {
         }],
         &program,
     );
-    let completed = signals
-        .iter()
-        .any(|s| s.kind == ProgressSignalKind::ObjectiveCompleted && s.id == "obj.neutralize_threat");
+    let completed = signals.iter().any(|s| {
+        s.kind == ProgressSignalKind::ObjectiveCompleted && s.id == "obj.neutralize_threat"
+    });
     let revealed = signals
         .iter()
         .any(|s| s.kind == ProgressSignalKind::RevelationUnlocked && s.id == "rev.threat_outcome");
     eprintln!(
         "RAN: live fact `encounter.hacking_server` -> ObjectiveCompleted={completed} RevelationUnlocked={revealed}"
     );
-    assert!(completed, "真活体 fact_id 应经 AnyFactMatches 对齐使目标 completed");
+    assert!(
+        completed,
+        "真活体 fact_id 应经 AnyFactMatches 对齐使目标 completed"
+    );
     assert!(revealed, "网关结局规则应在中和向量 fact 上 reveal coords");
 
     eprintln!("PASS: 真 module_config 词表 → scene_01 入场 frontier 非空 + 活体 fact 对齐目标完成");
@@ -254,11 +266,7 @@ async fn spine_generalization_gives_every_scene_a_frontier() {
         .filter(|s| !s.node_id.trim().is_empty())
         .collect();
     ordered.sort_by_key(|s| s.page_start.unwrap_or(u32::MAX));
-    let probe: Vec<String> = ordered
-        .iter()
-        .take(5)
-        .map(|s| s.node_id.clone())
-        .collect();
+    let probe: Vec<String> = ordered.iter().take(5).map(|s| s.node_id.clone()).collect();
 
     let mut nonempty_scenes = 0usize;
     for scene_id in &probe {

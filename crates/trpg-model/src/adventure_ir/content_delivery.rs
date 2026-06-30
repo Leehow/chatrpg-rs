@@ -91,10 +91,12 @@ mod tests {
     fn recipient_is_closed_to_player_only() {
         // The only legal recipient is the player; any other value fails to parse
         // (a delivery to an NPC/GM is structurally unrepresentable — fail-closed).
-        assert!(serde_json::from_value::<ContentDelivery>(serde_json::json!({
-            "delivery_cap": "cap_x", "recipient": "player", "basis": ["commit:0"]
-        }))
-        .is_ok());
+        assert!(
+            serde_json::from_value::<ContentDelivery>(serde_json::json!({
+                "delivery_cap": "cap_x", "recipient": "player", "basis": ["commit:0"]
+            }))
+            .is_ok()
+        );
         for bad in ["npc", "gm", "world", ""] {
             assert!(
                 serde_json::from_value::<ContentDelivery>(serde_json::json!({
@@ -129,13 +131,17 @@ mod tests {
     fn content_delivery_requires_a_nonempty_basis() {
         // No basis ⇒ parse error; empty basis ⇒ parse error (a delivery must cite ≥1
         // committed turn-local thing).
-        assert!(serde_json::from_value::<ContentDelivery>(serde_json::json!({
-            "delivery_cap": "cap_x", "recipient": "player"
-        }))
-        .is_err());
-        assert!(serde_json::from_value::<ContentDelivery>(serde_json::json!({
-            "delivery_cap": "cap_x", "recipient": "player", "basis": []
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<ContentDelivery>(serde_json::json!({
+                "delivery_cap": "cap_x", "recipient": "player"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ContentDelivery>(serde_json::json!({
+                "delivery_cap": "cap_x", "recipient": "player", "basis": []
+            }))
+            .is_err()
+        );
     }
 }

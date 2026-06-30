@@ -82,8 +82,15 @@ async fn the_vault_inducts_faithful_missions_not_flat_scenes() {
         graph.missions.len(),
         graph.content_units.len()
     );
-    assert_eq!(graph.missions.len(), 0, "baseline: reader collapsed missions to 0");
-    assert!(graph.scenes.len() >= 10, "baseline: ~12 missions flattened into scenes");
+    assert_eq!(
+        graph.missions.len(),
+        0,
+        "baseline: reader collapsed missions to 0"
+    );
+    assert!(
+        graph.scenes.len() >= 10,
+        "baseline: ~12 missions flattened into scenes"
+    );
 
     // --- Induct first-class missions from the real source (structure-fingerprint). ---
     let missions = induct_missions(VAULT, SOURCE_ID, &pages);
@@ -113,7 +120,10 @@ async fn the_vault_inducts_faithful_missions_not_flat_scenes() {
     }
 
     // 1) NOT collapsed: many first-class Mission units (source has 12).
-    assert!(n >= 10, "induct >=10 first-class missions (source 12), got {n}");
+    assert!(
+        n >= 10,
+        "induct >=10 first-class missions (source 12), got {n}"
+    );
     assert!(missions.iter().all(|m| m.unit.kind == UnitKind::Mission));
 
     // 2) The scored mechanics the flat scene list deleted are retained PER mission.
@@ -152,17 +162,17 @@ async fn the_vault_inducts_faithful_missions_not_flat_scenes() {
     );
     // scored objectives really score (Commendation / Demerit present somewhere).
     assert!(
-        missions.iter().flat_map(|m| &m.objectives).any(|o| o
-            .score_effects
+        missions
             .iter()
-            .any(|s| s.label == "Commendation")),
+            .flat_map(|m| &m.objectives)
+            .any(|o| o.score_effects.iter().any(|s| s.label == "Commendation")),
         "scored Commendations present"
     );
     assert!(
-        missions.iter().flat_map(|m| &m.objectives).any(|o| o
-            .score_effects
+        missions
             .iter()
-            .any(|s| s.label == "Demerit")),
+            .flat_map(|m| &m.objectives)
+            .any(|o| o.score_effects.iter().any(|s| s.label == "Demerit")),
         "scored Demerits present"
     );
 
@@ -170,7 +180,12 @@ async fn the_vault_inducts_faithful_missions_not_flat_scenes() {
     //    (a) a Chaos rung's "<cost> Chaos" and its ability label.
     let sample = missions
         .iter()
-        .find(|m| m.chaos.as_ref().map(|c| !c.rungs.is_empty()).unwrap_or(false))
+        .find(|m| {
+            m.chaos
+                .as_ref()
+                .map(|c| !c.rungs.is_empty())
+                .unwrap_or(false)
+        })
         .expect("a mission with a chaos rung");
     let chaos = sample.chaos.as_ref().unwrap();
     let rung = &chaos.rungs[0];

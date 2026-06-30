@@ -117,13 +117,14 @@ pub fn witnessed_objective_resolutions(
         .filter(|s| s.kind == ProgressSignalKind::ObjectiveCompleted)
         .map(|s| {
             // basis atom: the GuardLeaf atom this objective's evidence guard cited.
-            let basis_atom = objectives
-                .iter()
-                .find(|o| o.id == s.id)
-                .and_then(|o| match &o.success_when {
-                    PredicateExpr::EvidencePresent { atom_id } => Some(atom_id.clone()),
-                    _ => None,
-                });
+            let basis_atom =
+                objectives
+                    .iter()
+                    .find(|o| o.id == s.id)
+                    .and_then(|o| match &o.success_when {
+                        PredicateExpr::EvidencePresent { atom_id } => Some(atom_id.clone()),
+                        _ => None,
+                    });
             let data = serde_json::json!({
                 "objective_id": s.id,
                 "atom_id": basis_atom,
@@ -212,8 +213,10 @@ mod tests {
         let signals = evaluate(&mut state, &[], &program(&objs));
 
         assert!(
-            signals.iter().any(|s| s.kind == ProgressSignalKind::ObjectiveCompleted
-                && s.id == "obj.optional.0"),
+            signals
+                .iter()
+                .any(|s| s.kind == ProgressSignalKind::ObjectiveCompleted
+                    && s.id == "obj.optional.0"),
             "engine fires ObjectiveCompleted from admitted GuardLeaf evidence, got {signals:?}"
         );
         assert_eq!(
@@ -437,10 +440,19 @@ mod tests {
         ledger.append(guard_leaf_evidence(atom.atom_id.as_str()));
 
         let events = witnessed_objective_resolutions(
-            "sess-1", "turn-7", &graph, &packet, &ledger, "scene_001",
+            "sess-1",
+            "turn-7",
+            &graph,
+            &packet,
+            &ledger,
+            "scene_001",
         );
 
-        assert_eq!(events.len(), 1, "one ObjectiveResolved per completed objective");
+        assert_eq!(
+            events.len(),
+            1,
+            "one ObjectiveResolved per completed objective"
+        );
         let ev = &events[0];
         assert_eq!(ev.kind, DomainEventKind::ObjectiveResolved);
         // idempotent, turn-INDEPENDENT id ⇒ an objective resolves once per session
@@ -450,10 +462,7 @@ mod tests {
         assert_eq!(ev.turn_id, "turn-7");
         assert_eq!(ev.data["objective_id"], serde_json::json!(obj_id));
         // basis atom is carried for audit/projection (the GuardLeaf atom the evidence cited).
-        assert_eq!(
-            ev.data["atom_id"],
-            serde_json::json!(atom.atom_id.as_str())
-        );
+        assert_eq!(ev.data["atom_id"], serde_json::json!(atom.atom_id.as_str()));
     }
 
     #[test]
@@ -469,7 +478,10 @@ mod tests {
             &EvidenceLedger::new(),
             "scene_001",
         );
-        assert!(events.is_empty(), "empty ledger ⇒ no resolutions, got {events:?}");
+        assert!(
+            events.is_empty(),
+            "empty ledger ⇒ no resolutions, got {events:?}"
+        );
     }
 
     #[test]
@@ -481,7 +493,12 @@ mod tests {
         let mut ledger = EvidenceLedger::new();
         ledger.append(guard_leaf_evidence("atom:whatever"));
         let events = witnessed_objective_resolutions(
-            "sess-1", "turn-7", &graph, &empty_packet, &ledger, "scene_001",
+            "sess-1",
+            "turn-7",
+            &graph,
+            &empty_packet,
+            &ledger,
+            "scene_001",
         );
         assert!(events.is_empty());
     }

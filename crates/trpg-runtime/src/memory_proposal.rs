@@ -1507,11 +1507,17 @@ mod tests {
         assert_eq!(ev.kind, trpg_model::DomainEventKind::WorldFactChanged);
         assert_eq!(ev.session_id, "sess_commit");
         assert_eq!(ev.turn_id, "turn_commit");
-        assert_eq!(ev.data["fact_id"], "f_world_1", "adapter-resolvable fact_id");
+        assert_eq!(
+            ev.data["fact_id"], "f_world_1",
+            "adapter-resolvable fact_id"
+        );
         assert_eq!(ev.data["subject"], "gate");
         assert_eq!(ev.data["truth_status"], "true");
         // Deterministic, turn-scoped idempotency key (on-conflict-do-nothing folds same mutation).
-        assert_eq!(ev.event_id, "de_worldfact_sess_commit_f_world_1_turn_commit");
+        assert_eq!(
+            ev.event_id,
+            "de_worldfact_sess_commit_f_world_1_turn_commit"
+        );
     }
 
     #[test]
@@ -1522,7 +1528,10 @@ mod tests {
         let ev = bridge_event_for(&action, &ctx()).expect("LegacyFact must bridge one event");
         assert_eq!(ev.kind, trpg_model::DomainEventKind::WorldFactChanged);
         assert_eq!(ev.data["fact_id"], "mf_legacy_1");
-        assert_eq!(ev.event_id, "de_worldfact_sess_commit_mf_legacy_1_turn_commit");
+        assert_eq!(
+            ev.event_id,
+            "de_worldfact_sess_commit_mf_legacy_1_turn_commit"
+        );
     }
 
     #[test]
@@ -1564,7 +1573,10 @@ mod tests {
         assert_eq!(ev.data["fact_id"], "f_gm");
         assert_eq!(ev.data["holder_kind"], "gm");
         assert_eq!(ev.data["knowledge_state"], "suspects");
-        assert_eq!(ev.event_id, "de_durable_edge_sess_commit_gm__f_gm_turn_commit");
+        assert_eq!(
+            ev.event_id,
+            "de_durable_edge_sess_commit_gm__f_gm_turn_commit"
+        );
     }
 
     #[test]
@@ -1608,7 +1620,10 @@ mod tests {
         }));
         let a = bridge_event_for(&action, &ctx()).unwrap();
         let b = bridge_event_for(&action, &ctx()).unwrap();
-        assert_eq!(a.event_id, b.event_id, "same mutation+turn ⇒ same idempotent key");
+        assert_eq!(
+            a.event_id, b.event_id,
+            "same mutation+turn ⇒ same idempotent key"
+        );
         let later = CommitContext {
             session_id: "sess_commit",
             turn_id: "turn_LATER",

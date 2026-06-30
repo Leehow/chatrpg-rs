@@ -18,7 +18,10 @@
 //!   (default OFF). [`augment_story_with_anchor_seeds`] with empty anchors is an exact clone, so the
 //!   OFF / no-anchor path is byte-identical to the snapshot path.
 
-use trpg_model::{NarrativeAnchor, NarrativeAnchorKind, StoryState, StoryThread, StoryThreadOrigin, StoryThreadStatus};
+use trpg_model::{
+    NarrativeAnchor, NarrativeAnchorKind, StoryState, StoryThread, StoryThreadOrigin,
+    StoryThreadStatus,
+};
 
 /// Flag reader for the anchor-seeding path. Default OFF (mirrors `scene_plan_enabled` /
 /// `campaign_plan_enabled`): only `"1"` enables seeding so OFF stays byte-identical.
@@ -38,9 +41,9 @@ fn seeded_thread_id(anchor: &NarrativeAnchor) -> String {
 /// colliding `thread_id`). Used to keep seeding idempotent.
 fn already_seeded(anchor: &NarrativeAnchor, existing: &[StoryThread]) -> bool {
     let id = seeded_thread_id(anchor);
-    existing.iter().any(|t| {
-        t.thread_id == id || t.module_anchor.as_deref() == Some(anchor.anchor_id.as_str())
-    })
+    existing
+        .iter()
+        .any(|t| t.thread_id == id || t.module_anchor.as_deref() == Some(anchor.anchor_id.as_str()))
 }
 
 /// PURE: promote [`NarrativeAnchorKind::PotentialThread`] anchors into proposal [`StoryThread`]s,
@@ -146,7 +149,11 @@ mod tests {
             },
         ];
         let seeded = seed_threads_from_anchors(&anchors, &[]);
-        assert_eq!(seeded.len(), 1, "only the PotentialThread anchor seeds a thread");
+        assert_eq!(
+            seeded.len(),
+            1,
+            "only the PotentialThread anchor seeds a thread"
+        );
         let t = &seeded[0];
         assert_eq!(t.thread_id, "seed_anchor_thread_s1_s2");
         assert_eq!(t.origin, StoryThreadOrigin::ModuleAnchor);
@@ -162,7 +169,10 @@ mod tests {
         assert_eq!(once.len(), 1);
         // Re-running with the already-seeded thread in `existing` yields nothing new.
         let twice = seed_threads_from_anchors(&anchors, &once);
-        assert!(twice.is_empty(), "an already-seeded anchor must not re-seed");
+        assert!(
+            twice.is_empty(),
+            "an already-seeded anchor must not re-seed"
+        );
         // Also idempotent through augment (the live merge path).
         let story = augment_story_with_anchor_seeds(&StoryState::default(), &anchors);
         let again = augment_story_with_anchor_seeds(&story, &anchors);

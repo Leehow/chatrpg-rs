@@ -26,13 +26,13 @@
 //!
 //! No `DATABASE_URL` ⇒ SKIP (fail-closed, never blocks CI). Anti-false-green: a real
 //! run prints `RAN:` + counts + `PASS`; only seeing `SKIP` = not verified.
+use serde_json::json;
 use trpg_db::Db;
 use trpg_model::adventure_ir::EvidenceAuthority;
 use trpg_model::{DomainEvent, DomainEventKind};
 use trpg_runtime::{
     build_evidence_atom_catalog, exact_evidence_projector_enabled, project_exact_evidence,
 };
-use serde_json::json;
 
 const VAULT: &str = "triangle_agency.the_vault";
 
@@ -59,7 +59,10 @@ async fn the_vault_clue_reveal_projects_one_accepted_evidence() {
         .clues
         .iter()
         .find_map(|c| {
-            let id = c.get("id").and_then(|v| v.as_str()).filter(|s| !s.is_empty())?;
+            let id = c
+                .get("id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())?;
             let page = c.get("page").and_then(|v| v.as_u64())?;
             Some((id.to_string(), page as u32))
         })
@@ -69,7 +72,10 @@ async fn the_vault_clue_reveal_projects_one_accepted_evidence() {
         graph.clues.len(),
         catalog.len()
     );
-    assert!(!catalog.is_empty(), "catalog derives ≥1 atom from authored clues");
+    assert!(
+        !catalog.is_empty(),
+        "catalog derives ≥1 atom from authored clues"
+    );
     let atom = catalog
         .resolve_fact(&clue_id)
         .expect("the sampled clue id resolves to a catalog atom");
@@ -88,7 +94,11 @@ async fn the_vault_clue_reveal_projects_one_accepted_evidence() {
         json!({"fact_id": clue_id, "reason": "successful Investigation examined the clue"}),
     );
     let ledger = project_exact_evidence(std::slice::from_ref(&reveal), &catalog);
-    assert_eq!(ledger.len(), 1, "clue-reveal projects exactly one AcceptedEvidence");
+    assert_eq!(
+        ledger.len(),
+        1,
+        "clue-reveal projects exactly one AcceptedEvidence"
+    );
     let accepted = &ledger.entries()[0];
     eprintln!("RAN: projected AcceptedEvidence = {:#?}", accepted);
     assert_eq!(accepted.authority, EvidenceAuthority::ExactDomain);

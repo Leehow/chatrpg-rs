@@ -138,9 +138,9 @@ impl<'de> Deserialize<'de> for WitnessDecision {
                         "not_observed decision must not carry a basis",
                     ));
                 }
-                let reason = wire
-                    .reason
-                    .ok_or_else(|| de::Error::custom("not_observed decision must carry a reason"))?;
+                let reason = wire.reason.ok_or_else(|| {
+                    de::Error::custom("not_observed decision must carry a reason")
+                })?;
                 Ok(WitnessDecision::NotObserved { reason })
             }
         }
@@ -173,7 +173,10 @@ mod tests {
     fn observed_decision_roundtrips_with_basis_only() {
         let d = observed(vec![TurnLocalRef::Commit(0)]);
         let v = serde_json::to_value(&d).unwrap();
-        assert_eq!(v, serde_json::json!({"status": "observed", "basis": ["commit:0"]}));
+        assert_eq!(
+            v,
+            serde_json::json!({"status": "observed", "basis": ["commit:0"]})
+        );
         let back: WitnessDecision = serde_json::from_value(v).unwrap();
         assert_eq!(back, d);
     }
@@ -184,7 +187,10 @@ mod tests {
             reason: NotObservedReason::Failed,
         };
         let v = serde_json::to_value(&d).unwrap();
-        assert_eq!(v, serde_json::json!({"status": "not_observed", "reason": "failed"}));
+        assert_eq!(
+            v,
+            serde_json::json!({"status": "not_observed", "reason": "failed"})
+        );
         let back: WitnessDecision = serde_json::from_value(v).unwrap();
         assert_eq!(back, d);
     }
@@ -192,9 +198,8 @@ mod tests {
     #[test]
     fn observed_without_basis_is_rejected() {
         // The whole point: an "observed" with no basis cannot be admitted — fail-closed.
-        let err = serde_json::from_value::<WitnessDecision>(
-            serde_json::json!({"status": "observed"}),
-        );
+        let err =
+            serde_json::from_value::<WitnessDecision>(serde_json::json!({"status": "observed"}));
         assert!(err.is_err(), "observed must carry a basis");
         // Empty basis array is also rejected (NonEmpty).
         let err2 = serde_json::from_value::<WitnessDecision>(
@@ -255,7 +260,10 @@ mod tests {
     #[test]
     fn evidence_audit_roundtrips_serde() {
         let mut decisions = BTreeMap::new();
-        decisions.insert(CapId("cap_aaa".into()), observed(vec![TurnLocalRef::Commit(0)]));
+        decisions.insert(
+            CapId("cap_aaa".into()),
+            observed(vec![TurnLocalRef::Commit(0)]),
+        );
         decisions.insert(
             CapId("cap_bbb".into()),
             WitnessDecision::NotObserved {

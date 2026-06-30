@@ -240,7 +240,11 @@ fn bind_one(
         return Err(BindingReject::SourceHashMismatch);
     }
     let evidence_id = bound_evidence_id(atom.atom_id.as_str(), success_basis);
-    if ledger.entries().iter().any(|e| e.evidence_id == evidence_id) {
+    if ledger
+        .entries()
+        .iter()
+        .any(|e| e.evidence_id == evidence_id)
+    {
         return Err(BindingReject::DuplicateEvidence);
     }
     let atom_str = atom.atom_id.as_str().to_string();
@@ -303,8 +307,12 @@ mod tests {
     }
 
     fn fact_atom(clue: &str) -> EvidenceAtomSpec {
-        let atom_id =
-            AtomId::from_parts("the_vault", "p9", EvidenceKind::FactLearned, &[clue.to_string()]);
+        let atom_id = AtomId::from_parts(
+            "the_vault",
+            "p9",
+            EvidenceKind::FactLearned,
+            &[clue.to_string()],
+        );
         EvidenceAtomSpec {
             atom_id,
             kind: EvidenceKind::FactLearned,
@@ -351,13 +359,27 @@ mod tests {
         let (set, catalog, cap) = offer_for(action_atom("npc_fount_anomaly"));
         let events = vec![check_event("de_check_chk_1", true)];
         let (ledger, decisions) = bind_capability_evidence(
-            SESSION, TURN, &set, &catalog, &events, &[cap], &EvidenceLedger::new(),
+            SESSION,
+            TURN,
+            &set,
+            &catalog,
+            &events,
+            &[cap],
+            &EvidenceLedger::new(),
         );
         assert_eq!(ledger.len(), 1, "one bound action evidence");
         let ev = &ledger.entries()[0];
         assert_eq!(ev.evidence_kind, EvidenceKind::ActionResolved);
-        assert_eq!(ev.authority, EvidenceAuthority::ExactDomain, "deterministic producer");
-        assert_eq!(ev.basis_event_ids, vec!["de_check_chk_1".to_string()], "basis = the committed check");
+        assert_eq!(
+            ev.authority,
+            EvidenceAuthority::ExactDomain,
+            "deterministic producer"
+        );
+        assert_eq!(
+            ev.basis_event_ids,
+            vec!["de_check_chk_1".to_string()],
+            "basis = the committed check"
+        );
         assert!(decisions[0].result.is_ok());
         assert!(!ev.source_refs.is_empty(), "source-grounded");
     }
@@ -367,9 +389,19 @@ mod tests {
         let (set, catalog, cap) = offer_for(action_atom("npc_fount_anomaly"));
         let events = vec![check_event("de_check_chk_1", false)];
         let (ledger, decisions) = bind_capability_evidence(
-            SESSION, TURN, &set, &catalog, &events, &[cap], &EvidenceLedger::new(),
+            SESSION,
+            TURN,
+            &set,
+            &catalog,
+            &events,
+            &[cap],
+            &EvidenceLedger::new(),
         );
-        assert_eq!(ledger.len(), 0, "fail-closed: a failed check produces no ActionResolved");
+        assert_eq!(
+            ledger.len(),
+            0,
+            "fail-closed: a failed check produces no ActionResolved"
+        );
         assert_eq!(decisions[0].result, Err(BindingReject::NoCommittedSuccess));
     }
 
@@ -379,10 +411,19 @@ mod tests {
         let (set, catalog, cap) = offer_for(fact_atom("clue_aquifer_commercial"));
         let events = vec![check_event("de_check_chk_1", true)];
         let (ledger, decisions) = bind_capability_evidence(
-            SESSION, TURN, &set, &catalog, &events, &[cap], &EvidenceLedger::new(),
+            SESSION,
+            TURN,
+            &set,
+            &catalog,
+            &events,
+            &[cap],
+            &EvidenceLedger::new(),
         );
         assert_eq!(ledger.len(), 0);
-        assert_eq!(decisions[0].result, Err(BindingReject::NotAnActionCapability));
+        assert_eq!(
+            decisions[0].result,
+            Err(BindingReject::NotAnActionCapability)
+        );
     }
 
     #[test]
@@ -390,7 +431,13 @@ mod tests {
         let (set, catalog, _cap) = offer_for(action_atom("npc_fount_anomaly"));
         let events = vec![check_event("de_check_chk_1", true)];
         let (ledger, decisions) = bind_capability_evidence(
-            SESSION, TURN, &set, &catalog, &events, &[CapId("cap_fabricated".into())], &EvidenceLedger::new(),
+            SESSION,
+            TURN,
+            &set,
+            &catalog,
+            &events,
+            &[CapId("cap_fabricated".into())],
+            &EvidenceLedger::new(),
         );
         assert_eq!(ledger.len(), 0);
         assert_eq!(decisions[0].result, Err(BindingReject::UnknownCapability));
@@ -413,7 +460,13 @@ mod tests {
         catalog.insert(atom);
         let events = vec![check_event("de_check_chk_1", true)];
         let (ledger, decisions) = bind_capability_evidence(
-            SESSION, TURN, &set, &catalog, &events, &[cap], &EvidenceLedger::new(),
+            SESSION,
+            TURN,
+            &set,
+            &catalog,
+            &events,
+            &[cap],
+            &EvidenceLedger::new(),
         );
         assert_eq!(ledger.len(), 0);
         assert_eq!(decisions[0].result, Err(BindingReject::Expired));
@@ -424,9 +477,19 @@ mod tests {
         let (set, catalog, cap) = offer_for(action_atom("npc_fount_anomaly"));
         let events = vec![check_event("de_check_chk_1", true)];
         let (ledger, decisions) = bind_capability_evidence(
-            SESSION, TURN, &set, &catalog, &events, &[cap.clone(), cap], &EvidenceLedger::new(),
+            SESSION,
+            TURN,
+            &set,
+            &catalog,
+            &events,
+            &[cap.clone(), cap],
+            &EvidenceLedger::new(),
         );
-        assert_eq!(ledger.len(), 1, "the same bound atom+basis collapses to one entry");
+        assert_eq!(
+            ledger.len(),
+            1,
+            "the same bound atom+basis collapses to one entry"
+        );
         assert!(decisions[0].result.is_ok());
         assert_eq!(decisions[1].result, Err(BindingReject::DuplicateEvidence));
     }
@@ -442,9 +505,19 @@ mod tests {
             serde_json::json!({"check_id": "chk_2", "outcome": {"success": false, "success_tier": "partial"}}),
         )];
         let (ledger, _d) = bind_capability_evidence(
-            SESSION, TURN, &set, &catalog, &events, &[cap], &EvidenceLedger::new(),
+            SESSION,
+            TURN,
+            &set,
+            &catalog,
+            &events,
+            &[cap],
+            &EvidenceLedger::new(),
         );
-        assert_eq!(ledger.len(), 1, "a partial success also satisfies the binding");
+        assert_eq!(
+            ledger.len(),
+            1,
+            "a partial success also satisfies the binding"
+        );
     }
 
     #[test]
@@ -485,11 +558,24 @@ mod tests {
 
         // (2) the EV-P4 binding producer: the SAME atom + SAME check now admits.
         let (bound, decisions) = bind_capability_evidence(
-            SESSION, TURN, &set, &catalog, &events, &[cap], &EvidenceLedger::new(),
+            SESSION,
+            TURN,
+            &set,
+            &catalog,
+            &events,
+            &[cap],
+            &EvidenceLedger::new(),
         );
-        assert_eq!(bound.len(), 1, "EV-P4: capability binding admits the observed action");
+        assert_eq!(
+            bound.len(),
+            1,
+            "EV-P4: capability binding admits the observed action"
+        );
         assert!(decisions[0].result.is_ok());
-        assert_eq!(bound.entries()[0].evidence_kind, EvidenceKind::ActionResolved);
+        assert_eq!(
+            bound.entries()[0].evidence_kind,
+            EvidenceKind::ActionResolved
+        );
     }
 
     #[test]
@@ -501,7 +587,9 @@ mod tests {
         assert_eq!(caps[0].as_str(), "cap_abc");
         // no field ⇒ empty; non-array ⇒ empty
         assert!(parse_evidence_attempts(&serde_json::json!({"x": 1})).is_empty());
-        assert!(parse_evidence_attempts(&serde_json::json!({"evidence_attempts": "nope"})).is_empty());
+        assert!(
+            parse_evidence_attempts(&serde_json::json!({"evidence_attempts": "nope"})).is_empty()
+        );
         // a forged entry (extra `completed` field) and an empty cap_id are dropped
         let forged = serde_json::json!({"evidence_attempts": [
             {"cap_id": "cap_ok"},
@@ -509,7 +597,11 @@ mod tests {
             {"cap_id": ""}
         ]});
         let caps = parse_evidence_attempts(&forged);
-        assert_eq!(caps.len(), 1, "only the well-formed closed-schema attempt parses");
+        assert_eq!(
+            caps.len(),
+            1,
+            "only the well-formed closed-schema attempt parses"
+        );
         assert_eq!(caps[0].as_str(), "cap_ok");
     }
 

@@ -191,7 +191,7 @@ impl ContestService {
                     .get("success_bands")
                     .and_then(|v| v.as_array())
                 {
-                    if let Some((tier, rank)) = success_tier_for(bands, total, t) {
+                    if let Some((tier, rank)) = success_tier_for_outcome(bands, total, t, success) {
                         outcome["success_tier"] = json!(tier);
                         outcome[outcome_fields::SUCCESS_TIER_RANK] = json!(rank);
                     }
@@ -534,7 +534,12 @@ impl ContestService {
             return vec![];
         }
         // Guard 1: roll-high (meet_or_beat) ruleset only.
-        let Some(kernel) = self.db.load_rule_kernel(&contract.ruleset_id).await.ok().flatten()
+        let Some(kernel) = self
+            .db
+            .load_rule_kernel(&contract.ruleset_id)
+            .await
+            .ok()
+            .flatten()
         else {
             return vec![];
         };
@@ -988,18 +993,32 @@ fn is_flat_skill_modifier(m: &CheckModifier, skill: &str) -> bool {
 }
 
 fn is_attack_contract(contract: &CheckContract) -> bool {
-    let text = format!(
-        "{} {} {}",
-        contract.intent_kind, contract.check_label, contract.action_summary
-    )
-    .to_ascii_lowercase();
-    text.contains("attack")
-        || text.contains("combat")
-        || text.contains("fire")
-        || text.contains("shoot")
-        || text.contains("开火")
-        || text.contains("攻击")
-        || text.contains("还击")
+    let intent_label =
+        format!("{} {}", contract.intent_kind, contract.check_label).to_ascii_lowercase();
+    if intent_label.contains("attack")
+        || intent_label.contains("combat")
+        || intent_label.contains("shoot")
+        || intent_label.contains("射击")
+        || intent_label.contains("开火")
+        || intent_label.contains("攻击")
+        || intent_label.contains("还击")
+    {
+        return true;
+    }
+
+    let action = contract.action_summary.to_ascii_lowercase();
+    action.contains("shoot")
+        || action.contains("open fire")
+        || action.contains("return fire")
+        || action.contains("fire at")
+        || action.contains("我开火")
+        || action.contains("我射击")
+        || action.contains("开枪")
+        || action.contains("射击")
+        || action.contains("还击")
+        || action.contains("攻击")
+        || ((action.contains("朝") || action.contains("向") || action.contains("对"))
+            && action.contains("开火"))
 }
 
 /// 对抗契约判定：必须同时有 target_actor 与 opponent_tested_parameter。
@@ -1180,6 +1199,29 @@ pub(crate) fn success_tier_for(bands: &[Value], total: i64, target: i64) -> Opti
         .map(|b| (band_id(b), band_rank(b)))
 }
 
+pub(crate) fn success_tier_for_outcome(
+    bands: &[Value],
+    total: i64,
+    target: i64,
+    success: Option<bool>,
+) -> Option<(String, i64)> {
+    let success = success?;
+    let mut preds: Vec<&Value> = bands
+        .iter()
+        .filter(|b| !band_is_otherwise(b) && band_is_compatible_with_success(b, success))
+        .collect();
+    preds.sort_by(|a, b| band_rank(b).cmp(&band_rank(a)));
+    for b in preds {
+        if band_test_passes(b, total, target) {
+            return Some((band_id(b), band_rank(b)));
+        }
+    }
+    bands
+        .iter()
+        .find(|b| band_is_otherwise(b) && band_is_compatible_with_success(b, success))
+        .map(|b| (band_id(b), band_rank(b)))
+}
+
 fn band_id(b: &Value) -> String {
     b.get("id")
         .and_then(|v| v.as_str())
@@ -1194,6 +1236,25 @@ fn band_is_otherwise(b: &Value) -> bool {
         .and_then(|t| t.get("kind"))
         .and_then(|v| v.as_str())
         == Some("otherwise")
+}
+
+fn band_is_compatible_with_success(b: &Value, success: bool) -> bool {
+    let text = [
+        b.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+        b.get("label").and_then(|v| v.as_str()).unwrap_or(""),
+        b.get("semantics").and_then(|v| v.as_str()).unwrap_or(""),
+    ]
+    .join(" ")
+    .to_ascii_lowercase();
+    let failure_markers = ["failure", "fail", "fumble", "botch", "miss"];
+    let success_markers = ["success", "succeed", "regular", "hard", "extreme"];
+    let names_failure = failure_markers.iter().any(|marker| text.contains(marker));
+    let names_success = success_markers.iter().any(|marker| text.contains(marker));
+    if success {
+        !names_failure
+    } else {
+        names_failure || !names_success
+    }
 }
 
 fn band_test_passes(b: &Value, total: i64, target: i64) -> bool {
@@ -1367,13 +1428,22 @@ fn derive_tested_source(
 fn best_key_match(obj: Option<&Value>, hint: Option<&str>, hay: &str) -> Option<String> {
     let map = obj.and_then(|v| v.as_object())?;
     if let Some(h) = hint {
-        if let Some(k) = map.keys().find(|k| k.to_ascii_lowercase() == h) {
+        let hn = parameter_match_key(h);
+        if let Some(k) = map
+            .keys()
+            .find(|k| k.to_ascii_lowercase() == h || parameter_match_key(k) == hn)
+        {
             return Some(k.clone());
         }
         let mut best: Option<(&String, usize)> = None;
         for k in map.keys() {
             let kl = k.to_ascii_lowercase();
-            if h.contains(kl.as_str()) || kl.contains(h) {
+            let kn = parameter_match_key(k);
+            if h.contains(kl.as_str())
+                || kl.contains(h)
+                || hn.contains(kn.as_str())
+                || kn.contains(hn.as_str())
+            {
                 if best.map(|(_, l)| kl.len() > l).unwrap_or(true) {
                     best = Some((k, kl.len()));
                 }
@@ -1398,12 +1468,25 @@ fn best_key_match(obj: Option<&Value>, hint: Option<&str>, hay: &str) -> Option<
 /// Read a stat/skill value (handles numeric and string-encoded), case-insensitive key.
 fn value_from_profile(obj: Option<&Value>, key: &str) -> Option<i32> {
     let map = obj.and_then(|v| v.as_object())?;
+    let normalized_key = parameter_match_key(key);
     let v = map.get(key).or_else(|| {
         map.iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(key))
+            .find(|(k, _)| k.eq_ignore_ascii_case(key) || parameter_match_key(k) == normalized_key)
             .map(|(_, v)| v)
     })?;
     json_to_i32(v)
+}
+
+fn parameter_match_key(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        if ch.is_alphanumeric() {
+            for lower in ch.to_lowercase() {
+                out.push(lower);
+            }
+        }
+    }
+    out
 }
 
 fn json_to_i32(v: &Value) -> Option<i32> {
@@ -1503,6 +1586,60 @@ mod tested_param_tests {
         }
     }
 
+    fn contract_text(intent_kind: &str, check_label: &str, action_summary: &str) -> CheckContract {
+        serde_json::from_value(json!({
+            "check_id": "check_text", "session_id": "s", "turn_id": "t",
+            "ruleset_id": "rs", "module_id": null,
+            "initiator": {"actor_id":"pc.current","actor_kind":"player_character","display_name":null},
+            "target_actor": null,
+            "opposition": {"kind":"no_mechanical_opposition"},
+            "action_summary": action_summary, "intent_kind": intent_kind,
+            "check_label": check_label, "dice_expression": "1d10", "modifiers": [],
+            "target": {"kind":"static_number", "value": 12, "label": "DV"},
+            "tested_parameter": null,
+            "opponent_tested_parameter": null,
+            "actor_snapshot_ids": [], "source_refs": [], "learned_packet_ids": [],
+            "roll_visibility": "public_gm_roll", "roll_authority": "system",
+            "disclosure": {"show_roll_to_player":true,"show_formula_to_player":true,"show_dc_to_player":true,"show_success_failure_to_player":true,"reveal_after_scene":false,"reveal_after_session":false},
+            "stakes": {"before_roll_public":"","success_public":"","failure_public": "", "critical_public":null,"fumble_public":null,"success_patches_allowed":[],"failure_patches_allowed":[],"irreversible":false},
+            "confidence": "medium", "ruling_status": "source_backed", "advice_refs": [], "expires_at_turn": null
+        })).unwrap()
+    }
+
+    #[test]
+    fn under_fire_context_is_not_an_attack_contract() {
+        let c = contract_text(
+            "agent_selected_check",
+            "Hold the wedged signal connector steady under fire",
+            "maintain a technical bypass while staying under fire",
+        );
+        assert!(
+            !is_attack_contract(&c),
+            "environmental pressure ('under fire') must not turn a technical DV into attack_vs_defense"
+        );
+    }
+
+    #[test]
+    fn observing_people_who_are_firing_is_not_an_attack_contract() {
+        let c = contract_text(
+            "agent_selected_check",
+            "Scan drone fire lanes and officers' positions",
+            "观察无人机火线，以及两个还在开火的警员分别躲在哪里；我先不还火",
+        );
+        assert!(
+            !is_attack_contract(&c),
+            "a scene description mentioning other people firing must not make the player action an attack"
+        );
+    }
+
+    #[test]
+    fn active_fire_phrases_still_mark_attack_contracts() {
+        let c = contract_text("attack", "Handgun attack", "open fire at the hostile drone");
+        assert!(is_attack_contract(&c));
+        let c = contract_text("attack", "射击", "朝目标开火");
+        assert!(is_attack_contract(&c));
+    }
+
     fn coc_kernel_with_hp() -> RuleKernel {
         let mut k = RuleKernel::default();
         k.resource_tracks = vec![
@@ -1583,6 +1720,46 @@ mod tested_param_tests {
     }
 
     #[test]
+    fn skill_check_accepts_slug_and_dotted_parameter_hints() {
+        let spot = derive_tested_source(
+            Some(&tp("spot_hidden")),
+            &coc_kernel(),
+            &coc_mech(),
+            "Search the room",
+            "搜索房间",
+            "ability:skill_use",
+        );
+        match spot {
+            Some(TestedSource::Skill { key }) => assert_eq!(key, "Spot Hidden"),
+            other => panic!(
+                "expected Spot Hidden from slug hint, got {:?}",
+                other.is_some()
+            ),
+        }
+
+        let library = derive_tested_source(
+            Some(&tp("skills.Library Use")),
+            &coc_kernel(),
+            &coc_mech(),
+            "Search Hall of Records indexes",
+            "search property records",
+            "ability:skill_use",
+        );
+        match library {
+            Some(TestedSource::Skill { key }) => assert_eq!(key, "Library Use"),
+            other => panic!(
+                "expected Library Use from dotted hint, got {:?}",
+                other.is_some()
+            ),
+        }
+
+        assert_eq!(
+            value_from_profile(coc_mech().get("skills"), "library_use"),
+            Some(70)
+        );
+    }
+
+    #[test]
     fn characteristic_check_resolves_to_the_stat() {
         let src = derive_tested_source(
             Some(&tp("DEX")),
@@ -1648,7 +1825,11 @@ mod tested_param_tests {
         let mut k = RuleKernel::default();
         k.dice_core = json!({
             "compare": "meet_or_beat",
-            "skill_stat_links": {"Persuasion": "COOL", "Handgun": "REF", "Basic Tech": "TECH"}
+            "skill_stat_links": {"Persuasion": "COOL", "Handgun": "REF", "Basic Tech": "TECH"},
+            "success_bands": [
+                {"id":"critical_success","rank":4,"test":{"kind":"meet_or_beat_fraction","numerator":1,"denominator":1}},
+                {"id":"failure","rank":0,"test":{"kind":"otherwise"}}
+            ]
         });
         k
     }
@@ -1691,19 +1872,33 @@ mod tested_param_tests {
         // smokeLT root: Persuasion check vs DV 14. Skill-only = die2 + 6 = 8 < 14 (fail).
         // With L-U linked COOL 8: 2 + 6 + 8 = 16 >= 14 (pass).
         let skill = skill_modifier_from_label(&cpr_mech_flat(), "Persuasion").unwrap();
-        let stat = linked_stat_modifier(&cpr_kernel_with_links(), &cpr_mech_flat(), "Persuasion").unwrap();
+        let stat =
+            linked_stat_modifier(&cpr_kernel_with_links(), &cpr_mech_flat(), "Persuasion").unwrap();
         let comp: i64 = (skill.value + stat.value) as i64; // 6 + 8 = 14
-        assert!(2 + (skill.value as i64) < 14, "skill-only under-add still fails DV14");
+        assert!(
+            2 + (skill.value as i64) < 14,
+            "skill-only under-add still fails DV14"
+        );
         assert!(2 + comp >= 14, "full STAT+SKILL competence meets DV14");
     }
 
     #[test]
     fn flat_skill_modifier_distinguished_from_base() {
         let flat = skill_modifier_from_label(&cpr_mech_flat(), "Persuasion").unwrap();
-        assert!(is_flat_skill_modifier(&flat, "Persuasion"), "flat skill add needs linked stat");
+        assert!(
+            is_flat_skill_modifier(&flat, "Persuasion"),
+            "flat skill add needs linked stat"
+        );
         // A structured `_base` modifier is labeled "<skill> (base)" → already STAT+level.
-        let base = CheckModifier { label: "Persuasion (base)".into(), value: 14, source_ref: None };
-        assert!(!is_flat_skill_modifier(&base, "Persuasion"), "_base must NOT re-add stat");
+        let base = CheckModifier {
+            label: "Persuasion (base)".into(),
+            value: 14,
+            source_ref: None,
+        };
+        assert!(
+            !is_flat_skill_modifier(&base, "Persuasion"),
+            "_base must NOT re-add stat"
+        );
     }
 
     #[test]
@@ -1711,6 +1906,22 @@ mod tested_param_tests {
         // No env set in test ⇒ default ON (eval inherits it).
         std::env::remove_var("TRPG_SKILL_COMPETENCE_STAT");
         assert!(skill_competence_stat_enabled());
+    }
+
+    #[test]
+    fn roll_high_failure_uses_success_compatible_tier() {
+        let bands = cpr_kernel_with_links()
+            .dice_core
+            .get("success_bands")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .expect("fixture bands");
+
+        assert_eq!(
+            success_tier_for_outcome(&bands, 12, 14, Some(false)).map(|(tier, _)| tier),
+            Some("failure".to_string()),
+            "a failed meet-or-beat check must not emit critical_success/success"
+        );
     }
 }
 

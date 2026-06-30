@@ -63,7 +63,8 @@ pub(super) fn advance_threads(
         if rank == 0 || rank >= 5 {
             continue;
         }
-        let target = target_thread_status(&t.related_fact_ids, engaged.contains(&t.thread_id), known);
+        let target =
+            target_thread_status(&t.related_fact_ids, engaged.contains(&t.thread_id), known);
         if thread_rank(target) > rank {
             t.status = target; // forward-only
             changed = true;
@@ -106,10 +107,16 @@ mod tests {
         assert_eq!(story.active_threads[0].status, StoryThreadStatus::Active);
         let (story, c2) = run(story, &["thr"], &["f1", "f2"]); // all known ⇒ ReadyForPayoff
         assert!(c2);
-        assert_eq!(story.active_threads[0].status, StoryThreadStatus::ReadyForPayoff);
+        assert_eq!(
+            story.active_threads[0].status,
+            StoryThreadStatus::ReadyForPayoff
+        );
         let (story, c3) = run(story, &["thr"], &["f1", "f2"]); // idempotent at ceiling
         assert!(!c3);
-        assert_eq!(story.active_threads[0].status, StoryThreadStatus::ReadyForPayoff);
+        assert_eq!(
+            story.active_threads[0].status,
+            StoryThreadStatus::ReadyForPayoff
+        );
     }
 
     #[test]
@@ -120,7 +127,10 @@ mod tests {
         };
         let (story, c) = run(story, &["thr"], &["f1"]); // ratio .5 ⇒ Escalating
         assert!(c);
-        assert_eq!(story.active_threads[0].status, StoryThreadStatus::Escalating);
+        assert_eq!(
+            story.active_threads[0].status,
+            StoryThreadStatus::Escalating
+        );
     }
 
     #[test]
@@ -130,8 +140,14 @@ mod tests {
             ..Default::default()
         };
         let (story, c) = run(story, &[], &["f1", "f2"]); // all known but NOT engaged
-        assert!(!c, "fact-knowledge alone must not advance an unengaged thread");
-        assert_eq!(story.active_threads[0].status, StoryThreadStatus::Introduced);
+        assert!(
+            !c,
+            "fact-knowledge alone must not advance an unengaged thread"
+        );
+        assert_eq!(
+            story.active_threads[0].status,
+            StoryThreadStatus::Introduced
+        );
     }
 
     #[test]

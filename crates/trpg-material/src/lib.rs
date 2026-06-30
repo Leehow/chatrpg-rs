@@ -1048,7 +1048,10 @@ impl MaterializationService {
             contradictory_sources: vec![],
             ..Default::default()
         };
-        if matches!(verification.status, BindingVerificationStatus::RejectedNoSource) {
+        if matches!(
+            verification.status,
+            BindingVerificationStatus::RejectedNoSource
+        ) {
             self.insert_blocked_content_event(
                 &demand,
                 &packet,
@@ -1093,7 +1096,10 @@ impl MaterializationService {
         let mode = MaterializationAffordanceMode::from_env();
 
         // Part A: source-present VerifiedExact passes unconditionally (flag-agnostic).
-        if matches!(verification.status, BindingVerificationStatus::VerifiedExact) {
+        if matches!(
+            verification.status,
+            BindingVerificationStatus::VerifiedExact
+        ) {
             let writeback = RuntimeBindingWriteback {
                 writeback_id: format!("content_wb_{}", Uuid::new_v4().simple()),
                 binding_id: packet.binding_id.clone(),
@@ -1130,8 +1136,12 @@ impl MaterializationService {
         // Evaluate the three 4b invariants (gm_truth drives invariant ii).
         let decision = evaluate_4b_invariants(payload, gm_truth);
         if decision.is_blocked() {
-            let result_json =
-                blocked_content_event_json(&demand.demand_id, &packet.binding_id, &decision, payload);
+            let result_json = blocked_content_event_json(
+                &demand.demand_id,
+                &packet.binding_id,
+                &decision,
+                payload,
+            );
             self.insert_blocked_content_event_with_json(
                 demand,
                 packet,
@@ -1218,8 +1228,14 @@ impl MaterializationService {
             "verification_status": verification.status.as_str(),
             "note": "Provisional content blocked; no discoverable-content writeback applied."
         });
-        self.insert_blocked_content_event_with_json(demand, packet, extraction, verification, result_json)
-            .await
+        self.insert_blocked_content_event_with_json(
+            demand,
+            packet,
+            extraction,
+            verification,
+            result_json,
+        )
+        .await
     }
 
     async fn insert_blocked_content_event_with_json(

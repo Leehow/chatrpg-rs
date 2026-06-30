@@ -270,10 +270,20 @@ mod tests {
             "offer maps to the catalog atom"
         );
         assert_eq!(o.kind, EvidenceKind::FactLearned);
-        assert_eq!(o.required_basis, vec![BasisKind::FactCommitted], "clue basis = committed fact");
+        assert_eq!(
+            o.required_basis,
+            vec![BasisKind::FactCommitted],
+            "clue basis = committed fact"
+        );
         assert_eq!(o.expires_at, "turn_5", "single-turn capability");
-        assert!(o.meaning.contains("Aquifer storyboard"), "meaning cites the authored label");
-        assert!(o.meaning.contains("p10"), "meaning cites the authored source page");
+        assert!(
+            o.meaning.contains("Aquifer storyboard"),
+            "meaning cites the authored label"
+        );
+        assert!(
+            o.meaning.contains("p10"),
+            "meaning cites the authored source page"
+        );
     }
 
     #[test]
@@ -283,7 +293,10 @@ mod tests {
         let cat = catalog(&g);
         assert_eq!(cat.len(), 1, "catalog still has the clue atom");
         let set = derive_offer_set(&g, &cat, "scene_001", "sess_a", "turn_5");
-        assert!(set.is_empty(), "conservative: only surfaced atoms are offered");
+        assert!(
+            set.is_empty(),
+            "conservative: only surfaced atoms are offered"
+        );
     }
 
     #[test]
@@ -293,7 +306,10 @@ mod tests {
         g.scenes[0].referenced_clue_ids = vec!["clue_not_in_catalog".into()];
         let cat = catalog(&g);
         let set = derive_offer_set(&g, &cat, "scene_001", "sess_a", "turn_5");
-        assert!(set.is_empty(), "fail-closed: surfaced ref with no atom → no offer");
+        assert!(
+            set.is_empty(),
+            "fail-closed: surfaced ref with no atom → no offer"
+        );
     }
 
     #[test]
@@ -301,7 +317,10 @@ mod tests {
         let g = graph("clue_a", 10, true);
         let cat = catalog(&g);
         let set = derive_offer_set(&g, &cat, "scene_does_not_exist", "sess_a", "turn_5");
-        assert!(set.is_empty(), "fail-closed: unknown current scene → no offers");
+        assert!(
+            set.is_empty(),
+            "fail-closed: unknown current scene → no offers"
+        );
     }
 
     #[test]
@@ -314,7 +333,10 @@ mod tests {
         assert!(!o.cap_id.as_str().starts_with("atom:"));
         // an objective id is a dotted slug; the opaque handle is not.
         assert_ne!(o.cap_id.as_str(), "obj.advance.scene_001");
-        assert!(!o.cap_id.as_str().contains('.'), "opaque handle is not a dotted objective slug");
+        assert!(
+            !o.cap_id.as_str().contains('.'),
+            "opaque handle is not a dotted objective slug"
+        );
     }
 
     #[test]
@@ -329,7 +351,10 @@ mod tests {
             prompt.push_str("\n\n");
             prompt.push_str(&block);
         }
-        assert_eq!(prompt, base, "empty offer set ⇒ prompt bytes identical (OFF==baseline)");
+        assert_eq!(
+            prompt, base,
+            "empty offer set ⇒ prompt bytes identical (OFF==baseline)"
+        );
     }
 
     #[test]
@@ -339,14 +364,26 @@ mod tests {
         let set = derive_offer_set(&g, &cat, "scene_001", "sess_a", "turn_5");
         let block = render_offer_prompt_block(&set);
         let o = &set.offers()[0];
-        assert!(block.contains(o.cap_id.as_str()), "block shows the opaque handle");
-        assert!(block.contains("Aquifer storyboard"), "block shows the human meaning");
-        assert!(block.contains("fact_committed"), "block shows the required basis");
+        assert!(
+            block.contains(o.cap_id.as_str()),
+            "block shows the opaque handle"
+        );
+        assert!(
+            block.contains("Aquifer storyboard"),
+            "block shows the human meaning"
+        );
+        assert!(
+            block.contains("fact_committed"),
+            "block shows the required basis"
+        );
         assert!(
             !block.contains(o.atom_id.as_str()),
             "block NEVER leaks the atom_id (GM only sees the opaque handle)"
         );
-        assert!(!block.contains("atom:"), "no atom id prefix anywhere in the prompt block");
+        assert!(
+            !block.contains("atom:"),
+            "no atom id prefix anywhere in the prompt block"
+        );
     }
 
     #[test]
@@ -412,14 +449,21 @@ mod tests {
         std::env::set_var("TRPG_PROGRESS_OBSERVABLE_LEAF_CATALOG_V1", "1");
         let graph = graph_with_affordance();
         let cat = crate::evidence_projection::build_evidence_atom_catalog(&graph);
-        assert!(cat.len() >= 2, "ON ⇒ clue + ≥1 action atom, got {}", cat.len());
+        assert!(
+            cat.len() >= 2,
+            "ON ⇒ clue + ≥1 action atom, got {}",
+            cat.len()
+        );
         let set = derive_offer_set(&graph, &cat, "scene_001", "sess_a", "turn_5");
         std::env::remove_var("TRPG_PROGRESS_OBSERVABLE_LEAF_CATALOG_V1");
         let has_action = set
             .offers()
             .iter()
             .any(|o| o.kind == EvidenceKind::ActionResolved);
-        assert!(has_action, "ON ⇒ scene_001 gains an action offer (not just the clue)");
+        assert!(
+            has_action,
+            "ON ⇒ scene_001 gains an action offer (not just the clue)"
+        );
         // opaque + source-grounded meaning, never an atom id leaked
         for o in set.offers() {
             assert!(o.cap_id.as_str().starts_with("cap_"));
@@ -436,7 +480,9 @@ mod tests {
             "action capability requires a committed outcome"
         );
         assert!(
-            action.meaning.contains("Investigate the Aquifer commercial"),
+            action
+                .meaning
+                .contains("Investigate the Aquifer commercial"),
             "meaning cites the authored affordance text: {}",
             action.meaning
         );

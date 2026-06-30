@@ -114,11 +114,15 @@ async fn on_scene_change_emits_exactly_one_idempotent_plan_event() {
     std::env::set_var("TRPG_DIRECTOR_SCENE_PLAN", "1");
     let first = emit_scene_plan_on_change(&db, &session, "mod_missing", "t1", "scene_market").await;
     // Replay the SAME scene crossing on a later turn — must not double-count.
-    let second = emit_scene_plan_on_change(&db, &session, "mod_missing", "t2", "scene_market").await;
+    let second =
+        emit_scene_plan_on_change(&db, &session, "mod_missing", "t2", "scene_market").await;
     std::env::remove_var("TRPG_DIRECTOR_SCENE_PLAN");
 
     assert!(first, "ON ⇒ first crossing emits");
-    assert!(second, "ON ⇒ replay still appends (on conflict do nothing, no error)");
+    assert!(
+        second,
+        "ON ⇒ replay still appends (on conflict do nothing, no error)"
+    );
 
     let events = scene_plan_events(&db, &session).await;
     assert_eq!(
@@ -126,7 +130,10 @@ async fn on_scene_change_emits_exactly_one_idempotent_plan_event() {
         1,
         "exactly ONE ScenePlanCreated row for the scene (idempotent key)"
     );
-    assert_eq!(events[0].event_id, format!("de_scene_{session}_scene_market_created"));
+    assert_eq!(
+        events[0].event_id,
+        format!("de_scene_{session}_scene_market_created")
+    );
     assert_eq!(events[0].data["scene_id"], "scene_market");
     purge(&db, &session).await;
 }
@@ -164,12 +171,16 @@ async fn forbidden_reveals_derived_from_live_building_thread() {
         ..Default::default()
     };
     db.upsert_story_state(&session, &story, "t0").await.unwrap();
-    db.set_session_scene(&session, "scene_temple").await.unwrap();
+    db.set_session_scene(&session, "scene_temple")
+        .await
+        .unwrap();
 
     // OFF: empty proactive set — the reactive gate stays fully in charge (byte-identical baseline).
     std::env::remove_var("TRPG_DIRECTOR_SCENE_PLAN");
     assert!(
-        scene_forbidden_reveals(&db, &session, None).await.is_empty(),
+        scene_forbidden_reveals(&db, &session, None)
+            .await
+            .is_empty(),
         "OFF ⇒ no proactive forbidden set"
     );
 

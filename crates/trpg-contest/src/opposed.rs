@@ -214,7 +214,11 @@ mod tests {
         // 二者结论相反 → 证明 bare-threshold/margin 判定已被合成总点取代。
         let bands: Vec<Value> = vec![];
         let (_t, s, _d) = resolve_opposed("meet_or_beat", &bands, 10, Some(10), 11, Some(2));
-        assert_eq!(s, Some(true), "合成总点 20>13 攻击胜,而非旧 margin 判防御胜");
+        assert_eq!(
+            s,
+            Some(true),
+            "合成总点 20>13 攻击胜,而非旧 margin 判防御胜"
+        );
     }
 
     #[test]
@@ -247,7 +251,10 @@ mod tests {
         // value 在 roll_under 下是 roll-under 目标(非加数)→ Fix C 绝不把它加进 total。
         let b = coc_bands();
         // (atk_total, atk_value, def_total, def_value) → (target, success, degree)
-        let cases: &[((i64, i32, i64, i32), (Option<i64>, Option<bool>, Option<&str>))] = &[
+        let cases: &[(
+            (i64, i32, i64, i32),
+            (Option<i64>, Option<bool>, Option<&str>),
+        )] = &[
             // 一胜一败:攻击 30<=60 成功,防御 80>40 失败 → 攻击胜。
             ((30, 60, 80, 40), (None, Some(true), Some("attacker_wins"))),
             // 一胜一败镜像:攻击失败,防御成功 → 防御胜。
@@ -255,7 +262,10 @@ mod tests {
             // 双成功比 tier:攻击 5<=60(extreme)> 防御 35<=40(regular)→ 攻击胜。
             ((5, 60, 35, 40), (None, Some(true), Some("attacker_wins"))),
             // 双败:90>60,95>40 → mutual_failure,防御守成。
-            ((90, 60, 95, 40), (None, Some(false), Some("mutual_failure"))),
+            (
+                (90, 60, 95, 40),
+                (None, Some(false), Some("mutual_failure")),
+            ),
             // 同 tier 同 margin 平局 → 防御方胜。
             ((50, 60, 30, 40), (None, Some(false), Some("defender_wins"))),
         ];

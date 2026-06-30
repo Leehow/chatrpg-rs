@@ -174,6 +174,35 @@ impl TurnDocument {
         parts.join("\n\n").trim().to_string()
     }
 
+    /// Deterministic player-visible wire text. Unlike `player_text`, this preserves valid
+    /// player-facing wrappers such as `[roll]...[/roll]` so downstream battle reports can still
+    /// audit mechanics, while malformed roll wrappers have already been unwrapped by the parser.
+    pub(crate) fn player_wire_text(&self) -> String {
+        let parts: Vec<String> = self
+            .blocks
+            .iter()
+            .filter(|b| b.is_player_visible())
+            .filter_map(|b| {
+                let content = b.content.trim();
+                if content.is_empty() {
+                    return None;
+                }
+                let rendered = match b.kind {
+                    TurnBlockKind::Roll => format!("[roll]{content}[/roll]"),
+                    TurnBlockKind::System => format!("[system]{content}[/system]"),
+                    TurnBlockKind::Choice => format!("[choice]{content}[/choice]"),
+                    TurnBlockKind::Dialogue => format!("[dialogue]{content}[/dialogue]"),
+                    TurnBlockKind::Narration => content.to_string(),
+                    TurnBlockKind::HiddenEvent
+                    | TurnBlockKind::InternalMeta
+                    | TurnBlockKind::Extension { .. } => return None,
+                };
+                Some(rendered)
+            })
+            .collect();
+        parts.join("\n\n").trim().to_string()
+    }
+
     /// Internal route: `hide` blocks (each authority=Proposal) for canon-proposal validation.
     pub(crate) fn hide_blocks(&self) -> Vec<&TurnBlock> {
         self.blocks

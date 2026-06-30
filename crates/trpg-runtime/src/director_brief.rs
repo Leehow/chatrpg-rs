@@ -276,8 +276,10 @@ pub async fn prepare_director_plan_post_adjudication(
         .flatten()
         .unwrap_or_default();
     let rejected = rejected_thread_ids(&story);
-    let spotlights: Vec<SpotlightState> =
-        db.load_spotlight_states(session_id).await.unwrap_or_default();
+    let spotlights: Vec<SpotlightState> = db
+        .load_spotlight_states(session_id)
+        .await
+        .unwrap_or_default();
     Some(build_director_plan_post_adjudication(
         candidates,
         &story,

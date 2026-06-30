@@ -155,10 +155,15 @@ mod tests {
     fn columns_of_splits_at_wide_gutters_only() {
         // single-space inside "2 Chaos" stays one segment; the wide gutters split
         // the chaos row into cost | ability | detail.
-        assert_eq!(columns_of("      2 Chaos       Manifest        the puddle reflects"),
-            vec!["2 Chaos", "Manifest", "the puddle reflects"]);
+        assert_eq!(
+            columns_of("      2 Chaos       Manifest        the puddle reflects"),
+            vec!["2 Chaos", "Manifest", "the puddle reflects"]
+        );
         // a single-column line yields one segment.
-        assert_eq!(columns_of("Optional Objectives"), vec!["Optional Objectives"]);
+        assert_eq!(
+            columns_of("Optional Objectives"),
+            vec!["Optional Objectives"]
+        );
     }
 
     #[test]
@@ -173,10 +178,16 @@ mod tests {
 
     #[test]
     fn line_marker_matches_either_column() {
-        assert_eq!(line_marker("CHAOS EFFECTS", PHASE_MARKERS), Some("CHAOS EFFECTS"));
+        assert_eq!(
+            line_marker("CHAOS EFFECTS", PHASE_MARKERS),
+            Some("CHAOS EFFECTS")
+        );
         // header in the RIGHT column is still recognized.
         assert_eq!(
-            line_marker("some left prose here           CHAOS EFFECTS", PHASE_MARKERS),
+            line_marker(
+                "some left prose here           CHAOS EFFECTS",
+                PHASE_MARKERS
+            ),
             Some("CHAOS EFFECTS")
         );
         assert_eq!(line_marker("just narrative prose", PHASE_MARKERS), None);

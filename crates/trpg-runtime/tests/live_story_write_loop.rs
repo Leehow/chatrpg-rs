@@ -316,7 +316,10 @@ async fn live_by_default_cross_turn_memory_continuity() {
     // TURN t2 (a LATER turn) — the next turn loads story_state fresh. The game REMEMBERS: the thread
     // the player opened a turn ago is still Introduced (not amnesiacally back to Dormant/empty).
     let recalled = db.load_story_state(&session).await.unwrap().unwrap();
-    assert!(!recalled.is_empty(), "story_state is non-empty across turns (no amnesia)");
+    assert!(
+        !recalled.is_empty(),
+        "story_state is non-empty across turns (no amnesia)"
+    );
     let thread = recalled
         .active_threads
         .iter()

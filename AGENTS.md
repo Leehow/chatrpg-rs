@@ -14,6 +14,21 @@ relaxing the global hard gates.
 - Do not use Codex subagents as Team Lead workers unless the user explicitly
   requests that exception in the current turn.
 
+## Rust-Only Project Boundary
+
+This workspace is Rust-native. Product behavior, runtime logic, CLI surfaces,
+journey/playtest runners, orchestration, caching, character-card lifecycle,
+evaluation runners, and durable state handling must be implemented in Rust.
+
+Python is allowed only for test scripts and test fixtures, such as existing
+`scripts/*_test.py` / offline diagnostic tests. Do not add or expand Python as
+a product path, gameplay runner, scheduler, cache, character-pool layer,
+semantic policy layer, or replacement for Rust harness/CLI functionality.
+
+When a needed capability currently exists only in Python, port or expose it
+through Rust before relying on it for project behavior. Python may call the
+Rust binary in tests, but it must not own product decisions or state.
+
 ## Worker Route
 
 - Default backend: `tty`

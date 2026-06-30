@@ -18,6 +18,26 @@ pub enum WaitMode {
 /// `is_one_shot` = true  → `trpg turn`（脚本/测试，需确定性落账）。
 /// `is_one_shot` = false → `trpg play`（交互循环，下一轮守卫兜）。
 pub fn cli_wait_mode(is_one_shot: bool) -> WaitMode {
+    let override_value = std::env::var("TRPG_TURN_WAIT_HEAVY").ok();
+    cli_wait_mode_with_override(is_one_shot, override_value.as_deref())
+}
+
+pub fn cli_wait_mode_with_override(
+    is_one_shot: bool,
+    wait_heavy_override: Option<&str>,
+) -> WaitMode {
+    if !is_one_shot {
+        return WaitMode::NoWait;
+    }
+    if let Some(value) = wait_heavy_override {
+        let normalized = value.trim().to_ascii_lowercase();
+        if matches!(normalized.as_str(), "0" | "false" | "no" | "off") {
+            return WaitMode::NoWait;
+        }
+        if matches!(normalized.as_str(), "1" | "true" | "yes" | "on") {
+            return WaitMode::WaitHeavy;
+        }
+    }
     if is_one_shot {
         WaitMode::WaitHeavy
     } else {
@@ -55,8 +75,28 @@ mod tests {
     fn cli_wait_mode_is_pure_deterministic() {
         // 同参数反复调用返回同值（纯函数）。
         for _ in 0..5 {
-            assert_eq!(cli_wait_mode(true), WaitMode::WaitHeavy);
-            assert_eq!(cli_wait_mode(false), WaitMode::NoWait);
+            assert_eq!(cli_wait_mode_with_override(true, None), WaitMode::WaitHeavy);
+            assert_eq!(cli_wait_mode_with_override(false, None), WaitMode::NoWait);
         }
+    }
+
+    #[test]
+    fn one_shot_turn_can_disable_heavy_wait_for_eval() {
+        assert_eq!(
+            cli_wait_mode_with_override(true, Some("false")),
+            WaitMode::NoWait
+        );
+        assert_eq!(
+            cli_wait_mode_with_override(true, Some("0")),
+            WaitMode::NoWait
+        );
+    }
+
+    #[test]
+    fn interactive_play_ignores_wait_heavy_override() {
+        assert_eq!(
+            cli_wait_mode_with_override(false, Some("true")),
+            WaitMode::NoWait
+        );
     }
 }

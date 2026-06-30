@@ -150,7 +150,10 @@ mod tests {
         let entry = json!({"id": "npc_x", "name": "X"});
         let p = thin_profile_from_module_npc("npc_x", &entry).expect("profile");
         assert_eq!(p.name, "X");
-        assert!(p.persona_description.is_none(), "no body → no persona prose");
+        assert!(
+            p.persona_description.is_none(),
+            "no body → no persona prose"
+        );
     }
 
     #[test]
@@ -170,7 +173,10 @@ mod tests {
         let p = thin_profile_from_module_npc("npc_butler", &entry).expect("profile");
         let desc = p.persona_description.expect("redacted prose remains");
         assert!(!desc.contains("连环杀手"), "secret_term redacted: {desc}");
-        assert!(!desc.contains("莫里亚蒂教授"), "secret_term redacted: {desc}");
+        assert!(
+            !desc.contains("莫里亚蒂教授"),
+            "secret_term redacted: {desc}"
+        );
     }
 
     #[test]

@@ -80,7 +80,9 @@ pub fn collect_character_context(sheet_json: &Value, display_name: Option<&str>)
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or("调查员");
-    let mut out = vec![format!("【{name} 的能力档案(玩家自知,供念白引用,勿逐字罗列)】")];
+    let mut out = vec![format!(
+        "【{name} 的能力档案(玩家自知,供念白引用,勿逐字罗列)】"
+    )];
     out.extend(lines);
     out
 }
@@ -100,14 +102,29 @@ mod tests {
         let out = collect_character_context(&sheet, Some("Evelyn Price"));
         let joined = out.join("\n");
         assert!(joined.contains("Evelyn Price"), "{joined}");
-        assert!(joined.contains("STR 55") && joined.contains("DEX 70"), "{joined}");
+        assert!(
+            joined.contains("STR 55") && joined.contains("DEX 70"),
+            "{joined}"
+        );
         // "Spot Hidden" is a legitimate player-visible CoC skill — it must NOT be filtered
         // just because its name contains the substring "hidden".
-        assert!(joined.contains("Persuade 45") && joined.contains("Spot Hidden 50"), "{joined}");
+        assert!(
+            joined.contains("Persuade 45") && joined.contains("Spot Hidden 50"),
+            "{joined}"
+        );
         // 派生噪声 & GM-only 桶 & 桶内 GM-only 键绝不出现。
-        assert!(!joined.contains("con_half"), "derived noise leaked: {joined}");
-        assert!(!joined.contains("anomaly"), "gm_only bucket leaked: {joined}");
-        assert!(!joined.contains("keeper_only"), "in-bucket gm_only key leaked: {joined}");
+        assert!(
+            !joined.contains("con_half"),
+            "derived noise leaked: {joined}"
+        );
+        assert!(
+            !joined.contains("anomaly"),
+            "gm_only bucket leaked: {joined}"
+        );
+        assert!(
+            !joined.contains("keeper_only"),
+            "in-bucket gm_only key leaked: {joined}"
+        );
     }
 
     #[test]

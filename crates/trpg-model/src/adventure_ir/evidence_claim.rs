@@ -164,8 +164,14 @@ mod tests {
     fn turn_local_ref_roundtrips_token() {
         assert_eq!(TurnLocalRef::Outcome(0).as_token(), "outcome:0");
         assert_eq!(TurnLocalRef::Commit(1).as_token(), "commit:1");
-        assert_eq!(TurnLocalRef::parse("outcome:0"), Some(TurnLocalRef::Outcome(0)));
-        assert_eq!(TurnLocalRef::parse("commit:1"), Some(TurnLocalRef::Commit(1)));
+        assert_eq!(
+            TurnLocalRef::parse("outcome:0"),
+            Some(TurnLocalRef::Outcome(0))
+        );
+        assert_eq!(
+            TurnLocalRef::parse("commit:1"),
+            Some(TurnLocalRef::Commit(1))
+        );
         assert_eq!(TurnLocalRef::Outcome(3).index(), 3);
         assert_eq!(TurnLocalRef::Commit(2).index(), 2);
     }
@@ -173,7 +179,11 @@ mod tests {
     #[test]
     fn turn_local_ref_parse_is_fail_closed() {
         assert_eq!(TurnLocalRef::parse("bogus:0"), None, "unknown kind ⇒ None");
-        assert_eq!(TurnLocalRef::parse("commit:x"), None, "non-numeric index ⇒ None");
+        assert_eq!(
+            TurnLocalRef::parse("commit:x"),
+            None,
+            "non-numeric index ⇒ None"
+        );
         assert_eq!(TurnLocalRef::parse("commit"), None, "no colon ⇒ None");
         assert_eq!(TurnLocalRef::parse(""), None, "empty ⇒ None");
         // Crucially: a fabricated fact name is NOT a legal basis ref.
@@ -190,7 +200,10 @@ mod tests {
 
     #[test]
     fn nonempty_requires_at_least_one() {
-        assert!(NonEmpty::<u8>::from_vec(vec![]).is_none(), "empty vec ⇒ no NonEmpty");
+        assert!(
+            NonEmpty::<u8>::from_vec(vec![]).is_none(),
+            "empty vec ⇒ no NonEmpty"
+        );
         let ne = NonEmpty::from_vec(vec![1u8, 2, 3]).unwrap();
         assert_eq!(ne.len(), 3);
         assert_eq!(ne.first(), &1);
@@ -203,7 +216,10 @@ mod tests {
             serde_json::from_value(serde_json::json!(["commit:0"])).unwrap();
         assert_eq!(ok.len(), 1);
         let err = serde_json::from_value::<NonEmpty<TurnLocalRef>>(serde_json::json!([]));
-        assert!(err.is_err(), "empty basis array is a hard parse error (fail-closed)");
+        assert!(
+            err.is_err(),
+            "empty basis array is a hard parse error (fail-closed)"
+        );
     }
 
     #[test]
@@ -250,10 +266,10 @@ mod tests {
     #[test]
     fn evidence_claim_requires_a_basis() {
         // No basis field at all ⇒ parse error; empty basis ⇒ parse error.
-        assert!(serde_json::from_value::<EvidenceClaim>(
-            serde_json::json!({"cap_id": "cap_x"})
-        )
-        .is_err());
+        assert!(
+            serde_json::from_value::<EvidenceClaim>(serde_json::json!({"cap_id": "cap_x"}))
+                .is_err()
+        );
         assert!(serde_json::from_value::<EvidenceClaim>(
             serde_json::json!({"cap_id": "cap_x", "basis": []})
         )

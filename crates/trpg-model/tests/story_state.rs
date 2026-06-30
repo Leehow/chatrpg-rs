@@ -370,10 +370,14 @@ fn m4_full_base_era_blob_deserializes_defaults_and_round_trips() {
         }]
     });
 
-    let state: StoryState = serde_json::from_value(base_era).expect("BASE-era blob must deserialize");
+    let state: StoryState =
+        serde_json::from_value(base_era).expect("BASE-era blob must deserialize");
     // Old fields survive.
     assert_eq!(state.active_threads[0].thread_id, "thr_1");
-    assert_eq!(state.active_threads[0].status, StoryThreadStatus::Escalating);
+    assert_eq!(
+        state.active_threads[0].status,
+        StoryThreadStatus::Escalating
+    );
     assert_eq!(state.promises[0].promise_id, "prm_1");
     assert_eq!(state.character_arcs[0].character_id, "pc_1");
     assert_eq!(state.recent_beats[0].beat_kind, BeatKind::Complicate);
@@ -401,5 +405,8 @@ fn m4_full_base_era_blob_deserializes_defaults_and_round_trips() {
     assert_eq!(validated.character_arcs.len(), 1);
     let json = serde_json::to_string(&validated).unwrap();
     let back: StoryState = serde_json::from_str(&json).unwrap();
-    assert_eq!(back, validated, "re-serialize → deserialize must be a stable fixpoint");
+    assert_eq!(
+        back, validated,
+        "re-serialize → deserialize must be a stable fixpoint"
+    );
 }

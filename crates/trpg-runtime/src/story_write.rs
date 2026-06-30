@@ -231,16 +231,21 @@ mod tests {
         let loaded: StoryState = serde_json::from_value(blob).expect("BASE-era blob loads");
 
         // Re-run the live floor transform on the loaded old state.
-        let (floored, changed) = apply_thread_opened(loaded.clone(), &["fact_revealed".to_string()]);
+        let (floored, changed) =
+            apply_thread_opened(loaded.clone(), &["fact_revealed".to_string()]);
         assert!(changed, "floor must fire on the loaded legacy thread");
-        assert_eq!(floored.active_threads[0].status, StoryThreadStatus::Introduced);
+        assert_eq!(
+            floored.active_threads[0].status,
+            StoryThreadStatus::Introduced
+        );
 
         // The transition events derive from the before/after diff exactly as for a fresh state.
         let events = thread_status_events(&loaded, &floored, "s1", "t1");
         assert_eq!(events.len(), 1, "one StoryThreadOpened event");
 
         // Idempotent re-run + stable serde round-trip on the transformed legacy state.
-        let (again, changed2) = apply_thread_opened(floored.clone(), &["fact_revealed".to_string()]);
+        let (again, changed2) =
+            apply_thread_opened(floored.clone(), &["fact_revealed".to_string()]);
         assert!(!changed2, "re-floor is a no-op (idempotent)");
         let json = serde_json::to_string(&again.validated()).unwrap();
         let back: StoryState = serde_json::from_str(&json).unwrap();

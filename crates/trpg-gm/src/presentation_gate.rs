@@ -2,7 +2,8 @@
 //!
 //! 把 [`NarrationVerifierResult`] 按 severity+kind 折成 [`PresentationGate`]。
 //! Charter §5 P2 已拍板的**锁定**白名单（EXHAUSTIVE）：仅当某 finding 同时满足
-//! `severity == Blocker` 且 `kind ∈ {SecretLeak, InventedEffect, ManualRollRequest}` 时
+//! `severity == Blocker` 且
+//! `kind ∈ {SecretLeak, InventedEffect, ManualRollRequest, PlayerAgencyViolation}` 时
 //! 才 `Block`；其余（Warning / MissingCheck / MissingRollExecution / MissingEffect /
 //! OmittedVisibleResult 等走 RetroDebt 补账的）一律 `Allow`（保持既有 errata + RetroDebt 路径）。
 //!
@@ -33,10 +34,11 @@ impl PresentationGate {
 }
 
 /// 锁定的可阻断 kind 白名单（EXHAUSTIVE，charter §5 P2）。任何新增/移除都强制改穷举测试。
-pub const BLOCKING_KINDS: [VerifierFindingKind; 3] = [
+pub const BLOCKING_KINDS: [VerifierFindingKind; 4] = [
     VerifierFindingKind::SecretLeak,
     VerifierFindingKind::InventedEffect,
     VerifierFindingKind::ManualRollRequest,
+    VerifierFindingKind::PlayerAgencyViolation,
 ];
 
 /// 单 finding 是否触发阻断：Blocker 且 kind ∈ BLOCKING_KINDS。
@@ -66,13 +68,14 @@ mod tests {
         NarrationVerifierResult, VerifierFinding, VerifierFindingKind, VerifierSeverity,
     };
 
-    const ALL_KINDS: [VerifierFindingKind; 7] = [
+    const ALL_KINDS: [VerifierFindingKind; 8] = [
         VerifierFindingKind::MissingCheck,
         VerifierFindingKind::MissingRollExecution,
         VerifierFindingKind::MissingEffect,
         VerifierFindingKind::InventedEffect,
         VerifierFindingKind::OmittedVisibleResult,
         VerifierFindingKind::ManualRollRequest,
+        VerifierFindingKind::PlayerAgencyViolation,
         VerifierFindingKind::SecretLeak,
     ];
 
@@ -94,7 +97,7 @@ mod tests {
         }
     }
 
-    /// 穷举 kind×severity (7×2=14)：仅 (Blocker × {SecretLeak,InventedEffect,ManualRollRequest})
+    /// 穷举 kind×severity：仅 Blocker × BLOCKING_KINDS → Block。
     /// → Block；其余 11 组合 → Allow。
     #[test]
     fn exhaustive_kind_severity_matrix() {
@@ -122,13 +125,14 @@ mod tests {
         }
     }
 
-    /// 白名单恰好这三个 kind（锁定，widening 会令此红）。
+    /// 白名单恰好这些 kind（锁定，widening 会令此红）。
     #[test]
     fn blocking_kinds_whitelist_is_locked() {
-        assert_eq!(BLOCKING_KINDS.len(), 3);
+        assert_eq!(BLOCKING_KINDS.len(), 4);
         assert!(BLOCKING_KINDS.contains(&VerifierFindingKind::SecretLeak));
         assert!(BLOCKING_KINDS.contains(&VerifierFindingKind::InventedEffect));
         assert!(BLOCKING_KINDS.contains(&VerifierFindingKind::ManualRollRequest));
+        assert!(BLOCKING_KINDS.contains(&VerifierFindingKind::PlayerAgencyViolation));
     }
 
     #[test]

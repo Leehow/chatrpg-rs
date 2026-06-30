@@ -109,7 +109,11 @@ async fn the_vault_main_gm_claim_admits_through_live_pipeline_with_turn_id_align
         commit_idx,
     );
     let doc = parse_turn_document(&gm_output);
-    assert_eq!(doc.progress_claims.len(), 1, "main-GM markup parses one claim");
+    assert_eq!(
+        doc.progress_claims.len(),
+        1,
+        "main-GM markup parses one claim"
+    );
     // The cap handle / JSON never reaches the player.
     assert!(!doc.player_text().contains("progress_claims"));
     assert!(!doc.player_text().contains(offer.cap_id.as_str()));
@@ -123,7 +127,11 @@ async fn the_vault_main_gm_claim_admits_through_live_pipeline_with_turn_id_align
         &doc.progress_claims,
         &trpg_model::adventure_ir::EvidenceLedger::new(),
     );
-    assert_eq!(ledger.len(), 1, "valid main-GM claim ⇒ one AcceptedEvidence");
+    assert_eq!(
+        ledger.len(),
+        1,
+        "valid main-GM claim ⇒ one AcceptedEvidence"
+    );
     let ev = &ledger.entries()[0];
     assert_eq!(ev.authority, EvidenceAuthority::GmWitnessed);
     assert_eq!(

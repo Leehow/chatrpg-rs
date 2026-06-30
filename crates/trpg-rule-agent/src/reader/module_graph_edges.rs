@@ -37,7 +37,12 @@ pub fn bridge_edges(scenes: &[ScenarioNode]) -> Vec<(usize, usize, usize)> {
 /// (OFF==baseline 字节等价)。镜像既有 TRPG_* flag 习惯。
 fn typed_cooccurrence_enabled() -> bool {
     std::env::var("TRPG_TYPED_COOCCURRENCE")
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes"))
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "on" | "yes"
+            )
+        })
         .unwrap_or(false)
 }
 
@@ -65,11 +70,11 @@ fn apply_bridge_edges_inner(scenes: &mut Vec<ScenarioNode>, typed: bool) -> usiz
                     continue;
                 }
                 let from = ids[a].clone();
-                scenes[a]
-                    .relations
-                    .push(trpg_model::adventure_ir::Relation::from_entity_cooccurrence(
+                scenes[a].relations.push(
+                    trpg_model::adventure_ir::Relation::from_entity_cooccurrence(
                         &from, &to, shared,
-                    ));
+                    ),
+                );
                 added += 1;
             } else {
                 if scenes[a].links.iter().any(|l| l.to_node_id == to) {
@@ -318,7 +323,10 @@ mod tests {
         assert_eq!(r.enforcement, Enforcement::RetrievalOnly);
         assert_eq!(r.to, "b");
         assert!(!r.evidence.is_empty(), "带 evidence");
-        assert!(!r.participates_in_progression(), "retrieval-only 永不驱动推进");
+        assert!(
+            !r.participates_in_progression(),
+            "retrieval-only 永不驱动推进"
+        );
         // 幂等:重复调用不重复加。
         let n2 = apply_bridge_edges_inner(&mut scenes, true);
         assert_eq!(n2, 0, "重复不重复加");

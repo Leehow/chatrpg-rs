@@ -164,7 +164,10 @@ pub fn project_chapters(units: &[ContentUnit]) -> Vec<ScenarioNode> {
             node_id: u.id.clone(),
             title: u.title.clone(),
             node_type: "chapter".to_string(),
-            summary: format!("Contains tier derived from scene fingerprints ({})", u.title),
+            summary: format!(
+                "Contains tier derived from scene fingerprints ({})",
+                u.title
+            ),
             ..Default::default()
         })
         .collect()
@@ -189,29 +192,54 @@ mod tests {
     fn homecoming_scenes() -> Vec<ScenarioNode> {
         vec![
             node("front_01_word_to_gm", "guidance", "A Word to the GM", 3),
-            node("front_02_background", "setup", "Background, Synopsis, Interests", 4),
-            node("scene_01_lawmen", "scene", "Lawmen in Trouble / Scavv's Warehouse", 5),
+            node(
+                "front_02_background",
+                "setup",
+                "Background, Synopsis, Interests",
+                4,
+            ),
+            node(
+                "scene_01_lawmen",
+                "scene",
+                "Lawmen in Trouble / Scavv's Warehouse",
+                5,
+            ),
             node(
                 "scene_02_athena",
                 "scene",
                 "Questions for Athena / Getting Her to a Charger",
                 7,
             ),
-            node("scene_03_foxwell", "scene", "Foxwell Services / Charging Athena", 7),
+            node(
+                "scene_03_foxwell",
+                "scene",
+                "Foxwell Services / Charging Athena",
+                7,
+            ),
             node(
                 "scene_04_scavvs",
                 "encounter",
                 "Scavvs Are Here / Taking Care of the Scavvs",
                 9,
             ),
-            node("scene_05_coords", "transition_scene", "Coordinates to Apartment 3012", 10),
+            node(
+                "scene_05_coords",
+                "transition_scene",
+                "Coordinates to Apartment 3012",
+                10,
+            ),
             node(
                 "scene_06_condo",
                 "scene",
                 "Condominium Tora No Ko / Meet Quil and Hisako",
                 11,
             ),
-            node("scene_07_hisako", "branch_scene", "Hisako's Rewards and Promises", 12),
+            node(
+                "scene_07_hisako",
+                "branch_scene",
+                "Hisako's Rewards and Promises",
+                12,
+            ),
             node("scene_08_quil", "branch_scene", "Taking Quil's Side", 12),
             node(
                 "scene_09_net",
@@ -220,7 +248,12 @@ mod tests {
                 13,
             ),
             node("index_01_maps", "map_index", "Maps", 14),
-            node("appendix_01_npc", "appendix", "How to Use the NPC Cards", 27),
+            node(
+                "appendix_01_npc",
+                "appendix",
+                "How to Use the NPC Cards",
+                27,
+            ),
         ]
     }
 
@@ -240,7 +273,10 @@ mod tests {
         assert_eq!(roots[0].kind, UnitKind::Campaign);
 
         // three structural chapters: front / adventure / reference all non-empty here.
-        let chapters: Vec<_> = units.iter().filter(|u| u.kind == UnitKind::Chapter).collect();
+        let chapters: Vec<_> = units
+            .iter()
+            .filter(|u| u.kind == UnitKind::Chapter)
+            .collect();
         assert_eq!(chapters.len(), 3, "front+adventure+reference");
         assert!(chapters
             .iter()
@@ -264,7 +300,10 @@ mod tests {
     fn scene_units_carry_verbatim_evidence() {
         let scenes = homecoming_scenes();
         let units = derive_content_units("m", "cpr_homecoming", "T", &scenes);
-        let athena = units.iter().find(|u| u.id == "unit.scene_02_athena").unwrap();
+        let athena = units
+            .iter()
+            .find(|u| u.id == "unit.scene_02_athena")
+            .unwrap();
         let ev = &athena.source_evidence[0];
         assert_eq!(ev.source_id, "cpr_homecoming");
         assert_eq!(ev.page, Some(7));

@@ -535,7 +535,10 @@ mod module_scene_proj_tests {
         // include=false ⇒ 定场文正文消失,锚提示出现,durable 参考保留。
         let gated = scene_node_to_blocks_with_opts("mod1", &n, &npcs, &[], false);
         let text = gated[0].content.render_text();
-        assert!(!text.contains("褪色的广告牌"), "已交付场景不得复投定场文正文: {text}");
+        assert!(
+            !text.contains("褪色的广告牌"),
+            "已交付场景不得复投定场文正文: {text}"
+        );
         assert!(text.contains("请勿复述"), "应留锚提示防 GM 重述: {text}");
         assert!(text.contains("拉斯"), "NPC 参考仍每回合在: {text}");
         assert!(text.contains("钥匙"), "gm_notes 仍每回合在: {text}");
@@ -551,7 +554,10 @@ mod module_scene_proj_tests {
         let _lock = N3_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("TRPG_SCENE_READ_ALOUD_FIRST_ENTRY_ONLY").ok();
         std::env::remove_var("TRPG_SCENE_READ_ALOUD_FIRST_ENTRY_ONLY");
-        assert!(scene_read_aloud_first_entry_only_enabled(), "未设 ⇒ 默认 ON");
+        assert!(
+            scene_read_aloud_first_entry_only_enabled(),
+            "未设 ⇒ 默认 ON"
+        );
         for off in ["0", "false", "OFF", "no"] {
             std::env::set_var("TRPG_SCENE_READ_ALOUD_FIRST_ENTRY_ONLY", off);
             assert!(!scene_read_aloud_first_entry_only_enabled(), "{off} ⇒ OFF");
@@ -596,10 +602,19 @@ mod module_scene_proj_tests {
             on_t.contains("主动来到玩家当前所在处"),
             "ON 应含§4 relocation-toward-player: {on_t}"
         );
-        assert!(on_t.contains("场景角色名册"), "ON 应注入 NPC 名册从属注记: {on_t}");
+        assert!(
+            on_t.contains("场景角色名册"),
+            "ON 应注入 NPC 名册从属注记: {on_t}"
+        );
         assert!(!on_t.contains("【GM】"), "ON 应改用从属 GM 头: {on_t}");
-        assert!(on_t.contains("别无选择只能应战"), "ON 仍保留 gm_notes 文本(durable): {on_t}");
-        assert!(on_t.contains("雅典娜"), "ON 仍保留 NPC 文本(durable): {on_t}");
+        assert!(
+            on_t.contains("别无选择只能应战"),
+            "ON 仍保留 gm_notes 文本(durable): {on_t}"
+        );
+        assert!(
+            on_t.contains("雅典娜"),
+            "ON 仍保留 NPC 文本(durable): {on_t}"
+        );
 
         // OFF ⇒ gated body 与历史字节等价(原 read_aloud 锚提示 + 裸 【GM】 + 无名册注记)。
         for off in ["0", "false", "OFF", "no"] {
@@ -610,9 +625,18 @@ mod module_scene_proj_tests {
         let off = scene_node_to_blocks_with_opts("mod1", &n, &npcs, &[], false);
         let off_t = off[0].content.render_text();
         assert!(off_t.contains("【GM】"), "OFF 应保留原 GM 头: {off_t}");
-        assert!(!off_t.contains("场景静态参考"), "OFF 不得注入从属指令: {off_t}");
-        assert!(!off_t.contains("场景角色名册"), "OFF 不得注入名册注记: {off_t}");
-        assert!(off_t.contains("请勿复述"), "OFF 仍保留 L-G read_aloud 锚提示: {off_t}");
+        assert!(
+            !off_t.contains("场景静态参考"),
+            "OFF 不得注入从属指令: {off_t}"
+        );
+        assert!(
+            !off_t.contains("场景角色名册"),
+            "OFF 不得注入名册注记: {off_t}"
+        );
+        assert!(
+            off_t.contains("请勿复述"),
+            "OFF 仍保留 L-G read_aloud 锚提示: {off_t}"
+        );
 
         match prev {
             Some(v) => std::env::set_var("TRPG_SCENE_STATIC_FRAMING_SUBORDINATE", v),
@@ -675,7 +699,10 @@ mod module_scene_proj_tests {
             off_t.contains("别无选择只能应战"),
             "L-M OFF 应退回 L-I 保留 gm_notes 散文: {off_t}"
         );
-        assert!(off_t.contains("失控无人机"), "L-M OFF 应退回 L-I 保留 NPC 散文: {off_t}");
+        assert!(
+            off_t.contains("失控无人机"),
+            "L-M OFF 应退回 L-I 保留 NPC 散文: {off_t}"
+        );
 
         match prev {
             Some(v) => std::env::set_var("TRPG_SCENE_FROZEN_FRAMING_SUPPRESS", v),

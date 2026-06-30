@@ -59,6 +59,55 @@ pub(crate) fn retrieved_memory_block(
     block
 }
 
+pub(crate) fn committed_world_facts_block(
+    session_id: &str,
+    turn_id: &str,
+    facts: &[trpg_db::WorldFactRow],
+) -> ContextBlock {
+    let mut content = String::from(
+        "# Committed World Facts\n\nThese are runtime-committed facts for this session. Treat them as authoritative current-state constraints. A later failed attempt does not undo an earlier established fact unless a later committed fact explicitly says it was reversed or changed.\n",
+    );
+    for fact in facts {
+        let summary = if fact.summary.trim().is_empty() {
+            format!(
+                "{} {} {}",
+                fact.subject.trim(),
+                fact.predicate.trim(),
+                fact.object.trim()
+            )
+        } else {
+            fact.summary.trim().to_string()
+        };
+        let turn = fact.turn_id.as_deref().unwrap_or("unknown_turn");
+        let truth = fact.truth_status.as_deref().unwrap_or("unknown");
+        content.push_str(&format!("- [{turn}] ({truth}) {summary}\n"));
+    }
+
+    let mut block = ContextBlock::new(
+        format!("runtime.world_facts.{session_id}"),
+        BlockKind::WorldState,
+        "Committed World Facts",
+        BlockContent::Markdown(content),
+        Visibility::GmOnly,
+        Stability::TurnDynamic,
+        CacheZone::DynamicTail,
+        Scope {
+            scope_type: ScopeType::Session,
+            scope_id: session_id.to_string(),
+        },
+        108,
+    );
+    block.tags = vec![
+        "world_fact".into(),
+        "committed".into(),
+        "authoritative".into(),
+        "dynamic".into(),
+    ];
+    block.expires_at_turn = Some(turn_id.to_string());
+    block.load_reason = Some("world_facts_committed_context".into());
+    block
+}
+
 pub(crate) fn actionable_situation_block(
     brief: &ActionableSituationBrief,
     turn_id: &str,
@@ -409,8 +458,14 @@ mod continuity_anchor_tests {
         let rendered = render_continuity_anchor(tail);
         assert!(rendered.contains(tail), "必须含上一回合局面原文");
         assert!(rendered.contains("连续性锚"), "含锚标题");
-        assert!(rendered.contains("不要重述场景的开场定场文"), "含禁重述开场指令");
-        assert!(rendered.contains("不要把玩家挪回场景入口"), "含禁挪回入口指令");
+        assert!(
+            rendered.contains("不要重述场景的开场定场文"),
+            "含禁重述开场指令"
+        );
+        assert!(
+            rendered.contains("不要把玩家挪回场景入口"),
+            "含禁挪回入口指令"
+        );
         assert!(
             rendered.contains("冲突主动来到玩家当前所在处")
                 && rendered.contains("绝不把玩家瞬移到冲突发生地"),
@@ -423,10 +478,63 @@ mod continuity_anchor_tests {
         let b = continuity_anchor_block("GM: 局面");
         assert_eq!(b.block_id, "runtime.continuity_anchor");
         assert_eq!(b.visibility, Visibility::GmOnly, "锚是 GmOnly 内部上下文");
-        assert_eq!(b.kind, BlockKind::RecentTranscript, "复用既有 block_kind 词表");
+        assert_eq!(
+            b.kind,
+            BlockKind::RecentTranscript,
+            "复用既有 block_kind 词表"
+        );
         assert_eq!(b.stability, Stability::TurnDynamic);
         assert!(b.tags.iter().any(|t| t == "continuity_anchor"));
         assert!(b.content.render_text().contains("局面"));
+    }
+}
+
+#[cfg(test)]
+mod committed_world_facts_tests {
+    use super::*;
+    use trpg_db::WorldFactRow;
+
+    fn fact(object: &str, turn_id: &str) -> WorldFactRow {
+        WorldFactRow {
+            fact_id: format!("wf_{turn_id}"),
+            session_id: "session_world".into(),
+            subject: "pc.current".into(),
+            predicate: "established".into(),
+            object: object.into(),
+            summary: object.into(),
+            truth_status: Some("true".into()),
+            source_event_ids: vec![format!("ev_{turn_id}")],
+            turn_id: Some(turn_id.into()),
+            confidence: Some(1.0),
+        }
+    }
+
+    #[test]
+    fn committed_world_facts_block_carries_authoritative_current_constraints() {
+        let block = committed_world_facts_block(
+            "session_world",
+            "turn_probe",
+            &[
+                fact(
+                    "The Cut power to server cabling by finding and hitting the main breaker/emergency stop check succeeds.",
+                    "turn_power",
+                ),
+                fact("The later attempt to improve the server-side cut fails.", "turn_later"),
+            ],
+        );
+
+        let text = block.content.render_text();
+        assert!(text.contains("runtime-committed facts"));
+        assert!(text.contains("does not undo an earlier established fact"));
+        assert!(text.contains("main breaker/emergency stop check succeeds"));
+        assert_eq!(block.block_id, "runtime.world_facts.session_world");
+        assert_eq!(block.scope.scope_type, ScopeType::Session);
+        assert_eq!(block.scope.scope_id, "session_world");
+        assert_eq!(block.cache_zone, CacheZone::DynamicTail);
+        assert_eq!(
+            block.load_reason.as_deref(),
+            Some("world_facts_committed_context")
+        );
     }
 }
 
@@ -468,7 +576,10 @@ mod opening_convergence_tests {
             "禁位置一分为二(turn1 叠加根)"
         );
         assert!(r.contains("唯一"), "强调唯一所在");
-        assert!(r.contains("§4"), "引 §4 relocation-toward-player(非 railroad)");
+        assert!(
+            r.contains("§4"),
+            "引 §4 relocation-toward-player(非 railroad)"
+        );
     }
 
     #[test]
@@ -486,8 +597,16 @@ mod opening_convergence_tests {
     fn block_is_gmonly_dynamic_with_stable_id() {
         let b = opening_convergence_block(Some("场景X"));
         assert_eq!(b.block_id, "runtime.opening_convergence");
-        assert_eq!(b.visibility, Visibility::GmOnly, "收敛锚是 GmOnly 内部上下文");
-        assert_eq!(b.kind, BlockKind::RecentTranscript, "复用既有 block_kind 词表");
+        assert_eq!(
+            b.visibility,
+            Visibility::GmOnly,
+            "收敛锚是 GmOnly 内部上下文"
+        );
+        assert_eq!(
+            b.kind,
+            BlockKind::RecentTranscript,
+            "复用既有 block_kind 词表"
+        );
         assert_eq!(b.stability, Stability::TurnDynamic);
         assert!(b.tags.iter().any(|t| t == "opening_convergence"));
         assert_eq!(b.load_reason.as_deref(), Some("gm_opening_convergence"));

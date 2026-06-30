@@ -36,13 +36,37 @@ const VAULT: &str = "triangle_agency.the_vault";
 /// private internals). Lowercased, ≥4 chars, alnum.
 fn first_title_token(title: &str) -> Option<String> {
     const NOISE: &[&str] = &[
-        "scene", "node", "beat", "chapter", "mission", "phase", "location", "zone",
-        "encounter", "with", "from", "into", "that", "this", "they", "them", "your",
-        "have", "will", "the", "and", "for", "npc", "clue", "loc",
+        "scene",
+        "node",
+        "beat",
+        "chapter",
+        "mission",
+        "phase",
+        "location",
+        "zone",
+        "encounter",
+        "with",
+        "from",
+        "into",
+        "that",
+        "this",
+        "they",
+        "them",
+        "your",
+        "have",
+        "will",
+        "the",
+        "and",
+        "for",
+        "npc",
+        "clue",
+        "loc",
     ];
     for raw in title.split(|c: char| !c.is_ascii_alphanumeric()) {
         let tok = raw.to_ascii_lowercase();
-        if tok.len() >= 4 && !tok.chars().all(|c| c.is_ascii_digit()) && !NOISE.contains(&tok.as_str())
+        if tok.len() >= 4
+            && !tok.chars().all(|c| c.is_ascii_digit())
+            && !NOISE.contains(&tok.as_str())
         {
             return Some(tok);
         }
@@ -108,7 +132,9 @@ async fn the_vault_mission_objective_drives_progression() {
         }
         eprintln!("RAN: the_vault module_config present (threat objective wired)");
     } else {
-        eprintln!("RAN: the_vault has NO module_config → threat objective fail-closed skipped (honest)");
+        eprintln!(
+            "RAN: the_vault has NO module_config → threat objective fail-closed skipped (honest)"
+        );
     }
     // PL-5 spine generalization: each mission-scene gets a scoped open objective.
     augment_program_with_spine(&mut program, &graph);
@@ -157,8 +183,9 @@ async fn the_vault_mission_objective_drives_progression() {
         m1.title, m1.page_start
     );
     assert!(
-        advance_objs.iter().any(|o| o.id == m1_obj
-            && o.mission_id.as_deref() == Some(m1_id.as_str())),
+        advance_objs
+            .iter()
+            .any(|o| o.id == m1_obj && o.mission_id.as_deref() == Some(m1_id.as_str())),
         "first mission must carry a mission-scoped objective {m1_obj}"
     );
 
@@ -190,8 +217,7 @@ async fn the_vault_mission_objective_drives_progression() {
     // (2) A mission-grounded GM fact (fact_id carries the mission's OWN authored title
     //     token — extracted from the loaded scene, NOT module-name hardcoded) ⇒ the
     //     mission objective completes. This is the objective DRIVING progression.
-    let token = first_title_token(&m1.title)
-        .expect("mission title yields a structural token");
+    let token = first_title_token(&m1.title).expect("mission title yields a structural token");
     let mission_fact = format!("anomaly.{token}_resolved"); // how a GM would name the mission outcome
     eprintln!("RAN: simulating mission-grounded fact `{mission_fact}` (title token '{token}')");
     let fact_signals = evaluate(

@@ -115,7 +115,10 @@ mod tests {
         let plan = base_plan();
         let results = vec![view("c.x", CheckOutcomeView::Unresolved)];
         let out = apply_committed_outcome(plan.clone(), &results);
-        assert_eq!(out, plan, "unresolved is not a committed pass/fail ⇒ no override");
+        assert_eq!(
+            out, plan,
+            "unresolved is not a committed pass/fail ⇒ no override"
+        );
     }
 
     #[test]
@@ -130,7 +133,10 @@ mod tests {
         assert_ne!(post.beat_kind, pre.beat_kind);
         assert_ne!(post.desired_change, pre.desired_change);
         // Every guarantee preserved: reveal gating + thread selection untouched.
-        assert_eq!(post.reveal_candidate_fact_ids, pre.reveal_candidate_fact_ids);
+        assert_eq!(
+            post.reveal_candidate_fact_ids,
+            pre.reveal_candidate_fact_ids
+        );
         assert_eq!(post.primary_thread_id, pre.primary_thread_id);
     }
 
@@ -152,7 +158,11 @@ mod tests {
             view("c.dodge", CheckOutcomeView::Failed),
         ];
         let post = apply_committed_outcome(pre, &results);
-        assert_eq!(post.beat_kind, BeatKind::Complicate, "failure dominates a mixed turn");
+        assert_eq!(
+            post.beat_kind,
+            BeatKind::Complicate,
+            "failure dominates a mixed turn"
+        );
         assert_eq!(post.desired_change, DESIRED_CHANGE_FAIL_FORWARD);
     }
 }

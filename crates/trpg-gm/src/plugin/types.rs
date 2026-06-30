@@ -213,7 +213,11 @@ impl PluginContributionKind {
 /// beat 重权提议的安全摘要：只露稳定的 beat 种类 token + 计数，绝不回显 rationale 正文
 /// （rationale 虽为插件自产审计 token，摘要仍只走结构计数，与 proposal_summary 同纪律）。
 fn beat_weight_summary(bw: &BeatWeightProposal) -> String {
-    let kinds: Vec<&str> = bw.beat_weights.iter().map(|t| t.beat_kind.as_str()).collect();
+    let kinds: Vec<&str> = bw
+        .beat_weights
+        .iter()
+        .map(|t| t.beat_kind.as_str())
+        .collect();
     format!(
         "beat_weight:{} term(s)[{}],{} constraint(s)",
         bw.beat_weights.len(),

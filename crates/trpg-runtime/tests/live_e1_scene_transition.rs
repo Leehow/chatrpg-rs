@@ -148,7 +148,11 @@ async fn completed_scene_advance_drives_a_real_current_scene_transition() {
         &proposals,
         &EvidenceLedger::new(),
     );
-    assert_eq!(ledger.len(), 1, "witness admits scene_01's observation atom");
+    assert_eq!(
+        ledger.len(),
+        1,
+        "witness admits scene_01's observation atom"
+    );
     let resolutions = trpg_runtime::progression::witnessed_scene_advance_resolutions(
         SESSION,
         TURN,
@@ -156,15 +160,23 @@ async fn completed_scene_advance_drives_a_real_current_scene_transition() {
         &ledger,
         FROZEN_SEAM_SCENE,
     );
-    assert_eq!(resolutions.len(), 1, "scene_01's advance objective resolves (D2)");
+    assert_eq!(
+        resolutions.len(),
+        1,
+        "scene_01's advance objective resolves (D2)"
+    );
     assert_eq!(resolutions[0].data["objective_id"], objective.id);
     assert_eq!(resolutions[0].data["scene_id"], FROZEN_SEAM_SCENE);
     // land the EARNED completion + the engine's unlock in the live event log (mirrors the turn loop:
     // apply_witnessed_progression appends the ObjectiveResolved then, flag-gated, the SceneUnlocked).
     for ev in &resolutions {
-        db.append_domain_event(ev).await.expect("append ObjectiveResolved");
+        db.append_domain_event(ev)
+            .await
+            .expect("append ObjectiveResolved");
     }
-    db.append_domain_event(&unlock).await.expect("append SceneUnlocked");
+    db.append_domain_event(&unlock)
+        .await
+        .expect("append SceneUnlocked");
     eprintln!(
         "RAN: (B) earned — real admitted scene_01 observation ⇒ ObjectiveResolved {} + SceneUnlocked appended",
         objective.id
@@ -190,8 +202,14 @@ async fn completed_scene_advance_drives_a_real_current_scene_transition() {
     .await
     .expect("scene_navigate_critical ok")
     .expect("E1 progression-gated consume returns a SceneNavCommit (the SceneTransitioned source)");
-    assert_eq!(commit.from, FROZEN_SEAM_SCENE, "transition from the frozen seam");
-    assert_eq!(commit.to, next, "transition TO the data-driven spine successor");
+    assert_eq!(
+        commit.from, FROZEN_SEAM_SCENE,
+        "transition from the frozen seam"
+    );
+    assert_eq!(
+        commit.to, next,
+        "transition TO the data-driven spine successor"
+    );
     assert!(
         commit.reason.contains("progression-gated"),
         "the commit is progression-gated (earned), not an LLM player-driven nav: {}",
@@ -237,7 +255,11 @@ async fn completed_scene_advance_drives_a_real_current_scene_transition() {
     .into_iter()
     .map(|r| (r.get::<String, _>(0), r.get::<String, _>(1)))
     .collect();
-    assert_eq!(rows.len(), 1, "exactly one durable SceneTransitioned row (j3v2 spatial carrier, prev 0)");
+    assert_eq!(
+        rows.len(),
+        1,
+        "exactly one durable SceneTransitioned row (j3v2 spatial carrier, prev 0)"
+    );
     assert_eq!(rows[0], (FROZEN_SEAM_SCENE.to_string(), next.clone()));
     eprintln!(
         "RAN: (C2) durable domain_events row kind=SceneTransitioned from={} to={} (scene_transitions 0 → 1; spatial axis carrier)",

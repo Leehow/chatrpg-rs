@@ -16,7 +16,9 @@ pub struct ConsequenceCheckpoint {
 
 impl ConsequenceCheckpoint {
     pub fn active() -> Self {
-        Self { require_consequences: true }
+        Self {
+            require_consequences: true,
+        }
     }
     pub fn is_active(&self) -> bool {
         self.require_consequences

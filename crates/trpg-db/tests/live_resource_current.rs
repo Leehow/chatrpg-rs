@@ -164,7 +164,11 @@ async fn resource_changed_two_different_changes_two_rows_and_replay_idempotent()
         .unwrap();
     assert_eq!(r1, 30);
     assert_eq!(load_gps(db.clone()).await, json!(30));
-    assert_eq!(count_rc(db.clone()).await, 1, "first change => 1 ResourceChanged row");
+    assert_eq!(
+        count_rc(db.clone()).await,
+        1,
+        "first change => 1 ResourceChanged row"
+    );
 
     // Change 2: a DIFFERENT transition prior=30 -> 70. world_tick still 0 — must NOT collide.
     let r2 = db
@@ -194,19 +198,36 @@ async fn resource_changed_two_different_changes_two_rows_and_replay_idempotent()
     // do nothing` folds it. So row 1 of 70->70 adds a row; row 2 of 70->70 must NOT.
     let r_noop = db
         .write_resource_current(
-            RC_SESSION, RC_ACTOR, "sanity", 70, Some(99), &[], Visibility::GmOnly, 0,
+            RC_SESSION,
+            RC_ACTOR,
+            "sanity",
+            70,
+            Some(99),
+            &[],
+            Visibility::GmOnly,
+            0,
         )
         .await
         .unwrap();
     assert_eq!(r_noop, 70);
     let after_first_noop = count_rc(db.clone()).await; // 70->70 is a new distinct transition
-    assert_eq!(after_first_noop, 3, "70->70 is a distinct transition => 3rd row");
+    assert_eq!(
+        after_first_noop, 3,
+        "70->70 is a distinct transition => 3rd row"
+    );
 
     // Now REPLAY the identical 70->70 write: same (prior,capped,cap,visibility) => same event_id.
     // OFF==baseline: the return value + stored gps row are unchanged by the (folded) append.
     let r_replay = db
         .write_resource_current(
-            RC_SESSION, RC_ACTOR, "sanity", 70, Some(99), &[], Visibility::GmOnly, 0,
+            RC_SESSION,
+            RC_ACTOR,
+            "sanity",
+            70,
+            Some(99),
+            &[],
+            Visibility::GmOnly,
+            0,
         )
         .await
         .unwrap();

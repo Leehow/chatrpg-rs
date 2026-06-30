@@ -131,7 +131,9 @@ fn push_scene_objective(program: &mut OwnedProgram, node: &ScenarioNode) {
         tokens: vocab.clone(),
     };
     let mut obj_sr = SourceRef::default();
-    obj_sr.note = Some(format!("spine advance objective (scene-vocab aligned): {scene}"));
+    obj_sr.note = Some(format!(
+        "spine advance objective (scene-vocab aligned): {scene}"
+    ));
     program.objectives.push(ObjectiveSpec {
         id: obj_id.clone(),
         mission_id: Some(scene.to_string()), // scene-scoped: only surfaces in this scene
@@ -146,7 +148,9 @@ fn push_scene_objective(program: &mut OwnedProgram, node: &ScenarioNode) {
     let then = vec![EffectExpr::Complete(obj_id.clone())];
     let normalization = ProgressRule::classify(&success_when, &then);
     let mut rule_sr = SourceRef::default();
-    rule_sr.note = Some(format!("scene advance outcome (vocab match completes goal): {scene}"));
+    rule_sr.note = Some(format!(
+        "scene advance outcome (vocab match completes goal): {scene}"
+    ));
     program.rules.push(ProgressRule {
         id: format!("rule.advance.{scene}"),
         on: EventPattern::WorldFactChanged,
@@ -163,9 +167,31 @@ fn push_scene_objective(program: &mut OwnedProgram, node: &ScenarioNode) {
 /// hardcoded scene/ruleset names.
 fn scene_vocab(node: &ScenarioNode) -> Vec<String> {
     const NOISE: &[&str] = &[
-        "scene", "node", "beat", "chapter", "mission", "phase", "location", "zone",
-        "encounter", "with", "from", "into", "that", "this", "they", "them", "your",
-        "have", "will", "the", "and", "for", "npc", "clue", "loc",
+        "scene",
+        "node",
+        "beat",
+        "chapter",
+        "mission",
+        "phase",
+        "location",
+        "zone",
+        "encounter",
+        "with",
+        "from",
+        "into",
+        "that",
+        "this",
+        "they",
+        "them",
+        "your",
+        "have",
+        "will",
+        "the",
+        "and",
+        "for",
+        "npc",
+        "clue",
+        "loc",
     ];
     let mut sources: Vec<&str> = vec![node.node_id.as_str(), node.title.as_str()];
     for v in [
@@ -224,8 +250,16 @@ mod tests {
         let mut p = OwnedProgram::default();
         augment_program_with_spine(&mut p, &g);
         // two adjacent pairs ⇒ two spine activation rules.
-        let spine_rules: Vec<_> = p.rules.iter().filter(|r| r.id.starts_with("rule.spine.")).collect();
-        assert_eq!(spine_rules.len(), 2, "one activation per adjacent spine pair");
+        let spine_rules: Vec<_> = p
+            .rules
+            .iter()
+            .filter(|r| r.id.starts_with("rule.spine."))
+            .collect();
+        assert_eq!(
+            spine_rules.len(),
+            2,
+            "one activation per adjacent spine pair"
+        );
         assert!(p
             .rules
             .iter()
@@ -245,16 +279,26 @@ mod tests {
         let mut p = OwnedProgram::default();
         augment_program_with_spine(&mut p, &g);
         // both scenes (incl. the terminal one) get an advance objective, scene-scoped.
-        assert!(p.objectives.iter().any(|o| o.id == "obj.advance.scene_01_lawmen"
-            && o.mission_id.as_deref() == Some("scene_01_lawmen")));
-        assert!(p.objectives.iter().any(|o| o.id == "obj.advance.scene_02_athena"
-            && o.mission_id.as_deref() == Some("scene_02_athena")));
+        assert!(p
+            .objectives
+            .iter()
+            .any(|o| o.id == "obj.advance.scene_01_lawmen"
+                && o.mission_id.as_deref() == Some("scene_01_lawmen")));
+        assert!(p
+            .objectives
+            .iter()
+            .any(|o| o.id == "obj.advance.scene_02_athena"
+                && o.mission_id.as_deref() == Some("scene_02_athena")));
     }
 
     #[test]
     fn scene_objective_completes_on_matching_structural_fact() {
         // scene title "Questions for Athena" → vocab includes "athena","questions".
-        let g = graph(vec![scene("scene_02_athena", "Questions for Athena", Some(5))]);
+        let g = graph(vec![scene(
+            "scene_02_athena",
+            "Questions for Athena",
+            Some(5),
+        )]);
         let mut p = OwnedProgram::default();
         augment_program_with_spine(&mut p, &g);
         let obj = p
@@ -285,7 +329,13 @@ mod tests {
             "blank/numeric scenes get no objective (fail-closed)"
         );
         // spine activations still derive (structural ordering doesn't need vocab).
-        assert_eq!(p.rules.iter().filter(|r| r.id.starts_with("rule.spine.")).count(), 1);
+        assert_eq!(
+            p.rules
+                .iter()
+                .filter(|r| r.id.starts_with("rule.spine."))
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -310,7 +360,9 @@ mod tests {
         });
         augment_program_with_spine(&mut p, &g);
         assert!(
-            !p.rules.iter().any(|r| r.id == "rule.spine.scene_01__scene_02"),
+            !p.rules
+                .iter()
+                .any(|r| r.id == "rule.spine.scene_01__scene_02"),
             "must not duplicate an existing authored ridge activation"
         );
     }
@@ -330,10 +382,24 @@ mod tests {
             scene("scene_02_athena", "Questions for Athena", Some(7)),
             scene("scene_03_foxwell", "Foxwell Services", Some(9)),
         ]);
-        assert_eq!(next_spine_scene(&g, "scene_01_lawmen").as_deref(), Some("scene_02_athena"));
-        assert_eq!(next_spine_scene(&g, "scene_02_athena").as_deref(), Some("scene_03_foxwell"));
-        assert_eq!(next_spine_scene(&g, "scene_03_foxwell"), None, "terminal ⇒ fail-closed");
-        assert_eq!(next_spine_scene(&g, "not_a_scene"), None, "absent id ⇒ None");
+        assert_eq!(
+            next_spine_scene(&g, "scene_01_lawmen").as_deref(),
+            Some("scene_02_athena")
+        );
+        assert_eq!(
+            next_spine_scene(&g, "scene_02_athena").as_deref(),
+            Some("scene_03_foxwell")
+        );
+        assert_eq!(
+            next_spine_scene(&g, "scene_03_foxwell"),
+            None,
+            "terminal ⇒ fail-closed"
+        );
+        assert_eq!(
+            next_spine_scene(&g, "not_a_scene"),
+            None,
+            "absent id ⇒ None"
+        );
         assert_eq!(next_spine_scene(&g, "   "), None, "blank ⇒ None");
     }
 

@@ -199,7 +199,8 @@ async fn homecoming_scene_advance_consumes_admitted_observation_and_appends_obje
     assert_eq!(ev.data["signal"], "scene_advance", "distinctly labeled");
     assert_eq!(ev.data["scene_id"], scene_id);
     assert_eq!(
-        ev.data["atom_id"], atom.atom_id.as_str(),
+        ev.data["atom_id"],
+        atom.atom_id.as_str(),
         "matched atom recorded for audit"
     );
     eprintln!(
@@ -223,14 +224,21 @@ async fn homecoming_scene_advance_consumes_admitted_observation_and_appends_obje
             .await
             .expect("count query")
             .get(0);
-    assert_eq!(before_rows, 0, "prev ObjectiveResolved rows = 0 (the homecoming Wall B gap)");
+    assert_eq!(
+        before_rows, 0,
+        "prev ObjectiveResolved rows = 0 (the homecoming Wall B gap)"
+    );
 
     for ev in &resolutions {
-        db.append_domain_event(ev).await.expect("LIVE append_domain_event");
+        db.append_domain_event(ev)
+            .await
+            .expect("LIVE append_domain_event");
     }
     // idempotent: re-append must not create a second row (turn-independent event_id).
     for ev in &resolutions {
-        db.append_domain_event(ev).await.expect("idempotent re-append");
+        db.append_domain_event(ev)
+            .await
+            .expect("idempotent re-append");
     }
 
     let after_rows: Vec<(String, serde_json::Value)> = sqlx::query(
@@ -298,7 +306,10 @@ async fn frozen_seam_scene_01_advances_from_admitted_action_observation() {
         "the frozen player scene scene_01_lawmen_in_trouble has a scene-advance objective \
          (its authored affordance/mechanic content compiles to ≥1 salient observation atom)",
     );
-    assert_eq!(objective.id, format!("obj.scene_advance.{FROZEN_SEAM_SCENE}"));
+    assert_eq!(
+        objective.id,
+        format!("obj.scene_advance.{FROZEN_SEAM_SCENE}")
+    );
     // a witness-bindable guard atom of THIS scene (the audit's scene_01 admits an action atom).
     let atom = scene_advance_guard_leaves(&graph, FROZEN_SEAM_SCENE)
         .into_iter()
@@ -345,12 +356,20 @@ async fn frozen_seam_scene_01_advances_from_admitted_action_observation() {
         &proposals,
         &EvidenceLedger::new(),
     );
-    assert_eq!(ledger.len(), 1, "witness admits scene_01's observation atom");
+    assert_eq!(
+        ledger.len(),
+        1,
+        "witness admits scene_01's observation atom"
+    );
 
     // engine consumes the ledger for scene_01 ⇒ ObjectiveResolved (Wall B bridged on the seam).
     let resolutions =
         witnessed_scene_advance_resolutions(SESSION, TURN, &graph, &ledger, FROZEN_SEAM_SCENE);
-    assert_eq!(resolutions.len(), 1, "scene_01's advance objective resolves");
+    assert_eq!(
+        resolutions.len(),
+        1,
+        "scene_01's advance objective resolves"
+    );
     let ev = &resolutions[0];
     assert_eq!(ev.kind, DomainEventKind::ObjectiveResolved);
     assert_eq!(ev.data["objective_id"], objective.id);

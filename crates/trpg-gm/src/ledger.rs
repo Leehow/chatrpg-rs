@@ -23,10 +23,34 @@ impl TurnLedger {
         self.snapshot.check_contracts.push(contract.clone());
     }
 
+    pub fn record_contract_if_absent(&mut self, contract: &CheckContract) {
+        if self
+            .snapshot
+            .check_contracts
+            .iter()
+            .any(|existing| existing.check_id == contract.check_id)
+        {
+            return;
+        }
+        self.record_contract(contract);
+    }
+
     /// 入账一次检定结果（result.roll 同步进 dice_rolls）。
     pub fn record_result(&mut self, result: &CheckResultRecord) {
         self.snapshot.dice_rolls.push(result.roll.clone());
         self.snapshot.check_results.push(result.clone());
+    }
+
+    pub fn record_result_if_absent(&mut self, result: &CheckResultRecord) {
+        if self
+            .snapshot
+            .check_results
+            .iter()
+            .any(|existing| existing.check_id == result.check_id)
+        {
+            return;
+        }
+        self.record_result(result);
     }
 
     /// 入账 execute_system_roll_bundle 产物：primary + 全部 followups。
@@ -167,6 +191,18 @@ mod tests {
             .private_roll_tokens()
             .iter()
             .any(|t| t == "roll_a" || t == "12"));
+    }
+
+    #[test]
+    fn record_result_if_absent_dedupes_result_and_roll() {
+        let result = result("a", 12, RollVisibility::PublicGmRoll);
+        let mut ledger = TurnLedger::new();
+
+        ledger.record_result_if_absent(&result);
+        ledger.record_result_if_absent(&result);
+
+        assert_eq!(ledger.snapshot().check_results.len(), 1);
+        assert_eq!(ledger.snapshot().dice_rolls.len(), 1);
     }
 
     #[test]

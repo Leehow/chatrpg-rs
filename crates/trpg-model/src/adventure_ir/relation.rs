@@ -105,7 +105,10 @@ mod tests {
         assert_ne!(r.kind, RelationKind::SpatialAdjacent);
         assert_eq!(r.enforcement, Enforcement::RetrievalOnly);
         assert_eq!(r.authority, Authority::Structural);
-        assert!(!r.participates_in_progression(), "retrieval-only never drives");
+        assert!(
+            !r.participates_in_progression(),
+            "retrieval-only never drives"
+        );
         assert!(!r.evidence.is_empty(), "carries evidence note");
     }
 

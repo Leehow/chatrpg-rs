@@ -26,8 +26,8 @@
 pub mod anchor_seed;
 pub mod campaign;
 pub mod fallback;
-pub mod render;
 pub mod outcome;
+pub mod render;
 pub mod scene_plan;
 pub mod select;
 
@@ -36,9 +36,9 @@ pub use anchor_seed::{
 };
 pub use campaign::{campaign_plan_enabled, classify_campaign, should_run_campaign, CampaignPlan};
 pub use fallback::{fallback_beat_plan, pick_spotlight_target};
-pub use scene_plan::{derive_scene_plan, scene_plan_enabled, ScenePlan};
 pub use outcome::{
     apply_committed_outcome, DESIRED_CHANGE_CAPITALIZE_SUCCESS, DESIRED_CHANGE_FAIL_FORWARD,
 };
 pub use render::render_director_packet_block;
+pub use scene_plan::{derive_scene_plan, scene_plan_enabled, ScenePlan};
 pub use select::build_director_brief_packet;

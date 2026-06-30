@@ -49,9 +49,18 @@ impl PacingPlugin {
         if tension >= TENSION_HIGH {
             BeatWeightProposal {
                 beat_weights: vec![
-                    BeatWeightTerm { beat_kind: BeatKind::Escalate, weight_delta: -0.5 },
-                    BeatWeightTerm { beat_kind: BeatKind::Relief, weight_delta: 0.4 },
-                    BeatWeightTerm { beat_kind: BeatKind::Payoff, weight_delta: 0.3 },
+                    BeatWeightTerm {
+                        beat_kind: BeatKind::Escalate,
+                        weight_delta: -0.5,
+                    },
+                    BeatWeightTerm {
+                        beat_kind: BeatKind::Relief,
+                        weight_delta: 0.4,
+                    },
+                    BeatWeightTerm {
+                        beat_kind: BeatKind::Payoff,
+                        weight_delta: 0.3,
+                    },
                 ],
                 scene_constraints: vec!["relieve_tension".to_string()],
                 rationale: "tension_high_relieve".to_string(),
@@ -59,8 +68,14 @@ impl PacingPlugin {
         } else if tension <= TENSION_LOW {
             BeatWeightProposal {
                 beat_weights: vec![
-                    BeatWeightTerm { beat_kind: BeatKind::Escalate, weight_delta: 0.4 },
-                    BeatWeightTerm { beat_kind: BeatKind::Complicate, weight_delta: 0.3 },
+                    BeatWeightTerm {
+                        beat_kind: BeatKind::Escalate,
+                        weight_delta: 0.4,
+                    },
+                    BeatWeightTerm {
+                        beat_kind: BeatKind::Complicate,
+                        weight_delta: 0.3,
+                    },
                 ],
                 scene_constraints: Vec::new(),
                 rationale: "tension_low_build".to_string(),
@@ -140,10 +155,19 @@ mod tests {
         assert_eq!(out.len(), 1, "应产 1 条 BeatWeight 贡献");
         let bw = beat_weight(&out[0]);
         // Escalate 被压低、Relief/Payoff 被抬高（候选 beat 被重权）。
-        let escalate = bw.beat_weights.iter().find(|t| t.beat_kind == BeatKind::Escalate).unwrap();
+        let escalate = bw
+            .beat_weights
+            .iter()
+            .find(|t| t.beat_kind == BeatKind::Escalate)
+            .unwrap();
         assert!(escalate.weight_delta < 0.0, "高张力应压低 Escalate");
-        assert!(bw.beat_weights.iter().any(|t| t.beat_kind == BeatKind::Relief && t.weight_delta > 0.0));
-        assert!(bw.scene_constraints.contains(&"relieve_tension".to_string()));
+        assert!(bw
+            .beat_weights
+            .iter()
+            .any(|t| t.beat_kind == BeatKind::Relief && t.weight_delta > 0.0));
+        assert!(bw
+            .scene_constraints
+            .contains(&"relieve_tension".to_string()));
         assert_eq!(out[0].meta.plugin_id, PACING_PLUGIN_ID);
         assert_eq!(out[0].meta.safety_class, SafetyClass::Experience);
     }
@@ -154,14 +178,21 @@ mod tests {
             let out = PacingPlugin.on_hook(&ctx_with_tension(0.1)).await;
             beat_weight(&out[0]).clone()
         };
-        let escalate = bw.beat_weights.iter().find(|t| t.beat_kind == BeatKind::Escalate).unwrap();
+        let escalate = bw
+            .beat_weights
+            .iter()
+            .find(|t| t.beat_kind == BeatKind::Escalate)
+            .unwrap();
         assert!(escalate.weight_delta > 0.0, "低张力应抬高 Escalate");
     }
 
     #[tokio::test]
     async fn missing_config_is_neutral_fail_closed() {
         // 无 config["tension"] ⇒ 中性档（0.5），仍产一条提议（不空转、不报错）。
-        let ctx = PluginContext { hook: PluginHook::ContextAssembly, ..Default::default() };
+        let ctx = PluginContext {
+            hook: PluginHook::ContextAssembly,
+            ..Default::default()
+        };
         let out = PacingPlugin.on_hook(&ctx).await;
         assert_eq!(out.len(), 1);
         assert_eq!(beat_weight(&out[0]).rationale, "tension_neutral");
@@ -201,7 +232,10 @@ mod tests {
 
         // host 只返回提议（BeatWeight），不应用、不落库。
         assert_eq!(contributions.len(), 1);
-        assert!(matches!(contributions[0].kind, PluginContributionKind::BeatWeight(_)));
+        assert!(matches!(
+            contributions[0].kind,
+            PluginContributionKind::BeatWeight(_)
+        ));
         // 核心 story state 字节不变（插件无 handle 可改）。
         assert_eq!(
             serde_json::to_vec(&core_before).unwrap(),
@@ -217,7 +251,11 @@ mod tests {
         let t = out[0].to_trace();
         assert_eq!(t.kind, "beat_weight");
         assert_eq!(t.hook, "context_assembly");
-        assert!(t.summary.starts_with("beat_weight:3 term(s)"), "summary={}", t.summary);
+        assert!(
+            t.summary.starts_with("beat_weight:3 term(s)"),
+            "summary={}",
+            t.summary
+        );
         assert!(t.summary.contains("escalate"), "应含稳定 beat 种类 token");
     }
 }

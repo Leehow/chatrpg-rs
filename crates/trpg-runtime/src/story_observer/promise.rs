@@ -93,8 +93,10 @@ mod tests {
     fn run(story: StoryState, known: &[&str], paid: &[(&str, &str)]) -> (StoryState, bool) {
         let mut story = story;
         let kn: HashSet<&str> = known.iter().copied().collect();
-        let paid: Vec<(String, String)> =
-            paid.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+        let paid: Vec<(String, String)> = paid
+            .iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect();
         let changed = advance_promises(&mut story, &kn, &paid);
         (story, changed)
     }

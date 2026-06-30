@@ -45,7 +45,9 @@ pub fn evaluate(
     //    decide as True (fail-closed: may_autofire gates opaque guards/effects).
     for ev in events {
         for r in program.rules {
-            if ev.matches(&r.on) && r.may_autofire() && r.when.eval(&state.ctx) == PredicateValue::True
+            if ev.matches(&r.on)
+                && r.may_autofire()
+                && r.when.eval(&state.ctx) == PredicateValue::True
             {
                 apply_effects(state, &r.then, &mut signals);
             }
@@ -83,11 +85,7 @@ fn ingest(state: &mut ProgressionState, ev: &ProgressEvent, signals: &mut Vec<Pr
     }
 }
 
-fn check_tracker(
-    state: &mut ProgressionState,
-    t: &TrackerSpec,
-    signals: &mut Vec<ProgressSignal>,
-) {
+fn check_tracker(state: &mut ProgressionState, t: &TrackerSpec, signals: &mut Vec<ProgressSignal>) {
     if state.fired_trackers.contains(&t.id) {
         return;
     }
@@ -107,7 +105,10 @@ fn check_tracker(
     };
     if reached {
         state.fired_trackers.insert(t.id.clone());
-        signals.push(ProgressSignal::new(ProgressSignalKind::ClockAdvanced, &t.id));
+        signals.push(ProgressSignal::new(
+            ProgressSignalKind::ClockAdvanced,
+            &t.id,
+        ));
         // Threshold effects are executable-only (fail-closed).
         apply_effects(state, &t.at_threshold, signals);
     }
@@ -131,7 +132,10 @@ fn apply_effects(
             EffectExpr::Complete(id) => {
                 state.set_objective(id, ObjectiveStatus::Completed);
                 state.resolved_units.insert(id.clone());
-                signals.push(ProgressSignal::new(ProgressSignalKind::ObjectiveCompleted, id));
+                signals.push(ProgressSignal::new(
+                    ProgressSignalKind::ObjectiveCompleted,
+                    id,
+                ));
             }
             EffectExpr::Fail(id) => {
                 state.set_objective(id, ObjectiveStatus::Failed);
@@ -145,11 +149,14 @@ fn apply_effects(
                 state.disabled_units.insert(id.clone());
             }
             EffectExpr::Reveal(id) => {
-                state.ctx.known_revelations.push((
-                    id.clone(),
-                    trpg_model::adventure_ir::KnowledgeHolder::Party,
+                state
+                    .ctx
+                    .known_revelations
+                    .push((id.clone(), trpg_model::adventure_ir::KnowledgeHolder::Party));
+                signals.push(ProgressSignal::new(
+                    ProgressSignalKind::RevelationUnlocked,
+                    id,
                 ));
-                signals.push(ProgressSignal::new(ProgressSignalKind::RevelationUnlocked, id));
             }
             EffectExpr::AdvanceClock { id, by } => {
                 let entry = state.clocks_mut().entry(id.clone()).or_insert(0);

@@ -169,7 +169,10 @@ mod tests {
         assert!(evolve_pacing(&mut story, Some(BeatKind::Escalate)));
         assert!((story.pacing.tension - 0.2).abs() < f32::EPSILON);
         assert_eq!(story.pacing.beats_since_escalation, 0);
-        assert!(story.pacing.time_since_relief > 0.0, "no relief yet ⇒ relief clock ages");
+        assert!(
+            story.pacing.time_since_relief > 0.0,
+            "no relief yet ⇒ relief clock ages"
+        );
         assert!(evolve_pacing(&mut story, Some(BeatKind::Complicate)));
         assert!((story.pacing.tension - 0.4).abs() < 1e-6);
         assert_eq!(story.pacing.phase, "rising");

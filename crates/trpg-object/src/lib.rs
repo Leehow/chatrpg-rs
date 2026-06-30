@@ -72,12 +72,7 @@ impl ObjectService {
         // Data-driven source-backed firearm profiles come from the kernel's
         // `firearm_profiles` (override layer) — no per-ruleset hardcode. Absent
         // kernel / no firearm data → no source-backed profile (generic behavior).
-        let kernel = self
-            .db
-            .load_rule_kernel(ruleset_id)
-            .await
-            .ok()
-            .flatten();
+        let kernel = self.db.load_rule_kernel(ruleset_id).await.ok().flatten();
         let objects = inventory_weapon_instances_from_sheet(
             session_id,
             ruleset_id,
@@ -2788,7 +2783,9 @@ mod object_use_tests {
         .expect("CoC .45 must match");
         assert_eq!(def_id, "call_of_cthulhu_7e.weapon.45_automatic");
         assert_eq!(
-            profile.get("weapon_profile_source").and_then(|v| v.as_str()),
+            profile
+                .get("weapon_profile_source")
+                .and_then(|v| v.as_str()),
             Some("source_backed_table_row")
         );
         assert_eq!(
@@ -2815,7 +2812,10 @@ mod object_use_tests {
             profile.get("ammo_capacity").and_then(|v| v.as_i64()),
             Some(7)
         );
-        assert_eq!(profile.get("malfunction").and_then(|v| v.as_i64()), Some(100));
+        assert_eq!(
+            profile.get("malfunction").and_then(|v| v.as_i64()),
+            Some(100)
+        );
         assert_eq!(source_refs.len(), 1);
         let sr = &source_refs[0];
         assert_eq!(
@@ -2842,10 +2842,9 @@ mod object_use_tests {
         )
         .is_none());
         // Kernel present but no firearm_profiles (e.g. a non-CoC ruleset).
-        let bare: RuleKernel = serde_json::from_str(
-            r#"{"kernel_id":"t","ruleset_id":"cyberpunk_red","version":"1"}"#,
-        )
-        .unwrap();
+        let bare: RuleKernel =
+            serde_json::from_str(r#"{"kernel_id":"t","ruleset_id":"cyberpunk_red","version":"1"}"#)
+                .unwrap();
         assert!(source_backed_declared_firearm_profile(
             Some(&bare),
             "cyberpunk_red",

@@ -268,6 +268,59 @@ fn build_contract_binds_tested_parameter_and_visibility() {
 }
 
 #[test]
+fn agent_selected_pc_check_is_public_even_if_agent_requested_secret() {
+    let args = RollCheckArgs {
+        check_label: "Cautious basement descent and search".to_string(),
+        tested_parameter: "Spot Hidden".to_string(),
+        actor_id: Some("pc.current".to_string()),
+        opposed: None,
+        visibility: "secret".to_string(),
+        intent_kind: Some("agent_selected_check".to_string()),
+        mechanic_id: None,
+        scene_mechanic_id: None,
+    };
+    let contract = build_check_contract_for_args(
+        "s",
+        "t",
+        "call_of_cthulhu_7e",
+        Some("the_haunting"),
+        &args,
+        "1d100",
+    )
+    .unwrap();
+    assert_eq!(contract.roll_visibility, RollVisibility::PublicGmRoll);
+    assert!(contract.disclosure.show_roll_to_player);
+    assert!(contract.disclosure.show_success_failure_to_player);
+}
+
+#[test]
+fn active_pc_listen_check_is_public_even_if_agent_requested_secret() {
+    let args = RollCheckArgs {
+        check_label:
+            "Listen for movement or an immediate threat from the top of the basement stairs"
+                .to_string(),
+        tested_parameter: "Listen".to_string(),
+        actor_id: Some("pc.current".to_string()),
+        opposed: None,
+        visibility: "secret".to_string(),
+        intent_kind: Some("listen_or_perception_check".to_string()),
+        mechanic_id: None,
+        scene_mechanic_id: None,
+    };
+    let contract = build_check_contract_for_args(
+        "s",
+        "t",
+        "call_of_cthulhu_7e",
+        Some("the_haunting"),
+        &args,
+        "1d100",
+    )
+    .unwrap();
+    assert_eq!(contract.roll_visibility, RollVisibility::PublicGmRoll);
+    assert!(contract.disclosure.show_roll_to_player);
+}
+
+#[test]
 fn build_contract_infers_npc_actor_kind_from_actor_id() {
     let args = RollCheckArgs {
         check_label: "Major wound consciousness".to_string(),
@@ -335,12 +388,37 @@ fn passive_mechanic_call_path_returns_no_roll_and_no_default_die() {
         result["mechanic_id"],
         json!("call_of_cthulhu_7e.zero_hp_state")
     );
+    assert!(result["narration_instruction"]
+        .as_str()
+        .unwrap()
+        .contains("Do not wrap it in [roll]"));
     // The kernel default die (`1d100`) must never be reached for a no-roll
     // mechanic, and no roll-step `dice` field may leak into a passive result.
     let serialized = serde_json::to_string(&result).unwrap();
     assert!(
         !serialized.contains("1d100") && !serialized.contains("\"dice\""),
         "passive result must not carry a dice expression: {serialized}"
+    );
+}
+
+#[test]
+fn skill_check_mechanic_without_explicit_roll_step_is_not_passive() {
+    let entry = MechanicEntry {
+        id: "ruleset.skill_check".to_string(),
+        name: "Skill Check Resolution".to_string(),
+        kind: MechanicKind::SkillCheck,
+        tested_parameter: Some("basic_tech".to_string()),
+        procedure: vec![ProcedureStep::Gate {
+            condition: "Only uncertain or difficult actions call for a Skill Check.".to_string(),
+            note: None,
+        }],
+        ..Default::default()
+    };
+
+    assert!(!mechanic_has_roll_step(&entry));
+    assert!(
+        !mechanic_should_return_passive(&entry),
+        "skill_check catalog entries imply an active check even when the extractor omitted a Roll step"
     );
 }
 

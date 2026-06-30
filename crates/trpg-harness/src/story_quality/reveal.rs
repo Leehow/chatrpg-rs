@@ -49,7 +49,8 @@ impl RevealEvidence {
     /// The permitted reveal set `gm_truth ∖ player_known`, fail-closed: either input `None`
     /// ⇒ empty (mirrors `compute_reveal`, independently recomputed here).
     pub fn permitted_reveal(&self) -> Vec<String> {
-        let (Some(known), Some(truth)) = (self.player_known.as_ref(), self.gm_truth.as_ref()) else {
+        let (Some(known), Some(truth)) = (self.player_known.as_ref(), self.gm_truth.as_ref())
+        else {
             return Vec::new();
         };
         let known_set: HashSet<&str> = known.iter().map(String::as_str).collect();

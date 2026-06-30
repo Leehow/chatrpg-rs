@@ -168,7 +168,10 @@ mod tests {
         let on = guard_entity(&v, &none);
         std::env::remove_var(trpg_model::NPC_BODY_KEY_NORMALIZE_ENV);
         let on_zw = on.get("正文").and_then(Value::as_str).unwrap_or("");
-        assert!(!on_zw.contains("企业卧底"), "ON: 正文 secret 必被裁: {on_zw}");
+        assert!(
+            !on_zw.contains("企业卧底"),
+            "ON: 正文 secret 必被裁: {on_zw}"
+        );
         assert!(!on_zw.contains("Helix"), "ON: 正文 secret 必被裁: {on_zw}");
 
         // OFF：字段表不含 正文 → 不动该键（与历史字节等价；正文 secret 原样，

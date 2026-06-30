@@ -24,11 +24,11 @@
 //! No `DATABASE_URL` ⇒ SKIP (fail-closed, never blocks CI). Anti-false-green: a real
 //! run prints `RAN:` + counts + `PASS`; only seeing `SKIP` = not verified.
 use trpg_db::Db;
+use trpg_model::MaterializationAffordanceMode::{Enforce, Off};
 use trpg_runtime::progression::progress_events_from_domain;
 use trpg_runtime::{
     clue_reveal_candidates, project_clues_onto_scenes, ClueProjectionReport, ResolvedCheck,
 };
-use trpg_model::MaterializationAffordanceMode::{Enforce, Off};
 
 const VAULT: &str = "triangle_agency.the_vault";
 
@@ -81,7 +81,10 @@ async fn the_vault_clue_projection_populates_scene_referenced_clue_ids() {
     let report: ClueProjectionReport = project_clues_onto_scenes(&mut projected);
     eprintln!(
         "RAN: projection report = linked={} skipped(no_page={} out_of_range={} ambiguous={})",
-        report.linked, report.skipped_no_page, report.skipped_out_of_range, report.skipped_ambiguous
+        report.linked,
+        report.skipped_no_page,
+        report.skipped_out_of_range,
+        report.skipped_ambiguous
     );
     assert!(
         report.linked > 0,
@@ -127,8 +130,8 @@ async fn the_vault_clue_projection_populates_scene_referenced_clue_ids() {
             );
         };
         for cid in &s.referenced_clue_ids {
-            let page = page_of(cid)
-                .unwrap_or_else(|| panic!("linked clue {cid} must exist with a page"));
+            let page =
+                page_of(cid).unwrap_or_else(|| panic!("linked clue {cid} must exist with a page"));
             assert!(
                 (ps as u64) <= page && page <= (pe as u64),
                 "clue {cid} page {page} must fall inside scene {} range [{ps},{pe}] (no fabricated link)",
@@ -227,12 +230,18 @@ async fn the_vault_successful_investigation_feeds_progression_adapter() {
 
     // ---- Both gates ON (Enforce ∧ gating_on) → ≥1 source-backed candidate ----
     let cands = clue_reveal_candidates(&check, &scene, &graph, Enforce, true);
-    eprintln!("RAN: clue_reveal_candidates (Enforce ∧ gating ON) → {} candidate(s)", cands.len());
+    eprintln!(
+        "RAN: clue_reveal_candidates (Enforce ∧ gating ON) → {} candidate(s)",
+        cands.len()
+    );
     assert!(
         !cands.is_empty(),
         "successful investigation on a projected scene_001 clue must yield ≥1 reveal candidate"
     );
-    assert_eq!(cands[0].fact_id, clue_id, "candidate fact = source-backed clue id");
+    assert_eq!(
+        cands[0].fact_id, clue_id,
+        "candidate fact = source-backed clue id"
+    );
 
     // ---- The candidate → PlayerLearnedFact (what the commit boundary persists) ----
     // → feed through the REAL progression adapter → WorldFactChanged ProgressEvent.
@@ -277,7 +286,10 @@ async fn the_vault_successful_investigation_feeds_progression_adapter() {
         "OFF baseline: scene_001 referenced_clue_ids stays empty (byte-baseline)"
     );
     let off_cands = clue_reveal_candidates(&check, &off_scene, &base_graph, Enforce, true);
-    eprintln!("RAN: OFF (no projection) → {} candidate(s) (expect 0)", off_cands.len());
+    eprintln!(
+        "RAN: OFF (no projection) → {} candidate(s) (expect 0)",
+        off_cands.len()
+    );
     assert!(
         off_cands.is_empty(),
         "OFF: with empty referenced_clue_ids, successful investigation reveals nothing → 0 carriers"

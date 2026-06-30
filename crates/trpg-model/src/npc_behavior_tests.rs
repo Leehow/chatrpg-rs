@@ -15,8 +15,7 @@ fn profile() -> NpcProfile {
 }
 
 fn rel(trust: i16, fear: i16, hostility: i16) -> NpcRelationship {
-    let mut r =
-        NpcRelationship::new("s", "npc_lars", NpcRelationshipTarget::PlayerParty).unwrap();
+    let mut r = NpcRelationship::new("s", "npc_lars", NpcRelationshipTarget::PlayerParty).unwrap();
     r.apply_delta(&NpcRelationshipDelta {
         trust,
         fear,
@@ -42,8 +41,7 @@ fn emotion_tracks_dominant_channel() {
 
 #[test]
 fn current_goal_falls_back_to_persona_then_override() {
-    let plan =
-        NpcBehaviorPlan::derive(&view(rel(0, 0, 0), &[]), &NpcBehaviorContext::default());
+    let plan = NpcBehaviorPlan::derive(&view(rel(0, 0, 0), &[]), &NpcBehaviorContext::default());
     assert_eq!(plan.current_goal.as_deref(), Some("protect the workshop"));
     let ctx = NpcBehaviorContext {
         current_goal: Some("flee the city".into()),
@@ -55,8 +53,7 @@ fn current_goal_falls_back_to_persona_then_override() {
 
 #[test]
 fn persona_boundaries_become_forbidden_actions() {
-    let plan =
-        NpcBehaviorPlan::derive(&view(rel(0, 0, 0), &[]), &NpcBehaviorContext::default());
+    let plan = NpcBehaviorPlan::derive(&view(rel(0, 0, 0), &[]), &NpcBehaviorContext::default());
     assert!(plan
         .forbidden_actions
         .iter()
@@ -111,7 +108,8 @@ fn persona_description_surfaces_in_guidance_block() {
     // TDD #3: a body-carrying profile yields NON-empty persona guidance (the thing that
     // was empty before M8 — the no-invention guard kept such NPCs silent).
     let p = profile_with_body(Some("白天通常待在埃索加油站的三人之一。"));
-    let plan = NpcBehaviorPlan::derive(&view_with(&p, rel(0, 0, 0)), &NpcBehaviorContext::default());
+    let plan =
+        NpcBehaviorPlan::derive(&view_with(&p, rel(0, 0, 0)), &NpcBehaviorContext::default());
     assert_eq!(
         plan.persona_description.as_deref(),
         Some("白天通常待在埃索加油站的三人之一。")
@@ -127,7 +125,8 @@ fn persona_description_surfaces_in_guidance_block() {
 fn absent_persona_description_omits_line_baseline() {
     // A profile with no source body produces no persona line — byte-stable pre-M8 baseline.
     let p = profile_with_body(None);
-    let plan = NpcBehaviorPlan::derive(&view_with(&p, rel(0, 0, 0)), &NpcBehaviorContext::default());
+    let plan =
+        NpcBehaviorPlan::derive(&view_with(&p, rel(0, 0, 0)), &NpcBehaviorContext::default());
     assert!(plan.persona_description.is_none());
     assert!(
         !plan.to_guidance_block().contains("Persona (source)"),

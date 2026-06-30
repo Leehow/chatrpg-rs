@@ -1,6 +1,12 @@
 use super::*;
 use crate::turn_plan::{PhaseId, CANONICAL_TURN_PLAN};
 
+static EXEC_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+    EXEC_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 // 正常叙事终态：跑全部 15 phase，顺序与 CANONICAL_TURN_PLAN 一致。
 #[test]
 fn normal_narration_runs_all_phases_in_plan_order() {
@@ -113,7 +119,7 @@ fn agent_loop_present_exactly_once() {
 // ============================ channel / spawn / 真流式 ============================
 
 use crate::tools::ToolRegistry;
-use crate::turn_loop::{GmLoop, HeavyProbe, LoopConfig};
+use crate::turn_loop::{GmLoop, HeavyProbe, LoopConfig, TurnOutcome};
 use async_stream::try_stream;
 use async_trait::async_trait;
 use futures_core::Stream;
@@ -126,18 +132,27 @@ use tokio_util::sync::CancellationToken;
 use trpg_db::Db;
 use trpg_llm::{LlmClient, StreamEvent, ToolChoice};
 use trpg_model::{
-    ChatMessage, CompiledContext, ContextRequest, RuntimeState, TokenBudget, VisibilityProfile,
+    ChatMessage, CompiledContext, ContextRequest, DocumentType, LinkType, ModuleBundle,
+    ModuleGraph, RuntimeState, ScenarioLink, ScenarioNode, SourceIndex, TokenBudget,
+    ValidationReport, VisibilityProfile,
 };
 use trpg_runtime::RuntimeEngine;
 
 // 复刻 turn_loop_tests.rs MockLlm：恒空刺激命中、脚本化 stream。
 struct MockLlm {
     scripts: Mutex<Vec<Vec<StreamEvent>>>,
+    text_responses: Mutex<Vec<String>>,
+    text_requests: Mutex<Vec<Vec<ChatMessage>>>,
 }
 #[async_trait]
 impl LlmClient for MockLlm {
-    async fn complete_text(&self, _: Vec<ChatMessage>, _: f32) -> anyhow::Result<String> {
-        unimplemented!()
+    async fn complete_text(&self, messages: Vec<ChatMessage>, _: f32) -> anyhow::Result<String> {
+        self.text_requests.lock().unwrap().push(messages);
+        self.text_responses
+            .lock()
+            .unwrap()
+            .pop()
+            .ok_or_else(|| anyhow::anyhow!("text completion not scripted"))
     }
     async fn complete_json(&self, _: Vec<ChatMessage>, _: f32) -> anyhow::Result<Value> {
         Ok(json!({"hits": [], "moved": false}))
@@ -173,6 +188,23 @@ fn exec_fixture_inner(
     exec_fixture_with_llm(
         Arc::new(MockLlm {
             scripts: Mutex::new(scripts),
+            text_responses: Mutex::new(Vec::new()),
+            text_requests: Mutex::new(Vec::new()),
+        }),
+        probe,
+    )
+}
+
+fn exec_fixture_inner_with_text(
+    scripts: Vec<Vec<StreamEvent>>,
+    text_responses: Vec<String>,
+    probe: Option<HeavyProbe>,
+) -> (GmLoop, OwnedTurnRequest) {
+    exec_fixture_with_llm(
+        Arc::new(MockLlm {
+            scripts: Mutex::new(scripts),
+            text_responses: Mutex::new(text_responses),
+            text_requests: Mutex::new(Vec::new()),
         }),
         probe,
     )
@@ -326,6 +358,495 @@ async fn execute_turn_streams_deltas_and_completes() {
         "delta 必须逐块直通不合并"
     );
     assert!(completed, "stream must end with TurnComplete");
+}
+
+#[tokio::test]
+async fn presentation_gate_buffers_and_sanitizes_player_agency_blocks() {
+    if std::env::var("SKIP_DB_TESTS").is_ok() {
+        return;
+    }
+    let _env_guard = env_guard();
+    let old_gate = std::env::var("TRPG_PRESENTATION_GATE").ok();
+    let old_split = std::env::var("TRPG_NARRATOR_SPLIT").ok();
+    std::env::set_var("TRPG_PRESENTATION_GATE", "1");
+    std::env::set_var("TRPG_NARRATOR_SPLIT", "0");
+
+    let menu = "你现在可以立刻选择其一：\n- 从窗口翻进去\n- 走通风口\n- 继续死磕这扇门\n";
+    let repaired = "你贴住警车后方，枪火从车头上方掠过。无人机和仓库之间的低矮阴影里，有一束贴地回收的线缆被爆闪照亮；两名还在开火的警员分别压在左侧车门和仓库转角后。";
+    let (gm, req) = exec_fixture(vec![
+        vec![
+            StreamEvent::ContentDelta(menu.into()),
+            StreamEvent::Done {
+                finish_reason: Some("stop".into()),
+            },
+        ],
+        vec![
+            StreamEvent::ContentDelta(repaired.into()),
+            StreamEvent::Done {
+                finish_reason: Some("stop".into()),
+            },
+        ],
+    ]);
+    let mut stream = execute_turn(gm, req, CANONICAL_TURN_PLAN);
+    let mut deltas: Vec<String> = vec![];
+    let mut outcome_text = String::new();
+    while let Some(ev) = stream.next().await {
+        match ev {
+            TurnEvent::Delta(d) => deltas.push(d),
+            TurnEvent::TurnComplete {
+                outcome: TurnOutcome::Narration(text),
+            } => outcome_text = text,
+            _ => {}
+        }
+    }
+
+    match old_gate {
+        Some(v) => std::env::set_var("TRPG_PRESENTATION_GATE", v),
+        None => std::env::remove_var("TRPG_PRESENTATION_GATE"),
+    }
+    match old_split {
+        Some(v) => std::env::set_var("TRPG_NARRATOR_SPLIT", v),
+        None => std::env::remove_var("TRPG_NARRATOR_SPLIT"),
+    }
+
+    assert!(
+        !deltas.concat().contains("选择其一") && !deltas.concat().contains("从窗口翻进去"),
+        "gate-enabled narration may be delivered after terminal verification, but must not deliver the blocked menu text: {deltas:?}"
+    );
+    assert!(
+        !outcome_text.contains("选择其一") && !outcome_text.contains("从窗口翻进去"),
+        "blocked menu text must not be the persisted/TurnComplete narration: {outcome_text}"
+    );
+    assert!(
+        !outcome_text.trim().is_empty(),
+        "blocked presentation should fall back to a non-empty safe narration"
+    );
+    assert!(
+        outcome_text.contains("线缆被爆闪照亮") && outcome_text.contains("两名还在开火的警员"),
+        "repair should preserve the useful observation payload as prose: {outcome_text}"
+    );
+}
+
+#[tokio::test]
+async fn module_turns_enforce_presentation_gate_without_env_flag() {
+    if std::env::var("SKIP_DB_TESTS").is_ok() {
+        return;
+    }
+    let _env_guard = env_guard();
+    let old_gate = std::env::var("TRPG_PRESENTATION_GATE").ok();
+    let old_split = std::env::var("TRPG_NARRATOR_SPLIT").ok();
+    std::env::remove_var("TRPG_PRESENTATION_GATE");
+    std::env::set_var("TRPG_NARRATOR_SPLIT", "0");
+
+    let menu = "你现在已经贴上仓库外墙，离那台东西更近。下一步，无论你是想继续沿墙摸到门口、扑近它后背那块异常装配区、冲进仓库内侧，还是先朝警员喊话配合，时机都比刚才好多了。";
+    let repaired = "你贴着仓库外墙稳住呼吸。门侧的旧金属检修盖、贴墙走线卡扣和被油污盖住的嵌入式面板轮廓，都在这处更近的角度里变得清楚；无人机背部那块后期拆改过的装配区，也会在它转身压制火线时短暂露出来。";
+    let (gm, mut req) = exec_fixture(vec![
+        vec![
+            StreamEvent::ContentDelta(menu.into()),
+            StreamEvent::Done {
+                finish_reason: Some("stop".into()),
+            },
+        ],
+        vec![
+            StreamEvent::ContentDelta(repaired.into()),
+            StreamEvent::Done {
+                finish_reason: Some("stop".into()),
+            },
+        ],
+    ]);
+    req.request.module_id = Some("cyberpunk_red.homecoming".to_string());
+    req.module_id = Some("cyberpunk_red.homecoming".to_string());
+
+    let mut stream = execute_turn(gm, req, CANONICAL_TURN_PLAN);
+    let mut deltas: Vec<String> = vec![];
+    let mut outcome_text = String::new();
+    while let Some(ev) = stream.next().await {
+        match ev {
+            TurnEvent::Delta(d) => deltas.push(d),
+            TurnEvent::TurnComplete {
+                outcome: TurnOutcome::Narration(text),
+            } => outcome_text = text,
+            _ => {}
+        }
+    }
+
+    match old_gate {
+        Some(v) => std::env::set_var("TRPG_PRESENTATION_GATE", v),
+        None => std::env::remove_var("TRPG_PRESENTATION_GATE"),
+    }
+    match old_split {
+        Some(v) => std::env::set_var("TRPG_NARRATOR_SPLIT", v),
+        None => std::env::remove_var("TRPG_NARRATOR_SPLIT"),
+    }
+
+    assert!(
+        !deltas.concat().contains("无论你是想")
+            && !deltas.concat().contains("继续沿墙摸到门口"),
+        "module play must not stream player-action menus when TRPG_PRESENTATION_GATE is unset: {deltas:?}"
+    );
+    assert!(
+        !outcome_text.contains("无论你是想") && !outcome_text.contains("继续沿墙摸到门口"),
+        "module play must not persist player-action menus when TRPG_PRESENTATION_GATE is unset: {outcome_text}"
+    );
+    assert!(
+        !outcome_text.trim().is_empty(),
+        "blocked module presentation should fall back to non-empty narration"
+    );
+    assert!(
+        outcome_text.contains("旧金属检修盖") && outcome_text.contains("后期拆改过的装配区"),
+        "module default gate should preserve useful factual payload through repair: {outcome_text}"
+    );
+}
+
+#[tokio::test]
+async fn module_turn_roll_only_success_repair_survives_final_emit() {
+    if std::env::var("SKIP_DB_TESTS").is_ok() {
+        return;
+    }
+    let _env_guard = env_guard();
+    let old_gate = std::env::var("TRPG_PRESENTATION_GATE").ok();
+    let old_split = std::env::var("TRPG_NARRATOR_SPLIT").ok();
+    let old_lang = std::env::var("TRPG_OUTPUT_LANGUAGE").ok();
+    let old_craft = std::env::var("TRPG_GM_CRAFT").ok();
+    std::env::remove_var("TRPG_PRESENTATION_GATE");
+    std::env::set_var("TRPG_NARRATOR_SPLIT", "0");
+    std::env::set_var("TRPG_OUTPUT_LANGUAGE", "zh-Hans");
+    std::env::set_var("TRPG_GM_CRAFT", "true");
+
+    let roll_only = "根据本回合已确认的结果：\n· [roll]从楼梯顶端借助手电、相机、卷尺与细绳观察地下室地面，寻找更安全的下脚点或替代进入方法: 1d100=[47] 目标:≤55，结果:成功[/roll]";
+    let (gm, mut req) = exec_fixture(vec![
+        vec![
+            StreamEvent::ContentDelta(roll_only.into()),
+            StreamEvent::Done {
+                finish_reason: Some("stop".into()),
+            },
+        ],
+        vec![
+            StreamEvent::ContentDelta(roll_only.into()),
+            StreamEvent::Done {
+                finish_reason: Some("stop".into()),
+            },
+        ],
+    ]);
+    req.request.module_id = Some("call_of_cthulhu_7e.the_haunting".to_string());
+    req.module_id = Some("call_of_cthulhu_7e.the_haunting".to_string());
+    req.user_input =
+        "Maggie 从楼梯顶端用手电、相机、卷尺和细绳观察地下室地面，寻找安全下脚点或替代进入方法。"
+            .into();
+
+    let mut stream = execute_turn(gm, req, CANONICAL_TURN_PLAN);
+    let mut deltas: Vec<String> = vec![];
+    let mut outcome_text = String::new();
+    while let Some(ev) = stream.next().await {
+        match ev {
+            TurnEvent::Delta(d) => deltas.push(d),
+            TurnEvent::TurnComplete {
+                outcome: TurnOutcome::Narration(text),
+            } => outcome_text = text,
+            _ => {}
+        }
+    }
+
+    match old_gate {
+        Some(v) => std::env::set_var("TRPG_PRESENTATION_GATE", v),
+        None => std::env::remove_var("TRPG_PRESENTATION_GATE"),
+    }
+    match old_split {
+        Some(v) => std::env::set_var("TRPG_NARRATOR_SPLIT", v),
+        None => std::env::remove_var("TRPG_NARRATOR_SPLIT"),
+    }
+    match old_lang {
+        Some(v) => std::env::set_var("TRPG_OUTPUT_LANGUAGE", v),
+        None => std::env::remove_var("TRPG_OUTPUT_LANGUAGE"),
+    }
+    match old_craft {
+        Some(v) => std::env::set_var("TRPG_GM_CRAFT", v),
+        None => std::env::remove_var("TRPG_GM_CRAFT"),
+    }
+
+    let delivered = deltas.concat();
+    assert!(
+        delivered.contains("这次成功检查已经落实为玩家可见状态"),
+        "final delivered narration must not remain roll-only: deltas={deltas:?} outcome={outcome_text}"
+    );
+    assert!(
+        outcome_text.contains("这次成功检查已经落实为玩家可见状态"),
+        "TurnComplete narration must not persist roll-only success: {outcome_text}"
+    );
+}
+
+#[tokio::test]
+async fn pre_context_scene_transition_empty_narration_emits_arrival_delta() {
+    if std::env::var("SKIP_DB_TESTS").is_ok() {
+        return;
+    }
+    let _env_guard = env_guard();
+    let old_gate = std::env::var("TRPG_PRESENTATION_GATE").ok();
+    let old_split = std::env::var("TRPG_NARRATOR_SPLIT").ok();
+    std::env::remove_var("TRPG_PRESENTATION_GATE");
+    std::env::set_var("TRPG_NARRATOR_SPLIT", "0");
+
+    let (gm, mut req) = exec_fixture(vec![vec![StreamEvent::Done {
+        finish_reason: Some("stop".into()),
+    }]]);
+    let module_id = format!("test.pre_context_arrival.{}", uuid::Uuid::new_v4().simple());
+    let session_id = format!("s_pre_context_{}", uuid::Uuid::new_v4().simple());
+
+    let mut chapel = ScenarioNode::default();
+    chapel.node_id = "loc_chapel".into();
+    chapel.title = "Chapel of Contemplation".into();
+    chapel.links = vec![ScenarioLink {
+        to_node_id: "loc_corbitt_house_exterior".into(),
+        reason: "The chapel records point back to the Corbitt House.".into(),
+        clue_id: None,
+        link_type: LinkType::Trigger,
+        source_anchor: None,
+    }];
+    let mut house = ScenarioNode::default();
+    house.node_id = "loc_corbitt_house_exterior".into();
+    house.title = "Corbitt House Exterior".into();
+    house.summary = "Exterior arrival and first inspection of the old house.".into();
+    house.read_aloud = Some(
+        "The Corbitt House waits in daylight, shut and stale, with its front entrance visible."
+            .into(),
+    );
+    house.referenced_location_ids = vec!["corbitt_house".into()];
+    let graph = ModuleGraph {
+        module_id: module_id.clone(),
+        ruleset_id: Some("rs".into()),
+        title: "Pre-context arrival fixture".into(),
+        module_type: DocumentType::OneShot,
+        scenes: vec![chapel, house],
+        ..Default::default()
+    };
+    let bundle = ModuleBundle {
+        schema_version: "test".into(),
+        bundle_id: module_id.clone(),
+        module_id: module_id.clone(),
+        ruleset_id: Some("rs".into()),
+        title: "Pre-context arrival fixture".into(),
+        source_index: SourceIndex::default(),
+        module_graph: graph,
+        module_prep_packets: vec![],
+        module_locators: vec![],
+        material_index: vec![],
+        context_blocks: vec![],
+        validation_report: ValidationReport {
+            status: "ok".into(),
+            ..Default::default()
+        },
+        conversion_trace: vec![],
+    };
+    gm.engine
+        .db
+        .upsert_module_bundle(&bundle, None, "source_pre_context", "parse_pre_context")
+        .await
+        .unwrap();
+    gm.engine
+        .db
+        .create_session(&session_id, "rs", Some(&module_id))
+        .await
+        .unwrap();
+    gm.engine
+        .db
+        .set_session_scene(&session_id, "loc_chapel")
+        .await
+        .unwrap();
+
+    req.request.module_id = Some(module_id.clone());
+    req.request.session_id = session_id;
+    req.request.turn_id = format!("t_pre_context_{}", uuid::Uuid::new_v4().simple());
+    req.module_id = Some(module_id);
+    req.state.scene_id = Some("loc_chapel".into());
+    req.user_input =
+        "Evelyn goes to the Corbitt House in daylight and circles the exterior.".into();
+
+    let mut stream = execute_turn(gm, req, CANONICAL_TURN_PLAN);
+    let mut deltas: Vec<String> = vec![];
+    let mut saw_transition = false;
+    let mut outcome_text = String::new();
+    while let Some(ev) = stream.next().await {
+        match ev {
+            TurnEvent::Delta(d) => deltas.push(d),
+            TurnEvent::SceneTransition { to, .. } => {
+                saw_transition = to == "loc_corbitt_house_exterior";
+            }
+            TurnEvent::TurnComplete {
+                outcome: TurnOutcome::Narration(text),
+            } => outcome_text = text,
+            _ => {}
+        }
+    }
+
+    match old_gate {
+        Some(v) => std::env::set_var("TRPG_PRESENTATION_GATE", v),
+        None => std::env::remove_var("TRPG_PRESENTATION_GATE"),
+    }
+    match old_split {
+        Some(v) => std::env::set_var("TRPG_NARRATOR_SPLIT", v),
+        None => std::env::remove_var("TRPG_NARRATOR_SPLIT"),
+    }
+
+    let delivered = deltas.concat();
+    assert!(
+        saw_transition,
+        "pre-context transition event must be emitted"
+    );
+    assert!(
+        delivered.contains("Corbitt House Exterior")
+            && delivered.contains("front entrance visible"),
+        "pre-context transition with empty LLM narration must still deliver arrival text, got deltas={deltas:?} outcome={outcome_text:?}"
+    );
+    assert_eq!(
+        delivered, outcome_text,
+        "arrival repair must be the same text delivered and persisted"
+    );
+}
+
+#[tokio::test]
+async fn pre_context_scene_transition_generic_success_gets_destination_repair() {
+    if std::env::var("SKIP_DB_TESTS").is_ok() {
+        return;
+    }
+    let _env_guard = env_guard();
+    let old_gate = std::env::var("TRPG_PRESENTATION_GATE").ok();
+    let old_split = std::env::var("TRPG_NARRATOR_SPLIT").ok();
+    let old_lang = std::env::var("TRPG_OUTPUT_LANGUAGE").ok();
+    std::env::remove_var("TRPG_PRESENTATION_GATE");
+    std::env::set_var("TRPG_NARRATOR_SPLIT", "0");
+    std::env::set_var("TRPG_OUTPUT_LANGUAGE", "zh-Hans");
+
+    let generic = "根据本回合已确认的结果：\n· [roll]谨慎下楼试探落脚: 1d100=[53] 目标:≤65，结果:strong_success[/roll]\n\n你按自己的计划离开上一处位置，推进到新的可见区域。\n\n你现在的位置已经改变；门口、退路和周围明显危险仍在可观察范围内。";
+    let repaired = "根据本回合已确认的结果：\n· [roll]谨慎下楼试探落脚: 1d100=[53] 目标:≤65，结果:strong_success[/roll]\n\n你把重量留在绳子和楼梯上，第一脚落到地下室底端偏左那片较平整的地面；旧木、潮气和灰尘的味道更重，墙边仍在手边，楼梯口也还在身后可退。";
+    let (gm, mut req) = exec_fixture_inner_with_text(
+        vec![vec![
+            StreamEvent::ContentDelta(generic.into()),
+            StreamEvent::Done {
+                finish_reason: Some("stop".into()),
+            },
+        ]],
+        vec![repaired.into()],
+        None,
+    );
+    let module_id = format!(
+        "test.pre_context_generic_arrival.{}",
+        uuid::Uuid::new_v4().simple()
+    );
+    let session_id = format!("s_pre_context_generic_{}", uuid::Uuid::new_v4().simple());
+
+    let mut ground = ScenarioNode::default();
+    ground.node_id = "loc_ground".into();
+    ground.title = "Corbitt House: Ground Floor".into();
+    ground.links = vec![ScenarioLink {
+        to_node_id: "loc_basement".into(),
+        reason: "The basement stairs descend from the ground floor.".into(),
+        clue_id: None,
+        link_type: LinkType::Trigger,
+        source_anchor: None,
+    }];
+    let mut basement = ScenarioNode::default();
+    basement.node_id = "loc_basement".into();
+    basement.title = "Corbitt House: Basement".into();
+    basement.summary = "A damp basement below the old house, reached by unsafe stairs.".into();
+    basement.read_aloud = Some(
+        "The basement air is colder and wetter. Old wood, dust, and damp stone crowd the foot of the stairs."
+            .into(),
+    );
+    basement.referenced_location_ids = vec!["basement".into()];
+    let graph = ModuleGraph {
+        module_id: module_id.clone(),
+        ruleset_id: Some("rs".into()),
+        title: "Pre-context generic arrival fixture".into(),
+        module_type: DocumentType::OneShot,
+        scenes: vec![ground, basement],
+        ..Default::default()
+    };
+    let bundle = ModuleBundle {
+        schema_version: "test".into(),
+        bundle_id: module_id.clone(),
+        module_id: module_id.clone(),
+        ruleset_id: Some("rs".into()),
+        title: "Pre-context generic arrival fixture".into(),
+        source_index: SourceIndex::default(),
+        module_graph: graph,
+        module_prep_packets: vec![],
+        module_locators: vec![],
+        material_index: vec![],
+        context_blocks: vec![],
+        validation_report: ValidationReport {
+            status: "ok".into(),
+            ..Default::default()
+        },
+        conversion_trace: vec![],
+    };
+    gm.engine
+        .db
+        .upsert_module_bundle(
+            &bundle,
+            None,
+            "source_pre_context_generic",
+            "parse_pre_context_generic",
+        )
+        .await
+        .unwrap();
+    gm.engine
+        .db
+        .create_session(&session_id, "rs", Some(&module_id))
+        .await
+        .unwrap();
+    gm.engine
+        .db
+        .set_session_scene(&session_id, "loc_ground")
+        .await
+        .unwrap();
+
+    req.request.module_id = Some(module_id.clone());
+    req.request.session_id = session_id;
+    req.request.turn_id = format!("t_pre_context_generic_{}", uuid::Uuid::new_v4().simple());
+    req.module_id = Some(module_id);
+    req.state.scene_id = Some("loc_ground".into());
+    req.user_input =
+        "Maggie will enter loc_basement, the Corbitt House: Basement, and test the safer left foothold.".into();
+
+    let mut stream = execute_turn(gm, req, CANONICAL_TURN_PLAN);
+    let mut outcome_text = String::new();
+    let mut saw_transition = false;
+    while let Some(ev) = stream.next().await {
+        match ev {
+            TurnEvent::SceneTransition { to, .. } => {
+                saw_transition = to == "loc_basement";
+            }
+            TurnEvent::TurnComplete {
+                outcome: TurnOutcome::Narration(text),
+            } => {
+                outcome_text = text;
+            }
+            _ => {}
+        }
+    }
+
+    match old_gate {
+        Some(v) => std::env::set_var("TRPG_PRESENTATION_GATE", v),
+        None => std::env::remove_var("TRPG_PRESENTATION_GATE"),
+    }
+    match old_split {
+        Some(v) => std::env::set_var("TRPG_NARRATOR_SPLIT", v),
+        None => std::env::remove_var("TRPG_NARRATOR_SPLIT"),
+    }
+    match old_lang {
+        Some(v) => std::env::set_var("TRPG_OUTPUT_LANGUAGE", v),
+        None => std::env::remove_var("TRPG_OUTPUT_LANGUAGE"),
+    }
+
+    assert!(
+        saw_transition,
+        "test must exercise a pre-context scene transition"
+    );
+    assert!(
+        outcome_text.contains("地下室底端偏左")
+            && !outcome_text.contains("推进到新的可见区域"),
+        "pre-context transition must receive the same destination repair as critical transitions: {outcome_text}"
+    );
 }
 
 // ============================ P1-3 follow-up: 取消令牌掐断在途 LLM ============================

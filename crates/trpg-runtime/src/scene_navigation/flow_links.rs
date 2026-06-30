@@ -27,7 +27,12 @@ use trpg_model::{LinkType, ScenarioNode};
 /// 今日 link_type-agnostic 基线。对标 producer 侧 `flow_links_enabled` 默认关形态。
 pub fn nav_follow_flow_links_enabled() -> bool {
     std::env::var("TRPG_NAV_FOLLOW_FLOW_LINKS")
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes"))
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "on" | "yes"
+            )
+        })
         .unwrap_or(false)
 }
 
@@ -159,7 +164,11 @@ mod tests {
                 "Warehouse Entry",
                 vec![
                     link("side", LinkType::Spatial, None),
-                    link("deep", LinkType::Sequential, Some("press deeper along the cable")),
+                    link(
+                        "deep",
+                        LinkType::Sequential,
+                        Some("press deeper along the cable"),
+                    ),
                 ],
             ),
             node("deep", "Warehouse Depths", vec![]),
@@ -199,8 +208,16 @@ mod tests {
             "已授权 sequential 脊必须排第一，实际首行: {}",
             lines[0]
         );
-        assert!(lines[0].contains("已授权流转脊"), "脊边必须标注，实际: {}", lines[0]);
-        assert!(lines[0].contains("顺序衔接"), "sequential 标其类型，实际: {}", lines[0]);
+        assert!(
+            lines[0].contains("已授权流转脊"),
+            "脊边必须标注，实际: {}",
+            lines[0]
+        );
+        assert!(
+            lines[0].contains("顺序衔接"),
+            "sequential 标其类型，实际: {}",
+            lines[0]
+        );
         assert_eq!(lines[1], "side | Side Office", "spatial 桥排后且无标注");
     }
 
@@ -233,17 +250,41 @@ mod tests {
     // is_authored_flow_link：仅 (非 Spatial) ∧ (非空 anchor) 为真。
     #[test]
     fn is_authored_flow_link_discriminates_correctly() {
-        assert!(is_authored_flow_link(&link("x", LinkType::Sequential, Some("cue"))));
-        assert!(is_authored_flow_link(&link("x", LinkType::Trigger, Some("cue"))));
-        assert!(is_authored_flow_link(&link("x", LinkType::Branch, Some("cue"))));
+        assert!(is_authored_flow_link(&link(
+            "x",
+            LinkType::Sequential,
+            Some("cue")
+        )));
+        assert!(is_authored_flow_link(&link(
+            "x",
+            LinkType::Trigger,
+            Some("cue")
+        )));
+        assert!(is_authored_flow_link(&link(
+            "x",
+            LinkType::Branch,
+            Some("cue")
+        )));
         // spatial 桥（anchor=None）→ false
         assert!(!is_authored_flow_link(&link("x", LinkType::Spatial, None)));
         // 兜底 Sequential（anchor=None）→ false（ensure_entry_connected 形态）
-        assert!(!is_authored_flow_link(&link("x", LinkType::Sequential, None)));
+        assert!(!is_authored_flow_link(&link(
+            "x",
+            LinkType::Sequential,
+            None
+        )));
         // 空白 anchor（trim 后空）→ false
-        assert!(!is_authored_flow_link(&link("x", LinkType::Sequential, Some("   "))));
+        assert!(!is_authored_flow_link(&link(
+            "x",
+            LinkType::Sequential,
+            Some("   ")
+        )));
         // 即便标了 anchor，spatial 仍 false（脊只认有向型）
-        assert!(!is_authored_flow_link(&link("x", LinkType::Spatial, Some("cue"))));
+        assert!(!is_authored_flow_link(&link(
+            "x",
+            LinkType::Spatial,
+            Some("cue")
+        )));
     }
 
     // flag 默认 OFF（未设时）；显式 1/on 开、0 关。
@@ -251,7 +292,10 @@ mod tests {
     fn nav_follow_flow_links_flag_defaults_off_and_parses() {
         let saved = std::env::var("TRPG_NAV_FOLLOW_FLOW_LINKS").ok();
         std::env::remove_var("TRPG_NAV_FOLLOW_FLOW_LINKS");
-        assert!(!nav_follow_flow_links_enabled(), "未设 ⇒ 默认 OFF（字节等价基线）");
+        assert!(
+            !nav_follow_flow_links_enabled(),
+            "未设 ⇒ 默认 OFF（字节等价基线）"
+        );
         std::env::set_var("TRPG_NAV_FOLLOW_FLOW_LINKS", "1");
         assert!(nav_follow_flow_links_enabled(), "\"1\" ⇒ ON");
         std::env::set_var("TRPG_NAV_FOLLOW_FLOW_LINKS", "on");
@@ -284,6 +328,9 @@ mod tests {
             p.contains("绝不 teleport") || p.contains("moved=false"),
             "反铁路：玩家跑偏不可强推/teleport"
         );
-        assert!(p.contains("fail-closed") || p.contains("绝不编造"), "保留 fail-closed");
+        assert!(
+            p.contains("fail-closed") || p.contains("绝不编造"),
+            "保留 fail-closed"
+        );
     }
 }

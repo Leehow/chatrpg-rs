@@ -39,9 +39,16 @@ const PREP_ESTABLISHING_FIELDS: &[&str] = &[
 /// 键名含这些标记 ⇒ 视为 GM-only,纵深防御直接跳过(即便误入白名单父对象)。
 fn key_is_gm_only(key: &str) -> bool {
     let k = key.to_ascii_lowercase();
-    ["gm_only", "keeper_only", "secret", "spoiler", "redacted", "hidden"]
-        .iter()
-        .any(|m| k.contains(m))
+    [
+        "gm_only",
+        "keeper_only",
+        "secret",
+        "spoiler",
+        "redacted",
+        "hidden",
+    ]
+    .iter()
+    .any(|m| k.contains(m))
 }
 
 /// 取 `a.b` 点路径下的非空字符串(trim 后);任一层键名 GM-only ⇒ None。
@@ -195,7 +202,11 @@ mod tests {
         let m = module(vec![sc]);
         let out = collect_scene_establishing(&[m], Some("m1"), Some("sc1"));
         assert_eq!(out.len(), 1);
-        assert!(!out[0].contains("莫里亚蒂教授"), "secret redacted: {}", out[0]);
+        assert!(
+            !out[0].contains("莫里亚蒂教授"),
+            "secret redacted: {}",
+            out[0]
+        );
     }
 
     #[test]
@@ -237,10 +248,16 @@ mod tests {
         assert!(joined.contains("Mercantile Avenue"), "{joined}");
         assert!(joined.contains("自发哭泣"), "{joined}");
         // 谜底 / GM-only / 风格指令绝不出现。
-        assert!(!joined.contains("被囚禁"), "spoiler/gm_only leaked: {joined}");
+        assert!(
+            !joined.contains("被囚禁"),
+            "spoiler/gm_only leaked: {joined}"
+        );
         assert!(!joined.contains("Serena 是源头"), "secret leaked: {joined}");
         assert!(!joined.contains("1500"), "redacted leaked: {joined}");
-        assert!(!joined.contains("催眠感"), "style_prompt leaked as content: {joined}");
+        assert!(
+            !joined.contains("催眠感"),
+            "style_prompt leaked as content: {joined}"
+        );
     }
 
     #[test]

@@ -175,7 +175,10 @@ mod tests {
     fn forbidden_action_exhibited_is_flagged() {
         // Persona boundary "never harm a child" becomes a forbidden action.
         let p = plan(rel(0, 0, 0), &[]);
-        assert!(p.forbidden_actions.iter().any(|a| a == "never harm a child"));
+        assert!(p
+            .forbidden_actions
+            .iter()
+            .any(|a| a == "never harm a child"));
         let markers = vec![BehaviorSurfaceMarker::new(
             "never harm a child",
             vec!["strikes the child".into()],
@@ -218,8 +221,7 @@ mod tests {
             "sing a song",
             vec!["sings".into()],
         )];
-        let findings =
-            scan_npc_behavior_consistency(&p, "Lars sings cheerfully.", &markers);
+        let findings = scan_npc_behavior_consistency(&p, "Lars sings cheerfully.", &markers);
         assert!(
             findings.is_empty(),
             "only genuine plan forbidden_actions may be flagged"
@@ -234,11 +236,7 @@ mod tests {
             "never harm a child",
             vec![secret_substr.into()],
         )];
-        let findings = scan_npc_behavior_consistency(
-            &p,
-            "Lars strikes the child.",
-            &markers,
-        );
+        let findings = scan_npc_behavior_consistency(&p, "Lars strikes the child.", &markers);
         assert_eq!(findings.len(), 1);
         assert!(
             !findings[0].detail.contains(secret_substr),

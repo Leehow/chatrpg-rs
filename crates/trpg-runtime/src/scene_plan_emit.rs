@@ -73,8 +73,13 @@ pub async fn emit_scene_plan_on_change(
     let module_cfg = db.load_module_config(module_id).await;
     let director_cfg = module_cfg.as_ref().and_then(|m| m.director.as_ref());
 
-    let (_plan, event) =
-        build_scene_plan_emission(session_id, turn_id, scene_id, &story.active_threads, director_cfg);
+    let (_plan, event) = build_scene_plan_emission(
+        session_id,
+        turn_id,
+        scene_id,
+        &story.active_threads,
+        director_cfg,
+    );
 
     // Additive + fail-soft write-through: appending the ledger row must NEVER reverse the committed
     // scene switch, so a failure only warns.

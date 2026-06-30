@@ -130,7 +130,10 @@ async fn the_vault_gm_claim_loop_admits_through_live_gateway() {
         accepted.atom_id, offer.atom_id,
         "atom_id is RUST-resolved from the OfferSet, never named by the LLM"
     );
-    assert_eq!(accepted.basis_event_ids, vec!["de_clue_learn_live".to_string()]);
+    assert_eq!(
+        accepted.basis_event_ids,
+        vec!["de_clue_learn_live".to_string()]
+    );
     assert_eq!(accepted.turn_id, TURN);
     assert!(
         !accepted.source_refs.is_empty(),
@@ -144,7 +147,10 @@ async fn the_vault_gm_claim_loop_admits_through_live_gateway() {
         basis: NonEmpty::from_vec(vec![TurnLocalRef::Commit(0)]).unwrap(),
     };
     let r_unknown = EvidenceGateway::admit(&forged_unknown, &inp).unwrap_err();
-    eprintln!("RAN: REJECT log ⇒ cap=cap_fabricated_by_llm REJECTED reason={}", r_unknown.as_str());
+    eprintln!(
+        "RAN: REJECT log ⇒ cap=cap_fabricated_by_llm REJECTED reason={}",
+        r_unknown.as_str()
+    );
     assert_eq!(r_unknown, RejectionReason::UnknownCapability);
 
     // (b) Expired: the same valid cap, but admitted in a LATER turn (offer's window passed).
@@ -157,7 +163,11 @@ async fn the_vault_gm_claim_loop_admits_through_live_gateway() {
         ledger: &ledger,
     };
     let r_expired = EvidenceGateway::admit(&valid_claim, &expired_scope).unwrap_err();
-    eprintln!("RAN: REJECT log ⇒ cap={} (turn_999) REJECTED reason={}", offer.cap_id.as_str(), r_expired.as_str());
+    eprintln!(
+        "RAN: REJECT log ⇒ cap={} (turn_999) REJECTED reason={}",
+        offer.cap_id.as_str(),
+        r_expired.as_str()
+    );
     assert_eq!(r_expired, RejectionReason::Expired);
 
     // (c) DuplicateEvidence: admit the same valid claim again against a ledger that
@@ -173,7 +183,11 @@ async fn the_vault_gm_claim_loop_admits_through_live_gateway() {
         ledger: &seeded,
     };
     let r_dup = EvidenceGateway::admit(&valid_claim, &dup_inp).unwrap_err();
-    eprintln!("RAN: REJECT log ⇒ cap={} (replay) REJECTED reason={}", offer.cap_id.as_str(), r_dup.as_str());
+    eprintln!(
+        "RAN: REJECT log ⇒ cap={} (replay) REJECTED reason={}",
+        offer.cap_id.as_str(),
+        r_dup.as_str()
+    );
     assert_eq!(r_dup, RejectionReason::DuplicateEvidence);
 
     // ---- (2.5) the parser is fail-closed on a forged objective field (closed schema) ----
@@ -182,7 +196,11 @@ async fn the_vault_gm_claim_loop_admits_through_live_gateway() {
         {"cap_id": offer.cap_id.as_str(), "basis": ["commit:0"], "completed": true}
     ]});
     let parsed = parse_progress_claims(&forged_sidecar);
-    assert_eq!(parsed.len(), 1, "the forged `completed` claim is dropped; the closed one parses");
+    assert_eq!(
+        parsed.len(),
+        1,
+        "the forged `completed` claim is dropped; the closed one parses"
+    );
 
     // ---- (3) OFF run: shadow gate false by default ⇒ no parse/admit/ledger write ----
     assert!(

@@ -16,6 +16,16 @@ pub struct TurnLedgerSnapshot {
     pub parameter_impacts: Vec<ParameterImpact>,
     #[serde(default)]
     pub interaction_gates: Vec<InteractionGate>,
+    #[serde(default)]
+    pub committed_world_facts: Vec<CommittedWorldFactEvidence>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CommittedWorldFactEvidence {
+    pub fact_id: String,
+    pub summary: String,
+    #[serde(default)]
+    pub truth_status: Option<String>,
 }
 
 impl TurnLedgerSnapshot {
@@ -23,6 +33,20 @@ impl TurnLedgerSnapshot {
         !self.check_contracts.is_empty()
             || !self.check_results.is_empty()
             || self.has_open_player_roll_gate()
+    }
+
+    pub fn has_check_fact_for_text(&self, text: &str) -> bool {
+        self.has_check_fact() || self.committed_world_fact_quotes_check_text(text)
+    }
+
+    fn committed_world_fact_quotes_check_text(&self, text: &str) -> bool {
+        let text = normalize_text(text);
+        self.committed_world_facts.iter().any(|fact| {
+            fact_truth_is_true(fact.truth_status.as_deref())
+                && world_fact_check_fragments(&normalize_text(&fact.summary))
+                    .iter()
+                    .any(|fragment| text.contains(fragment))
+        })
     }
 
     pub fn has_executed_check(&self) -> bool {
@@ -46,6 +70,19 @@ impl TurnLedgerSnapshot {
                 .check_results
                 .iter()
                 .any(|result| !result.committed_patches.is_empty())
+    }
+
+    pub fn has_effect_evidence_for_text(&self, text: &str) -> bool {
+        self.has_effect_evidence() || self.committed_world_fact_supports_effect_text(text)
+    }
+
+    fn committed_world_fact_supports_effect_text(&self, text: &str) -> bool {
+        let text = normalize_text(text);
+        self.committed_world_facts.iter().any(|fact| {
+            fact_truth_is_true(fact.truth_status.as_deref())
+                && !fact.summary.trim().is_empty()
+                && effect_family_overlap(&normalize_text(&fact.summary), &text)
+        })
     }
 
     fn visible_evidence_tokens(&self) -> Vec<String> {
@@ -184,7 +221,8 @@ impl NarrationVerifier {
         ledger: &TurnLedgerSnapshot,
         submission: &FinalNarrationSubmission,
     ) -> NarrationVerifierResult {
-        let text = normalize_text(&submission.player_visible_text);
+        let player_visible_text = strip_gm_only_sidecars(&submission.player_visible_text);
+        let text = normalize_text(&player_visible_text);
         let mut findings = Vec::new();
 
         for claim in &submission.mechanical_claims {
@@ -222,7 +260,7 @@ impl NarrationVerifier {
                 | MechanicalClaimKind::Object
                 | MechanicalClaimKind::Clock
                 | MechanicalClaimKind::State => {
-                    if !ledger.has_effect_evidence() {
+                    if !ledger.has_effect_evidence_for_text(&claim.text) {
                         findings.push(VerifierFinding::blocker(
                             VerifierFindingKind::InventedEffect,
                             format!(
@@ -254,16 +292,18 @@ impl NarrationVerifier {
             // 即使 final narration 引用了合法 check/roll ledger id，也不能让这些引用
             // 掩盖额外声称的资源/伤害/状态变化；effect 仍必须有 apply_effect /
             // parameter impact 证据。
-            let luck_spend_adjustment =
-                text_says_luck_spend_adjustment(&text) && ledger.has_effect_evidence();
-            if text_says_check_or_roll(&text) && !luck_spend_adjustment && !ledger.has_check_fact()
+            let luck_spend_adjustment = text_says_luck_spend_adjustment(&text)
+                && ledger.has_effect_evidence_for_text(&text);
+            if text_says_check_or_roll(&text)
+                && !luck_spend_adjustment
+                && !ledger.has_check_fact_for_text(&text)
             {
                 findings.push(VerifierFinding::blocker(
                     VerifierFindingKind::MissingCheck,
                     "fallback:substring_scan: final narration mentions a check/roll, but no ledger check fact exists",
                 ));
             }
-            if text_says_effect(&text) && !ledger.has_effect_evidence() {
+            if text_says_effect(&text) && !ledger.has_effect_evidence_for_text(&text) {
                 findings.push(VerifierFinding::blocker(
                     VerifierFindingKind::InventedEffect,
                     "fallback:substring_scan: final narration mentions a mechanical effect, but no ledger effect evidence exists",
@@ -284,6 +324,27 @@ impl NarrationVerifier {
             findings.push(VerifierFinding::blocker(
                 VerifierFindingKind::ManualRollRequest,
                 "final narration asks the player to provide dice totals under system-rolls-visible policy",
+            ));
+        }
+
+        if text_mislabels_static_dv_as_opposed(&text, ledger) {
+            findings.push(VerifierFinding::blocker(
+                VerifierFindingKind::InventedEffect,
+                "final narration labels a static DV/DC check as opposed, but the ledger has no opposed check target",
+            ));
+        }
+
+        if blocked_movement_check_narrated_as_arrival(&text, ledger) {
+            findings.push(VerifierFinding::blocker(
+                VerifierFindingKind::InventedEffect,
+                "final narration treats a blocked movement/location check as completed arrival, but the ledger has no resolved movement result",
+            ));
+        }
+
+        if let Some(detail) = player_agency_violation_detail(&player_visible_text) {
+            findings.push(VerifierFinding::blocker(
+                VerifierFindingKind::PlayerAgencyViolation,
+                detail,
             ));
         }
 
@@ -345,6 +406,7 @@ pub enum VerifierFindingKind {
     InventedEffect,
     OmittedVisibleResult,
     ManualRollRequest,
+    PlayerAgencyViolation,
     SecretLeak,
 }
 
@@ -368,6 +430,11 @@ pub enum VerifierNextAction {
 
 fn next_action_for(findings: &[VerifierFinding]) -> Option<VerifierNextAction> {
     if findings
+        .iter()
+        .any(|f| f.kind == VerifierFindingKind::PlayerAgencyViolation)
+    {
+        Some(VerifierNextAction::ReviseText)
+    } else if findings
         .iter()
         .any(|f| f.kind == VerifierFindingKind::MissingCheck)
     {
@@ -422,6 +489,104 @@ fn visibility_is_player_visible(visibility: Visibility) -> bool {
 
 fn normalize_text(text: &str) -> String {
     text.to_lowercase()
+}
+
+fn strip_tagged_block(text: &str, tag: &str) -> String {
+    let open = format!("[{tag}]");
+    let close = format!("[/{tag}]");
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+
+    while let Some(start) = rest.find(&open) {
+        out.push_str(&rest[..start]);
+        let after_open = &rest[start + open.len()..];
+        if let Some(end) = after_open.find(&close) {
+            rest = &after_open[end + close.len()..];
+        } else {
+            out.push_str(&rest[start..]);
+            return out;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn strip_gm_only_sidecars(text: &str) -> String {
+    [
+        "evidence_audit",
+        "evidence_attempts",
+        "progress_claims",
+        "materialized_content",
+        "hide",
+        "meta",
+    ]
+    .iter()
+    .fold(text.to_string(), |acc, tag| strip_tagged_block(&acc, tag))
+}
+
+fn fact_truth_is_true(truth_status: Option<&str>) -> bool {
+    matches!(truth_status, Some("true"))
+}
+
+fn text_has_any(text: &str, terms: &[&str]) -> bool {
+    terms.iter().any(|term| text.contains(term))
+}
+
+fn effect_family_overlap(fact_text: &str, narration_text: &str) -> bool {
+    const FAMILIES: &[&[&str]] = &[
+        &[
+            "power",
+            "powered",
+            "breaker",
+            "emergency stop",
+            "shut down",
+            "shutdown",
+            "server cable",
+            "供电",
+            "断电",
+            "电闸",
+            "急停",
+            "电源",
+            "缆线",
+        ],
+        &[
+            "hp",
+            "hit point",
+            "生命值",
+            "damage",
+            "伤害",
+            "wound",
+            "injury",
+        ],
+        &["luck", "幸运", "resource", "资源", "sanity", "san", "理智"],
+        &[
+            "condition",
+            "status",
+            "disabled",
+            "broken",
+            "状态",
+            "关闭",
+            "离线",
+            "停机",
+            "破坏",
+            "摧毁",
+        ],
+        &["clock", "progress", "进度"],
+    ];
+
+    FAMILIES
+        .iter()
+        .any(|family| text_has_any(fact_text, family) && text_has_any(narration_text, family))
+}
+
+fn world_fact_check_fragments(fact_text: &str) -> Vec<String> {
+    fact_text
+        .split(|c| matches!(c, '.' | '。' | ';' | '；' | '\n' | '\r'))
+        .map(str::trim)
+        .filter(|fragment| fragment.chars().count() >= 16)
+        .filter(|fragment| fragment.contains("check") || fragment.contains("检定"))
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn push_token(tokens: &mut Vec<String>, token: &str) {
@@ -527,6 +692,120 @@ fn term_followed_by_check_word(text: &str, byte_idx: usize, term: &str) -> bool 
         .any(|word| after.contains(word))
 }
 
+fn is_ascii_word_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
+}
+
+fn term_occurrence_has_word_boundary(text: &str, byte_idx: usize, term: &str) -> bool {
+    if !term
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return true;
+    }
+    let before = text[..byte_idx].chars().next_back();
+    let after = text[byte_idx + term.len()..].chars().next();
+    before.is_none_or(|ch| !is_ascii_word_char(ch))
+        && after.is_none_or(|ch| !is_ascii_word_char(ch))
+}
+
+fn line_around_byte(text: &str, byte_idx: usize) -> &str {
+    let start = text[..byte_idx].rfind('\n').map(|idx| idx + 1).unwrap_or(0);
+    let end = text[byte_idx..]
+        .find('\n')
+        .map(|idx| byte_idx + idx)
+        .unwrap_or(text.len());
+    &text[start..end]
+}
+
+fn line_looks_like_option(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("- ")
+        || trimmed.starts_with("* ")
+        || trimmed.starts_with("•")
+        || trimmed.chars().next().is_some_and(|ch| ch.is_ascii_digit())
+            && trimmed
+                .chars()
+                .nth(1)
+                .is_some_and(|ch| ch == '.' || ch == '、')
+}
+
+fn mechanical_term_is_future_option(text: &str, byte_idx: usize) -> bool {
+    let line = line_around_byte(text, byte_idx);
+    let before = chars_before(text, byte_idx, 240);
+    let context = format!("{before}{line}");
+    let has_option_shape = line_looks_like_option(line);
+    let has_future_cue = [
+        "你可以",
+        "可以立刻",
+        "可以立刻做的有",
+        "可以立刻选择",
+        "能立刻做的有",
+        "下一步",
+        "接下来",
+        "从这里",
+        "要定的是",
+        "要哪一个",
+        "你要",
+        "选择",
+        "要么",
+        "或者",
+        "what do you do",
+        "you could",
+        "from here",
+        "or ",
+    ]
+    .iter()
+    .any(|cue| context.contains(cue));
+    has_option_shape && has_future_cue
+}
+
+fn mechanical_term_is_nonmechanical_homograph(text: &str, byte_idx: usize, term: &str) -> bool {
+    let window = text_window(text, byte_idx, 8, 8);
+    match term {
+        "扣" => [
+            "连接扣",
+            "固定扣",
+            "卡扣",
+            "搭扣",
+            "衣扣",
+            "扣上",
+            "扣住",
+            "扣紧",
+            "扣动",
+            "扣下",
+            "扣回",
+            "扣稳",
+            "扣着",
+        ]
+        .iter()
+        .any(|marker| window.contains(marker)),
+        "状态" => ["状态面板", "状态灯", "状态栏", "状态显示", "状态读数"]
+            .iter()
+            .any(|marker| window.contains(marker)),
+        _ => false,
+    }
+}
+
+fn environment_activation_context_is_negated_or_hypothetical(context: &str) -> bool {
+    [
+        "还没真正启动",
+        "没真正启动",
+        "没有真正启动",
+        "未真正启动",
+        "并未启动",
+        "没有启动",
+        "还没启动",
+        "未启动",
+        "怀疑会重新启动",
+        "可能重新启动",
+        "可能会重新启动",
+        "会重新启动",
+    ]
+    .iter()
+    .any(|marker| context.contains(marker))
+}
+
 fn context_has_number(text: &str) -> bool {
     text.chars().any(|c| c.is_ascii_digit())
         || [
@@ -534,6 +813,69 @@ fn context_has_number(text: &str) -> bool {
         ]
         .iter()
         .any(|word| text.contains(word))
+}
+
+fn text_says_environment_activation_effect(text: &str) -> bool {
+    let anchors = [
+        "电动门",
+        "闸门",
+        "舱门",
+        "门",
+        "机构",
+        "设备",
+        "炮塔",
+        "无人机",
+        "drone",
+        "turret",
+    ];
+    let activation_verbs = [
+        "打开",
+        "开启",
+        "开了一截",
+        "启动",
+        "激活",
+        "苏醒",
+        "复位",
+        "露头",
+        "开始动作",
+        "转动起来",
+        "重新启动",
+        "重新苏醒",
+    ];
+    let causation_cues = [
+        "你",
+        "这一下",
+        "立刻",
+        "随即",
+        "随后",
+        "结果",
+        "相反",
+        "回应",
+        "触发",
+        "导致",
+        "失败",
+        "误触",
+        "重新",
+        "开始",
+    ];
+
+    anchors.iter().any(|anchor| {
+        text.match_indices(anchor).any(|(idx, _)| {
+            if mechanical_term_is_negated(text, idx) {
+                return false;
+            }
+            if mechanical_term_is_future_option(text, idx) {
+                return false;
+            }
+            let context = text_window(text, idx, 32, 48);
+            if environment_activation_context_is_negated_or_hypothetical(&context) {
+                return false;
+            }
+            let has_activation = activation_verbs.iter().any(|verb| context.contains(verb));
+            let has_causation = causation_cues.iter().any(|cue| context.contains(cue));
+            has_activation && has_causation
+        })
+    })
 }
 
 fn text_says_check_or_roll(text: &str) -> bool {
@@ -551,8 +893,11 @@ fn text_says_check_or_roll(text: &str) -> bool {
     ]
     .iter()
     .any(|term| {
-        text.match_indices(term)
-            .any(|(idx, _)| !mechanical_term_is_negated(text, idx))
+        text.match_indices(term).any(|(idx, _)| {
+            term_occurrence_has_word_boundary(text, idx, term)
+                && !mechanical_term_is_negated(text, idx)
+                && !mechanical_term_is_future_option(text, idx)
+        })
     })
 }
 
@@ -605,29 +950,38 @@ fn text_says_effect(text: &str) -> bool {
     ];
     let effect_verbs = [
         "受到", "造成", "失去", "损失", "扣", "扣除", "花费", "消耗", "减少", "降低", "恢复",
-        "回复", "增加", "治疗", "获得", "陷入", "移除", "推进", "破坏", "摧毁",
+        "回复", "增加", "治疗", "获得", "陷入", "移除", "推进", "改变", "变为", "变成", "破坏",
+        "摧毁",
     ];
 
-    effect_terms.iter().any(|term| {
-        text.match_indices(term).any(|(idx, _)| {
-            if mechanical_term_is_negated(text, idx) {
-                return false;
-            }
-            if matches!(*term, "伤害" | "理智" | "san" | "sanity")
-                && term_followed_by_check_word(text, idx, term)
-            {
-                return false;
-            }
+    text_says_environment_activation_effect(text)
+        || effect_terms.iter().any(|term| {
+            text.match_indices(term).any(|(idx, _)| {
+                if !term_occurrence_has_word_boundary(text, idx, term) {
+                    return false;
+                }
+                if mechanical_term_is_negated(text, idx) {
+                    return false;
+                }
+                if mechanical_term_is_future_option(text, idx)
+                    || mechanical_term_is_nonmechanical_homograph(text, idx, term)
+                {
+                    return false;
+                }
+                if matches!(*term, "伤害" | "理智" | "san" | "sanity")
+                    && term_followed_by_check_word(text, idx, term)
+                {
+                    return false;
+                }
 
-            let context = text_window(text, idx, 18, 18);
-            let has_effect_verb = effect_verbs.iter().any(|verb| context.contains(verb));
-            let object_state_term = matches!(
-                *term,
-                "condition" | "状态" | "clock" | "进度" | "破坏" | "摧毁"
-            );
-            object_state_term || (has_effect_verb && context_has_number(&context))
+                let context = text_window(text, idx, 18, 18);
+                let has_effect_verb = effect_verbs.iter().any(|verb| context.contains(verb));
+                let object_state_term = matches!(*term, "condition" | "状态" | "clock" | "进度");
+                let destructive_term = matches!(*term, "破坏" | "摧毁");
+                destructive_term
+                    || (has_effect_verb && (object_state_term || context_has_number(&context)))
+            })
         })
-    })
 }
 
 fn text_asks_player_for_manual_roll(text: &str) -> bool {
@@ -638,6 +992,539 @@ fn text_asks_player_for_manual_roll(text: &str) -> bool {
         .iter()
         .any(|term| text.contains(term));
     asks_roll && asks_total
+}
+
+fn text_mislabels_static_dv_as_opposed(text: &str, ledger: &TurnLedgerSnapshot) -> bool {
+    let says_opposed_static_target = ["对抗 dv", "对抗dv", "对抗 dc", "对抗dc"]
+        .iter()
+        .any(|needle| text.contains(needle));
+    if !says_opposed_static_target {
+        return false;
+    }
+    let has_static = ledger
+        .check_contracts
+        .iter()
+        .any(|check| matches!(check.target, CheckTargetModel::StaticNumber { .. }))
+        || ledger
+            .check_results
+            .iter()
+            .any(check_result_records_static_target);
+    let has_opposed = ledger
+        .check_contracts
+        .iter()
+        .any(|check| matches!(check.target, CheckTargetModel::Opposed { .. }))
+        || ledger
+            .check_results
+            .iter()
+            .any(check_result_records_opposed);
+    has_static && !has_opposed
+}
+
+fn check_result_records_static_target(result: &CheckResultRecord) -> bool {
+    result
+        .outcome
+        .pointer("/opposition_kind")
+        .and_then(Value::as_str)
+        == Some("static_check")
+        || result
+            .outcome
+            .pointer("/resolution_model/kind")
+            .and_then(Value::as_str)
+            == Some("static_target_number")
+}
+
+fn check_result_records_opposed(result: &CheckResultRecord) -> bool {
+    result.outcome.pointer("/opposed").is_some()
+        || result
+            .outcome
+            .pointer("/opposition_kind")
+            .and_then(Value::as_str)
+            == Some("opposed_check")
+        || matches!(
+            result
+                .outcome
+                .pointer("/resolution_model/kind")
+                .and_then(Value::as_str),
+            Some("opposed_roll" | "dice_pool_opposed")
+        )
+}
+
+fn blocked_movement_check_narrated_as_arrival(text: &str, ledger: &TurnLedgerSnapshot) -> bool {
+    ledger
+        .check_results
+        .iter()
+        .any(check_result_is_blocked_movement)
+        && text_claims_completed_movement(text)
+}
+
+fn check_result_is_blocked_movement(result: &CheckResultRecord) -> bool {
+    if result.outcome.pointer("/blocked").and_then(Value::as_bool) != Some(true) {
+        return false;
+    }
+    let label = result
+        .outcome
+        .pointer("/check_label")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    [
+        "move", "dash", "cross", "reach", "approach", "enter", "sprint", "run", "冲", "移动",
+        "穿过", "抵达", "到达", "进入", "靠近", "贴",
+    ]
+    .iter()
+    .any(|cue| label.contains(cue))
+}
+
+fn text_claims_completed_movement(text: &str) -> bool {
+    [
+        "你已经不在",
+        "你人稳在",
+        "你稳在",
+        "你已经到了",
+        "你已经到达",
+        "你到达",
+        "你抵达",
+        "你来到",
+        "你进入",
+        "你冲进",
+        "你穿过",
+        "你移动到",
+        "你挪到",
+        "你把身体收进",
+        "把身体收进",
+        "你稳稳藏进",
+        "稳稳藏进",
+        "你已经伏在",
+        "你伏在",
+        "你贴上",
+        "你贴到",
+        "你贴住",
+        "贴住门框",
+    ]
+    .iter()
+    .any(|cue| text.contains(cue))
+}
+
+fn player_agency_violation_detail(text: &str) -> Option<String> {
+    let lowered = normalize_text(text);
+    if hollow_suspension_of_declared_action(&lowered) {
+        return Some(
+            "player-facing narration suspends or negates a concrete player-declared action instead of resolving it into a current fictional result"
+                .to_string(),
+        );
+    }
+    let action_cues = [
+        "选择其一",
+        "可以选择",
+        "你现在可以立刻",
+        "你接下来可以",
+        "下一步你可以",
+        "下一步可以",
+        "可以直接做",
+        "可以立刻做",
+        "可以立刻做的有",
+        "做的有",
+        "几条路",
+        "选哪一个",
+    ];
+    if text_has_any(&lowered, &["选择其一", "选哪一个"]) {
+        return Some("player-facing narration presents an explicit choice prompt".to_string());
+    }
+    if text_has_any(
+        &lowered,
+        &[
+            "下一步可以",
+            "你下一步可以",
+            "接下来可以",
+            "你接下来可以",
+            "your next move could be",
+        ],
+    ) {
+        return Some(
+            "player-facing narration ends by prompting the player for a menu-like next action"
+                .to_string(),
+        );
+    }
+    if inline_followup_action_menu_violation(&lowered) {
+        return Some(
+            "player-facing narration presents inline follow-up opportunities as an action menu"
+                .to_string(),
+        );
+    }
+
+    let listed_lines = text
+        .lines()
+        .filter(|line| line_is_player_facing_list_item(line))
+        .count();
+    if listed_lines < 2 {
+        return None;
+    }
+
+    if text_has_any(&lowered, &action_cues) {
+        return Some(
+            "player-facing narration lists possible player actions instead of presenting diegetic affordances"
+                .to_string(),
+        );
+    }
+
+    let dump_cues = [
+        "关键事实",
+        "你已经确认",
+        "你已经能确定",
+        "能确定的是",
+        "现在能确认",
+        "你已经知道",
+        "你得到的信息",
+        "可你已经能确定",
+        "你可以确定",
+    ];
+    if text_has_any(text, &dump_cues) || listed_lines >= 3 {
+        return Some(
+            "player-facing narration dumps clues or findings as a manifest list".to_string(),
+        );
+    }
+
+    None
+}
+
+fn inline_followup_action_menu_violation(text: &str) -> bool {
+    if prepared_action_menu_violation(text) {
+        return true;
+    }
+    if prose_branch_action_menu_violation(text) {
+        return true;
+    }
+    if either_or_action_menu_violation(text) {
+        return true;
+    }
+    let menu_frame = [
+        "后续机会",
+        "实际的后续机会",
+        "实际机会",
+        "你现在有几个",
+        "你眼前有几个",
+        "你面前有几个",
+        "几个很近",
+        "你把这些观察串在一起",
+        "观察串在一起",
+    ];
+    if !text_has_any(text, &menu_frame) || !text.contains('：') && !text.contains(':') {
+        return false;
+    }
+
+    let branch_count =
+        text.matches('；').count() + text.matches("或者").count() + text.matches("或是").count();
+    if branch_count < 2 {
+        return false;
+    }
+
+    inline_player_action_branch_count(text) >= 2
+}
+
+fn prepared_action_menu_violation(text: &str) -> bool {
+    let tail = ["接下来你是准备", "接下来你准备"]
+        .iter()
+        .find_map(|cue| text.split_once(cue).map(|(_, rest)| rest));
+    let Some(tail) = tail else {
+        return false;
+    };
+    if !["还是", "或者", "或是"]
+        .iter()
+        .any(|connector| tail.contains(connector))
+    {
+        return false;
+    }
+    let branch_count = tail.matches("还是").count()
+        + tail.matches("或者").count()
+        + tail.matches("或是").count()
+        + tail.matches('；').count()
+        + tail.matches(';').count();
+    if branch_count < 2 {
+        return false;
+    }
+    tail.split('；')
+        .flat_map(|part| part.split(';'))
+        .flat_map(|part| part.split("还是"))
+        .flat_map(|part| part.split("或者"))
+        .flat_map(|part| part.split("或是"))
+        .filter(|part| branch_looks_like_player_action(part))
+        .count()
+        >= 2
+}
+
+fn either_or_action_menu_violation(text: &str) -> bool {
+    let has_frame = text.matches("要么").count() >= 2
+        || text.contains("要么") && (text.contains("或者") || text.contains("或是"));
+    if !has_frame {
+        return false;
+    }
+    text.split("要么")
+        .flat_map(|part| part.split("或者"))
+        .flat_map(|part| part.split("或是"))
+        .filter(|part| branch_looks_like_player_action(part))
+        .count()
+        >= 2
+}
+
+fn inline_player_action_branch_count(text: &str) -> usize {
+    let tail = text
+        .split_once('：')
+        .map(|(_, rest)| rest)
+        .or_else(|| text.split_once(':').map(|(_, rest)| rest))
+        .unwrap_or(text);
+    tail.split(|c| c == '；')
+        .flat_map(|part| part.split("或者"))
+        .flat_map(|part| part.split("或是"))
+        .filter(|part| branch_looks_like_player_action(part))
+        .count()
+}
+
+fn branch_looks_like_player_action(part: &str) -> bool {
+    let s = part.trim_matches(|c: char| c.is_whitespace() || "，。；:：、".contains(c));
+    if s.is_empty() {
+        return false;
+    }
+    if let Some((head, rest)) = s.split_once('，') {
+        if head.chars().count() <= 16 && branch_looks_like_player_action(rest) {
+            return true;
+        }
+    }
+    let action_starts = [
+        "先",
+        "再",
+        "继续",
+        "有人",
+        "下车",
+        "试着",
+        "尝试",
+        "冒险",
+        "顺着",
+        "确认",
+        "切断",
+        "断线",
+        "撬开",
+        "靠近",
+        "贴",
+        "冲",
+        "转向",
+        "追",
+        "开火",
+        "射击",
+        "喊话",
+        "撤",
+        "进入",
+        "压制",
+        "破坏",
+        "扑近",
+        "沿墙",
+        "摸到",
+        "想办法",
+    ];
+    if action_starts.iter().any(|prefix| s.starts_with(prefix)) {
+        return true;
+    }
+    s.starts_with('对')
+        && ["喊话", "发号施令", "开火", "射击"]
+            .iter()
+            .any(|verb| s.contains(verb))
+}
+
+fn prose_branch_action_menu_violation(text: &str) -> bool {
+    let frames = ["无论你是想", "无论你想", "无论你是要", "无论你要"];
+    if !text_has_any(text, &frames) || !text.contains("还是") {
+        return false;
+    }
+    let branch_count = text.matches('、').count()
+        + text.matches('，').count()
+        + text.matches('；').count()
+        + text.matches("或者").count()
+        + text.matches("或是").count()
+        + text.matches("还是").count();
+    if branch_count < 3 {
+        return false;
+    }
+    let action_verbs = [
+        "继续", "试着", "尝试", "冒险", "顺着", "确认", "切断", "断线", "撬开", "靠近", "贴", "冲",
+        "开火", "射击", "喊话", "撤", "进入", "压制", "破坏", "扑近", "沿墙", "摸到",
+    ];
+    action_verbs
+        .iter()
+        .filter(|verb| text.contains(**verb))
+        .count()
+        >= 3
+}
+
+fn hollow_suspension_of_declared_action(text: &str) -> bool {
+    let action_context = [
+        "冲",
+        "扑",
+        "跑",
+        "sprint",
+        "burst",
+        "warehouse",
+        "仓库",
+        "侧门",
+        "门把",
+        "警车",
+        "火线",
+        "掩体",
+        "墙根",
+        "线缆",
+        "走向",
+        "可接近",
+    ]
+    .iter()
+    .any(|term| text.contains(term));
+    if !action_context {
+        return false;
+    }
+
+    let still_in_starting_cover = text_has_any(
+        text,
+        &[
+            "还伏在",
+            "仍伏在",
+            "仍旧伏在",
+            "仍然伏在",
+            "依旧伏在",
+            "依然伏在",
+            "还压在",
+            "仍压在",
+            "仍然压在",
+            "依旧压在",
+            "依然压在",
+            "还蹲在",
+            "还躲在",
+        ],
+    ) && text_has_any(
+        text,
+        &[
+            "掩护后",
+            "警车后",
+            "巡逻车后",
+            "车后",
+            "这点掩护",
+            "这片掩护",
+        ],
+    );
+    let future_window = text_has_any(
+        text,
+        &[
+            "下一次",
+            "下一个",
+            "下轮",
+            "火力空隙",
+            "火力轮转",
+            "武器循环",
+            "空档",
+            "空隙",
+        ],
+    );
+    let wait_or_prepare = text_has_any(
+        text,
+        &["等", "等待", "准备", "随时", "就会", "将会", "才会", "就要"],
+    );
+    let departure_action = text_has_any(
+        text,
+        &[
+            "扑出去",
+            "冲出去",
+            "猛冲出去",
+            "跑出去",
+            "钻过去",
+            "扑向仓库",
+            "冲向仓库",
+            "离开掩体",
+        ],
+    );
+    let waiting_for_future_departure = text_has_any(
+        text,
+        &[
+            "等着下一个",
+            "等待下一个",
+            "等着下一次",
+            "等待下一次",
+            "随时准备抓住下一次",
+            "准备抓住下一次",
+            "下一次火力",
+            "下一个火力",
+            "下一次武器循环",
+        ],
+    ) && text_has_any(
+        text,
+        &[
+            "扑出去",
+            "冲出去",
+            "猛冲出去",
+            "跑出去",
+            "钻过去",
+            "扑向仓库",
+            "冲向仓库",
+        ],
+    );
+    let future_departure_from_cover =
+        text_has_any(text, &["下一次", "下一个", "火力稍稍回落", "火力轮转"])
+            && text_has_any(text, &["你就会", "才会", "将会", "就要从"])
+            && text_has_any(text, &["掩护后", "警车后", "巡逻车后", "这点掩护"])
+            && text_has_any(
+                text,
+                &[
+                    "冲出去",
+                    "猛冲出去",
+                    "扑出去",
+                    "跑出去",
+                    "扑向仓库",
+                    "冲向仓库",
+                ],
+            );
+    let no_result_suspension =
+        text_has_any(
+            text,
+            &[
+                "没有出现任何可见的变化",
+                "没有可见的变化",
+                "没有推进到新的位置",
+                "还没有明确显露",
+                "还没有从眼前",
+            ],
+        ) && text_has_any(text, &["线缆", "走向", "可接近", "机会或风险", "局面"]);
+
+    (text.contains("真正把身体甩出去") && text.contains("没有发生"))
+        || text.contains("这一扑还没有")
+        || text.contains("这一扑还没")
+        || text.contains("没有离开这辆警车")
+        || text.contains("没有离开警车")
+        || (text.contains("还没有摸到") && text.contains("门"))
+        || (text.contains("还没摸到") && text.contains("门"))
+        || (text.contains("只差那一瞬") && (text.contains("扑过去") || text.contains("冲出去")))
+        || (still_in_starting_cover && future_window && wait_or_prepare && departure_action)
+        || (still_in_starting_cover && waiting_for_future_departure)
+        || future_departure_from_cover
+        || no_result_suspension
+}
+
+fn line_is_player_facing_list_item(line: &str) -> bool {
+    let s = line.trim_start();
+    s.starts_with("- ") || s.starts_with("* ") || s.starts_with("• ") || line_starts_numbered(s)
+}
+
+fn line_starts_numbered(s: &str) -> bool {
+    let mut chars = s.chars().peekable();
+    let mut saw_digit = false;
+    while matches!(chars.peek(), Some(ch) if ch.is_ascii_digit()) {
+        saw_digit = true;
+        chars.next();
+    }
+    if !saw_digit {
+        return false;
+    }
+    match chars.next() {
+        Some('.') | Some('、') | Some(')') => match chars.peek() {
+            None => true,
+            Some(ch) => ch.is_whitespace() || *ch == '*',
+        },
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -985,6 +1872,910 @@ mod tests {
             player_visible_text: "高温与疲惫造成体力损耗：林岚失去 1 点生命值。".into(),
             mechanical_claims: vec![],
             referenced_ledger_ids: vec!["check_heat".into(), "roll_check_heat".into()],
+        };
+
+        let result = NarrationVerifier::default().verify(&ledger, &submission);
+
+        assert!(!result.accepted, "{:?}", result.findings);
+        assert!(
+            result
+                .findings
+                .iter()
+                .any(|f| f.kind == VerifierFindingKind::InventedEffect),
+            "{:?}",
+            result.findings
+        );
+    }
+
+    #[test]
+    fn verifier_fallback_accepts_prior_committed_power_fact_as_effect_evidence() {
+        // Live Homecoming regression: a later turn may restate an already
+        // committed world fact. The verifier should not treat that restatement
+        // as a new invented effect just because the current-turn ledger is empty.
+        let ledger = TurnLedgerSnapshot {
+            committed_world_facts: vec![CommittedWorldFactEvidence {
+                fact_id: "fact_cut_power".into(),
+                summary:
+                    "Found the main breaker / emergency stop and cut power to the server cables."
+                        .into(),
+                truth_status: Some("true".into()),
+            }],
+            ..Default::default()
+        };
+        let submission = FinalNarrationSubmission {
+            player_visible_text:
+                "此前找到并拍下总电闸/急停、切断服务器缆线供电已经成功成立；后续追加处理失败不会撤销这个既成事实。"
+                    .into(),
+            mechanical_claims: vec![],
+            referenced_ledger_ids: vec![],
+        };
+
+        let result = NarrationVerifier::default().verify(&ledger, &submission);
+
+        assert!(result.accepted, "{:?}", result.findings);
+        assert!(
+            result
+                .findings
+                .iter()
+                .all(|f| f.kind != VerifierFindingKind::InventedEffect),
+            "{:?}",
+            result.findings
+        );
+    }
+
+    #[test]
+    fn verifier_fallback_rejects_unrelated_world_fact_for_damage_claim() {
+        // A committed fact is evidence only for matching prior state, not a
+        // blanket waiver for fresh mechanics such as HP loss.
+        let ledger = TurnLedgerSnapshot {
+            committed_world_facts: vec![CommittedWorldFactEvidence {
+                fact_id: "fact_signage".into(),
+                summary: "The office sign on the door reads ED-02.".into(),
+                truth_status: Some("true".into()),
+            }],
+            ..Default::default()
+        };
+        let submission = FinalNarrationSubmission {
+            player_visible_text: "清道夫受到 8 点伤害，踉跄后退。".into(),
+            mechanical_claims: vec![],
+            referenced_ledger_ids: vec![],
+        };
+
+        let result = NarrationVerifier::default().verify(&ledger, &submission);
+
+        assert!(!result.accepted, "{:?}", result.findings);
+        assert!(
+            result
+                .findings
+                .iter()
+                .any(|f| f.kind == VerifierFindingKind::InventedEffect),
+            "{:?}",
+            result.findings
+        );
+    }
+
+    #[test]
+    fn verifier_fallback_allows_observed_power_status_without_effect_evidence() {
+        // Live Homecoming regression: "供电状态" can be an observed UI label or
+        // scene description. The substring "状态" alone is not a mechanical
+        // condition/effect claim.
+        let ledger = TurnLedgerSnapshot::default();
+        let submission = FinalNarrationSubmission {
+            player_visible_text:
+                "屏幕上显示多路连接和供电状态；这地方像个临时充电巢，设备还在工作。".into(),
+            mechanical_claims: vec![],
+            referenced_ledger_ids: vec![],
+        };
+
+        let result = NarrationVerifier::default().verify(&ledger, &submission);
+
+        assert!(result.accepted, "{:?}", result.findings);
+        assert!(
+            result
+                .findings
+                .iter()
+                .all(|f| f.kind != VerifierFindingKind::InventedEffect),
+            "{:?}",
+            result.findings
+        );
+    }
+
+    #[test]
+    fn verifier_fallback_allows_residual_power_observation_without_activation() {
+        // Live Homecoming regression: observing residual-power device status is
+        // not the same as causing doors/turrets/drones to activate.
+        let ledger = TurnLedgerSnapshot::default();
+        let submission = FinalNarrationSubmission {
+            player_visible_text:
+                "仓库深处另外几台接在系统上的老旧设备还带着残电：一台小型转台摄像头正一抽一抽地缓慢摆头；旁边一块状态面板还在闪黄灯；几具旧无人机外壳偶尔会抖一下，像只是被残余电流带得痉挛，还没真正启动。"
+                    .into(),
+            mechanical_claims: vec![],
+            referenced_ledger_ids: vec![],
+        };
+
+        let result = NarrationVerifier::default().verify(&ledger, &submission);
+
+        assert!(result.accepted, "{:?}", result.findings);
+        assert!(
+            result
+                .findings
+                .iter()
+                .all(|f| f.kind != VerifierFindingKind::InventedEffect),
+            "{:?}",
+            result.findings
+        );
+    }
+
+    #[test]
+    fn verifier_fallback_rejects_environment_activation_without_effect_evidence() {
+        // Live Homecoming regression: a failed check may have a cost, but
+        // persistent environment changes still need effect/world-state evidence.
+        let ledger = TurnLedgerSnapshot::default();
+        let submission = FinalNarrationSubmission {
+            player_visible_text:
+                "你拍下按钮后，深处的老旧电动门缓缓又开了一截，某个转动机构在黑暗里重新苏醒。"
+                    .into(),
+            mechanical_claims: vec![],
+            referenced_ledger_ids: vec![],
+        };
+
+        let result = NarrationVerifier::default().verify(&ledger, &submission);
+
+        assert!(!result.accepted, "{:?}", result.findings);
+        assert!(
+            result
+                .findings
+                .iter()
+                .any(|f| f.kind == VerifierFindingKind::InventedEffect),
+            "{:?}",
+            result.findings
+        );
+    }
+
+    #[test]
+    fn verifier_fallback_ignores_gm_only_evidence_audit_sidecar() {
+        // GM-only sidecars can contain ids such as `advance_time_1`; the substring
+        // `dv` inside those ids must not be parsed as a player-visible DV/check claim.
+        let ledger = TurnLedgerSnapshot::default();
+        let submission = FinalNarrationSubmission {
+            player_visible_text:
+                "No movement in the shadows.\n[evidence_audit]{\"basis\":[\"commit:advance_time_1\"]}[/evidence_audit]"
+                    .into(),
+            mechanical_claims: vec![],
+            referenced_ledger_ids: vec![],
+        };
+
+        let result = NarrationVerifier::default().verify(&ledger, &submission);
+
+        assert!(result.accepted, "{:?}", result.findings);
+        assert!(
+            result
+                .findings
+                .iter()
+                .all(|f| f.kind != VerifierFindingKind::MissingCheck),
+            "{:?}",
+            result.findings
+        );
+    }
+
+    #[test]
+    fn verifier_rejects_future_action_menu_as_player_agency_violation() {
+        // Player-facing action menus are a constitution violation even when
+        // they are phrased as future possibilities rather than committed effects.
+        let ledger = TurnLedgerSnapshot::default();
+        let submission = FinalNarrationSubmission {
+            player_visible_text:
+                "你现在已经确认目标方向。下一步你可以立刻：\n- 继续贴门边，先朝亮着的设备打几枪压制/破坏\n- 改为找掩体"
+                    .into(),
+            mechanical_claims: vec![],
+            referenced_ledger_ids: vec![],
+        };
+
+        let result = NarrationVerifier::default().verify(&ledger, &submission);
+
+        assert!(!result.accepted, "{:?}", result.findings);
+        assert_eq!(
+            result.next_required_action,
+            Some(VerifierNextAction::ReviseText)
+        );
+        assert!(
+            result
+                .findings
+                .iter()
+                .any(|f| f.kind == VerifierFindingKind::PlayerAgencyViolation),
+            "{:?}",
+            result.findings
+        );
+    }
+
+    #[test]
+    fn verifier_rejects_late_action_menu_as_player_agency_violation() {
+        // The option header may be several bullets above a destructive word.
+        let ledger = TurnLedgerSnapshot::default();
+        let submission = FinalNarrationSubmission {
+            player_visible_text:
+                "你眼前这半秒窗口里，可以立刻做的有：\n\n- 再狠狠干一次，赌下一把把接头彻底拽断\n- 直接顺着缆线扑进仓库侧的服务器面板，从里面断电\n- 趁它失衡贴近本体，冒险近身控制或破坏\n- 立刻翻回墙后"
+                    .into(),
+            mechanical_claims: vec![],
+            referenced_ledger_ids: vec![],
+        };
+
+        let result = NarrationVerifier::default().verify(&ledger, &submission);
+
+        assert!(!result.accepted, "{:?}", result.findings);
+        assert_eq!(
+            result.next_required_action,
+            Some(VerifierNextAction::ReviseText)
+        );
+        assert!(
+            result
+                .findings
+                .iter()
+                .any(|f| f.kind == VerifierFindingKind::PlayerAgencyViolation),
+            "{:?}",
+            result.findings
+        );
+    }
+
+    #[test]
+    fn verifier_rejects_inline_followup_opportunities_as_player_agency_violation() {
+        let ledger = TurnLedgerSnapshot::default();
+        let submission = FinalNarrationSubmission {
+            player_visible_text:
+                "你已经撬开维护盖板，看见里面一粗一细两组活线。你现在有几个很近、很实际的后续机会：继续顺着这道缝看清哪根线是电；试着从这里做更精细的技术处理；或者冒险再往前贴一点确认背后的接口。"
+                    .into(),
+            mechanical_claims: vec![],
+            referenced_ledger_ids: vec![],
+        };
+
+        let result = NarrationVerifier::default().verify(&ledger, &submission);
+
+        assert!(!result.accepted, "{:?}", result.findings);
+        assert_eq!(
+            result.next_required_action,
+            Some(VerifierNextAction::ReviseText)
+        );
+        assert!(
+            result
+                .findings
+                .iter()
+                .any(|f| f.kind == VerifierFindingKind::PlayerAgencyViolation),
+            "{:?}",
+            result.findings
+        );
+    }
+
+    #[test]
+    fn verifier_rejects_prose_rewritten_action_list_as_player_agency_violation() {
+        let ledger = TurnLedgerSnapshot::default();
+        let submission = FinalNarrationSubmission {
+            player_visible_text:
+                "你现在有了一个短窗口。你把这些观察串在一起：趁它还没完全停摆，冲出去控制、拖拽或缴械；转向仓库内侧，追服务器和那根线的源头；对警员发号施令，争取把他们从射界里撤出来；先观察它接下来几秒还保不保持火控与瞄准能力。"
+                    .into(),
+            mechanical_claims: vec![],
+            referenced_ledger_ids: vec![],
+        };
+
+        let result = NarrationVerifier::default().verify(&ledger, &submission);
+
+        assert!(!result.accepted, "{:?}", result.findings);
+        assert_eq!(
+            result.next_required_action,
+            Some(VerifierNextAction::ReviseText)
+        );
+        assert!(
+            result
+                .findings
+                .iter()
+                .any(|f| f.kind == VerifierFindingKind::PlayerAgencyViolation),
+            "{:?}",
+            result.findings
+        );
+    }
+
+    #[test]
+    fn verifier_allows_fact_summary_after_observation_frame() {
+        let ledger = TurnLedgerSnapshot::default();
+        let submission = FinalNarrationSubmission {
+            player_visible_text:
+                "你把这些观察串在一起：那台人形无人机和仓库之间，确实连着一根明显的线缆；它的火力扇区主要咬着正前方开阔地；两名警员都还活着，但伤得不轻；它和仓库里的东西之间，很可能不只是拴着，更像是被供电、控制，或者两者都有。"
+                    .into(),
+            mechanical_claims: vec![],
+            referenced_ledger_ids: vec![],
+        };
+
+        let result = NarrationVerifier::default().verify(&ledger, &submission);
+
+        assert!(
+            !result
+                .findings
+                .iter()
+                .any(|f| f.kind == VerifierFindingKind::PlayerAgencyViolation),
+            "{:?}",
+            result.findings
+        );
+    }
+
+    #[test]
+    fn verifier_rejects_no_colon_prose_branch_menu_as_player_agency_violation() {
+        let ledger = TurnLedgerSnapshot::default();
+        let submission = FinalNarrationSubmission {
+            player_visible_text:
+                "你现在已经贴上仓库外墙，离那台东西更近。下一步，无论你是想继续沿墙摸到门口、扑近它后背那块异常装配区、冲进仓库内侧，还是先朝警员喊话配合，时机都比刚才好多了。"
+                    .into(),
+            mechanical_claims: vec![],
+            referenced_ledger_ids: vec![],
+        };
+
+        let result = NarrationVerifier::default().verify(&ledger, &submission);
+
+        assert!(!result.accepted, "{:?}", result.findings);
+        assert_eq!(
+            result.next_required_action,
+            Some(VerifierNextAction::ReviseText)
+        );
+        assert!(
+            result
+                .findings
+                .iter()
+                .any(|f| f.kind == VerifierFindingKind::PlayerAgencyViolation),
+            "{:?}",
+            result.findings
+        );
+    }
+
+    #[test]
+    fn verifier_rejects_clue_dump_manifest_as_player_agency_violation() {
+        let ledger = TurnLedgerSnapshot::default();
+        let submission = FinalNarrationSubmission {
+            player_visible_text:
+                "你暂时还没定位到能一把切进去的控制口，可你已经能确定：\n\n- 这玩意儿背后有可侵入的本地系统；\n- 真正的控制核心不在街面上，在仓库内部更深处；\n- 你如果想夺控制权，得更近。"
+                    .into(),
+            mechanical_claims: vec![],
+            referenced_ledger_ids: vec![],
+        };
+
+        let result = NarrationVerifier::default().verify(&ledger, &submission);
+
+        assert!(!result.accepted, "{:?}", result.findings);
+        assert_eq!(
+            result.next_required_action,
+            Some(VerifierNextAction::ReviseText)
+        );
+        assert!(
+            result
+                .findings
+                .iter()
+                .any(|f| f.kind == VerifierFindingKind::PlayerAgencyViolation),
+            "{:?}",
+            result.findings
+        );
+    }
+
+    #[test]
+    fn verifier_rejects_hollow_suspension_of_declared_player_action() {
+        let ledger = TurnLedgerSnapshot::default();
+        let submission = FinalNarrationSubmission {
+            player_visible_text:
+                "你已经不再犹豫要不要冲了，仓库右侧的外墙和门把手都被你钉得很清楚。可真正把身体甩出去的那一下，仍旧没有发生。你没有离开这辆警车后的窄缝，也还没有摸到右侧仓库门的把手。"
+                    .into(),
+            mechanical_claims: vec![],
+            referenced_ledger_ids: vec![],
+        };
+
+        let result = NarrationVerifier::default().verify(&ledger, &submission);
+
+        assert!(!result.accepted, "{:?}", result.findings);
+        assert_eq!(
+            result.next_required_action,
+            Some(VerifierNextAction::ReviseText)
+        );
+        assert!(
+            result
+                .findings
+                .iter()
+                .any(|f| f.kind == VerifierFindingKind::PlayerAgencyViolation),
+            "{:?}",
+            result.findings
+        );
+    }
+
+    #[test]
+    fn verifier_rejects_no_result_suspension_of_cable_observation() {
+        let ledger = TurnLedgerSnapshot::default();
+        let submission = FinalNarrationSubmission {
+            player_visible_text:
+                "你没有贸然探身出去，只是贴着掩体的边缘，一点点挪动视线，试着沿那根被拖向仓库内部的线缆去辨认它贴地延伸的方向，想找出它经过的位置，以及是否有哪一段落在火线之外、足够接近。\n\n但这一轮里，局面没有出现任何可见的变化。你没有因此暴露自己，也没有推进到新的位置；线缆的走向、可接近与否，以及周围是否存在新的机会或风险，都还没有从眼前这片紧绷的静默中明确显露出来。"
+                    .into(),
+            mechanical_claims: vec![],
+            referenced_ledger_ids: vec![],
+        };
+
+        let result = NarrationVerifier::default().verify(&ledger, &submission);
+
+        assert!(!result.accepted, "{:?}", result.findings);
+        assert_eq!(
+            result.next_required_action,
+            Some(VerifierNextAction::ReviseText)
+        );
+        assert!(
+            result
+                .findings
+                .iter()
+                .any(|f| f.kind == VerifierFindingKind::PlayerAgencyViolation),
+            "{:?}",
+            result.findings
+        );
+    }
+
+    #[test]
+    fn verifier_rejects_future_tense_delay_after_declared_sprint() {
+        let ledger = TurnLedgerSnapshot::default();
+        for player_visible_text in [
+            "你还伏在这片掩护后，重心已经前送，等着下一个火力轮转里真正能扑出去的空隙。",
+            "你不再继续伏着等下去。下一次火力稍稍回落，你就会从这点掩护后猛冲出去，扑向仓库右侧那片阴影。",
+            "你把每一处可能让你脱离火线的落点都迅速过了一遍，身体绷在起跑前的那一下，重心压低，随时准备抓住下一次武器循环的空档扑出去。可就在这一刻，你依旧伏在巡逻车后的冷硬掩体边，枪口朝前，目光钉着仓库那一侧可供切入的黑暗。",
+            "你依然压在警车后，准备等火力空隙冲出去，视线锁住仓库侧墙。",
+        ] {
+            let submission = FinalNarrationSubmission {
+                player_visible_text: player_visible_text.into(),
+                mechanical_claims: vec![],
+                referenced_ledger_ids: vec![],
+            };
+
+            let result = NarrationVerifier::default().verify(&ledger, &submission);
+
+            assert!(!result.accepted, "{:?}", result.findings);
+            assert_eq!(
+                result.next_required_action,
+                Some(VerifierNextAction::ReviseText)
+            );
+            assert!(
+                result
+                    .findings
+                    .iter()
+                    .any(|f| f.kind == VerifierFindingKind::PlayerAgencyViolation),
+                "{:?}",
+                result.findings
+            );
+        }
+    }
+
+    #[test]
+    fn verifier_fallback_rejects_actual_equipment_destruction() {
+        let ledger = TurnLedgerSnapshot::default();
+        let submission = FinalNarrationSubmission {
+            player_visible_text: "你已经破坏了设备，监控屏跟着熄灭。".into(),
+            mechanical_claims: vec![],
+            referenced_ledger_ids: vec![],
+        };
+
+        let result = NarrationVerifier::default().verify(&ledger, &submission);
+
+        assert!(!result.accepted, "{:?}", result.findings);
+        assert!(
+            result
+                .findings
+                .iter()
+                .any(|f| f.kind == VerifierFindingKind::InventedEffect),
+            "{:?}",
+            result.findings
+        );
+    }
+
+    #[test]
+    fn verifier_fallback_ignores_connector_latch_homograph() {
+        // `连接扣` contains the character `扣`, but it is a physical latch, not a
+        // resource deduction such as "扣 2 HP".
+        let ledger = TurnLedgerSnapshot::default();
+        let submission = FinalNarrationSubmission {
+            player_visible_text: "2. **直接开枪**：既然连接扣已经基本废了，就改打别的暴露部位。"
+                .into(),
+            mechanical_claims: vec![],
+            referenced_ledger_ids: vec![],
+        };
+
+        let result = NarrationVerifier::default().verify(&ledger, &submission);
+
+        assert!(result.accepted, "{:?}", result.findings);
+        assert!(
+            result
+                .findings
+                .iter()
+                .all(|f| f.kind != VerifierFindingKind::InventedEffect),
+            "{:?}",
+            result.findings
+        );
+    }
+
+    #[test]
+    fn verifier_fallback_accepts_quoted_prior_check_world_fact() {
+        // A true world fact that literally records an earlier successful check
+        // may be quoted in a later recap. That quote is not a new current-turn
+        // request to propose/execute a check.
+        let ledger = TurnLedgerSnapshot {
+            committed_world_facts: vec![CommittedWorldFactEvidence {
+                fact_id: "fact_prior_check".into(),
+                summary:
+                    "The Cut power to server cabling by finding and hitting the main breaker/emergency stop check succeeds."
+                        .into(),
+                truth_status: Some("true".into()),
+            }],
+            ..Default::default()
+        };
+        let submission = FinalNarrationSubmission {
+            player_visible_text:
+                "已提交事实包括 `The Cut power to server cabling by finding and hitting the main breaker/emergency stop check succeeds.`"
+                    .into(),
+            mechanical_claims: vec![],
+            referenced_ledger_ids: vec![],
+        };
+
+        let result = NarrationVerifier::default().verify(&ledger, &submission);
+
+        assert!(result.accepted, "{:?}", result.findings);
+        assert!(
+            result
+                .findings
+                .iter()
+                .all(|f| f.kind != VerifierFindingKind::MissingCheck),
+            "{:?}",
+            result.findings
+        );
+    }
+
+    #[test]
+    fn verifier_fallback_rejects_fresh_check_despite_unrelated_prior_check_fact() {
+        let ledger = TurnLedgerSnapshot {
+            committed_world_facts: vec![CommittedWorldFactEvidence {
+                fact_id: "fact_prior_check".into(),
+                summary: "The Perception to read the door sign check succeeds.".into(),
+                truth_status: Some("true".into()),
+            }],
+            ..Default::default()
+        };
+        let submission = FinalNarrationSubmission {
+            player_visible_text: "这里需要一次新的潜行检定。".into(),
+            mechanical_claims: vec![],
+            referenced_ledger_ids: vec![],
+        };
+
+        let result = NarrationVerifier::default().verify(&ledger, &submission);
+
+        assert!(!result.accepted, "{:?}", result.findings);
+        assert!(
+            result
+                .findings
+                .iter()
+                .any(|f| f.kind == VerifierFindingKind::MissingCheck),
+            "{:?}",
+            result.findings
+        );
+    }
+
+    #[test]
+    fn verifier_rejects_opposed_label_for_static_dv_check() {
+        let ledger = TurnLedgerSnapshot {
+            check_contracts: vec![sample_check("check_observe", "观察线缆")],
+            check_results: vec![sample_result(
+                "check_observe",
+                RollVisibility::PublicGmRoll,
+                "1d10",
+                json!({"target": 14, "success": true, "degree": "success"}),
+            )],
+            ..Default::default()
+        };
+        let submission = FinalNarrationSubmission {
+            player_visible_text:
+                "[roll]观察线缆：1d10=2；总计 16，对抗 DV14，成功。[/roll]你看清了线缆走向。".into(),
+            mechanical_claims: vec![],
+            referenced_ledger_ids: vec![],
+        };
+
+        let result = NarrationVerifier::default().verify(&ledger, &submission);
+
+        assert!(!result.accepted, "{:?}", result.findings);
+        assert!(
+            result
+                .findings
+                .iter()
+                .any(|f| f.kind == VerifierFindingKind::InventedEffect),
+            "{:?}",
+            result.findings
+        );
+    }
+
+    #[test]
+    fn verifier_rejects_opposed_label_when_static_target_is_only_in_result() {
+        let ledger = TurnLedgerSnapshot {
+            check_results: vec![sample_result(
+                "check_observe",
+                RollVisibility::PublicGmRoll,
+                "1d10",
+                json!({
+                    "target": 14,
+                    "success": true,
+                    "degree": "success",
+                    "opposition_kind": "static_check",
+                    "resolution_model": {
+                        "kind": "static_target_number",
+                        "label": "source-backed module technical option DV",
+                        "value": 14
+                    }
+                }),
+            )],
+            ..Default::default()
+        };
+        let submission = FinalNarrationSubmission {
+            player_visible_text:
+                "[roll]侦察扫描：1d10=7；总计 21，对抗 DV 14，成功。[/roll]你看清了线缆。".into(),
+            mechanical_claims: vec![],
+            referenced_ledger_ids: vec![],
+        };
+
+        let result = NarrationVerifier::default().verify(&ledger, &submission);
+
+        assert!(!result.accepted, "{:?}", result.findings);
+        assert!(
+            result.findings.iter().any(|f| {
+                f.kind == VerifierFindingKind::InventedEffect && f.detail.contains("static DV/DC")
+            }),
+            "{:?}",
+            result.findings
+        );
+    }
+
+    #[test]
+    fn verifier_allows_trailing_chinese_what_do_you_do_prompt() {
+        let submission = FinalNarrationSubmission {
+            player_visible_text: "你看清了仓库门前的开阔带。接下来你要怎么做？".into(),
+            mechanical_claims: vec![],
+            referenced_ledger_ids: vec![],
+        };
+
+        let result =
+            NarrationVerifier::default().verify(&TurnLedgerSnapshot::default(), &submission);
+
+        assert!(
+            !result
+                .findings
+                .iter()
+                .any(|f| f.kind == VerifierFindingKind::PlayerAgencyViolation),
+            "{:?}",
+            result.findings
+        );
+    }
+
+    #[test]
+    fn verifier_allows_trailing_chinese_do_what_prompt() {
+        let submission = FinalNarrationSubmission {
+            player_visible_text: "你把车停在加油站外缘，退路还在。接下来你要做什么？".into(),
+            mechanical_claims: vec![],
+            referenced_ledger_ids: vec![],
+        };
+
+        let result =
+            NarrationVerifier::default().verify(&TurnLedgerSnapshot::default(), &submission);
+
+        assert!(
+            !result
+                .findings
+                .iter()
+                .any(|f| f.kind == VerifierFindingKind::PlayerAgencyViolation),
+            "{:?}",
+            result.findings
+        );
+    }
+
+    #[test]
+    fn verifier_rejects_prepared_action_menu_prompt() {
+        let submission = FinalNarrationSubmission {
+            player_visible_text: "油开始往车里灌。接下来你是准备继续坐在车里指挥他们加油，还是有人下车去开油箱、买水，或者再追问晚上别在路上的事？"
+                .into(),
+            mechanical_claims: vec![],
+            referenced_ledger_ids: vec![],
+        };
+
+        let result =
+            NarrationVerifier::default().verify(&TurnLedgerSnapshot::default(), &submission);
+
+        assert!(!result.accepted, "{:?}", result.findings);
+        assert!(
+            result
+                .findings
+                .iter()
+                .any(|f| f.kind == VerifierFindingKind::PlayerAgencyViolation),
+            "{:?}",
+            result.findings
+        );
+    }
+
+    #[test]
+    fn verifier_allows_trailing_you_next_step_prompt() {
+        let submission = FinalNarrationSubmission {
+            player_visible_text: "无人机仍在扫街，线缆通进仓库。你下一步要怎么做？".into(),
+            mechanical_claims: vec![],
+            referenced_ledger_ids: vec![],
+        };
+
+        let result =
+            NarrationVerifier::default().verify(&TurnLedgerSnapshot::default(), &submission);
+
+        assert!(
+            !result
+                .findings
+                .iter()
+                .any(|f| f.kind == VerifierFindingKind::PlayerAgencyViolation),
+            "{:?}",
+            result.findings
+        );
+    }
+
+    #[test]
+    fn verifier_allows_trailing_how_to_take_next_step_prompt() {
+        let submission = FinalNarrationSubmission {
+            player_visible_text:
+                "仓库门口仍在火线边缘，线缆钻进里面的设备区。眼下你要怎么接下一步？".into(),
+            mechanical_claims: vec![],
+            referenced_ledger_ids: vec![],
+        };
+
+        let result =
+            NarrationVerifier::default().verify(&TurnLedgerSnapshot::default(), &submission);
+
+        assert!(
+            !result
+                .findings
+                .iter()
+                .any(|f| f.kind == VerifierFindingKind::PlayerAgencyViolation),
+            "{:?}",
+            result.findings
+        );
+    }
+
+    #[test]
+    fn verifier_rejects_english_next_move_could_be_menu() {
+        let submission = FinalNarrationSubmission {
+            player_visible_text: concat!(
+                "You make the doorframe's blind side. ",
+                "From here, your next move could be to peek deeper into the warehouse, ",
+                "go for the server side, try to help the cops, or make a play on the cable."
+            )
+            .into(),
+            mechanical_claims: vec![],
+            referenced_ledger_ids: vec![],
+        };
+
+        let result =
+            NarrationVerifier::default().verify(&TurnLedgerSnapshot::default(), &submission);
+
+        assert!(!result.accepted, "{:?}", result.findings);
+        assert!(
+            result
+                .findings
+                .iter()
+                .any(|f| f.kind == VerifierFindingKind::PlayerAgencyViolation),
+            "{:?}",
+            result.findings
+        );
+    }
+
+    #[test]
+    fn verifier_rejects_inline_either_or_action_branches() {
+        let submission = FinalNarrationSubmission {
+            player_visible_text: concat!(
+                "最危险的是仓库门前那段开阔带。",
+                "要么继续借掩体贴过去，要么想办法先让那台 drone 转火、断电，或者失去行动能力。"
+            )
+            .into(),
+            mechanical_claims: vec![],
+            referenced_ledger_ids: vec![],
+        };
+
+        let result =
+            NarrationVerifier::default().verify(&TurnLedgerSnapshot::default(), &submission);
+
+        assert!(!result.accepted, "{:?}", result.findings);
+        assert!(
+            result
+                .findings
+                .iter()
+                .any(|f| f.kind == VerifierFindingKind::PlayerAgencyViolation),
+            "{:?}",
+            result.findings
+        );
+    }
+
+    #[test]
+    fn verifier_rejects_single_sentence_next_step_action_menu() {
+        let submission = FinalNarrationSubmission {
+            player_visible_text:
+                "从这里，你下一步可以更近地观察门内、扑向线缆、冲进仓库，或者继续贴墙等待更好的时机。"
+                    .into(),
+            mechanical_claims: vec![],
+            referenced_ledger_ids: vec![],
+        };
+
+        let result =
+            NarrationVerifier::default().verify(&TurnLedgerSnapshot::default(), &submission);
+
+        assert!(!result.accepted, "{:?}", result.findings);
+        assert!(
+            result
+                .findings
+                .iter()
+                .any(|f| f.kind == VerifierFindingKind::PlayerAgencyViolation),
+            "{:?}",
+            result.findings
+        );
+    }
+
+    #[test]
+    fn verifier_rejects_blocked_movement_check_narrated_as_arrival() {
+        let ledger = TurnLedgerSnapshot {
+            check_results: vec![sample_result(
+                "check_move",
+                RollVisibility::PublicGmRoll,
+                "1d10",
+                json!({
+                    "blocked": true,
+                    "success": null,
+                    "target": null,
+                    "reason": "missing_source_backed_parameters",
+                    "check_label": "Time the dash through cover to the warehouse door blind spot"
+                }),
+            )],
+            ..Default::default()
+        };
+        let submission = FinalNarrationSubmission {
+            player_visible_text: concat!(
+                "现在你已经不在警车后了。",
+                "你人稳在仓库门框旁的盲区里，左侧是被打得坑坑洼洼的墙。"
+            )
+            .into(),
+            mechanical_claims: vec![],
+            referenced_ledger_ids: vec![],
+        };
+
+        let result = NarrationVerifier::default().verify(&ledger, &submission);
+
+        assert!(!result.accepted, "{:?}", result.findings);
+        assert!(
+            result
+                .findings
+                .iter()
+                .any(|f| f.kind == VerifierFindingKind::InventedEffect),
+            "{:?}",
+            result.findings
+        );
+    }
+
+    #[test]
+    fn verifier_rejects_blocked_movement_check_narrated_as_tucked_into_new_cover() {
+        let ledger = TurnLedgerSnapshot {
+            check_results: vec![sample_result(
+                "check_move",
+                RollVisibility::PublicGmRoll,
+                "1d10",
+                json!({
+                    "blocked": true,
+                    "success": null,
+                    "target": null,
+                    "reason": "missing_source_backed_parameters",
+                    "check_label": "Time the dash through cover to the warehouse door blind spot"
+                }),
+            )],
+            ..Default::default()
+        };
+        let submission = FinalNarrationSubmission {
+            player_visible_text: concat!(
+                "你没有去碰旁边的线缆，只把身体收进仓库门框旁那块刚看出来的死角里，",
+                "肩背贴住门框与墙边的硬面，先把自己稳稳藏进掩护。",
+                "此刻，你已经伏在门框边的阴影里。"
+            )
+            .into(),
+            mechanical_claims: vec![],
+            referenced_ledger_ids: vec![],
         };
 
         let result = NarrationVerifier::default().verify(&ledger, &submission);

@@ -41,4 +41,4 @@ Question: what do you most want to change first—save people, control the threa
 - NPC advice is biased and never official truth.
 - Investigation turns update a clue board without revealing GM-only truth.
 - Repeated waiting/searching advances clocks or opens direction gates.
-- LLM output stops using a numbered menu every turn.
+- LLM output avoids explicit option menus and raw clue/content dumps; choices are implied by the situation unless a runtime/rules gate requires a structured choice.

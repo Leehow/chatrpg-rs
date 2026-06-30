@@ -49,10 +49,18 @@ async fn homecoming_derives_real_contains_hierarchy() {
     let n_chapters = units.iter().filter(|u| u.kind == UnitKind::Chapter).count();
     let n_scene_tier = units
         .iter()
-        .filter(|u| matches!(u.kind, UnitKind::Scene | UnitKind::Procedure | UnitKind::Encounter))
+        .filter(|u| {
+            matches!(
+                u.kind,
+                UnitKind::Scene | UnitKind::Procedure | UnitKind::Encounter
+            )
+        })
         .count();
     let n_beats = units.iter().filter(|u| u.kind == UnitKind::Beat).count();
-    let with_evidence = units.iter().filter(|u| !u.source_evidence.is_empty()).count();
+    let with_evidence = units
+        .iter()
+        .filter(|u| !u.source_evidence.is_empty())
+        .count();
     eprintln!(
         "RAN: derived content_units={} (roots={}, chapters={}, scene_tier={}, beats={}), with_evidence={}, projected_chapters={}",
         units.len(),
@@ -67,7 +75,10 @@ async fn homecoming_derives_real_contains_hierarchy() {
     // 1) 真层级:单根 + ≥2 章 + 场景层 + 子拍,不再恒 0。
     assert_eq!(roots, 1, "恰一个 Campaign 根");
     assert!(n_chapters >= 2, "结构章(front/adventure/reference)≥2");
-    assert!(n_scene_tier >= graph.scenes.len() / 2, "多数 scene 进入场景层");
+    assert!(
+        n_scene_tier >= graph.scenes.len() / 2,
+        "多数 scene 进入场景层"
+    );
     assert!(
         !chapters.is_empty(),
         "compat 投影:ModuleGraph.chapters 不再恒 0"
@@ -84,13 +95,17 @@ async fn homecoming_derives_real_contains_hierarchy() {
         .filter(|u| u.parent_id.is_some() && u.kind != UnitKind::Chapter)
         .collect();
     assert!(
-        scene_units.iter().all(|u| !u.source_evidence.is_empty()
-            && u.source_evidence[0].source_id == SOURCE_ID),
+        scene_units
+            .iter()
+            .all(|u| !u.source_evidence.is_empty() && u.source_evidence[0].source_id == SOURCE_ID),
         "场景/拍单元全带真 source_evidence(source_id+page)"
     );
 
     // 3) golden:hacking/NET/escape 子程序场景 → Procedure,绝不普通 Scene。
-    let procedures = units.iter().filter(|u| u.kind == UnitKind::Procedure).count();
+    let procedures = units
+        .iter()
+        .filter(|u| u.kind == UnitKind::Procedure)
+        .count();
     eprintln!("RAN: procedure-kind units={}", procedures);
     assert!(
         procedures >= 1,

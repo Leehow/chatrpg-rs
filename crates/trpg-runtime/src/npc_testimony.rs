@@ -116,20 +116,18 @@ pub fn collect_testimony_sources(
     // 每个 active NPC 的 body 原文(DP-A 的 per-NPC 半)。
     if let Some(module) = modules.iter().find(|m| m.module_id == mid) {
         for npc_id in active_npc_ids {
-            let Some(entry) = module
-                .module_graph
-                .npcs
-                .iter()
-                .find(|v| {
-                    v.get("id").and_then(|x| x.as_str()) == Some(npc_id.as_str())
-                        || v.get("actor_id").and_then(|x| x.as_str()) == Some(npc_id.as_str())
-                })
-            else {
+            let Some(entry) = module.module_graph.npcs.iter().find(|v| {
+                v.get("id").and_then(|x| x.as_str()) == Some(npc_id.as_str())
+                    || v.get("actor_id").and_then(|x| x.as_str()) == Some(npc_id.as_str())
+            }) else {
                 continue;
             };
             if let Some(src) = npc_knowledge(entry) {
                 // 同名去重(场景知识标签固定,NPC 标签为名)。
-                if !out.iter().any(|e| e.label == src.label && e.text == src.text) {
+                if !out
+                    .iter()
+                    .any(|e| e.label == src.label && e.text == src.text)
+                {
                     out.push(src);
                 }
             }
@@ -216,7 +214,11 @@ mod tests {
     fn scene_gm_notes_and_read_aloud_surfaced() {
         // DP-A: 当前场景的 source-present read_aloud + gm_notes 进证词块。
         let m = module(
-            vec![scene("sc1", Some("门半开着。"), Some("门后是凶手的藏身处。"))],
+            vec![scene(
+                "sc1",
+                Some("门半开着。"),
+                Some("门后是凶手的藏身处。"),
+            )],
             vec![],
         );
         let srcs = collect_testimony_sources(&[m], Some("m1"), Some("sc1"), &[]);
@@ -248,7 +250,11 @@ mod tests {
         let m = module(vec![sc], vec![]);
         let srcs = collect_testimony_sources(&[m], Some("m1"), Some("sc1"), &[]);
         assert_eq!(srcs.len(), 1);
-        assert!(!srcs[0].text.contains("莫里亚蒂教授"), "secret redacted: {}", srcs[0].text);
+        assert!(
+            !srcs[0].text.contains("莫里亚蒂教授"),
+            "secret redacted: {}",
+            srcs[0].text
+        );
     }
 
     #[test]
@@ -263,7 +269,11 @@ mod tests {
         );
         let srcs = collect_testimony_sources(&[m], Some("m1"), None, &["npc_butler".to_string()]);
         assert_eq!(srcs.len(), 1);
-        assert!(!srcs[0].text.contains("连环杀手"), "secret redacted: {}", srcs[0].text);
+        assert!(
+            !srcs[0].text.contains("连环杀手"),
+            "secret redacted: {}",
+            srcs[0].text
+        );
     }
 
     #[test]
@@ -271,7 +281,10 @@ mod tests {
         let m = module(vec![scene("sc1", None, None)], vec![]);
         let srcs = collect_testimony_sources(&[m], Some("m1"), Some("sc1"), &[]);
         assert!(srcs.is_empty());
-        assert!(module_testimony_surface_text(&[module(vec![], vec![])], Some("m1"), None, &[]).is_none());
+        assert!(
+            module_testimony_surface_text(&[module(vec![], vec![])], Some("m1"), None, &[])
+                .is_none()
+        );
     }
 
     #[test]

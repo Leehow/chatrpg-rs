@@ -29,15 +29,16 @@ impl ProgressEvent {
     pub fn matches(&self, pat: &EventPattern) -> bool {
         matches!(
             (self, pat),
-            (ProgressEvent::TimeAdvanced { .. }, EventPattern::TimeAdvanced)
-                | (
-                    ProgressEvent::WorldFactChanged { .. },
-                    EventPattern::WorldFactChanged
-                )
-                | (
-                    ProgressEvent::ChoiceRecorded { .. },
-                    EventPattern::ChoiceRecorded
-                )
+            (
+                ProgressEvent::TimeAdvanced { .. },
+                EventPattern::TimeAdvanced
+            ) | (
+                ProgressEvent::WorldFactChanged { .. },
+                EventPattern::WorldFactChanged
+            ) | (
+                ProgressEvent::ChoiceRecorded { .. },
+                EventPattern::ChoiceRecorded
+            )
         ) || match (self, pat) {
             (ProgressEvent::Entered(a), EventPattern::Entered(b)) => a == b,
             (ProgressEvent::ObjectiveResolved(a), EventPattern::ObjectiveResolved(b)) => a == b,

@@ -9,6 +9,7 @@ use trpg_model::{PP_COMPLETE, PP_CRITICAL_DONE, PP_STREAMING};
 // 两 test 并行跑，各用独立 session（共用同一 sessions 行会让 delete/insert 相互踩）。
 const SESSION_ROUNDTRIP: &str = "sess_r5_pp_lifecycle_roundtrip";
 const SESSION_LOAD_LAST: &str = "sess_r5_pp_lifecycle_load_last";
+const SESSION_LOAD_BY_ID: &str = "sess_r5_pp_lifecycle_load_by_id";
 
 /// 0028 就地自施（幂等 add column if not exists）——不跑整条迁移链（链上有非幂等老迁移）。
 /// 容忍并发自施竞态：`CREATE INDEX IF NOT EXISTS` 在两并发 test 下仍可能撞 pg_class
@@ -176,6 +177,61 @@ async fn load_last_returns_most_recent_turn_by_created_at() {
 
     sqlx::query("delete from turns where session_id=$1")
         .bind(SESSION_LOAD_LAST)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn load_turn_pp_lifecycle_reads_the_requested_turn_not_session_latest() {
+    let url = match std::env::var("DATABASE_URL") {
+        Ok(u) => u,
+        Err(_) => {
+            eprintln!("SKIP: DATABASE_URL unset");
+            return;
+        }
+    };
+    let db = match Db::connect(&url).await {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("SKIP: connect: {e}");
+            return;
+        }
+    };
+    ensure_column(&db).await;
+    seed_session(&db, SESSION_LOAD_BY_ID).await;
+    let turn_a = "turn_r5_pp_by_id_a";
+    let turn_b = "turn_r5_pp_by_id_b";
+    sqlx::query("delete from turns where session_id=$1")
+        .bind(SESSION_LOAD_BY_ID)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    db.save_turn(SESSION_LOAD_BY_ID, turn_a, "i", "o", json!({}), "ready")
+        .await
+        .unwrap();
+    db.set_turn_pp_lifecycle(turn_a, PP_COMPLETE).await.unwrap();
+    db.save_turn(SESSION_LOAD_BY_ID, turn_b, "i2", "o2", json!({}), "ready")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        db.load_last_turn_pp_lifecycle(SESSION_LOAD_BY_ID)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(PP_STREAMING),
+        "fixture sanity: session latest is turn_b and still streaming"
+    );
+    assert_eq!(
+        db.load_turn_pp_lifecycle(turn_a).await.unwrap().as_deref(),
+        Some(PP_COMPLETE),
+        "turn-scoped wait must read turn_a even when turn_b is the session latest"
+    );
+
+    sqlx::query("delete from turns where session_id=$1")
+        .bind(SESSION_LOAD_BY_ID)
         .execute(&db.pool)
         .await
         .unwrap();

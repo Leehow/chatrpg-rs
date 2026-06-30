@@ -49,9 +49,9 @@ impl ContentTierDecision {
 /// Required fields for source-present discoverable content.
 /// All must be present and non-null for `VerifiedExact`.
 pub const CONTENT_REQUIRED_FIELDS: &[&str] = &[
-    "content_kind",  // "clue_body" | "npc_persona_prose" | "scene_read_aloud"
-    "content_text",  // the actual text payload
-    "source_refs",   // must cite at least one source document
+    "content_kind", // "clue_body" | "npc_persona_prose" | "scene_read_aloud"
+    "content_text", // the actual text payload
+    "source_refs",  // must cite at least one source document
 ];
 
 /// Evaluate the three 4b invariants for a persona-judge synthesized content payload.
@@ -250,8 +250,12 @@ mod tests {
             "facts_will_withhold": []
         });
         let d = evaluate_4b_invariants_with_mode(&payload, None, ENFORCE);
-        assert_eq!(d, ContentTierDecision::AdmitProvisional,
-            "all invariants satisfied → admitted: {:?}", d);
+        assert_eq!(
+            d,
+            ContentTierDecision::AdmitProvisional,
+            "all invariants satisfied → admitted: {:?}",
+            d
+        );
     }
 
     // ------------------------------------------------------------------
@@ -337,8 +341,11 @@ mod tests {
             "facts_will_withhold": []
         });
         let d = evaluate_4b_invariants_with_mode(&payload, None, OFF);
-        assert_eq!(d, ContentTierDecision::SkippedFlagOff,
-            "flag Off must skip all evaluation");
+        assert_eq!(
+            d,
+            ContentTierDecision::SkippedFlagOff,
+            "flag Off must skip all evaluation"
+        );
     }
 
     // ------------------------------------------------------------------
@@ -347,8 +354,11 @@ mod tests {
 
     #[test]
     fn required_fields_list_has_three_entries() {
-        assert_eq!(CONTENT_REQUIRED_FIELDS.len(), 3,
-            "content required fields must be content_kind, content_text, source_refs");
+        assert_eq!(
+            CONTENT_REQUIRED_FIELDS.len(),
+            3,
+            "content required fields must be content_kind, content_text, source_refs"
+        );
     }
 
     // ------------------------------------------------------------------

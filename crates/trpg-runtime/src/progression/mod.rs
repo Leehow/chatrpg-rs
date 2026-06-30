@@ -42,7 +42,12 @@ pub use state::{ProgressEvent, ProgressionState};
 /// (byte-identical baseline). Mirrors the established TRPG_* flag pattern.
 pub fn progression_engine_enabled() -> bool {
     std::env::var("TRPG_PROGRESSION_ENGINE")
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes"))
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "on" | "yes"
+            )
+        })
         .unwrap_or(false)
 }
 
@@ -54,7 +59,12 @@ mod golden_tests {
         PredicateExpr, ProgressRule, ProgressSignalKind, TrackerKind, TrackerSpec,
     };
 
-    fn rule(id: &str, on: EventPattern, when: PredicateExpr, then: Vec<EffectExpr>) -> ProgressRule {
+    fn rule(
+        id: &str,
+        on: EventPattern,
+        when: PredicateExpr,
+        then: Vec<EffectExpr>,
+    ) -> ProgressRule {
         let normalization = ProgressRule::classify(&when, &then);
         ProgressRule {
             id: id.into(),
@@ -129,7 +139,9 @@ mod golden_tests {
         // Frontier: completed objective drops out; the new beat is the legal next.
         let f = compute_frontier(&state, &objectives, &[]);
         assert!(f.active_units.contains(&"beat.athena_message".to_string()));
-        assert!(!f.open_objectives.contains(&"obj.neutralize_athena".to_string()));
+        assert!(!f
+            .open_objectives
+            .contains(&"obj.neutralize_athena".to_string()));
     }
 
     /// GOLDEN 2: 进入 Foxwell 后经过 15min(world time) → ScavvsEncounter active
@@ -170,7 +182,9 @@ mod golden_tests {
         );
         assert!(!state.active_units.contains("encounter.scavvs"), "10<15");
         let f_early = compute_frontier(&state, &[], &trackers);
-        assert!(!f_early.active_units.contains(&"encounter.scavvs".to_string()));
+        assert!(!f_early
+            .active_units
+            .contains(&"encounter.scavvs".to_string()));
 
         // 6 more minutes → 16 >= 15 → Scavvs fires exactly once.
         let signals = evaluate(
@@ -183,8 +197,12 @@ mod golden_tests {
             .iter()
             .any(|s| s.kind == ProgressSignalKind::BeatActivated && s.id == "encounter.scavvs"));
         let f_late = compute_frontier(&state, &[], &trackers);
-        assert!(f_late.active_units.contains(&"encounter.scavvs".to_string()));
-        assert!(f_late.due_trackers.contains(&"tracker.scavvs_timer".to_string()));
+        assert!(f_late
+            .active_units
+            .contains(&"encounter.scavvs".to_string()));
+        assert!(f_late
+            .due_trackers
+            .contains(&"tracker.scavvs_timer".to_string()));
 
         // Idempotent: another tick does not re-fire.
         let again = evaluate(
@@ -233,7 +251,9 @@ mod golden_tests {
         assert!(state.disabled_units.contains("outcome.accept_hisako"));
         // Frontier must NOT offer the foreclosed branch.
         let f = compute_frontier(&state, &[], &[]);
-        assert!(!f.active_units.contains(&"outcome.accept_hisako".to_string()));
+        assert!(!f
+            .active_units
+            .contains(&"outcome.accept_hisako".to_string()));
         assert!(f.active_units.contains(&"beat.escape_condo".to_string()));
     }
 
@@ -309,7 +329,10 @@ mod golden_tests {
             .iter()
             .find(|s| s.kind == ProgressSignalKind::ObjectiveCompleted)
             .expect("semantic objective progress emitted");
-        assert_eq!(sem.kind.j3_axis(), trpg_model::adventure_ir::J3Axis::Semantic);
+        assert_eq!(
+            sem.kind.j3_axis(),
+            trpg_model::adventure_ir::J3Axis::Semantic
+        );
     }
 
     #[test]

@@ -45,7 +45,9 @@ use trpg_model::adventure_ir::{
     AcceptedEvidence, AtomId, ContentDelivery, EvidenceAtomCatalog, EvidenceAtomSpec,
     EvidenceAuthority, EvidenceClaim, EvidenceKind, EvidenceLedger, EvidenceOfferSet,
 };
-use trpg_model::{DomainEvent, DomainEventKind, EffectPatchIntent, ModuleGraph, ScenarioNode, SourceRef};
+use trpg_model::{
+    DomainEvent, DomainEventKind, EffectPatchIntent, ModuleGraph, ScenarioNode, SourceRef,
+};
 
 use crate::evidence_gateway::{EvidenceGateway, GatewayInputs};
 
@@ -89,7 +91,9 @@ fn location_atom(module_id: &str, node_id: &str, page: Option<u32>) -> EvidenceA
     let bound = vec![node_id.to_string()];
     let atom_id = AtomId::from_parts(
         module_id,
-        &page.map(|p| format!("p{p}")).unwrap_or_else(|| format!("loc:{node_id}")),
+        &page
+            .map(|p| format!("p{p}"))
+            .unwrap_or_else(|| format!("loc:{node_id}")),
         EvidenceKind::LocationEntered,
         &bound,
     );
@@ -311,7 +315,10 @@ pub fn project_content_delivery(
         let Some(offer) = offer_set.find(d.delivery_cap.as_str()) else {
             continue; // fail-closed: unknown cap (the gateway would also reject it)
         };
-        if !matches!(offer.kind, EvidenceKind::FactLearned | EvidenceKind::FactRevealed) {
+        if !matches!(
+            offer.kind,
+            EvidenceKind::FactLearned | EvidenceKind::FactRevealed
+        ) {
             continue; // fail-closed: not a presentable authored clue
         }
 
@@ -349,9 +356,7 @@ pub fn project_content_delivery(
 mod tests {
     use super::*;
     use serde_json::json;
-    use trpg_model::adventure_ir::{
-        BasisKind, CapId, EvidenceOffer, NonEmpty, TurnLocalRef,
-    };
+    use trpg_model::adventure_ir::{BasisKind, CapId, EvidenceOffer, NonEmpty, TurnLocalRef};
     use trpg_model::mechanics::{EffectPolicy, SceneMechanicIntent};
     use trpg_model::ScenarioNode;
 
@@ -395,10 +400,18 @@ mod tests {
     fn location_catalog_covers_scene_and_location_nodes() {
         let cat = build_location_atom_catalog(&nav_graph());
         assert_eq!(cat.len(), 3, "two scenes + one location node");
-        let a = cat.resolve_grounding("location:scene_kitchen").expect("scene atom");
+        let a = cat
+            .resolve_grounding("location:scene_kitchen")
+            .expect("scene atom");
         assert_eq!(a.kind, EvidenceKind::LocationEntered);
-        assert_eq!(a.source_refs[0].page, Some(4), "scene page_start is the source span");
-        let l = cat.resolve_grounding("location:loc_attic").expect("location atom");
+        assert_eq!(
+            a.source_refs[0].page,
+            Some(4),
+            "scene page_start is the source span"
+        );
+        let l = cat
+            .resolve_grounding("location:loc_attic")
+            .expect("location atom");
         assert_eq!(l.source_refs[0].page, Some(7));
     }
 
@@ -411,7 +424,12 @@ mod tests {
         let ev = &led.entries()[0];
         assert_eq!(ev.authority, EvidenceAuthority::ExactDomain);
         assert_eq!(ev.evidence_kind, EvidenceKind::LocationEntered);
-        assert_eq!(ev.atom_id, cat.resolve_grounding("location:scene_kitchen").unwrap().atom_id);
+        assert_eq!(
+            ev.atom_id,
+            cat.resolve_grounding("location:scene_kitchen")
+                .unwrap()
+                .atom_id
+        );
         assert_eq!(ev.basis_event_ids, vec!["de_nav".to_string()]);
         assert_eq!(ev.turn_id, TURN);
         assert!(!ev.source_refs.is_empty(), "source-grounded");
@@ -489,16 +507,27 @@ mod tests {
                 data[k] = v;
             }
         }
-        DomainEvent::new(event_id, SESSION, TURN, DomainEventKind::WorldFactChanged, data)
+        DomainEvent::new(
+            event_id,
+            SESSION,
+            TURN,
+            DomainEventKind::WorldFactChanged,
+            data,
+        )
     }
 
     #[test]
     fn state_catalog_covers_authored_object_state_leaves() {
         let cat = build_state_atom_catalog(&state_graph());
         assert_eq!(cat.len(), 1, "one SetObjectState leaf ⇒ one state atom");
-        let a = cat.resolve_grounding("state:door_loading_dock").expect("state atom");
+        let a = cat
+            .resolve_grounding("state:door_loading_dock")
+            .expect("state atom");
         assert_eq!(a.kind, EvidenceKind::StateEstablished);
-        assert!(!a.source_refs.is_empty(), "source-grounded by the authored anchor");
+        assert!(
+            !a.source_refs.is_empty(),
+            "source-grounded by the authored anchor"
+        );
     }
 
     #[test]
@@ -514,19 +543,32 @@ mod tests {
     #[test]
     fn committed_authored_state_projects_one_state_established() {
         let cat = build_state_atom_catalog(&state_graph());
-        let events = vec![world_fact("de_st", "door_loading_dock", json!({"truth_status": "true"}))];
+        let events = vec![world_fact(
+            "de_st",
+            "door_loading_dock",
+            json!({"truth_status": "true"}),
+        )];
         let led = project_state_established(&events, &cat);
         assert_eq!(led.len(), 1);
         let ev = &led.entries()[0];
         assert_eq!(ev.authority, EvidenceAuthority::ExactDomain);
         assert_eq!(ev.evidence_kind, EvidenceKind::StateEstablished);
-        assert_eq!(ev.atom_id, cat.resolve_grounding("state:door_loading_dock").unwrap().atom_id);
+        assert_eq!(
+            ev.atom_id,
+            cat.resolve_grounding("state:door_loading_dock")
+                .unwrap()
+                .atom_id
+        );
     }
 
     #[test]
     fn synthetic_wf_chk_world_fact_does_not_project_state() {
         let cat = build_state_atom_catalog(&state_graph());
-        let events = vec![world_fact("de_chk", "wf_chk_check_2c160e4", json!({"truth_status": "true"}))];
+        let events = vec![world_fact(
+            "de_chk",
+            "wf_chk_check_2c160e4",
+            json!({"truth_status": "true"}),
+        )];
         assert!(
             project_state_established(&events, &cat).is_empty(),
             "fail-closed: a synthetic non-authored fact has no state atom"
@@ -621,9 +663,17 @@ mod tests {
         );
         assert_eq!(led.len(), 1);
         let ev = &led.entries()[0];
-        assert_eq!(ev.authority, EvidenceAuthority::ExactDomain, "materialization is an exact producer");
+        assert_eq!(
+            ev.authority,
+            EvidenceAuthority::ExactDomain,
+            "materialization is an exact producer"
+        );
         assert_eq!(ev.evidence_kind, EvidenceKind::FactLearned);
-        assert_eq!(ev.atom_id, set.offers()[0].atom_id, "atom is Rust-resolved, never named by the GM");
+        assert_eq!(
+            ev.atom_id,
+            set.offers()[0].atom_id,
+            "atom is Rust-resolved, never named by the GM"
+        );
         assert_eq!(ev.basis_event_ids, vec!["de_reveal".to_string()]);
         assert!(!ev.source_refs.is_empty(), "source-grounded");
     }
@@ -632,10 +682,21 @@ mod tests {
     fn content_delivery_with_unknown_cap_projects_nothing() {
         let (set, cat) = clue_offer_set(CLUE, 8);
         let events = vec![learned_event("de_reveal", CLUE)];
-        let d = delivery(&CapId("cap_fabricated".into()), vec![TurnLocalRef::Commit(0)]);
+        let d = delivery(
+            &CapId("cap_fabricated".into()),
+            vec![TurnLocalRef::Commit(0)],
+        );
         assert!(
-            project_content_delivery(&[d], SESSION, TURN, &set, &cat, &events, &EvidenceLedger::new())
-                .is_empty(),
+            project_content_delivery(
+                &[d],
+                SESSION,
+                TURN,
+                &set,
+                &cat,
+                &events,
+                &EvidenceLedger::new()
+            )
+            .is_empty(),
             "fail-closed: a cap not in this turn's OfferSet projects nothing"
         );
     }
@@ -646,8 +707,16 @@ mod tests {
         let events: Vec<DomainEvent> = vec![]; // commit:0 resolves to nothing
         let d = delivery(&set.offers()[0].cap_id, vec![TurnLocalRef::Commit(0)]);
         assert!(
-            project_content_delivery(&[d], SESSION, TURN, &set, &cat, &events, &EvidenceLedger::new())
-                .is_empty(),
+            project_content_delivery(
+                &[d],
+                SESSION,
+                TURN,
+                &set,
+                &cat,
+                &events,
+                &EvidenceLedger::new()
+            )
+            .is_empty(),
             "fail-closed: the gateway rejects an unresolved basis"
         );
     }

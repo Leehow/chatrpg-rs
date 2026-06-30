@@ -48,6 +48,34 @@ fn a1_narrator_system_prompt_enforces_second_person() {
     );
 }
 
+/// J1：split Narrator 默认路径也必须守住连续性，不能只靠 TRPG_GM_CRAFT。
+#[test]
+fn j1_narrator_default_system_preserves_position_and_committed_state() {
+    let packet = NarrationPacket {
+        player_input: "我继续处理服务器接口".to_string(),
+        what_happened: vec![],
+        what_changed: vec!["服务器线缆供电已被切断，机柜指示灯熄灭。".to_string()],
+        player_perceivable_facts: vec![],
+        ..Default::default()
+    }
+    .with_scene_context(&["你蹲在仓库深处机柜旁，急停刚刚被拍下。".to_string()]);
+    let messages = build_narrator_messages(&packet, false, false);
+    let system = messages[0]["content"].as_str().unwrap();
+
+    assert!(
+        system.contains("当前位置") || system.contains("当前所在位置"),
+        "Narrator 默认 system 必须守住当前位置，实得：{system}"
+    );
+    assert!(
+        system.contains("既成状态") && system.contains("不复活"),
+        "Narrator 默认 system 必须禁止复活已终止状态，实得：{system}"
+    );
+    assert!(
+        system.contains("场景的到达/入口定场") || system.contains("不要重述场景的开场"),
+        "Narrator 默认 system 必须禁止重播入口定场，实得：{system}"
+    );
+}
+
 // ───────────────────── A2: player-safe scene_context ─────────────────────
 
 /// A2：scene_context 字段经 player-safe 投影注入，且**绝不**携带 GM-only / secret。
@@ -151,7 +179,10 @@ fn m3_story_mood_empty_is_byte_equal_nonempty_injects() {
         .to_string();
     assert_eq!(empty_user, off_user, "空 story_mood 必须字节等价基线");
     // 非空 ⇒ 注入且区别于基线。
-    assert!(on_user.contains("潮湿的霉味"), "ON story_mood 必须注入 user：{on_user}");
+    assert!(
+        on_user.contains("潮湿的霉味"),
+        "ON story_mood 必须注入 user：{on_user}"
+    );
     assert_ne!(on_user, off_user);
 }
 
@@ -214,6 +245,18 @@ fn a3_locked_whitelist_still_allows_omitted_visible_result() {
         crate::presentation_gate::presentation_gate_decision(&r),
         crate::presentation_gate::PresentationGate::Allow,
         "白名单不得因本修复而 widen——OmittedVisibleResult 仍 gate=Allow"
+    );
+}
+
+#[test]
+fn a3_omitted_visible_repair_runs_for_module_hard_delivery() {
+    assert!(
+        omitted_visible_repair_path_enabled(true, false),
+        "module hard-delivery buffers output and must repair omitted visible roll/effect evidence"
+    );
+    assert!(
+        omitted_visible_repair_path_enabled(false, true),
+        "narrator split path still repairs omitted visible evidence"
     );
 }
 
@@ -379,6 +422,36 @@ fn a3harden_strip_machine_json_keeps_token_drops_json() {
     assert_eq!(
         strip_machine_json_objects("effect e_dmg (damage)"),
         "effect e_dmg (damage)"
+    );
+}
+
+#[test]
+fn deterministic_fallback_sanitizes_module_clue_ids() {
+    let packet = NarrationPacket {
+        player_input: "查市政档案".to_string(),
+        what_happened: vec![
+            "[roll]Library Use — Hall of Records search: 1d100=[67] 目标:≤80，结果:strong_success[/roll]"
+                .to_string(),
+        ],
+        what_changed: vec![],
+        player_perceivable_facts: vec![
+            "已揭示的模组线索 handout_7: Corbitt’s executor was Reverend Michael Thomas of the Chapel of Contemplation; the chapel closed in 1912."
+                .to_string(),
+        ],
+        ..Default::default()
+    };
+
+    let fallback = deterministic_committed_facts_narration(&packet);
+
+    assert!(
+        fallback.contains("Corbitt")
+            && fallback.contains("Michael Thomas")
+            && fallback.contains("1912"),
+        "玩家可见事实必须保留，实得：{fallback}"
+    );
+    assert!(
+        !fallback.contains("handout_7") && !fallback.contains("已揭示的模组线索"),
+        "fallback 不得泄露素材内部 id 或机器前缀，实得：{fallback}"
     );
 }
 

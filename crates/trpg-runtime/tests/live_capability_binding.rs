@@ -70,8 +70,15 @@ async fn the_vault_guard_leaves_and_bound_check_success_admits() {
     );
     for (n, a) in guard_leaves.iter().enumerate() {
         // Anti-fabrication: every atom is a GuardLeaf, source-grounded, with a verbatim span.
-        assert_eq!(a.progress_role, ProgressRole::GuardLeaf, "objective leaf ⇒ GuardLeaf");
-        assert!(!a.source_refs.is_empty(), "source-grounded: carries ≥1 SourceRef");
+        assert_eq!(
+            a.progress_role,
+            ProgressRole::GuardLeaf,
+            "objective leaf ⇒ GuardLeaf"
+        );
+        assert!(
+            !a.source_refs.is_empty(),
+            "source-grounded: carries ≥1 SourceRef"
+        );
         let span = a
             .source_refs
             .first()
@@ -133,8 +140,16 @@ async fn the_vault_guard_leaves_and_bound_check_success_admits() {
     );
     let ev = &ledger.entries()[0];
     assert_eq!(ev.evidence_kind, EvidenceKind::ActionResolved);
-    assert_eq!(ev.authority, EvidenceAuthority::ExactDomain, "deterministic producer (not GM-witnessed)");
-    assert_eq!(ev.basis_event_ids, vec!["de_check_live_1".to_string()], "basis = the committed check");
+    assert_eq!(
+        ev.authority,
+        EvidenceAuthority::ExactDomain,
+        "deterministic producer (not GM-witnessed)"
+    );
+    assert_eq!(
+        ev.basis_event_ids,
+        vec!["de_check_live_1".to_string()],
+        "basis = the committed check"
+    );
     assert!(decisions[0].result.is_ok());
     eprintln!(
         "RAN: bound check-success ⇒ admitted AcceptedEvidence(ActionResolved) atom={} basis={:?} authority={:?}",
@@ -142,5 +157,7 @@ async fn the_vault_guard_leaves_and_bound_check_success_admits() {
         ev.basis_event_ids,
         ev.authority
     );
-    eprintln!("PASS: GuardLeaf>0 from prep-packet objectives + bound check-success admits (EV-P4 shadow)");
+    eprintln!(
+        "PASS: GuardLeaf>0 from prep-packet objectives + bound check-success admits (EV-P4 shadow)"
+    );
 }

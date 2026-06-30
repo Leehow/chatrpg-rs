@@ -80,15 +80,15 @@ pub use npc_behavior::{
 };
 pub mod director_brief;
 pub mod knowledge_leak_verifier;
+pub mod memory_guard;
+/// Adventure IR runtime ProgressionEngine + AdvancementFrontier (P1-3, flag
+/// `TRPG_PROGRESSION_ENGINE`, default OFF). Additive; consumer wiring deferred.
+pub mod progression;
 pub mod scene_plan_emit;
 pub mod story_events;
 pub mod story_observer;
 pub mod story_write;
-pub mod memory_guard;
 pub mod world;
-/// Adventure IR runtime ProgressionEngine + AdvancementFrontier (P1-3, flag
-/// `TRPG_PROGRESSION_ENGINE`, default OFF). Additive; consumer wiring deferred.
-pub mod progression;
 pub use director_brief::{
     apply_story_proposals, build_director_block, build_director_plan_post_adjudication,
     commit_story_writes, prepare_director_brief, prepare_director_plan_post_adjudication,
@@ -98,11 +98,11 @@ pub use knowledge_leak_verifier::{
     verify_npc_asserted_facts, verify_npc_behavior_consistency, verify_npc_disclosure,
     verify_player_narration_leak,
 };
-pub use story_write::{
-    apply_thread_opened, merge_rejections, rejection_proposal, story_write_loop_enabled,
-};
 pub use scene_plan_emit::{
     build_scene_plan_emission, emit_scene_plan_on_change, scene_forbidden_reveals,
+};
+pub use story_write::{
+    apply_thread_opened, merge_rejections, rejection_proposal, story_write_loop_enabled,
 };
 
 pub mod verifier_private_view;
@@ -136,7 +136,9 @@ mod npc_activation;
 use npc_activation::apply_npc_activation;
 
 pub mod clue_affordance;
-pub use clue_affordance::{clue_reveal_candidates, ClueRevealCandidate, ResolvedCheck};
+pub use clue_affordance::{
+    clue_reveal_candidates, clue_reveal_candidates_with_known, ClueRevealCandidate, ResolvedCheck,
+};
 
 pub mod clue_projection;
 pub use clue_projection::{
@@ -150,9 +152,7 @@ pub use evidence_projection::{
 };
 
 pub mod evidence_offers;
-pub use evidence_offers::{
-    derive_offer_set, progress_offers_enabled, render_offer_prompt_block,
-};
+pub use evidence_offers::{derive_offer_set, progress_offers_enabled, render_offer_prompt_block};
 
 pub mod evidence_gateway;
 pub use evidence_gateway::{
@@ -202,10 +202,10 @@ mod context_blocks;
 
 mod spotlight_roster;
 use context_blocks::{
-    actionable_situation_block, clue_board_block, continuity_anchor_block, continuity_anchor_tail,
-    dynamic_text_block, engine_protocol_block, engine_protocol_block_agent_loop,
-    gm_continuity_anchor_enabled, gm_opening_convergence_enabled, memory_snapshot_block,
-    opening_convergence_block, retrieved_memory_block,
+    actionable_situation_block, clue_board_block, committed_world_facts_block,
+    continuity_anchor_block, continuity_anchor_tail, dynamic_text_block, engine_protocol_block,
+    engine_protocol_block_agent_loop, gm_continuity_anchor_enabled, gm_opening_convergence_enabled,
+    memory_snapshot_block, opening_convergence_block, retrieved_memory_block,
     world_events_since_block, world_state_block, world_time_block,
 };
 
@@ -600,13 +600,7 @@ impl RuntimeEngine {
             return Ok(None);
         };
         // Only at the true start (0 committed turns); resume never re-surfaces the opening.
-        if self
-            .db
-            .count_session_turns(session_id)
-            .await
-            .unwrap_or(0)
-            > 0
-        {
+        if self.db.count_session_turns(session_id).await.unwrap_or(0) > 0 {
             return Ok(None);
         }
         // Entry scene was activated at session init (ensure_session_initialized); self-heal
@@ -1024,6 +1018,12 @@ impl RuntimeEngine {
                 tracing::warn!(error = %err, "rule steward BP1 projection failed; continuing without active kernel blocks")
             }
         }
+        match self.committed_world_fact_blocks_for_turn(request).await {
+            Ok(mut world_fact_blocks) => blocks.append(&mut world_fact_blocks),
+            Err(err) => {
+                tracing::warn!(error = %err, "committed world facts projection failed; continuing without world fact context")
+            }
+        }
 
         blocks.push(if state.agent_loop_protocol {
             engine_protocol_block_agent_loop()
@@ -1044,7 +1044,8 @@ impl RuntimeEngine {
             // 表回载最近回合的 Player/GM 散文,注入 GmOnly 连续性锚——直击"GM 每回合重述
             // 开场定场文、把玩家挪回入口"的失忆病灶(J1 AMNESIA→0)。flag OFF ⇒ 此分支不跑
             // ⇒ 字节等价基线;DB 失败/无回合 ⇒ fail-soft 不注入(不阻断回合)。
-            if let Ok(Some(history)) = self.db.load_recent_transcript(&request.session_id, 2).await {
+            if let Ok(Some(history)) = self.db.load_recent_transcript(&request.session_id, 2).await
+            {
                 let tail = continuity_anchor_tail(&history, 1500);
                 if !tail.is_empty() {
                     blocks.push(continuity_anchor_block(&tail));
@@ -1093,17 +1094,25 @@ impl RuntimeEngine {
             if let Some(mid) = mat_module_id.as_deref() {
                 // Read the prep-packet `current_session_packet` from its own table (the
                 // project-bundle snapshot strips it to {mode}). fail-soft: any error → no block.
-                if let Ok(Some(csp)) = self.db.load_module_prep_packet_session(mid).await {
-                    let clues = clue_surface::surface_player_facing_clues(&csp);
-                    if !clues.is_empty() {
-                        blocks.push(dynamic_text_block(
-                            "runtime.mat.clue_surface",
-                            BlockKind::Clue,
-                            "Authored Discoverable Clues",
-                            &clue_surface::render_clue_surface(&clues),
-                            vec!["materialization", "clue_surface", "gm_only"],
-                        ));
-                    }
+                let prep_packet = self
+                    .db
+                    .load_module_prep_packet_session(mid)
+                    .await
+                    .ok()
+                    .flatten();
+                if let Some(text) = clue_surface::module_scene_clue_surface_text(
+                    &project.modules,
+                    Some(mid),
+                    state.scene_id.as_deref(),
+                    prep_packet.as_ref(),
+                ) {
+                    blocks.push(dynamic_text_block(
+                        "runtime.mat.clue_surface",
+                        BlockKind::Clue,
+                        "Authored Discoverable Clues",
+                        &text,
+                        vec!["materialization", "clue_surface", "gm_only"],
+                    ));
                 }
             }
         }
@@ -2675,7 +2684,8 @@ impl RuntimeEngine {
         if !kernel.source_refs.is_empty() {
             c.source_refs = kernel.source_refs.clone();
             c.ruling_status = RulingStatus::SourceBacked;
-        } else if kernel_dicecore_is_source_enabled() && kernel_dice_core_is_typed(&kernel.dice_core)
+        } else if kernel_dicecore_is_source_enabled()
+            && kernel_dice_core_is_typed(&kernel.dice_core)
         {
             // KERNEL-DICECORE-IS-SOURCE (BUG-1, default ON kill-switch
             // `TRPG_KERNEL_DICECORE_IS_SOURCE`): when the parsed ruleset kernel
@@ -2895,6 +2905,9 @@ impl RuntimeEngine {
         {
             return false;
         }
+        if Self::percentile_actor_parameter_check(contract) {
+            return false;
+        }
         let intent = contract.intent_kind.to_ascii_lowercase();
         let label = contract.check_label.to_ascii_lowercase();
         let action = contract.action_summary.to_ascii_lowercase();
@@ -2908,11 +2921,54 @@ impl RuntimeEngine {
             "disable",
             "shoot",
             "fire",
+            "firing",
+            "sprint",
+            "dive",
+            "cover",
+            "breach",
+            "entry",
+            "entrance",
+            "door",
+            "handle",
+            "lock",
+            "locked",
+            "listen",
+            "probe",
+            "sneak",
             "开火",
             "攻击",
             "射击",
             "黑入",
             "切断",
+            "冲刺",
+            "火线",
+            "掩护",
+            "侧门",
+            "门",
+            "锁",
+            "把手",
+            "入口",
+            "仓库",
+            "潜入",
+            "侦听",
+            "search",
+            "survey",
+            "investigate",
+            "inspect",
+            "records",
+            "record",
+            "archives",
+            "archive",
+            "files",
+            "file",
+            "clue",
+            "spot hidden",
+            "library use",
+            "搜索",
+            "调查",
+            "档案",
+            "记录",
+            "线索",
         ]
         .iter()
         .any(|needle| intent.contains(needle) || label.contains(needle) || action.contains(needle));
@@ -2927,7 +2983,22 @@ impl RuntimeEngine {
         let no_sources = contract.source_refs.is_empty() && contract.learned_packet_ids.is_empty();
         let bare_die = ["1d10", "d20", "1d20", "2d6", "d100", "1d100", "6d4"]
             .contains(&contract.dice_expression.trim());
-        no_sources && (missing_target || missing_opposition || bare_die)
+        let missing_resolution_model = missing_target && missing_opposition;
+        missing_resolution_model || (no_sources && bare_die)
+    }
+
+    fn percentile_actor_parameter_check(contract: &CheckContract) -> bool {
+        contract.tested_parameter.is_some()
+            && matches!(
+                contract
+                    .dice_expression
+                    .trim()
+                    .to_ascii_lowercase()
+                    .as_str(),
+                "1d100" | "d100"
+            )
+            && matches!(contract.target, CheckTargetModel::UnknownUntilLookup)
+            && matches!(contract.opposition, OppositionModel::NoMechanicalOpposition)
     }
 
     fn graceful_degrade_missing_source_backed_parameters() -> bool {
@@ -3541,6 +3612,32 @@ impl RuntimeEngine {
         // M3 decision #5: fail-closed strip of any Story/Director-layer block before the Adjudicator
         // can read it. No-op on the real corpus (seam emits only Mechanical kinds) ⇒ byte-equal.
         Ok(crate::memory_guard::guard_adjudicator_memory(blocks))
+    }
+
+    async fn committed_world_fact_blocks_for_turn(
+        &self,
+        request: &ContextRequest,
+    ) -> Result<Vec<ContextBlock>> {
+        if !committed_world_facts_context_enabled() {
+            return Ok(Vec::new());
+        }
+        let limit = std::env::var("TRPG_WORLD_FACT_CONTEXT_LIMIT")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(16);
+        let facts = self
+            .db
+            .list_recent_world_facts(&request.session_id, limit)
+            .await?;
+        if facts.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![committed_world_facts_block(
+            &request.session_id,
+            &request.turn_id,
+            &facts,
+        )])
     }
 
     async fn rule_steward_prefix_blocks_for_turn(
@@ -4310,7 +4407,9 @@ fn scope_matches(scope: &Scope, state: &RuntimeState, request: &ContextRequest) 
         ScopeType::Location => state.location_id.as_deref() == Some(scope.scope_id.as_str()),
         ScopeType::Npc => state.active_npc_ids.iter().any(|id| id == &scope.scope_id),
         ScopeType::Session => scope.scope_id == request.session_id,
-        ScopeType::Turn => scope.scope_id == request.turn_id,
+        ScopeType::Turn => {
+            scope.scope_id == request.turn_id || scope.scope_id.as_str() == "current"
+        }
         ScopeType::Material => state
             .pending_material_refs
             .iter()
@@ -4329,8 +4428,35 @@ fn player_facing_output_contract() -> String {
 - If a Rust tool result is provided in [roll]...[/roll], the roll/effect already happened. Narrate its fictional consequence; do not re-request the roll or invent additional mechanical changes.\n\
 - Keep out-of-fiction adjudication out of plain prose. If a short meta/status note is unavoidable, wrap it in [system]...[/system]. If a visible dice summary is necessary, wrap it in [roll]...[/roll]. Never place GM-only secrets or internal scratch text in player-visible output; [gm]...[/gm] is reserved for internal context only.\n\
 - For uncertain technical, analytical, stealth, combat, social-pressure, hacking, investigation, or risky actions: resolve through provided Rust mechanical context if present; otherwise describe the fiction and stakes without exposing formulas/DV/DC/stat math.\n\
-- Do not end every turn with a numbered menu. Vary the cadence: sometimes offer concise options, sometimes ask one focused question, sometimes end on pure fiction and wait for the player."
+- Do not offer explicit option menus or numbered/bulleted action lists. Do not dump clues, findings, or module content as a manifest. Present affordances through diegetic scene details and ask at most one focused question only when the fiction truly needs clarification. A structured choice is allowed only when a runtime interaction gate or rules-required reaction explicitly asks for it."
         .to_string()
+}
+
+#[cfg(test)]
+mod player_facing_output_contract_tests {
+    use super::player_facing_output_contract;
+
+    #[test]
+    fn forbids_explicit_option_menus_and_content_dumps() {
+        let contract = player_facing_output_contract();
+
+        assert!(
+            contract.contains("Do not offer explicit option menus"),
+            "player-facing contract must hard-ban explicit option menus"
+        );
+        assert!(
+            contract.contains("Do not dump clues"),
+            "player-facing contract must hard-ban raw clue/content dumps"
+        );
+        assert!(
+            !contract.contains("sometimes offer concise options"),
+            "legacy cadence wording re-allows explicit menus"
+        );
+        assert!(
+            !contract.contains("numbered menu. Vary"),
+            "legacy numbered-menu wording is weaker than the constitution"
+        );
+    }
 }
 
 fn project_visibility(block: ContextBlock, viewer: &VisibilityProfile) -> Option<ContextBlock> {
@@ -5292,6 +5418,122 @@ pub fn bind_tech_option_target(contract: &mut CheckContract, cfg: &ModuleConfig)
 }
 
 #[cfg(test)]
+mod missing_source_block_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn unbound_contract(check_label: &str, action_summary: &str) -> CheckContract {
+        serde_json::from_value(json!({
+            "check_id": "check_missing_source", "session_id": "s", "turn_id": "t",
+            "ruleset_id": "cyberpunk_red", "module_id": "cyberpunk_red.homecoming",
+            "initiator": {"actor_id":"pc.current","actor_kind":"player_character","display_name":null},
+            "target_actor": null,
+            "opposition": {"kind":"no_mechanical_opposition"},
+            "action_summary": action_summary, "intent_kind": "agent_selected_check",
+            "check_label": check_label, "dice_expression": "1d10", "modifiers": [],
+            "target": {"kind":"unknown_until_lookup"},
+            "tested_parameter": {"domain":null,"key":"Athletics","label":"Athletics"},
+            "opponent_tested_parameter": null,
+            "actor_snapshot_ids": [],
+            "source_refs": [{
+                "source_id":"rule_kernel:cyberpunk_red:dice_core",
+                "page": null,
+                "anchor_id": null,
+                "section_path": ["dice_core"],
+                "char_start": null,
+                "char_end": null,
+                "text_hash": null,
+                "note": null
+            }],
+            "learned_packet_ids": [],
+            "roll_visibility": "public_gm_roll", "roll_authority": "system",
+            "disclosure": {"show_roll_to_player":true,"show_formula_to_player":true,"show_dc_to_player":true,"show_success_failure_to_player":true,"reveal_after_scene":false,"reveal_after_session":false},
+            "stakes": {"before_roll_public":"","success_public":"","failure_public":"","critical_public":null,"fumble_public":null,"success_patches_allowed":[],"failure_patches_allowed":[],"irreversible":false},
+            "confidence": "medium", "ruling_status": "provisional", "advice_refs": [], "expires_at_turn": null
+        })).unwrap()
+    }
+
+    fn percentile_contract(check_label: &str, skill: &str) -> CheckContract {
+        let mut c = unbound_contract(check_label, check_label);
+        c.ruleset_id = "call_of_cthulhu_7e".into();
+        c.module_id = Some("call_of_cthulhu_7e.the_haunting".into());
+        c.dice_expression = "1d100".into();
+        c.tested_parameter = Some(TestedParameter {
+            domain: None,
+            key: skill.into(),
+            label: skill.into(),
+        });
+        c
+    }
+
+    #[test]
+    fn kernel_source_ref_alone_does_not_make_unknown_target_resolvable() {
+        let c = unbound_contract(
+            "Sprint to the warehouse wall and dive into cover under drone fire",
+            "Sprint to the warehouse wall and dive into cover under drone fire",
+        );
+
+        assert!(
+            RuntimeEngine::contract_missing_source_backed_parameters(&c),
+            "a rule-kernel dice source does not bind the task DV/opposition; this must block before rolling, not create an awaiting_binding half-roll"
+        );
+    }
+
+    #[test]
+    fn unsourced_trivial_observation_still_does_not_force_a_block() {
+        let c = unbound_contract("Look around the street", "Look around the street");
+
+        assert!(
+            !RuntimeEngine::contract_missing_source_backed_parameters(&c),
+            "non-risky/non-mechanical observation should not be forced into the missing-source roll gate"
+        );
+    }
+
+    #[test]
+    fn unbound_search_or_survey_check_blocks_before_half_roll() {
+        let search = unbound_contract(
+            "Search Hall of Records indexes for Corbitt and Macario",
+            "Search property, probate, and civil records",
+        );
+        assert!(
+            RuntimeEngine::contract_missing_source_backed_parameters(&search),
+            "a declared search check with no bound actor parameter must block before rolling"
+        );
+
+        let survey = unbound_contract(
+            "Survey the Chapel exterior and surviving records",
+            "Survey the chapel exterior, files, marks, and clues",
+        );
+        assert!(
+            RuntimeEngine::contract_missing_source_backed_parameters(&survey),
+            "survey/records checks must not create target:null half-rolls"
+        );
+    }
+
+    #[test]
+    fn percentile_actor_parameter_checks_are_not_missing_dv_blocks() {
+        let c = percentile_contract("Library Use — Hall of Records search", "Library Use");
+        assert!(
+            !RuntimeEngine::contract_missing_source_backed_parameters(&c),
+            "roll-under checks use the actor's tested parameter as target; UnknownUntilLookup is not a missing DV"
+        );
+    }
+
+    #[test]
+    fn side_door_probe_without_bound_target_blocks_before_roll() {
+        let c = unbound_contract(
+            "Listen at the warehouse side door and cautiously test the handle",
+            "Listen at the warehouse side door and cautiously test the handle",
+        );
+
+        assert!(
+            RuntimeEngine::contract_missing_source_backed_parameters(&c),
+            "a risky entry/lock probe with no bound DV/opposition must block before rolling instead of producing an awaiting_binding half-roll"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tech_option_binding_tests {
     use super::*;
     use serde_json::json;
@@ -5320,8 +5562,8 @@ mod tech_option_binding_tests {
     fn homecoming_cfg() -> ModuleConfig {
         serde_json::from_value(json!({
             "technical_option_table": [
-                {"matcher": ["basic tech","cut off","power","cable","线缆","切断","供电"], "dv": 14},
-                {"matcher": ["hack","interface","net","server","黑入","服务器"], "dv": 12}
+                {"matcher": ["basic tech","cut off","power","cable","tether","wire","线缆","缆线","电缆","切断","供电"], "dv": 14},
+                {"matcher": ["hack","interface","net","server","athena","signal","interference","terminal","control channel","control node","remote commands","weapon permissions","deck","黑入","服务器","无人机"], "dv": 12}
             ]
         })).unwrap()
     }
@@ -5377,6 +5619,58 @@ mod tech_option_binding_tests {
             "hack/server -> DV 12: {:?}",
             c.target
         );
+    }
+
+    #[test]
+    fn homecoming_scene_coverage_terms_bind_source_backed_dvs() {
+        let cfg = homecoming_cfg();
+        let cases = [
+            (
+                "Rip the tether free at the wall entry point",
+                "Rip the tether free at the wall entry point",
+                14,
+            ),
+            (
+                "Trace the tether signal from the damaged sheath toward its warehouse entry point",
+                "Trace the tether signal from the damaged sheath toward its warehouse entry point",
+                14,
+            ),
+            (
+                "Blast the tether path with interference pulses to destabilize the rogue drone for a moment",
+                "Blast the tether path with interference pulses to destabilize the rogue drone for a moment",
+                14,
+            ),
+            (
+                "Scan the live terminal's recent remote commands and hard-route the control channel through your deck",
+                "Scan the live terminal's recent remote commands and hard-route the control channel through your deck",
+                12,
+            ),
+            (
+                "Seize the rogue drone control node and lock its weapon permissions",
+                "Seize the rogue drone control node and lock its weapon permissions",
+                12,
+            ),
+        ];
+
+        for (label, summary, expected_dv) in cases {
+            let mut c = contract(label, summary);
+            assert!(
+                bind_tech_option_target(&mut c, &cfg),
+                "live scene technical expression must bind source-backed module DV: {label}"
+            );
+            assert!(
+                matches!(c.target, CheckTargetModel::StaticNumber { value, .. } if value == expected_dv),
+                "expected DV {expected_dv} for {label}, got {:?}",
+                c.target
+            );
+            assert!(
+                c.source_refs
+                    .iter()
+                    .any(|r| r.source_id.contains("technical_option_table")),
+                "bound check must carry module source ref: {:?}",
+                c.source_refs
+            );
+        }
     }
 
     // FAIL-CLOSED: a perception/observe action with no matching DV row stays
@@ -5875,7 +6169,12 @@ fn env_bool_runtime(key: &str, default: bool) -> bool {
 fn kernel_dicecore_is_source_enabled() -> bool {
     std::env::var("TRPG_KERNEL_DICECORE_IS_SOURCE")
         .ok()
-        .map(|v| !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"))
+        .map(|v| {
+            !matches!(
+                v.to_ascii_lowercase().as_str(),
+                "0" | "false" | "off" | "no"
+            )
+        })
         .unwrap_or(true)
 }
 
@@ -5892,6 +6191,16 @@ fn opening_delivery_flag_on(raw: Option<&str>) -> bool {
 
 fn opening_scene_delivery_enabled() -> bool {
     opening_delivery_flag_on(std::env::var("TRPG_OPENING_SCENE_DELIVERY").ok().as_deref())
+}
+
+fn committed_world_facts_context_enabled() -> bool {
+    !matches!(
+        std::env::var("TRPG_WORLD_FACT_CONTEXT_BP3")
+            .ok()
+            .map(|v| v.to_ascii_lowercase())
+            .as_deref(),
+        Some("0") | Some("false") | Some("off") | Some("no")
+    )
 }
 
 /// A kernel `dice_core` is *typed* (a real resolution rule, not an empty stub)
@@ -6060,8 +6369,12 @@ mod kernel_dicecore_source_tests {
         ));
         // metadata gaps that must NOT qualify as a typed rule.
         assert!(!kernel_dice_core_is_typed(&json!({"dice":"1d10"})));
-        assert!(!kernel_dice_core_is_typed(&json!({"compare":"meet_or_beat"})));
-        assert!(!kernel_dice_core_is_typed(&json!({"dice":"","compare":"x"})));
+        assert!(!kernel_dice_core_is_typed(
+            &json!({"compare":"meet_or_beat"})
+        ));
+        assert!(!kernel_dice_core_is_typed(
+            &json!({"dice":"","compare":"x"})
+        ));
         assert!(!kernel_dice_core_is_typed(&json!({})));
         assert!(!kernel_dice_core_is_typed(&serde_json::Value::Null));
     }
@@ -6227,6 +6540,65 @@ mod merge_need_outcome_tests {
         assert_eq!(entry.source_refs.len(), 2);
         assert_eq!(entry.source_refs[0].source_id, "r1");
         assert_eq!(entry.source_refs[1].source_id, "r2");
+    }
+}
+
+#[cfg(test)]
+mod plan_blocks_tests {
+    use super::*;
+    use context_blocks::{dynamic_text_block, world_state_block};
+
+    fn request() -> ContextRequest {
+        ContextRequest {
+            ruleset_id: "rs".to_string(),
+            module_id: None,
+            session_id: "s".to_string(),
+            turn_id: "turn_current".to_string(),
+            viewer: VisibilityProfile::gm(),
+            token_budget: TokenBudget::default(),
+        }
+    }
+
+    #[test]
+    fn turn_current_blocks_are_included_for_this_turn() {
+        let req = request();
+        let state = RuntimeState {
+            ruleset_id: "rs".to_string(),
+            ..RuntimeState::default()
+        };
+        let blocks = vec![
+            world_state_block(&state),
+            dynamic_text_block(
+                "runtime.continuity_anchor",
+                BlockKind::RecentTranscript,
+                "Continuity Anchor",
+                "carry the current situation",
+                vec!["continuity_anchor"],
+            ),
+            dynamic_text_block(
+                "runtime.current_input",
+                BlockKind::CurrentInput,
+                "Current Player Input",
+                "look around",
+                vec!["current_input"],
+            ),
+        ];
+
+        let planned = plan_blocks(blocks, &state, &req);
+        let ids: Vec<&str> = planned
+            .dynamic_blocks
+            .iter()
+            .map(|block| block.block_id.as_str())
+            .collect();
+
+        assert_eq!(
+            ids,
+            vec![
+                "runtime.world_state",
+                "runtime.continuity_anchor",
+                "runtime.current_input",
+            ]
+        );
     }
 }
 
