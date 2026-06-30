@@ -66,7 +66,11 @@ fn c2_builder_always_emits_both_world_fact_and_knowledge_update() {
         ProposalHolder::player_party(),
         grade_knowledge_state(KnowledgeLearningMode::Witnessed),
     );
-    assert_eq!(pair.len(), 2, "builder must emit exactly the two paired proposals");
+    assert_eq!(
+        pair.len(),
+        2,
+        "builder must emit exactly the two paired proposals"
+    );
 
     let kinds: Vec<&str> = pair.iter().map(|p| p.kind_token()).collect();
     assert!(kinds.contains(&"world_fact"), "missing paired WorldFact");
@@ -110,7 +114,10 @@ fn c2_pair_shares_fact_id_and_evidence_and_both_validate() {
             _ => panic!("unexpected proposal kind in atomic pair"),
         }
     }
-    assert!(saw_fact && saw_update, "原子配对必含 WorldFact 与 KnowledgeUpdate 两者");
+    assert!(
+        saw_fact && saw_update,
+        "原子配对必含 WorldFact 与 KnowledgeUpdate 两者"
+    );
 }
 
 /// C2 的 API 形态保证：唯一构造口返回 `Vec`，且总含其配对 WorldFact——无法经本 API 拿到
@@ -130,9 +137,9 @@ fn c2_cannot_produce_lone_knowledge_update() {
         })
         .collect();
     for fid in update_fact_ids {
-        let has_paired_fact = pair.iter().any(|p| {
-            matches!(p, MemoryExtractionProposal::WorldFact(c) if c.fact_id == fid)
-        });
+        let has_paired_fact = pair
+            .iter()
+            .any(|p| matches!(p, MemoryExtractionProposal::WorldFact(c) if c.fact_id == fid));
         assert!(
             has_paired_fact,
             "every KnowledgeUpdate must ship with its paired WorldFact (same fact_id)"

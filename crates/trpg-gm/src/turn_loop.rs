@@ -3140,6 +3140,9 @@ impl GmLoop {
         let mut all_findings = plugin_findings;
         all_findings.extend(projection_new.iter().cloned());
         all_findings.extend(npc_new.iter().cloned());
+        all_findings = self
+            .annotate_secret_leaks_with_gm_hidden_truth(request, all_findings)
+            .await;
         if !all_findings.is_empty() {
             let entries = self.errata.record(&request.turn_id, &all_findings);
             if !entries.is_empty() {
@@ -3160,6 +3163,42 @@ impl GmLoop {
         }
         // findings（含 SecretLeak）一并返回，供 PresentationGate 判定（SecretLeak 来源在此 hook）。
         (traces, all_findings)
+    }
+
+    /// Add a GM-only marker to leak findings that are confirmed by the runtime GM truth ledger.
+    ///
+    /// This is advisory/fail-soft: it never changes whether a finding blocks, never enters
+    /// player-visible narration, and never feeds NPC-safe knowledge. It only improves the
+    /// GM-facing errata detail by distinguishing ledger-confirmed hidden truth from a red herring.
+    async fn annotate_secret_leaks_with_gm_hidden_truth(
+        &self,
+        request: &ContextRequest,
+        findings: Vec<trpg_agent::VerifierFinding>,
+    ) -> Vec<trpg_agent::VerifierFinding> {
+        if findings.is_empty() {
+            return findings;
+        }
+        let projection = match trpg_runtime::project_for_gm_adjudication(
+            &self.engine.db,
+            &request.session_id,
+        )
+        .await
+        {
+            Ok(projection) => projection,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    session_id = %request.session_id,
+                    "gm_adjudication: hidden-truth projection load failed; leaving leak findings unannotated"
+                );
+                return findings;
+            }
+        };
+        let hidden = projection.hidden_truth_fact_ids();
+        if hidden.is_empty() {
+            return findings;
+        }
+        annotate_findings_with_hidden_truth(&findings, &hidden)
     }
 
     /// TC-D3-06：活动 NPC 知识/行为一致性校验的生产半边（纯接线、fail-soft）。**不再**自行载入
@@ -8763,6 +8802,34 @@ fn secret_leak_fact_key(detail: &str) -> Option<&str> {
     Some(&rest[..end])
 }
 
+/// Marker appended only to GM-facing verifier details.
+pub const GM_HIDDEN_TRUTH_MARK: &str = " [gm-internal: ledger-confirmed hidden truth]";
+
+/// Annotate SecretLeak findings whose fact id is confirmed as hidden GM truth.
+///
+/// The function is pure and isolation-preserving: it does not add findings, change severity,
+/// change kind, or alter anything outside the GM-facing detail string.
+pub fn annotate_findings_with_hidden_truth(
+    findings: &[trpg_agent::VerifierFinding],
+    hidden_truth_fact_ids: &std::collections::HashSet<String>,
+) -> Vec<trpg_agent::VerifierFinding> {
+    findings
+        .iter()
+        .map(|finding| {
+            let confirmed = secret_leak_fact_key(&finding.detail)
+                .map(|fact_id| hidden_truth_fact_ids.contains(fact_id))
+                .unwrap_or(false);
+            if confirmed && !finding.detail.ends_with(GM_HIDDEN_TRUTH_MARK) {
+                let mut annotated = finding.clone();
+                annotated.detail.push_str(GM_HIDDEN_TRUTH_MARK);
+                annotated
+            } else {
+                finding.clone()
+            }
+        })
+        .collect()
+}
+
 /// 把一条 projection verifier finding 折成 plugin trace（plugin_id 标本投影 verifier）。
 /// summary = kind + 截断 detail（detail 只含 fact_id，绝不夹 secret 正文）。
 fn projection_verifier_finding_trace(
@@ -9032,6 +9099,54 @@ mod projection_verifier_tests {
             Some("fact_x")
         );
         assert_eq!(secret_leak_fact_key("no quotes here"), None);
+    }
+
+    #[test]
+    fn hidden_truth_annotation_marks_only_ledger_confirmed_leak_for_gm() {
+        use std::collections::HashSet;
+
+        let findings = vec![
+            VerifierFinding {
+                kind: VerifierFindingKind::SecretLeak,
+                severity: VerifierSeverity::Blocker,
+                detail: "player-visible narration exposes player-unknown fact 'fact_confirmed'"
+                    .to_string(),
+            },
+            VerifierFinding {
+                kind: VerifierFindingKind::SecretLeak,
+                severity: VerifierSeverity::Blocker,
+                detail: "player-visible narration exposes player-unknown fact 'fact_red_herring'"
+                    .to_string(),
+            },
+        ];
+        let hidden = HashSet::from(["fact_confirmed".to_string()]);
+
+        let annotated = annotate_findings_with_hidden_truth(&findings, &hidden);
+
+        assert_eq!(annotated.len(), findings.len());
+        assert_eq!(annotated[0].kind, VerifierFindingKind::SecretLeak);
+        assert_eq!(annotated[0].severity, VerifierSeverity::Blocker);
+        assert!(annotated[0].detail.contains(GM_HIDDEN_TRUTH_MARK));
+        assert_eq!(annotated[1].detail, findings[1].detail);
+    }
+
+    #[test]
+    fn hidden_truth_annotation_is_idempotent() {
+        use std::collections::HashSet;
+
+        let finding = VerifierFinding {
+            kind: VerifierFindingKind::SecretLeak,
+            severity: VerifierSeverity::Blocker,
+            detail: format!(
+                "player-visible narration exposes player-unknown fact 'fact_confirmed'{}",
+                GM_HIDDEN_TRUTH_MARK
+            ),
+        };
+        let hidden = HashSet::from(["fact_confirmed".to_string()]);
+
+        let annotated = annotate_findings_with_hidden_truth(&[finding.clone()], &hidden);
+
+        assert_eq!(annotated, vec![finding]);
     }
 
     /// P3.6 等价性守卫：流后 verify 路径单一来源（build_verifier_private_view 的 player_known
