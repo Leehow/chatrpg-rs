@@ -1,5 +1,26 @@
 # 层化运行时 — 事实约束清单（invariants）
 
+> **2026-07-01 current-status note**
+>
+> This file is a historical P0 guardrail snapshot. Some statements below were
+> true at the P0 baseline but have since been superseded by implementation.
+> In particular, INV-1's claim that Ports / `NarrationPacket` had zero landing
+> is no longer current: `crates/trpg-gm/src/ports.rs`,
+> `crates/trpg-gm/src/packet.rs`, and `crates/trpg-gm/tests/ports_adapters.rs`
+> show that the port layer and packet layer exist and have production-call
+> guards.
+>
+> Current architecture status lives in:
+>
+> - `docs/status/CURRENT_RUNTIME_SNAPSHOT.md`
+> - `docs/status/DOCUMENTATION_DRIFT_RECONCILIATION_2026-07-01.md`
+>
+> Keep using this file for still-valid guardrails such as INV-2
+> (`trpg-gm::execute::run_pipeline` is the real control plane) and INV-6
+> (do not prematurely split five ContextCompiler implementations), but do not
+> treat every historical assertion below as current without checking the current
+> snapshot.
+
 > **后续每个 phase（P1-P7）的 spec 与自动 agent 必读。**
 > 设计4 正文的若干描述已被其**附录A/C**修正。本清单把 6 条映射纠正固化为
 > 带 `file:line` 证据的事实约束，避免自动 agent 基于 设计4 正文（过时假设）动手。
@@ -12,6 +33,11 @@
 ---
 
 ## INV-1 — §14 Ports / 独立 Narrator / NarrationPacket / 五 ContextCompiler 当前=零落地
+
+> 2026-07-01 supersession: this heading is historical. Ports and
+> `NarrationPacket` are now landed. The remaining current guidance is: do not
+> introduce five separate ContextCompiler implementations prematurely; use the
+> current snapshot for the live state.
 
 设计4 §14 描绘的 Ports 抽象、独立 `Narrator` 类型、`NarrationPacket`、五套
 `ContextCompiler` 在当前代码库**尚无任何落地**。
